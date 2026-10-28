@@ -2,7 +2,7 @@
 
 Constructor fields are passed to ``Terminus2(...)``. Completion fields are
 merged into ``request_params`` and then into Harbor ``llm_kwargs``. The split
-matches Harbor 0.18: ``temperature`` binds to ``LiteLLM._temperature``, and the
+matches the Harbor 0.24 pin: ``temperature`` binds to ``LiteLLM._temperature``, and the
 other completion fields are spread into every ``litellm.acompletion`` call.
 ``drop_params=True`` keeps that set for an OpenAI-compatible endpoint.
 """
@@ -111,6 +111,8 @@ def apply_harbor_config_dict(trial_config: dict[str, Any]) -> dict[str, Any]:
         if current is not None and current != value:
             raise ValueError(f"harbor_config.{key} conflicts with request_params.{key}")
         params[key] = value
+    if params.get("max_tokens") is not None and params.get("max_completion_tokens") is not None:
+        raise ValueError("merged request_params accepts max_tokens or max_completion_tokens, not both")
     if params:
         out["request_params"] = params
     return out

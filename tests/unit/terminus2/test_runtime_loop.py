@@ -186,7 +186,8 @@ async def test_harbor_config_reaches_terminus_constructor(
     constructed: list[dict[str, object]] = []
     _patch_harbor(monkeypatch, tokens_seen=[], constructed=constructed)
     runtime = LoomTerminus2Runtime(
-        model=ModelSpec(provider="openai", name="glm-5.2"), team_id=str(uuid4()),
+        model=ModelSpec(provider="openai", name="glm-5.2", max_input_tokens=65536,
+                        max_output_tokens=4096), team_id=str(uuid4()),
         trial_id=uuid4(), cp_client=_TokenCP(), gateway_url="http://127.0.0.1:9000",
         harbor_config={
             "max_turns": 128,
@@ -213,7 +214,7 @@ async def test_harbor_config_reaches_terminus_constructor(
     assert kwargs["max_turns"] == 128
     assert kwargs["enable_summarize"] is False
     assert kwargs["max_thinking_tokens"] == 2048
-    assert kwargs["model_info"] == {"max_input_tokens": 262144}
+    assert kwargs["model_info"] == {"max_input_tokens": 262144, "max_output_tokens": 4096}
     llm_kwargs = kwargs["llm_kwargs"]
     assert isinstance(llm_kwargs, dict)
     assert llm_kwargs["temperature"] == 1

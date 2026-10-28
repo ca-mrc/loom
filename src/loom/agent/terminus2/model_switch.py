@@ -442,6 +442,10 @@ class LoomRoleRouter(_HarborBaseLLM):  # type: ignore[misc]
                     error=str(exc),
                 )
             raise
+        if self.agent_execution_id and self.agent_run_attempt_id and hasattr(result, "extra"):
+            # Harbor's native response metadata carries the same identity sent
+            # to Gateway, including when summaries share the current episode.
+            result.extra = {**(result.extra or {}), "loom_client_call_id": client_call_id}
         response_model = None
         if isinstance(result, dict):
             response_model = result.get("model")
@@ -511,13 +515,22 @@ def gateway_llm_kwargs_for_teacher(agent: Any) -> dict[str, Any]:
     )
 
 
-def construct_teacher_llm(agent: Any, *, teacher_model_name: str) -> Any:
-    """Build a second Harbor LiteLLM with the same gateway/JWT as the student."""
+def construct_teacher_llm(
+    agent: Any,
+    *,
+    teacher_model_name: str,
+    teacher_model_info: dict[str, Any] | None = None,
+) -> Any:
+    """Reuse Harbor with teacher limits and the student's gateway/JWT.
+
+    Model metadata is per delegate; omitted teacher limits use Harbor's own
+    resolution rather than inheriting the student's context window.
+    """
     student = _student_llm_for_auth(agent)
     llm_kwargs = gateway_llm_kwargs_for_teacher(agent)
     from harbor.llms.base import LLMBackend
 
-    resolved = agent._resolve_model_info(teacher_model_name, None)
+    resolved = agent._resolve_model_info(teacher_model_name, teacher_model_info)
     return agent._init_llm(
         llm_backend=LLMBackend.LITELLM,
         model_name=teacher_model_name,
@@ -567,6 +580,7 @@ def install_role_router(
     agent: Any,
     *,
     teacher_model_name: str,
+    teacher_model_info: dict[str, Any] | None = None,
     first_switch_episode: int | None = None,
     return_switch_episode: int | None = None,
     mix_mode: MixMode = "student_teacher_student",
@@ -600,6 +614,7 @@ def install_role_router(
     teacher = teacher_llm if teacher_llm is not None else construct_teacher_llm(
         agent,
         teacher_model_name=teacher_model_name,
+        teacher_model_info=teacher_model_info,
     )
     router = LoomRoleRouter(
         agent=agent,
