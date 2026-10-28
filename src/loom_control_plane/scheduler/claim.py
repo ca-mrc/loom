@@ -146,6 +146,13 @@ WITH worker_scope AS (
             )
           )
           AND (
+            COALESCE((t.requires_caps->>'mainland_proxy')::boolean, false) IS NOT TRUE
+            OR EXISTS (
+              SELECT 1 FROM jsonb_array_elements(w.capabilities) cap
+              WHERE COALESCE((cap->>'mainland_proxy')::boolean, false) IS TRUE
+            )
+          )
+          AND (
             COALESCE((t.requires_caps->>'terminus2_model_switch')::boolean, false) IS NOT TRUE
             OR EXISTS (
               SELECT 1 FROM jsonb_array_elements(w.capabilities) cap
@@ -318,6 +325,13 @@ WITH candidates AS (
      AND t.requires_caps->>'gpu_vendor' = ANY(:worker_gpu_vendors)
      AND COALESCE(t.requires_caps->>'backend', 'docker') = ANY(:worker_backends)
      AND (t.requires_caps->'network_policies') <@ (:worker_network_policies)::jsonb
+     AND (
+       COALESCE((t.requires_caps->>'mainland_proxy')::boolean, false) IS NOT TRUE
+       OR EXISTS (
+         SELECT 1 FROM jsonb_array_elements(w.capabilities) cap
+         WHERE COALESCE((cap->>'mainland_proxy')::boolean, false) IS TRUE
+       )
+     )
      AND (
        COALESCE((t.requires_caps->>'terminus2_model_switch')::boolean, false) IS NOT TRUE
        OR EXISTS (

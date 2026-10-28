@@ -231,6 +231,8 @@ async def _run_step_impl(
                 verifier_driver_lease.driver = isolated_verifier_driver
                 verifier_env = isolated_verifier_driver
                 await verifier_env.start(options=_isolated_verifier_start_options(ctx))
+                if ctx.tool_network_policy_setter is not None:
+                    await ctx.tool_network_policy_setter(verifier_env, baseline_policy)
                 # The verifier driver receives a fresh public bundle plus its
                 # private verifier-only files.  We then copy only non-private
                 # agent workspace files across the process boundary; an agent
@@ -261,6 +263,7 @@ async def _run_step_impl(
                 verifier_env,
                 baseline=baseline_policy,
                 phase=verifier_phase,
+                set_policy=ctx.tool_network_policy_setter,
             ):
                 reader = TrajectoryReader(ctx.local_trajectory_path)
                 verifier_result = await asyncio.wait_for(
@@ -465,7 +468,7 @@ def _isolated_verifier_start_options(ctx: TrialContext) -> StartOptions:
     return StartOptions(
         force_build=ctx.trial_config.force_build,
         network=ctx.sandbox_network,
-        environment=tuple(sorted(ctx.task_config.environment.environment.items())),
+        environment=ctx.sandbox_environment,
         extra_hosts=tuple(
             sorted(
                 {
@@ -734,6 +737,7 @@ async def _run_agent_with_retry(
                         ctx.driver,
                         baseline=baseline_policy,
                         phase=agent_phase,
+                        set_policy=ctx.tool_network_policy_setter,
                     ):
                         await ctx.agent.run(
                             instruction=instruction,

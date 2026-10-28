@@ -17,6 +17,8 @@ from loom.models.skill import SkillRef
 from loom.models.types import AgentVersion, IsolationSelection, ModelSpec, VerifierEnvMode
 from loom.request_params import sanitize_request_extras
 
+MAINLAND_PROXY_AGENT_NAMES = frozenset({"terminus-2", "oracle", "direct-completion", "litellm"})
+
 MixPolicy = Literal[
     "student_teacher_student",
     "beta_mixture",
@@ -223,6 +225,8 @@ class TrialConfig(BaseModel):
 
     # Build/runtime
     force_build: bool = False
+    # Optional simulated-mainland tool egress; never changes model-provider routing.
+    mainland_proxy: bool = Field(default=False, strict=True)
     delete_env: bool = True
     skip_verifier: bool = False
     verifier_env_mode: VerifierEnvMode | None = None
@@ -283,6 +287,15 @@ class TrialConfig(BaseModel):
     # Clone / exact replay / failed-case rerun: inherit the persisted
     # K1/K2/seed plan, or resample a new one. Exact replay defaults inherit.
     model_switch_plan_mode: Literal["inherit", "resample"] | None = None
+
+    @model_validator(mode="after")
+    def _validate_mainland_proxy_agent(self) -> TrialConfig:
+        if self.mainland_proxy and self.agent_name not in MAINLAND_PROXY_AGENT_NAMES:
+            raise ValueError(
+                "mainland_proxy supports only terminus-2, oracle, direct-completion "
+                "or litellm; in-sandbox model clients are unsupported"
+            )
+        return self
 
     @field_validator("isolation", mode="before")
     @classmethod

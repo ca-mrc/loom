@@ -133,3 +133,71 @@ def test_single_model_run_layout_unchanged(
         if e.is_dir():
             # Trial dirs contain events.jsonl + atif.json
             assert (e / "events.jsonl").exists() or e.name.startswith("_")
+
+
+@pytest.mark.parametrize(
+    "flag,enabled", [("--mainland-proxy", True), ("--no-mainland-proxy", False)]
+)
+def test_local_run_mainland_proxy_parser(flag, enabled):
+    from loom_cli.__main__ import _build_parser
+
+    args = _build_parser().parse_args(["run", "--dataset", "stub", "--agent", "oracle", flag])
+    assert args.mainland_proxy is enabled
+
+
+def test_local_run_mainland_proxy_rejects_unsupported_backend(capsys):
+    assert (
+        main(
+            [
+                "run",
+                "--dataset",
+                "unused",
+                "--agent",
+                "oracle",
+                "--backend",
+                "fake",
+                "--mainland-proxy",
+            ]
+        )
+        == 2
+    )
+    assert "requires --backend docker" in capsys.readouterr().err
+
+
+def test_local_run_mainland_proxy_reaches_trial_config(tmp_xdg_home, tmp_path, monkeypatch):
+    from loom_benchmarks import registry
+
+    from loom_cli import run_cmd
+
+    monkeypatch.setitem(registry.REGISTRY, "stub-proxy", _StubAdapter(name="stub-proxy"))
+    captured = []
+
+    async def driver_factory(*_args, **_kwargs):
+        return lambda: None
+
+    class CaptureRunner:
+        def __init__(self, **kwargs):
+            captured.append(kwargs["trial_config"])
+
+        async def run(self):
+            raise RuntimeError("intentional stop before sandbox")
+
+    monkeypatch.setattr(run_cmd, "_driver_factory", driver_factory)
+    monkeypatch.setattr(run_cmd, "LocalRunner", CaptureRunner)
+    assert (
+        main(
+            [
+                "run",
+                "--dataset",
+                "stub-proxy",
+                "--agent",
+                "oracle",
+                "--mainland-proxy",
+                "--output-dir",
+                str(tmp_path / "out"),
+            ]
+        )
+        == 1
+    )
+    assert len(captured) == 2
+    assert all(config.mainland_proxy and config.agent_name == "oracle" for config in captured)

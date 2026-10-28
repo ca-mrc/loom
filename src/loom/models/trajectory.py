@@ -88,6 +88,7 @@ class TrialStartEvent(_EventBase):
     task_id: str
     agent_name: str
     agent_mode: Literal["out-of-box", "in-box"]
+    tool_network_profile: dict[str, Any] | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 # Trial-level ──────────────────────────────────────────────────────────────────

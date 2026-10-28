@@ -48,6 +48,7 @@ class LoomServiceSettings(BaseSettings):
     gateway_url: HttpUrl = cast(HttpUrl, "http://loom-llm-gateway:9100")
     k8s_worker_enabled: bool = True
     log_level: LogLevel = "info"
+    mainland_proxy_profile_dir: Path | None = Field(default=None, validation_alias="LOOM_MAINLAND_PROXY_PROFILE_DIR")
     managed_environment_config_file: Path | None = None
     management_http_body_timeout_sec: float = 30.0
     management_http_max_body_bytes: int = 1048576

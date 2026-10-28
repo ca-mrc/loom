@@ -43,6 +43,7 @@ class Capabilities(BaseModel):
     # CapabilityError rather than silently degrading.
     supports_custom_network: bool = False
     terminus2_model_switch: bool = False
+    mainland_proxy: bool = False
 
 
 class RequiredCapabilities(BaseModel):
@@ -56,6 +57,7 @@ class RequiredCapabilities(BaseModel):
     gpu_vendor: GPUVendor
     network_policies: frozenset[NetworkPolicyKind]
     terminus2_model_switch: bool = False
+    mainland_proxy: bool = False
 
     def satisfied_by(self, caps: Capabilities) -> bool:
         """True iff `caps` offers everything this requires."""
@@ -66,4 +68,5 @@ class RequiredCapabilities(BaseModel):
             and self.gpu_vendor == caps.gpu_vendor
             and self.network_policies <= caps.network_policies
             and (not self.terminus2_model_switch or caps.terminus2_model_switch)
+            and (not self.mainland_proxy or caps.mainland_proxy)
         )

@@ -29,6 +29,7 @@ from loom.execution_contract import (
 )
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
 from loom.execution_requirements import ALL_GUEST_EXECUTION_CAPABILITIES, GuestExecutionCapability
+from loom.mainland_network_profile import MainlandNetworkProfileV1
 from loom.models.networking import NetworkPolicy, TaskHttpEgress, WebAllowlist, hosted_http_egress
 from loom.runtime_environment import (
     MAX_ENV_VALUE_BYTES,
@@ -404,6 +405,7 @@ class ExecutionRuntimePlanV1(_Strict):
     task_resources: ContainerResourcesV1
     effective_network_policy: NetworkPolicy | None = None
     task_egress: TaskHttpEgress | None = None
+    mainland_proxy_profile: MainlandNetworkProfileV1 | None = None
     # Install sources reachable only during setup phases (#2310). Never part of
     # the task's own network policy; the agent and verifier cannot reach them.
     setup_egress: WebAllowlist | None = None
@@ -692,6 +694,8 @@ class ExecutionRuntimePlanV1(_Strict):
         payload = self.model_dump(mode="json")
         if self.effective_network_policy is None:
             payload.pop("effective_network_policy")
+        if self.mainland_proxy_profile is None:
+            payload.pop("mainland_proxy_profile")
         if self.task_egress is None:
             payload.pop("task_egress")
         if self.setup_egress is None:
@@ -902,6 +906,8 @@ def validate_runtime_plan_requirements(
         admission = evaluate_execution_admission(requirements, execution_class)
         if not admission.compatible or any(frozenset(guest.capabilities) != expected_guest for guest in guests):
             raise ValueError("runtime guest plan does not match admitted workload requirements")
+    if requirements.mainland_proxy != (plan.mainland_proxy_profile is not None):
+        raise ValueError("runtime plan mainland proxy does not match workload requirements")
     if requirements.task_egress != plan.task_egress:
         raise ValueError("runtime plan network policy does not match workload requirements")
     # Historical task-authored/static plans predate the frozen policy field.

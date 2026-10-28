@@ -690,6 +690,9 @@ def _run(args: argparse.Namespace) -> int:
                     agent_provider_override=args.agent_provider,
                 ),
             }
+            mainland_proxy = getattr(args, "mainland_proxy", None)
+            if mainland_proxy is not None:
+                trial_config["mainland_proxy"] = mainland_proxy
             payload: dict[str, Any] = {
                 "task_id": args.task,
                 "config": trial_config,
@@ -1034,6 +1037,9 @@ def _batch_create(args: argparse.Namespace) -> int:
             except ValueError as exc:
                 sys.stderr.write(f"error: {exc}\n")
                 return 2
+            mainland_proxy = getattr(args, "mainland_proxy", None)
+            if mainland_proxy is not None:
+                trial_config["mainland_proxy"] = mainland_proxy
             if network_policy_override is not None:
                 trial_config["baseline_network_policy_override"] = network_policy_override
             selection = getattr(args, "execution_config", None)
@@ -1918,6 +1924,10 @@ def dispatch(argv: list[str]) -> int:
             "custom → openai)."
         ),
     )
+    p_run.add_argument(
+        "--mainland-proxy", action=argparse.BooleanOptionalAction, default=None,
+        help="Use the configured simulated-mainland tool gateway (default off).",
+    )
     p_run.set_defaults(handler=_run)
 
     # --- batch ---
@@ -1999,6 +2009,10 @@ def dispatch(argv: list[str]) -> int:
             "file, which defaults to separate. Same values as "
             "execution-config verification."
         ),
+    )
+    p_bc.add_argument(
+        "--mainland-proxy", action=argparse.BooleanOptionalAction, default=None,
+        help="Use the configured simulated-mainland tool gateway (default off).",
     )
     p_bc.add_argument(
         "--network-policy",

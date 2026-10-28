@@ -96,14 +96,20 @@ type storedTaskEgress struct {
 // setup phase may reach only the declared install sources; every other phase
 // gets exactly the task's frozen policy, which is none for gateway-only tasks.
 type phasedEgressPolicy struct {
-	broker *workloadBroker
-	task   taskEgressPolicy
-	setup  *webAllowlist
+	broker   *workloadBroker
+	task     taskEgressPolicy
+	setup    *webAllowlist
+	mainland *mainlandProxyProfile
 }
 
 func (p phasedEgressPolicy) validate() error {
 	if p.task == nil && p.setup == nil {
 		return fmt.Errorf("task egress requires a task or setup policy")
+	}
+	if p.mainland != nil {
+		if err := p.mainland.validate(); err != nil {
+			return err
+		}
 	}
 	if p.task != nil {
 		if err := p.task.validate(); err != nil {
@@ -120,7 +126,7 @@ func (p phasedEgressPolicy) permits(d webDestination) bool {
 	if p.broker.currentPhaseRole() == "setup" {
 		return p.setup != nil && p.setup.permits(d)
 	}
-	return p.task != nil && p.task.permits(d)
+	return p.task != nil && p.denialReason(d) == "" && p.task.permits(d)
 }
 
 func (s *storedTaskEgress) UnmarshalJSON(data []byte) error {
@@ -246,15 +252,19 @@ type taskEgressAudit struct {
 }
 
 func (a *taskEgressAudit) record(d webDestination, outcome string) {
+	if !d.valid() {
+		d = webDestination{}
+	}
+	a.recordFields(map[string]any{"time": time.Now().UTC(), "host": d.Host, "protocol": d.Protocol, "outcome": outcome})
+}
+
+func (a *taskEgressAudit) recordFields(fields map[string]any) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.truncated {
 		return
 	}
-	if !d.valid() {
-		d = webDestination{}
-	}
-	payload, _ := json.Marshal(map[string]any{"time": time.Now().UTC(), "host": d.Host, "protocol": d.Protocol, "outcome": outcome})
+	payload, _ := json.Marshal(fields)
 	payload = append(payload, '\n')
 	marker := []byte("{\"outcome\":\"task_egress_diagnostics_truncated\"}\n")
 	if a.entries >= 4096 || a.bytes+int64(len(payload)+len(marker)) > a.limit {
@@ -371,6 +381,12 @@ func (b *workloadBroker) startTaskEgressAt(parent context.Context, policy taskEg
 			fail("task_egress_request_invalid", 400)
 			return
 		}
+		if restricted, ok := policy.(interface{ denialReason(webDestination) string }); ok {
+			if reason := restricted.denialReason(d); reason != "" {
+				fail(reason, http.StatusForbidden)
+				return
+			}
+		}
 		if !policy.permits(d) {
 			fail("task_egress_destination_denied", 403)
 			return
@@ -463,6 +479,10 @@ func (b *workloadBroker) startTaskEgressAt(parent context.Context, policy taskEg
 			}
 		}
 	})
+	if phased, ok := policy.(phasedEgressPolicy); ok && phased.mainland != nil {
+		profile := phased.mainland
+		audit.recordFields(map[string]any{"time": time.Now().UTC(), "outcome": "mainland_proxy_loaded", "provider_version": profile.ProviderVersion, "rule_counts": map[string]int{"gfw_suffixes": len(profile.GFWSuffixes), "gfw_hosts": len(profile.GFWHosts), "greatfire_hosts": len(profile.GreatFireHosts)}})
+	}
 	go func() { _ = server.Serve(listener) }()
 	return "http://" + listener.Addr().String(), func() error {
 		gate.Lock()

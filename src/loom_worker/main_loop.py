@@ -194,7 +194,15 @@ _DEFAULT_CAPS = [
 
 
 def _worker_capabilities(settings: WorkerSettings) -> list[dict[str, Any]]:
-    return [dict(_DEFAULT_CAPS[0])]
+    caps = dict(_DEFAULT_CAPS[0])
+    profile_dir = getattr(settings, "mainland_proxy_profile_dir", None)
+    caps["mainland_proxy"] = bool(
+        getattr(settings, "mainland_proxy_image", "") and profile_dir
+        and all((Path(profile_dir) / name).is_file() for name in (
+            "gfw-rules.yaml", "greatfire-rules.yaml", "sources.json", "greatfire-decisions.json",
+        ))
+    )
+    return [caps]
 
 
 def _host_memory_bytes() -> int:
@@ -1442,7 +1450,26 @@ async def _spawn_trial(
                 ),
             )
 
+        mainland_proxy_factory = None
+        if trial_config.mainland_proxy:
+            from loom.driver.mainland_proxy import MainlandProxyGateway, MainlandProxySettings
+
+            if not settings.mainland_proxy_image or settings.mainland_proxy_profile_dir is None:
+                raise RuntimeError("mainland_proxy is not configured on this worker")
+            mainland_settings = MainlandProxySettings(
+                image=settings.mainland_proxy_image,
+                profile_dir=settings.mainland_proxy_profile_dir,
+                binary=settings.mainland_proxy_binary,
+            )
+            def mainland_proxy_factory() -> MainlandProxyGateway:
+                return MainlandProxyGateway(
+                    trial_id, mainland_settings,
+                    output_dir=settings.trajectory_cache_dir / str(trial_id)
+                    / f"attempt-{attempt_count or 0}" / "mainland_proxy",
+                )
+
         runner = LocalTrialRunner(
+            mainland_proxy_factory=mainland_proxy_factory,
             trial_id=trial_id,
             team_id=team_id,
             attempt_count=attempt_count,
