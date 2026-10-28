@@ -1239,6 +1239,18 @@ the image limit when publication reads runtime metadata.
 For the cache-sizing assessment and the conditions for a 2 GiB pilot, see
 [task-image cache sizing](../architecture/task-image-materialization.md#cache-budget-sizing).
 
+Legacy tar cache transfer distinguishes logical file bytes from transport
+bytes. The existing 1 GiB logical payload and 10,000-entry limits remain in
+effect. Download and unpack allow separately derived headroom for each tar
+header, file padding, bounded PAX/GNU extension records and EOF/record padding;
+an exact-limit payload can therefore round-trip through object storage.
+Extensions are capped at 8 KiB before the standard parser reads them, with
+bounded nesting, aggregate headers and retained global metadata. Sparse
+extensions, links, devices and escaping paths remain unsupported. File data is
+read in 1 MiB chunks and parsed member metadata is released as extraction
+advances. This tar headroom does not increase logical cache capacity, OCI
+archive limits, cache-GC targets or builder resource allocation.
+
 Trim/GC still runs in-process on publish, before the new cache upload. It reads
 every v2 manifest first. If any retained manifest cannot be fetched, read, or
 parsed, the sweep stops and deletes nothing; the Job log emits
