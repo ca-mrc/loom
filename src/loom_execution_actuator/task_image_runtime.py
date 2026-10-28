@@ -936,9 +936,12 @@ def _install_terminus_runtime_tools(claim: dict[str, Any], context: Path) -> Non
         if component.name not in {"task", "verifier"}:
             continue
         dockerfile = context / component.dockerfile_path
+        environment = (claim["task_config"].get("environment", {}) if component.name == "task"
+                       else claim["task_config"].get("verifier", {}).get("environment") or {})
         try:
             rewritten = append_terminus_runtime_tools(
                 dockerfile.read_text(), prepare_harness_dirs=bool(frozen_preparation_revision(claim)),
+                build_arg_names=environment.get("docker_build_args", {}),
             )
         except TaskImagePreparationError as exc:
             raise BuildPreparationError(str(exc), code=exc.code) from exc

@@ -47,7 +47,8 @@ def test_recipe_keys_preserve_old_claim_and_separate_changed_source_arch_or_reci
 
 
 @pytest.mark.parametrize("revision", ["", NATIVE_HARBOR_PREPARATION])
-def test_native_builder_prepares_only_its_frozen_recipe(tmp_path, revision):
+@pytest.mark.parametrize("variable_user", [False, True])
+def test_native_builder_prepares_only_its_frozen_recipe(tmp_path, revision, variable_user):
     from loom_execution_actuator.task_image_runtime import _install_terminus_runtime_tools
 
     config = {
@@ -63,6 +64,8 @@ def test_native_builder_prepares_only_its_frozen_recipe(tmp_path, revision):
             "changes": [],
         },
     }
+    if variable_user:
+        config["environment"]["docker_build_args"] = {"LOOM_PREPARATION_OWNER": "root"}
     identity = dict(task_id="sample/task", task_checksum="a" * 64, cpu_arch="x86_64")
     claim = {
         **identity,
@@ -71,10 +74,14 @@ def test_native_builder_prepares_only_its_frozen_recipe(tmp_path, revision):
             **identity, preparation_revision=revision
         ),
     }
-    authored = "FROM python:3.12-slim-bookworm\nUSER nobody\nWORKDIR /app\n"
+    user = "${TASK_USER}" if variable_user else "nobody"
+    authored = f"FROM python:3.12-slim-bookworm\nARG TASK_USER=nobody\nUSER {user}\nWORKDIR /app\n"
     (tmp_path / "Dockerfile").write_text(authored)
     _install_terminus_runtime_tools(claim, tmp_path)
     prepared = (tmp_path / "Dockerfile").read_text()
-    assert prepared.startswith(authored) and prepared.rstrip().endswith("USER nobody")
+    assert prepared.startswith(authored) and prepared.rstrip().endswith(f"USER {user}")
     assert ("mkdir -p /solution /tests /logs/verifier /loom/verifier" in prepared) is bool(revision)
     assert "chown nobody /app" not in prepared
+    if variable_user and revision:
+        assert "ARG LOOM_PREPARATION_OWNER_1=${TASK_USER}" in prepared
+        assert 'chown "$LOOM_PREPARATION_OWNER_1" ' in prepared
