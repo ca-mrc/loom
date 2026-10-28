@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import delete, insert, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import undefer
 
 from loom.db.schema import (
     Task,
@@ -184,12 +185,15 @@ async def test_same_id_rebuild_preserves_trial_and_frozen_image_revision(publica
         trial_before = _columns(await session.get(Trial, trial_id))
         image_before = (
             await session.scalars(
-                select(TaskImageMaterialization).where(
+                select(TaskImageMaterialization).options(
+                    undefer(TaskImageMaterialization.preparation_revision),
+                ).where(
                     TaskImageMaterialization.task_id == old.id,
                 )
             )
         ).one()
         image_id, frozen_before = image_before.id, _columns(image_before)
+        assert frozen_before["preparation_revision"] == ""
         registered_at = (await session.get(Task, old.id)).registered_at
 
     replacement = publication.draft("kept", "b")
@@ -205,7 +209,10 @@ async def test_same_id_rebuild_preserves_trial_and_frozen_image_revision(publica
         assert current.registered_at == registered_at
         assert current.task_set_id == publication.task_set_id
         assert _columns(await session.get(Trial, trial_id)) == trial_before
-        assert _columns(await session.get(TaskImageMaterialization, image_id)) == frozen_before
+        frozen_after = await session.get(TaskImageMaterialization, image_id, options=(
+            undefer(TaskImageMaterialization.preparation_revision),
+        ))
+        assert _columns(frozen_after) == frozen_before
         # A replay of the old submission must retain its original revision.
         await _ensure_trial_task_image_links(session, trial_id=trial_id, task_row=current)
         links = list(
@@ -324,7 +331,9 @@ async def test_duplicate_retained_ids_reject_without_changing_publication(public
                 "images": {
                     row.id: _columns(row)
                     for row in await session.scalars(
-                        select(TaskImageMaterialization).where(
+                        select(TaskImageMaterialization).options(
+                            undefer(TaskImageMaterialization.preparation_revision),
+                        ).where(
                             TaskImageMaterialization.task_id == old.id
                         ),
                     )
