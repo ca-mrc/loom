@@ -1387,6 +1387,23 @@ The actuator retains a bounded, redacted tail before timeout/cancellation
 cleanup; ordinary polling does not repeatedly fetch logs. A valid completed
 publication is still accepted if its first reconciliation is after the deadline.
 
+Native image publication uses the existing Kubernetes termination message to
+return all registry references, issued immutable archive versions and required
+OCI metadata. Small receipts retain their existing plain JSON. If a complete
+receipt exceeds 4000 bytes, the publisher transports that same JSON losslessly
+as a versioned zlib/base64 envelope; this keeps the 4000-byte application budget
+inside Kubernetes' 4096-byte limit. The controller also accepts existing plain
+receipts. It rejects malformed, truncated, trailing or over-budget compressed
+data before applying the unchanged build identity, Pod ownership, image,
+metadata and archive-binding checks. Decoded data is capped at 128 KiB, covering
+the eight-component archive schema and existing metadata preview limit; the
+metadata preview itself keeps its existing 4000-byte budget. Compression changes
+only transport and does not create another store or grant publication authority.
+Small failure diagnostics remain plain JSON.
+If adding a failure diagnostic cannot fit, the failed publisher keeps its last
+valid progress message, preserving every known image/archive reference for the
+existing recovery path. Its nonzero exit still reports publication failure.
+
 The dedicated build namespace permits the rootless user-namespace helper's
 SETUID/SETGID and unconfined seccomp/AppArmor profiles. This exception does not
 change the restricted execution namespace. Build Pods remain nonprivileged,

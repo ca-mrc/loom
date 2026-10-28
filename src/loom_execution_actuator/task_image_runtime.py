@@ -54,6 +54,10 @@ from loom.trajectory.storage import (
     _validate_bundle_relative_path,
     bundle_file_metadata_sha256,
 )
+from loom_execution_actuator.image_publication_receipt import (
+    decode_publication_receipt,
+    encode_publication_receipt,
+)
 from loom_execution_actuator.task_image_oci import (
     NativeOCIArchiveError,
     validate_native_oci_archive,
@@ -1231,7 +1235,7 @@ def publish(
                             **metadata, "image_ref": images[component.name],
                         }).model_dump(mode="json")
                     receipt_path.write_text(
-                        json.dumps(
+                        _publication_message(
                             {
                                 "materialization_id": claim["id"],
                                 "lease_epoch": claim["lease_epoch"],
@@ -1285,11 +1289,14 @@ def publish(
         **({"image_archives": image_archives} if image_archives else {}),
         **({"image_runtime_metadata": runtime_metadata} if runtime_metadata else {}),
     }
-    if len(json.dumps(receipt).encode()) > 4000:
-        raise BuildPreparationError(
-            "publication receipt exceeds Kubernetes termination message limit"
-        )
     return receipt
+
+
+def _publication_message(receipt: dict[str, Any]) -> str:
+    try:
+        return encode_publication_receipt(receipt)
+    except ValueError as error:
+        raise BuildPreparationError(str(error)) from None
 
 
 def main() -> None:
@@ -1304,20 +1311,33 @@ def main() -> None:
             prepare(claim, work, secrets)
         else:
             receipt = publish(claim, work, secrets)
-            Path("/dev/termination-log").write_text(json.dumps(receipt))
+            Path("/dev/termination-log").write_text(_publication_message(receipt))
     except Exception as error:
         # SDK/tool exceptions can carry credentials, endpoints or task-controlled text.
         error_receipt: dict[str, Any] = {}
+        previous_message: str | None = None
+        failure = termination_failure_update(error)
         try:
-            parsed = json.loads(Path("/dev/termination-log").read_text())
+            previous_message = Path("/dev/termination-log").read_text()
+            parsed = decode_publication_receipt(previous_message)
         except (OSError, ValueError):
+            previous_message = None
             parsed = None
         if isinstance(parsed, dict):
             error_receipt = parsed
-        error_receipt.update(phase=args.phase, **termination_failure_update(error))
+        error_receipt.update(phase=args.phase, **failure)
         if args.phase == "prepare":
             error_receipt.update(classify_preparation_failure(error).receipt())
-        Path("/dev/termination-log").write_text(json.dumps(error_receipt))
+        try:
+            message = encode_publication_receipt(error_receipt)
+        except ValueError:
+            # Publication already failed. Preserve every last known image and
+            # archive rather than replace valid progress with a small error.
+            # Without valid progress, emit only the bounded plain diagnostic.
+            message = previous_message if previous_message is not None else json.dumps({
+                "phase": args.phase, "error": str(failure.get("error", ""))[:200],
+            })
+        Path("/dev/termination-log").write_text(message)
         raise SystemExit(1) from None
 
 
