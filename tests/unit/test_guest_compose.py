@@ -249,10 +249,13 @@ def shell_control(tmp_path):
     helper = tmp_path / "busybox"
     deny = tmp_path / "deny-touch"
     race = tmp_path / "remove-before-cat"
+    publish = tmp_path / "publish-after-cat-fails"
     helper.write_text(
         "#!/bin/sh\ncommand=$1; shift\n"
         f"if test \"$command\" = touch && test -e {deny}; then exit 9; fi\n"
         f"if test \"$command\" = cat && test -e {race}; then rm -f -- \"$1\"; fi\n"
+        f"if test \"$command\" = cat && test -e {publish}; then "
+        'cat "$@" >/dev/null 2>&1; status=$?; printf 123 >"$1"; exit "$status"; fi\n'
         'exec "$command" "$@"\n'
     )
     helper.chmod(0o755)
@@ -292,17 +295,86 @@ async def test_activation_observes_identity_before_releasing_gate(shell_control)
     assert guest.calls == 2
 
 
-async def test_readiness_wait_does_not_restart_docker_for_a_late_marker(shell_control):
+async def test_activation_rechecks_a_missing_marker_before_releasing_a_late_publication(shell_control):
     import asyncio
 
     driver, guest, marker, _, _ = shell_control
     activation = asyncio.create_task(driver._activate(str(marker)))
-    await guest.started.wait()
-    await asyncio.sleep(.1)
+    await guest.observed.wait()
+    assert not marker.exists() and not marker.with_suffix(".go").exists()
     marker.write_text("123")
     await activation
     assert marker.with_suffix(".go").is_file()
-    assert guest.calls == 2
+    assert guest.calls >= 3
+
+
+@pytest.mark.parametrize("return_code", [1, 2, 7, 124, 137])
+async def test_activation_read_failure_is_not_retried_or_reported_ready(return_code):
+    from loom.driver.fake import FakeDriver
+    from loom.driver.guest_compose import GuestComposeRuntime
+    from loom.errors import DriverError
+    from loom.models.compose import ComposeServiceSpec, NativeComposeSpec
+    from loom.models.exec import ExecResult
+
+    class FailedRead(FakeDriver):
+        calls = 0
+
+        async def exec(self, command, **kwargs):
+            self.calls += 1
+            if self.calls != 1:
+                pytest.fail("failed identity read was retried or released the gate")
+            return ExecResult(return_code=return_code, stdout=b"123", stderr=b"private command text",
+                              duration_sec=5)
+
+    guest = FailedRead()
+    runtime = GuestComposeRuntime(guest=guest, topology=NativeComposeSpec(source="fixture",
+        services=(ComposeServiceSpec(name="main", image="fixture"),)), image_archives={})
+    runtime.containers["main"] = "f" * 64
+    with pytest.raises(DriverError, match=rf"identity read failed.*exit_code={return_code}") as error:
+        await runtime.driver("main")._activate("/tmp/test-marker")
+    assert guest.calls == 1 and "private command text" not in str(error.value)
+
+
+async def test_activation_existing_unreadable_marker_is_a_read_failure(shell_control):
+    from loom.errors import DriverError
+
+    driver, guest, marker, _, _ = shell_control
+    marker.mkdir()  # A real cat failure, with the path still present.
+    with pytest.raises(DriverError, match=r"identity read failed.*exit_code=2"):
+        await driver._activate(str(marker))
+    assert guest.calls == 1 and not marker.with_suffix(".go").exists()
+
+
+async def test_activation_marker_removed_during_read_can_be_republished(shell_control):
+    import asyncio
+
+    driver, guest, marker, _, race = shell_control
+    marker.write_text("123")
+    race.touch()
+    activation = asyncio.create_task(driver._activate(str(marker)))
+    await guest.observed.wait()
+    assert not marker.exists() and not marker.with_suffix(".go").exists()
+    race.unlink()
+    marker.write_text("123")
+    await activation
+    assert marker.with_suffix(".go").exists() and guest.calls >= 3
+
+
+async def test_activation_initially_missing_marker_is_rechecked_without_cat(shell_control):
+    import asyncio
+
+    driver, guest, marker, _, _ = shell_control
+    publish = marker.parent / "publish-after-cat-fails"
+    publish.touch()
+    activation = asyncio.create_task(driver._activate(str(marker)))
+    await guest.observed.wait()
+    # The helper would publish the marker after a failed cat. Pre-absence must
+    # return not-ready without entering that potentially racing read at all.
+    assert not marker.exists() and not marker.with_suffix(".go").exists()
+    publish.unlink()
+    marker.write_text("123")
+    await activation
+    assert marker.with_suffix(".go").exists() and guest.calls >= 3
 
 
 @pytest.mark.parametrize("pid", ["", "1", "0", "2147483648", "123; touch injected"])

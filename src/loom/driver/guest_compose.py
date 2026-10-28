@@ -285,6 +285,7 @@ class GuestComposeRuntime:
 
 class GuestComposeServiceDriver:
     _SUPERVISOR = "/loom/compose-tools/busybox"
+    _IDENTITY_NOT_READY = 75  # Inner EX_TEMPFAIL; Docker CLI failures commonly use 1.
     def __init__(self, runtime: GuestComposeRuntime, service: str) -> None:
         self.runtime, self.service = runtime, service
         self.capabilities = runtime.guest.capabilities
@@ -408,18 +409,18 @@ class GuestComposeServiceDriver:
                 # Keep this probe read-only: cancelling Docker's client does
                 # not stop an inner exec already accepted by its daemon. Only
                 # the controller may release the gate after observing the PID.
-                # Poll briefly inside one helper rather than starting another
-                # cold Docker CLI for a marker still being published. Both the
-                # five-second request and thirty-second activation cap remain.
+                # Keep each accepted inner exec small: killing its Docker CLI
+                # does not reap an inner polling helper. An observed absent
+                # marker gets a dedicated status distinct from Docker errors.
                 helper = self._SUPERVISOR
-                script = ("i=0; "
-                          f"while test ! -f {marker}; do i=$((i+1)); "
-                          'test "$i" -lt 20 || exit 1; '
-                          f"{helper} sleep 0.05; done; {helper} cat {marker}")
+                script = (f"if test ! -e {marker}; then exit {self._IDENTITY_NOT_READY}; fi; "
+                          f"if {helper} cat {marker} 2>/dev/null; then exit 0; "
+                          f"elif test ! -e {marker}; then exit {self._IDENTITY_NOT_READY}; "
+                          "else exit 2; fi")
                 result = await self.runtime.guest.exec(shlex.join(self._exec(
                     [helper, "sh", "-c", script], user="0:0")), timeout_sec=5)
-                value = result.stdout.decode().strip()
                 if result.return_code == 0:
+                    value = result.stdout.decode().strip()
                     if not value.isdecimal() or not 1 < int(value) < 2**31:
                         raise DriverError("guest Compose process identity is invalid")
                     activated = await self.runtime.guest.exec(shlex.join(self._exec(
@@ -427,6 +428,10 @@ class GuestComposeServiceDriver:
                     if activated.return_code:
                         raise DriverError("guest Compose process activation failed")
                     return
+                if result.return_code != self._IDENTITY_NOT_READY:
+                    raise DriverError(
+                        f"guest Compose process identity read failed (exit_code={result.return_code})"
+                    )
                 await asyncio.sleep(.05)
 
     async def _cleanup_with_context(self, marker: str, failure: BaseException | None, phase: str) -> None:

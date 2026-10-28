@@ -577,13 +577,30 @@ Guest Compose retains its two-phase handshake: a bounded read-only probe waits
 for the supervised process identity, then the controller validates the returned
 PID before a separate request releases the command gate. A cancelled Docker CLI
 does not retire its container's inner exec, so a late probe must never release
-that gate. The 5-second request and 30-second activation limits remain. Cleanup
+that gate. Each probe performs at most one read. An observed absent marker is
+the only not-ready status (75) that permits another probe within the existing
+30-second activation budget; the dedicated inner status distinguishes absence
+from a Docker CLI failure (1). An existing unreadable marker (2), execution
+deadline (124), or any other failure is reported immediately with its exit code,
+without command, environment or stderr contents. The 5-second request limit and
+separate gate request remain. Cleanup
 reads the marker once so a supervisor's normal EXIT removal cannot race a
 separate existence check; an existing invalid marker still fails. If activation
 or execution fails and cleanup also fails, the diagnostic names both phases and
 preserves the first exception as its cause, without including authored commands
 or environment values. Inspect that first failure before attributing an
 activation expiry to cancellation cleanup.
+
+A local ARM64 host-Docker witness held two accepted read probes with controlled
+SIGSTOP: each client expired at the original 5 seconds while the inner probes
+remained alive, then both retired after resume. This demonstrates ownership and
+overlap under injected delay, not the physical cause of a native CI expiry. A
+single missing-marker observation measured the former 19 external sleep calls
+at 1.137 seconds and a single read at 0.061 seconds on that host. The inner
+polling loop is removed; these measurements establish smaller per-probe work,
+not an end-to-end CI speedup or a qualified cure for the original TCG timeout.
+Native qualification on the final source must still exercise the original
+240/120/30/5-second bounds and cancellation, collection and teardown assertions.
 
 The Compose HTTP fixture keeps its listening socket open while individual
 response workers run. Responses include their actual Content-Length; a health
