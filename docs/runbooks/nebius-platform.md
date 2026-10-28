@@ -625,6 +625,9 @@ invoker-rights triggers used by its command/reconciliation path:
 | `execution_admission_policies` | `UPDATE(active_count, counter_updated_at)` | Terminal lease triggers release admission counters |
 | `execution_budget_policies` | `UPDATE(daily_reserved_microusd, monthly_reserved_microusd, updated_at)` | Terminal leases without a started Pod release their reserved budget |
 | `team_quotas` | `SELECT(team_id, in_flight_count, max_attempts_ceiling)`, `UPDATE(in_flight_count)` | Trial terminal projection decrements its team's active count; deadline-bounded infrastructure retry reads the attempt ceiling |
+| `task_bundle_sources` | `SELECT`, `UPDATE(created_at)` | Native image claims validate and lock their registered frozen source |
+| `task_bundle_source_incarnations` | `SELECT` | Claims require an available source incarnation |
+| `task_bundle_source_references` | `SELECT`, `INSERT` | Claims retain the exact registered source; reference deletion remains with lifecycle management |
 
 [PostgreSQL row locks require UPDATE on at least one column](https://www.postgresql.org/docs/16/ddl-priv.html).
 The capacity grant permits changing its bookkeeping timestamp, not policy

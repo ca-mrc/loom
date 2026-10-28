@@ -286,6 +286,14 @@ successor; unrelated materializations remain eligible when capacity is available
 The native actuator's bootstrap database role has read-only access to
 `nebius_pool_build_outbox` for this check, including before global-pool
 activation. The separate participant activation path owns write grants.
+Ordinary native claims also read `task_bundle_sources`,
+`task_bundle_source_incarnations` and `task_bundle_source_references` to validate
+the frozen source and retain it before creating an attempt. The bootstrap role
+receives only `UPDATE(created_at)` on sources for its row lock and `INSERT` on
+references in addition to those reads. It cannot change source content, retire
+incarnations, delete references or access source write/version journals. These
+grants apply before any optional global-pool activation and survive bootstrap
+repetition.
 
 ## Compatibility and verification
 
