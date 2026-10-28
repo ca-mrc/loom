@@ -7,6 +7,7 @@ neither a terminal result nor those replies frees the charged reservation.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Any, Literal, Protocol
 
@@ -24,6 +25,7 @@ from loom.nebius_pool_lifecycle import PoolDrainV1, PoolStopV1
 from loom.nebius_pool_native_runtime import PoolNativeRuntimeV1
 from loom.pipeline.keys import canonical_digest
 from loom_control_plane.task_image_materializations import heartbeat_task_image_materialization
+from loom_execution_actuator.metrics import record_build_cycle
 from loom_execution_actuator.pool_build_driver import PoolBuildDriver
 from loom_execution_actuator.pool_build_selection import PoolBuildSelector
 from loom_execution_actuator.pool_native_observation import qualify_native_observation
@@ -230,8 +232,10 @@ class PoolNativeBuildController:
             await self.driver.management.drain(drain)
 
     async def run_once(self) -> None:
+        started, outstanding = time.monotonic(), 0
         first_error: Exception | None = None
         async for pending in self.driver.outbox.iter_pending():
+            outstanding += 1
             try:
                 await self._reconcile(pending.request.key)
             except Exception as error:
@@ -239,14 +243,19 @@ class PoolNativeBuildController:
                     first_error = error
                 _LOG.warning("Global native build deferred materialization=%s error=%s",
                     pending.request.key.local_work_id, type(error).__name__)
+        reconciled, outcome = time.monotonic(), "no_selector"
         if self.selector is not None:
             try:
                 selected = await self.selector.select_next()
+                outcome = "idle" if selected is None else "claimed"
                 if selected is not None:
                     await self._reconcile(selected.request.key)
             except Exception as error:
+                outcome = "error"
                 if first_error is None:
                     first_error = error
                 _LOG.warning("Global native build selection deferred error=%s", type(error).__name__)
+        record_build_cycle("pool", outstanding=outstanding, reconcile_seconds=reconciled - started,
+                           outcome=outcome, admission_seconds=time.monotonic() - reconciled)
         if first_error is not None:
             raise first_error
