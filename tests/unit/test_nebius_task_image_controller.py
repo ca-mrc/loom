@@ -9,7 +9,9 @@ import pytest
 from kubernetes.client import ApiException
 
 from loom_execution_actuator.task_image_controller import (
+    _BUILDER_LOG_LIMIT,
     NativeBuildKubernetesApi,
+    _build_failure_message,
     _matches,
     _native_failure,
     _terminal_phase_failure,
@@ -207,8 +209,21 @@ def test_observation_excludes_raw_messages_and_redacts_bounded_builder_log():
     encoded = json.dumps(result)
     assert "private receipt" not in encoded and "raw-secret" not in encoded
     assert "secretvalue" not in encoded and "othervalue" not in encoded
-    assert len(result["builder_log"]) <= 16384
+    assert 16384 < len(result["builder_log"]) <= _BUILDER_LOG_LIMIT
     assert result["phases"][0]["state"]["terminated"] == {"exitCode": 1, "reason": "Error"}
+
+
+def test_build_failure_message_keeps_the_dockerfile_error_ahead_of_the_wrapper():
+    wrapper = "rootlesskit: child exited: exit status 1\n" * 80
+    log = (
+        "error: failed to solve: process setup.sh did not complete successfully: exit code: 128\n"
+        + wrapper
+        + "password=secretvalue token=othervalue https://user:secret@registry.example/v2\n"
+    )
+    message = _build_failure_message(log)
+    assert message.index("failed to solve") < message.index("rootlesskit")
+    assert "secretvalue" not in message and "othervalue" not in message and "user:secret" not in message
+    assert len(message) > 2000
 
 
 def test_expected_job_accepts_api_defaults_and_equivalent_quantities_but_not_security_mutation():
@@ -339,10 +354,10 @@ async def test_running_build_log_is_read_only_when_explicitly_captured(monkeypat
     observed = await api.observe("builds", "build", capture_logs=True)
     assert len(calls) == 1
     assert calls[0][1] == {
-        "container": "build", "tail_lines": 100, "limit_bytes": 16384, "_request_timeout": 20,
+        "container": "build", "limit_bytes": _BUILDER_LOG_LIMIT, "_request_timeout": 20,
     }
     assert "private-token" not in observed["builder_log"]
-    assert len(observed["builder_log"]) <= 16384
+    assert 16384 < len(observed["builder_log"]) <= _BUILDER_LOG_LIMIT
 
 
 async def test_cleanup_waits_for_exact_job_and_orphan_pods_and_configmap_absence():

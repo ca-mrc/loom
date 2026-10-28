@@ -85,7 +85,7 @@ async def test_real_native_reader_binds_namespace_job_and_pod_before_returning_r
 
     def read_log(name, namespace, **kwargs):
         calls.append("log")
-        assert kwargs["limit_bytes"] == 16384 and kwargs["tail_lines"] == 100
+        assert kwargs["limit_bytes"] == 256 * 1024 and "tail_lines" not in kwargs
         return "compile output token=must-not-persist"
 
     api = NativeBuildKubernetesApi.__new__(NativeBuildKubernetesApi)

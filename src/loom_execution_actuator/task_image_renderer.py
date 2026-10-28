@@ -7,14 +7,17 @@ import json
 import math
 import re
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from typing import Any, Literal
 from uuid import UUID
 
 from loom.models.task import TaskConfig
 from loom.native_image_build import NativeImageBuildComponentV1
-from loom.task_image_build_plan import TaskImageBuildComponentV1
+from loom.task_image_build_plan import (
+    MAX_TASK_IMAGE_BUILD_TIMEOUT_SECONDS,
+    TaskImageBuildComponentV1,
+)
 from loom_execution_actuator.renderer import ExecutionTargetRuntime
 
 # Same manifest identity as the successful native rootless capability probe.
@@ -36,6 +39,10 @@ MAX_NATIVE_BUILD_COMPONENTS = 8
 # publisher's extracted OCI require separate room. Larger multi-component
 # builds remain bounded by the explicitly configured aggregate Pod budget.
 MIN_TASK_IMAGE_EPHEMERAL_STORAGE_MIB = 16 * 1024
+# Extra BuildKit time beyond the task's own budget. It shrinks before that
+# budget does, and only when the Job can still keep prepare/publish slack.
+_BUILD_BUDGET_GRACE_SECONDS = 300
+_JOB_DEADLINE_SLACK_SECONDS = 600
 _SCRATCH_DIRECTORIES = "/scratch/state /scratch/tmp /scratch/runtime /scratch/docker-config"
 
 
@@ -279,9 +286,20 @@ def render_task_image_job(
                     component_args[prefix + service.name] = service.build.args
                     if service.build.target is not None:
                         component_targets[prefix + service.name] = service.build.target
+    build_timeout = config.active_deadline_seconds
+    if environments:
+        task_budget = math.ceil(max(env.build_timeout_sec for env in environments.values()))
+        grace_room = MAX_TASK_IMAGE_BUILD_TIMEOUT_SECONDS - task_budget - _JOB_DEADLINE_SLACK_SECONDS
+        grace = min(_BUILD_BUDGET_GRACE_SECONDS, max(0, grace_room))
+        build_timeout = task_budget + grace
+        deadline = min(
+            MAX_TASK_IMAGE_BUILD_TIMEOUT_SECONDS,
+            max(config.active_deadline_seconds, build_timeout + _JOB_DEADLINE_SLACK_SECONDS),
+        )
+        config = replace(config, active_deadline_seconds=deadline)
     return render_native_image_job(workload="task", work_id=materialization_id, attempt=lease_epoch,
         claim=claim, components=checked, target=target, config=config,
-        build_timeout_seconds=math.ceil(max(env.build_timeout_sec for env in environments.values())) if environments else config.active_deadline_seconds,
+        build_timeout_seconds=build_timeout,
         component_build_args=component_args or None, component_build_targets=component_targets or None,
         component_no_cache=frozenset(no_cache))
 

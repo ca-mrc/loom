@@ -172,8 +172,44 @@ def test_native_build_preserves_arguments_target_and_task_deadline(inputs) -> No
     assert "target=selected" in builds[0]
     assert not any(value.startswith(("build-arg:", "target=")) for value in builds[1])
     assert job["spec"]["activeDeadlineSeconds"] == inputs["config"].active_deadline_seconds
-    assert builds[0][:6] == ["timeout", "-s", "TERM", "-k", "10", "73"]
+    assert builds[0][:6] == ["timeout", "-s", "TERM", "-k", "10", "373"]
     assert builds[0][6:10] == ["sh", "-c", 'trap "exit 124" TERM; "$@" & wait "$!"', "loom-build"]
+
+
+def _budget_inputs(inputs, seconds: float) -> dict:
+    budget = copy.deepcopy(inputs)
+    budget["claim"]["task_config"] = {
+        "task": {"id": "native/budget", "name": "Budget"},
+        "agent": {"name": "oracle"},
+        "verifier": {"name": "pytest"},
+        "environment": {
+            "os": "linux",
+            "dockerfile": "env/Dockerfile",
+            "build_timeout_sec": seconds,
+        },
+    }
+    return budget
+
+
+def _buildkit_timeout(job: dict) -> str:
+    script = job["spec"]["template"]["spec"]["initContainers"][1]["command"][2]
+    builds = [
+        shlex.split(line)[1:] for line in _component_script(script).splitlines()
+        if "buildctl-daemonless.sh build" in line
+    ]
+    return builds[0][5]
+
+
+def test_task_build_grace_extends_the_timer_and_keeps_job_slack(inputs) -> None:
+    _, short = render_task_image_job(**_budget_inputs(inputs, 600))
+    assert _buildkit_timeout(short) == "900"
+    assert short["spec"]["activeDeadlineSeconds"] == 1800
+    _, default = render_task_image_job(**_budget_inputs(inputs, 1200))
+    assert _buildkit_timeout(default) == "1500"
+    assert default["spec"]["activeDeadlineSeconds"] == 2100
+    _, capped = render_task_image_job(**_budget_inputs(inputs, 7200))
+    assert _buildkit_timeout(capped) == "7200"
+    assert capped["spec"]["activeDeadlineSeconds"] == 7200
 
 
 def test_job_bounds_resources_and_only_builder_has_rootless_exceptions(inputs) -> None:

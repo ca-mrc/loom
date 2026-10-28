@@ -250,11 +250,8 @@ class NativeBuildKubernetesApi:
             if capture_logs or job.get("status", {}).get("succeeded") or job.get("status", {}).get("failed"):
                 for pod in _owned_pods(job, job["metadata"].get("uid"))[:1]:
                     try:
-                        log = self._core.read_namespaced_pod_log(
-                            pod["metadata"]["name"], namespace, container="build", tail_lines=100,
-                            limit_bytes=16384, _request_timeout=20,
-                        )
-                        job["builder_log"] = _safe_log(str(log))
+                        log = _read_builder_log(self._core, pod["metadata"]["name"], namespace)
+                        job["builder_log"] = _stored_builder_log(str(log))
                     except Exception:
                         pass  # An unscheduled Pod has no build log.
             return job
@@ -310,12 +307,11 @@ class NativeBuildKubernetesApi:
 
                 current_pod()
                 try:
-                    log = self._core.read_namespaced_pod_log(pod["metadata"]["name"], runtime.namespace.name,
-                        container="build", tail_lines=100, limit_bytes=16384, _request_timeout=20)
+                    log = _read_builder_log(self._core, pod["metadata"]["name"], runtime.namespace.name)
                 except Exception:
                     pass  # Logs may not exist yet; never fabricate a result.
                 else:
-                    job["builder_log"] = _safe_log(str(log))
+                    job["builder_log"] = _stored_builder_log(str(log))
                 current_pod()
             namespace()
             return job
@@ -389,6 +385,38 @@ def _platform_diagnostic(receipt: Any, *, exit_code: Any) -> dict[str, Any] | No
     if type(code) is int and 0 <= code <= 255:
         diagnostic["exit_code"] = code
     return diagnostic
+
+
+# The Job is deleted after this capture, so the stored tail is the only copy.
+# 256 KiB keeps a Dockerfile error that sits ahead of the build wrapper.
+_BUILDER_LOG_LIMIT = 256 * 1024
+
+
+def _read_builder_log(core: Any, name: str, namespace: str) -> str:
+    return core.read_namespaced_pod_log(
+        name, namespace, container="build", limit_bytes=_BUILDER_LOG_LIMIT, _request_timeout=20,
+    )
+
+
+def _stored_builder_log(value: str) -> str:
+    return redact_log_text(value, limit=_BUILDER_LOG_LIMIT)
+
+
+def _build_failure_message(log: str) -> str:
+    """Lead with the BuildKit error so a later bound cannot keep only the wrapper."""
+
+    seen: list[str] = []
+    for line in log.splitlines():
+        stripped = line.strip()
+        if "ERROR:" in stripped or "failed to solve" in stripped.lower():
+            if stripped not in seen:
+                seen.append(stripped)
+    body = "Native build phase build failed."
+    if seen:
+        body += "\n" + "\n".join(seen)
+    if log:
+        body += "\n" + log
+    return _stored_builder_log(body)
 
 
 def _publication_document(observation: dict[str, Any], *, materialization_id: UUID, lease_epoch: int) -> dict[str, Any]:
@@ -495,7 +523,7 @@ def build_observation(observation: dict[str, Any]) -> dict[str, Any]:
             phases.append(phase)
         result["phases"] = phases
     if observation.get("builder_log"):
-        result["builder_log"] = _safe_log(observation["builder_log"])
+        result["builder_log"] = _stored_builder_log(observation["builder_log"])
     return result
 
 
@@ -870,7 +898,7 @@ class NativeTaskImageController:
 async def fail_native_build(session: AsyncSession, row: TaskImageMaterialization, reason: str, *, builder_id: str,
                             retryable: bool, images: dict[str, str] | None = None, message: str | None = None) -> None:
     """Existing native failure semantics; caller owns claim qualification/commit."""
-    safe_message = _safe_log(message or reason.replace("_", " "))[-2000:]
+    safe_message = _stored_builder_log(message or reason.replace("_", " "))
     await fail_task_image_materialization(session, materialization_id=row.id, builder_id=builder_id,
         lease_epoch=row.lease_epoch, retryable=retryable, failure_reason=reason,
         failure_message=safe_message, registry_images=images or {})
@@ -891,11 +919,12 @@ def _terminal_phase_failure(native: dict[str, Any], observed: dict[str, Any]) ->
 
     phase = next((item["name"] for item in native.get("phases", [])
         if item.get("state", {}).get("terminated", {}).get("exitCode", 0)), "job")
+    if phase == "build":
+        message = _build_failure_message(str(native.get("builder_log", "")))
+    else:
+        message = "Native build phase " + phase + " failed: " + _phase_error(observed, phase)
     return _native_failure(native) or (
-        "build_" + phase + "_failed",
-        ("Native build phase " + phase + " failed. " + native.get("builder_log", ""))
-        if phase == "build" else "Native build phase " + phase + " failed: " + _phase_error(observed, phase),
-        phase not in {"build", "prepare"})
+        "build_" + phase + "_failed", message, phase not in {"build", "prepare"})
 
 
 async def record_native_build_result(session: AsyncSession, row: TaskImageMaterialization,

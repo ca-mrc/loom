@@ -755,6 +755,63 @@ def test_cache_size_limits_apply_to_pack_and_unpack(tmp_path, monkeypatch) -> No
         runtime.unpack_cache(archive, tmp_path / "restored")
 
 
+def test_publisher_defers_oversized_optional_cache_and_keeps_the_image(
+    source_bundle, tmp_path, publisher, monkeypatch, capsys,
+) -> None:
+    claim, _ = source_bundle
+    cache, calls = publisher
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    archive = work / "oci/0000.tar"
+    _write_native_oci(archive)
+    # Stay above the archive check (3 * limit) while the cache tree is one byte over.
+    limit = archive.stat().st_size
+    monkeypatch.setattr(runtime, "_CACHE_BYTES", limit)
+    cache_dir = work / "cache-out/0"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "blob").write_bytes(b"x" * (limit + 1))
+    receipt = runtime.publish(claim, work, tmp_path / "secrets", receipt_path=tmp_path / "receipt.json")
+    assert receipt["registry_images"]["task"].endswith("b" * 64)
+    assert cache.uploads == [] and calls
+    assert '"reason":"cache_capacity"' in capsys.readouterr().out
+
+
+def test_publisher_still_exports_a_cache_at_the_byte_boundary(
+    source_bundle, tmp_path, publisher, monkeypatch,
+) -> None:
+    claim, _ = source_bundle
+    cache, _calls = publisher
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    archive = work / "oci/0000.tar"
+    _write_native_oci(archive)
+    limit = archive.stat().st_size
+    monkeypatch.setattr(runtime, "_CACHE_BYTES", limit)
+    cache_dir = work / "cache-out/0"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "blob").write_bytes(b"x" * limit)
+    runtime.publish(claim, work, tmp_path / "secrets", receipt_path=tmp_path / "receipt.json")
+    assert cache.uploads
+
+
+def test_publisher_rejects_invalid_cache_content_after_the_image_copy(
+    source_bundle, tmp_path, publisher,
+) -> None:
+    claim, _ = source_bundle
+    cache, _calls = publisher
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    _write_native_oci(work / "oci/0000.tar")
+    cache_dir = work / "cache-out/0"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "link").symlink_to(tmp_path / "secrets")
+    receipt_file = tmp_path / "receipt.json"
+    with pytest.raises(runtime.BuildPreparationError, match="unsupported content"):
+        runtime.publish(claim, work, tmp_path / "secrets", receipt_path=receipt_file)
+    assert cache.uploads == []
+    assert json.loads(receipt_file.read_text())["registry_images"]["task"].endswith("b" * 64)
+
+
 @pytest.mark.parametrize("path", ["oci", "oci/0000.tar", "cache-out", "cache-out/0"])
 def test_publisher_output_path_rejects_task_created_credential_symlinks(tmp_path, path) -> None:
     work, secrets = tmp_path / "work", tmp_path / "secrets"

@@ -194,6 +194,22 @@ failed command has one. The controller copies those fields onto the attempt as
 record as `diagnostic` for the current attempt. The summary is not retry
 authority. Dockerfile build logs remain on the attempt row.
 
+An optional BuildKit cache larger than 1 GiB is deferred during publish. The
+registry image, archives, runtime metadata, and receipt still succeed. Invalid
+cache content still fails publish. Import and unpack keep rejecting a stored
+cache over that limit.
+
+The attempt stores the build container's redacted tail, at most 256 KiB. A
+build failure message starts with the BuildKit error lines from that tail. The
+public trial response still uses the canned build-failure sentence and does
+not include the builder log.
+
+The task-image BuildKit timer is the task's `build_timeout_sec` plus up to 300
+seconds of grace. The Job deadline stays at least the configured value and at
+least the build timer plus 600 seconds for prepare and publish, and it never
+exceeds 7200 seconds. Grace shrinks before the task budget does. Pool jobs
+keep their absolute deadline.
+
 Task-source recovery inventories only versions whose stored metadata matches the
 committed write intent. Its shared `loom.trajectory.immutable_object` reader then
 fetches the exact non-null S3 `VersionId` and verifies the returned version, byte

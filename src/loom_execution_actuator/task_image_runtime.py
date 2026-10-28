@@ -540,6 +540,27 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _cache_tree_bytes(directory: Path) -> int:
+    """Validate a cache tree and return its logical size. Do not hash or upload."""
+
+    if not stat.S_ISDIR(directory.lstat().st_mode):
+        raise BuildPreparationError("cache root must be a real directory")
+    total = 0
+    files = 0
+    for path in sorted(directory.rglob("*")):
+        mode = path.lstat().st_mode
+        if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+            raise BuildPreparationError("build cache contains unsupported content")
+        if stat.S_ISDIR(mode):
+            continue
+        files += 1
+        if files > 10000:
+            raise BuildPreparationError("build cache exceeds file limit")
+        _validate_bundle_relative_path(path.relative_to(directory).as_posix())
+        total += path.stat().st_size
+    return total
+
+
 def _inventory_cache_directory(directory: Path) -> list[dict[str, Any]]:
     if not stat.S_ISDIR(directory.lstat().st_mode):
         raise BuildPreparationError("cache root must be a real directory")
@@ -1220,6 +1241,14 @@ def publish(
                         cache, "cache_export", component_index=index,
                     ):
                         cache_dir = _output_path(work, f"cache-out/{index}", directory=True)
+                        logical_bytes = _cache_tree_bytes(cache_dir)
+                        if logical_bytes > _CACHE_BYTES:
+                            # Optional export. The registry copy above already succeeded.
+                            emit_stage(
+                                "cache_export", "deferred", reason="cache_capacity",
+                                component_index=index, logical_bytes=logical_bytes,
+                            )
+                            continue
                         if transfer == "blobs":
                             _publish_cache_blobs(
                                 cache, claim, index=index, cache_dir=cache_dir
