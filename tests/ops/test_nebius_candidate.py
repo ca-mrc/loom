@@ -427,6 +427,7 @@ def test_profile_records_the_default_image_version(tmp_path: Path) -> None:
         document, signing_key=private, signing_key_id="publisher", keyring_json=trust,
     )
     assert "agent_image_version" not in unlabelled
+    assert "supports_terminus_environment_metadata" not in unlabelled
     document["runtime_metadata"] = runtime_metadata("nebius-" + "a" * 40)
     _, profile = candidate.create_candidate(
         document, signing_key=private, signing_key_id="publisher", keyring_json=trust,
@@ -560,6 +561,30 @@ def runtime_metadata(version: str = "test-1") -> dict[str, str]:
     }
 
 
+@pytest.mark.parametrize("bridge,harbor,enabled", [
+    ("1.1", "0.24.0", True),
+    ("1.0", "0.24.0", False),
+    ("1.0", "0.18.0", False),
+    ("1.1", "0.18.0", False),
+    ("1.10", "0.24.0", False),
+    ("1.1", "0.25.0", False),
+])
+def test_image_labels_determine_default_task_metadata_support(tmp_path, bridge, harbor, enabled):
+    document, private, keyring = inputs(tmp_path)
+    labels = {**runtime_metadata(), "loom_bridge_revision": bridge, "harbor_version": harbor}
+    archive = oci_fixture(tmp_path, metadata=labels)
+    extracted: dict[str, str] = {}
+    candidate.inspect_oci_archive(archive, candidate=document["candidate_sha"], runtime_metadata=extracted)
+    document["runtime_metadata"] = extracted
+    _, profile = candidate.create_candidate(
+        document, signing_key=private, signing_key_id="publisher", keyring_json=keyring,
+    )
+    parsed = ServiceExecutionRuntimeProfileV1.model_validate(profile)
+    assert parsed.supports_terminus_environment_metadata is enabled
+    assert ("supports_terminus_environment_metadata" in profile) is enabled
+    assert parsed.agent_image_version == labels["agent_version"]
+
+
 def test_runtime_release_cli_outputs_only_reusable_single_image_record(tmp_path: Path) -> None:
     document, private, keyring = inputs(tmp_path)
     document["images"] = {"harbor_runtime": document["images"]["harbor_runtime"]}
@@ -580,6 +605,14 @@ def test_runtime_release_cli_outputs_only_reusable_single_image_record(tmp_path:
     assert release["schema_version"] == "loom.agent-runtime-release.v1"
     assert {key: release[key] for key in runtime_metadata()} == runtime_metadata()
     assert set(release) == set(runtime_metadata()) | {"schema_version", "agent_image_ref", "image_admission"}
+    from loom.agent_runtime import AgentRuntimeReleaseV1, supports_terminus_environment_metadata
+
+    historical = AgentRuntimeReleaseV1.model_validate(release)
+    assert historical.model_dump(mode="json") == release
+    assert historical.public_metadata()["readiness_status"] == "ready"
+    assert not supports_terminus_environment_metadata(
+        loom_bridge_revision=historical.loom_bridge_revision, harbor_version=historical.harbor_version,
+    )
     from loom.execution_image_admission import verify_execution_image_admission
 
     verify_execution_image_admission(

@@ -37,6 +37,7 @@ from scripts.ops.nebius_registry_auth import refresh_registry_auth
 from scripts.validate_trivy_release_report import validate_trivy_release_report
 from scripts.write_trivy_release_policy import write_release_policy
 
+from loom.agent_runtime import supports_terminus_environment_metadata
 from loom.execution_image_admission import (
     ExecutionImageAdmissionBundleV1,
     ImageAdmissionKeyring,
@@ -332,6 +333,10 @@ def create_candidate(
         runtime_image_ref=document["images"]["execution_runtime"]["image_ref"],
         agent_image_ref=document["images"]["harbor_runtime"]["image_ref"],
         agent_image_version=_default_agent_version(document),
+        supports_terminus_environment_metadata=supports_terminus_environment_metadata(
+            loom_bridge_revision=(document.get("runtime_metadata") or {}).get("loom_bridge_revision", ""),
+            harbor_version=(document.get("runtime_metadata") or {}).get("harbor_version", ""),
+        ),
         runtime_binary_sha256=document["runtime_binary_sha256"],
         supports_task_web_egress=supports_task_web_egress,
         service_lifecycle_ready=service_lifecycle_ready,

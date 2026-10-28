@@ -127,8 +127,17 @@ service materialization, worker admission before factories/model launch, and
 the Trial's driver-start boundary. Schema validity and preserved raw files do
 not grant runtime support. Hosted execution prepares independent verifier images,
 keeps their resource and environment declarations distinct, and restores declared
-artifacts before grading. The legacy worker still rejects these hosted-only
-contracts. Unsupported Compose fields and exact GPU-model placement remain
+artifacts before grading. Independent verifiers use their own image USER,
+WORKDIR and ENTRYPOINT defaults unless explicitly overridden, including when
+the agent uses Compose. When `[verifier.environment]` is declared, an omitted
+internet setting maps to hosted `public-web` independently of the agent; explicit
+offline and allowlist policies remain unchanged. Submission validates the
+independent verifier against its selected execution class before execution.
+An independent tests image does not inherit the agent workbench's readiness
+probe: that image does not start the agent's services. An explicitly declared
+verifier healthcheck remains authoritative. Original upstream configuration is
+retained in the bundle alongside this executable projection.
+The legacy worker still rejects these hosted-only contracts. Unsupported Compose fields and exact GPU-model placement remain
 explicit blockers.
 
 Supported native Compose topologies run inside a private software guest. The
@@ -183,18 +192,30 @@ agent cutoff; external cancellation receives only ordinary termination grace.
 Compose command cancellation retires the inner process group before collection
 hooks run. A single read-only BusyBox helper provides session control without
 exposing the guest Docker socket; the authored service user and umask are preserved.
-Structured artifact transfer preserves source
-paths and exclusions, overlays only transferred files onto the verifier image,
-and rejects unsafe links and private paths. Generic separate verification keeps
-its full-workspace handoff; a native independent verifier consumes its authored
+The inner helper writes its PID privately and atomically renames the completed
+file before the controller validates it and separately releases the execution
+gate. Invalid PIDs remain fatal; cancellation and normal teardown remove any
+unpublished PID file as well as the marker and gate.
+Native independent-verifier artifact transfer preserves source
+paths and exclusions, replaces each declared directory with its collected tree,
+and rejects unsafe links and private paths. Excluded or agent-deleted files do
+not survive from the verifier image; file artifacts retain unrelated siblings.
+Generic separate verification keeps
+its full-workspace handoff and overlays structured outputs to preserve staged
+private verifier inputs; a native independent verifier consumes its authored
 artifact declarations. Oracle solution variables apply only to the solution
 process. Health probes honor the declared startup interval.
 
 The native reward bridge runs the original `tests/test.sh`, removes stale
 reward/output files, and accepts finite numeric scalar or JSON rewards,
-including zero and fractional scores. Missing, malformed, boolean and
+including zero and fractional scores. Like Harbor, `reward.json` takes precedence
+over `reward.txt`; text-only rewards use the `reward` key. An invalid existing
+JSON reward fails instead of falling back to text. Missing, malformed, boolean and
 non-finite rewards fail explicitly. A shell timeout cannot reuse a prior
-success. This bridge does not qualify the separate verifier's execution backend.
+success. Previously generated native wrappers retain exact version recognition
+and the private-input layout; the runtime-owned bridge uses the current reward
+reader without rewriting task assets. This bridge does not qualify the separate
+verifier's execution backend.
 
 ## Development evidence and remaining acceptance
 
@@ -227,6 +248,35 @@ retains the same upstream revision and complete source count of 66, with exactly
 This subset stays marked unqualified until image preparation, actual Oracle
 runs, bounded Terminus-2 model runs and durable result/export readback pass.
 Local tests and import census alone are not deployed benchmark acceptance.
+
+### Native Terminus task skills and MCP metadata
+
+Hosted Terminus forwards `environment.skills_dir` and `environment.mcp_servers`
+to the pinned Harbor agent constructor. Harbor 0.24's
+[Terminus2.run](https://github.com/harbor-framework/harbor/blob/2de4605b9404eada7d341388291e6e469c90330b/src/harbor/agents/terminus_2/terminus_2.py#L1774)
+adds declared MCP endpoints/commands and an `available_skills` XML section to
+the initial instruction. It does not create a host MCP client or proxy. The
+agent accesses declared endpoints from its existing task sandbox/network.
+
+Native skill discovery reads `skills_dir/*/SKILL.md` through the sandbox Driver,
+using Harbor's inherited `BaseEnvironment.is_dir` and `exec` methods. The pinned
+agent omits a missing directory and skips unreadable or malformed skill entries;
+it includes valid YAML-frontmatter names, descriptions and sandbox paths. Loom
+does not read these paths from the controller filesystem or copy task skills.
+
+The supported MCP declaration transports are `stdio`, `sse`, and `http` (mapped
+to Harbor's `streamable-http`). Stdio command vectors become the native command
+and arguments. WebSocket, nonempty MCP environment/header maps and credentials
+embedded in endpoint userinfo are rejected explicitly: the pinned Terminus
+prompt cannot convey those fields. Older installed Harbor agents lacking the
+declared metadata capabilities also reject the request instead of dropping it.
+Harbor's Oracle/nop utility-agent semantics ignore task-provided skills/MCP;
+explicit unsupported agent-level configuration remains independently rejected.
+
+The offline native-runtime regression checks actual Harbor construction and its
+initial model request with a mocked HTTP model transport, including absent and
+unreadable skills. This verifies forwarding, not endpoint availability or
+successful completion of the benchmark tasks.
 
 When a task selects a prebuilt image with no explicit build or Compose
 definition, findings in its unused default Dockerfile remain source warnings.

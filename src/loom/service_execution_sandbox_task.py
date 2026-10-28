@@ -35,7 +35,7 @@ from loom.errors import AgentError, DriverError, exception_info
 from loom.execution_contract import effective_guest_capabilities
 from loom.harbor_verifier_script import (
     VERIFIER_SCRIPT_PATH,
-    native_verifier_run_sh_bytes,
+    native_verifier_run_sh_templates,
     native_verifier_workdir_run_sh_bytes,
     offline_verifier_run_sh_bytes,
 )
@@ -105,11 +105,14 @@ def _harbor_verifier_kind(workspace: Path, task: TaskConfig) -> str | None:
     if task.verifier.args.get("script_path") != VERIFIER_SCRIPT_PATH:
         return None
     wrapper = _safe_workspace_path(workspace, VERIFIER_SCRIPT_PATH)
-    templates = {"native": native_verifier_run_sh_bytes(), "offline": offline_verifier_run_sh_bytes()}
-    if not wrapper.is_file() or wrapper.stat().st_size not in {len(body) for body in templates.values()}:
+    templates = [
+        *(("native", body) for body in native_verifier_run_sh_templates()),
+        ("offline", offline_verifier_run_sh_bytes()),
+    ]
+    if not wrapper.is_file() or wrapper.stat().st_size not in {len(body) for _, body in templates}:
         return None
     body = wrapper.read_bytes()
-    return next((kind for kind, expected in templates.items() if body == expected), None)
+    return next((kind for kind, expected in templates if body == expected), None)
 
 
 def _uses_harbor_private_inputs(workspace: Path, task: TaskConfig) -> bool:
@@ -981,6 +984,7 @@ async def _run_verifier(
                 archive=workspace / ".loom" / ARCHIVE_NAME,
                 sources=task.steps[0].artifact_sources, driver=driver,
                 workdir=task.environment.workdir,
+                replace_directories=native_independent_verifier_handoff(task) and harbor_kind == "native",
             )
         remote_output = (
             _PRIVATE_VERIFIER_INPUT_ROOT.parent / "output.json" if private_inputs

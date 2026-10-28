@@ -762,18 +762,19 @@ async def test_in_place_archive_failure_is_recorded_and_does_not_fail_the_agent(
     }
 
 
-@pytest.mark.parametrize("kind", ["native", "offline"])
+@pytest.mark.parametrize("kind", ["native", "native-v1", "offline"])
 @pytest.mark.parametrize("modified", [False, True])
 def test_harbor_layout_recognizes_only_complete_known_templates(tmp_path, kind, modified):
     from loom import service_execution_sandbox_task as module
     from loom.harbor_verifier_script import (
-        native_verifier_run_sh_bytes,
+        native_verifier_run_sh_templates,
         offline_verifier_run_sh_bytes,
     )
 
     task, _, _ = _inputs()
     task.verifier.args["script_path"] = "verifier/run.sh"
-    wrapper = native_verifier_run_sh_bytes() if kind == "native" else offline_verifier_run_sh_bytes()
+    current, legacy = native_verifier_run_sh_templates()
+    wrapper = {"native": current, "native-v1": legacy, "offline": offline_verifier_run_sh_bytes()}[kind]
     (tmp_path / "verifier").mkdir()
     if modified:
         wrapper = wrapper.replace(b"# ", b"##", 1)
@@ -846,13 +847,14 @@ class _FilesystemSandbox:
 
 @pytest.mark.parametrize("requirement", ["shell-whitelist", "git-clean"])
 @pytest.mark.parametrize("extra_business_file", [False, True])
+@pytest.mark.parametrize("wrapper_version", [0, 1], ids=["current", "published-v1"])
 async def test_shared_native_harbor_executes_with_clean_business_tree(
-    tmp_path, monkeypatch, requirement, extra_business_file,
+    tmp_path, monkeypatch, requirement, extra_business_file, wrapper_version,
 ):
     import shlex
 
     from loom import service_execution_sandbox_task as module
-    from loom.harbor_verifier_script import native_verifier_run_sh_bytes
+    from loom.harbor_verifier_script import native_verifier_run_sh_templates
     from loom.models.trial import TrialConfig
     from loom.service_execution_oracle import parse_oracle_events
 
@@ -869,7 +871,8 @@ async def test_shared_native_harbor_executes_with_clean_business_tree(
     trial = TrialConfig(agent_name="oracle", agent_model=None, verifier_env_mode="shared")
     (controller / "instruction.md").write_text("Do not commit this harness input")
     (controller / "verifier").mkdir()
-    (controller / "verifier/run.sh").write_bytes(native_verifier_run_sh_bytes())
+    original_wrapper = native_verifier_run_sh_templates()[wrapper_version]
+    (controller / "verifier/run.sh").write_bytes(original_wrapper)
     (controller / "tests").mkdir()
     (controller / "solution").mkdir()
     business_q = shlex.quote(str(business))
@@ -903,7 +906,8 @@ async def test_shared_native_harbor_executes_with_clean_business_tree(
         f"test \"$PWD\" = {business_q}\n"
         "python - <<'CHECK'\nimport os, subprocess\n"
         f"root = {str(business)!r}\n" + assertion + "CHECK\n"
-        'echo 1 > "$LOOM_HARBOR_LOG_DIR/reward.txt"\n',
+        'echo .7 > "$LOOM_HARBOR_LOG_DIR/reward.txt"\n'
+        'echo \'{"reward": 1}\' > "$LOOM_HARBOR_LOG_DIR/reward.json"\n',
     )
     driver = _FilesystemSandbox(sandbox)
     monkeypatch.setattr(module, "_PRIVATE_VERIFIER_INPUT_ROOT", PurePosixPath(private))
@@ -924,7 +928,8 @@ async def test_shared_native_harbor_executes_with_clean_business_tree(
         (business / "unexpected.txt").write_text("must remain a failure")
     await run_verifier(controller, task, trial)
     result = json.loads((controller / ".loom/verifier/output.json").read_text())
-    assert result["rewards"] == {"resolved": 0 if extra_business_file else 1}
+    assert result["rewards"] == {"reward": 0 if extra_business_file else 1}
+    assert (controller / "verifier/run.sh").read_bytes() == original_wrapper
     trace = parse_oracle_events((controller / ".loom/agent/trajectory.jsonl").read_bytes())
     assert trace[0].cwd == str(business)
     assert not (business / "instruction.md").exists()
@@ -950,7 +955,7 @@ async def test_harbor_external_layout_does_not_broaden_supported_workdirs(tmp_pa
         await run_agent(tmp_path, task, trial)
 
 
-@pytest.mark.parametrize("kind", ["native", "offline"])
+@pytest.mark.parametrize("kind", ["native", "native-v1", "offline"])
 @pytest.mark.parametrize("reward", [0, 1])
 async def test_shared_harbor_private_inputs_and_report_leave_business_tree_untouched(
     tmp_path, monkeypatch, kind, reward,
