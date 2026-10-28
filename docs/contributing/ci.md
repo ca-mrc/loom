@@ -578,12 +578,25 @@ preserves the first exception as its cause, without including authored commands
 or environment values. Inspect that first failure before attributing an
 activation expiry to cancellation cleanup.
 
+The Compose HTTP fixture keeps its listening socket open while individual
+response workers run. Responses include their actual Content-Length; a health
+request must not retire the only listener before the next client connects.
+HTTP failures retain the original assertion and only project safe state fields
+from the fixture's own containers, without repeating the request.
+
 The TLS rotation test prepares only its pinned Traefik and Python images on the
 host before starting K3s, using the existing Skopeo OCI fixture transport. It
 imports the original references and verifies their manifest digests in the
 disposable containerd. This avoids a nested Docker Hub token/DNS dependency;
 classic Docker archives can reconstruct manifests and change those identities.
 The existing acquisition policy and the full 240-second TLS/rotation test remain.
+
+For a disposable K3s sandbox stall, early Flannel bootstrap warnings are not
+enough to explain a later Pending Pod. The existing five-second process snapshot
+slot retains owned netfilter/CNI kernel waits through a bounded host reader;
+container cgroups and process identities limit which stacks can be read. It
+does not change network policy, kernel modules or the networking backend. The
+physical wait-chain cause tracked in #2611 remains separate from this diagnostic.
 
 MinIO preparation follows selected fixture imports and parent conftests. Fast
 integration normally needs only the testcontainers release; TLS storage tests

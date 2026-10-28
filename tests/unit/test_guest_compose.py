@@ -5,6 +5,82 @@ import pytest
 from loom.guest_compose import compile_native_compose
 
 
+@pytest.mark.parametrize("body", [b"ready\n", b"guest-ready\n"])
+def test_http_fixture_frames_the_actual_response_body(body):
+    import subprocess
+
+    from tests.integration.test_guest_compose import _http_fixture_command
+
+    response = subprocess.check_output(_http_fixture_command(body)[-3:])
+    headers, actual_body = response.split(b"\r\n\r\n", 1)
+    assert actual_body == body
+    assert f"Content-Length: {len(actual_body)}".encode() in headers.split(b"\r\n")
+
+
+@pytest.mark.parametrize("failure", ["exception", "extra", "oversized", "invalid"])
+async def test_http_state_diagnostics_do_not_leak_or_replace_original_failure(failure, capsys):
+    import json
+    import shlex
+    from types import SimpleNamespace
+
+    from loom.models.exec import ExecResult
+    from tests.integration.test_guest_compose import _report_http_fixture_state
+
+    safe = {"status": "running", "running": True, "dead": False,
+            "oom_killed": False, "exit_code": 0, "health": "healthy"}
+    calls = []
+
+    async def execute(command, *, timeout_sec):
+        calls.append((shlex.split(command), timeout_sec))
+        if len(calls) == 1:
+            if failure == "exception":
+                raise RuntimeError("private-token-in-exception")
+            payload = dict(safe)
+            if failure == "extra":
+                payload["Error"] = "private-token-in-state"
+            if failure == "invalid":
+                payload["status"] = "private-token-in-status"
+            data = json.dumps(payload).encode()
+            if failure == "oversized":
+                data = b"private-token" * 200
+        else:
+            data = json.dumps(safe).encode()
+        return ExecResult(return_code=0, stdout=data, stderr=b"private-token-in-stderr",
+                          duration_sec=0)
+
+    runtime = SimpleNamespace(guest=SimpleNamespace(exec=execute),
+                              containers={"api": "a" * 64, "main": "b" * 64, "foreign": "c" * 64})
+    with pytest.raises(AssertionError, match="original HTTP assertion"):
+        await _report_http_fixture_state(runtime)
+        raise AssertionError("original HTTP assertion")
+    output = capsys.readouterr().out
+    assert "private-token" not in output
+    report = json.loads(output.removeprefix("compose-http-state "))
+    assert report["main"] == safe
+    assert report["api"] == {"state": "unavailable", "error_type":
+                              "RuntimeError" if failure == "exception" else "ValueError"}
+    assert [args[-1] for args, _ in calls] == ["a" * 64, "b" * 64]
+    assert all(timeout == 5 for _, timeout in calls)
+    for args, _ in calls:
+        assert args[:3] == ["docker", "inspect", "--format"]
+        assert all(value not in args[3] for value in ("Config", "Env", "Error", "Log", "Output"))
+
+
+async def test_http_state_diagnostics_do_not_query_unowned_reference(capsys):
+    from types import SimpleNamespace
+
+    from tests.integration.test_guest_compose import _report_http_fixture_state
+
+    async def execute(*args, **kwargs):
+        pytest.fail("malformed or absent ownership must not reach Docker")
+
+    await _report_http_fixture_state(SimpleNamespace(
+        guest=SimpleNamespace(exec=execute), containers={"api": "foreign; echo private-token"}))
+    output = capsys.readouterr().out
+    assert "private-token" not in output
+    assert output.count('"state": "unavailable"') == 2
+
+
 def bundle(tmp_path: Path, yaml: str):
     environment = tmp_path / "environment"
     environment.mkdir()
