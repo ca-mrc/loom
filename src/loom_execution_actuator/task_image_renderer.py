@@ -26,7 +26,7 @@ _IMAGE = re.compile(r"[^\s]+@sha256:[0-9a-f]{64}")
 _DNS_NAME = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?")
 # Public subordinate IDs preserve source-layer ownership above 65535. These
 # are fixed builder configuration, never authored task inputs or credentials.
-_BUILDER_SUBIDS = "user:100000:262144\n"
+_BUILDER_SUBIDS = "user:100000:262144\nroot:1:262144\n"
 _CLAIM = "/loom/claim/claim.json"
 _BUILD = "/loom/build"
 _CREDENTIALS = "/var/run/loom-task-build"
@@ -117,9 +117,6 @@ def _build_script(
 ) -> str:
     lines = [
         "set -eu",
-        # Set both limits in the original namespace, before daemonless.sh starts
-        # rootlesskit. Activation requires the native process-bound proof.
-        f"ulimit -u {max_processes}",
         "mkdir -p /scratch/tmp /scratch/runtime /scratch/docker-config /scratch/state /loom/build/oci /loom/build/cache-out",
     ]
     for index, component in enumerate(components):
@@ -235,7 +232,19 @@ def _build_script(
                 "fi",
             ]
         )
-    return "\n".join(lines) + "\n"
+    # A keeps the runtime's incoming creator limit instead of charging every
+    # builder's new namespaces against a lowered shared host UID1000 ceiling.
+    # B captures A's private soft/hard limit as its descendant accounting bound,
+    # including Dockerfile USER transitions. Keep both supervisors' state outside
+    # the per-component cleanup directories. The pinned daemonless script sees
+    # namespace root in B and uses /run/buildkit, so copy up only private /run.
+    inner = shlex.join([
+        "rootlesskit", "--state-dir=/scratch/scope/b", "--copy-up=/run", "sh", "-ec", "\n".join(lines) + "\n",
+    ])
+    creator = f"ulimit -Su {max_processes}\nulimit -Hu {max_processes}\nexec {inner}"
+    return "set -eu\nmkdir -p /scratch/scope\nexec " + shlex.join([
+        "rootlesskit", "--state-dir=/scratch/scope/a", "sh", "-ec", creator,
+    ]) + "\n"
 
 
 def render_task_image_job(
