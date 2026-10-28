@@ -10,6 +10,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from loom.family_run.spec import FamilyRunSpec
+from loom.models.harbor_config import HarborConfig, apply_harbor_config_dict
 from loom.models.mcp import MCPConnection
 from loom.models.networking import NetworkPolicy
 from loom.models.skill import SkillRef
@@ -274,6 +275,9 @@ class TrialConfig(BaseModel):
     # fifth batch axis. ``none`` no longer opens tests/ or solution/.
     workspace_staging_policy_name: Literal["tb21", "none"] | None = None
 
+    # #2667: Harbor Terminus-2 constructor controls and completion kwargs.
+    harbor_config: HarborConfig | None = None
+
     # #1380: optional mid-trajectory model switch (terminus-2 only).
     multi_model: MultiModelSwitchSpec | None = None
     # Clone / exact replay / failed-case rerun: inherit the persisted
@@ -290,3 +294,10 @@ class TrialConfig(BaseModel):
     @classmethod
     def _sanitize_request_params(cls, value: Any) -> dict[str, Any]:
         return sanitize_request_extras(value)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _merge_harbor_config(cls, value: Any) -> Any:
+        if isinstance(value, dict) and value.get("harbor_config") is not None:
+            return apply_harbor_config_dict(dict(value))
+        return value

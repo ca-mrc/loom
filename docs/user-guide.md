@@ -1310,6 +1310,44 @@ batch-creation flags, including `--purpose`; do not combine the two input modes.
 The JSON itself contains `purpose` and `team_id`. Export preserves configuration,
 so review it before sharing it with anyone else.
 
+Terminus-2 sampling and session limits use `--harbor-config` (a JSON object or
+`@file`). The same object is `trial_config.harbor_config` inside a request JSON.
+Do not combine `--harbor-config` with `--request-json`.
+
+```bash
+loom eval batch create \
+  --purpose trajectory_generation \
+  --task-set ts/<team>/terminal-bench-2-1 \
+  --agent terminus-2 \
+  --provider az-gateway-loom-runs \
+  --model MODEL \
+  --n-per-task 2 \
+  --harbor-config @harbor.json
+```
+
+```json
+{
+  "max_turns": 128,
+  "agent_timeout_sec": 7200,
+  "max_input_tokens": 262144,
+  "enable_summarize": false,
+  "temperature": 1,
+  "top_p": 0.9,
+  "max_tokens": 16384
+}
+```
+
+`temperature`, `top_p`, `max_tokens`, `max_completion_tokens`, `seed`, `stop`,
+`frequency_penalty`, and `presence_penalty` are copied into Harbor `llm_kwargs`.
+`max_turns`, `enable_summarize`, `proactive_summarization_threshold`,
+`max_thinking_tokens`, and `reasoning_effort` are Terminus constructor arguments.
+`max_input_tokens` is passed as Harbor `model_info` and only affects the
+summarizer; with `enable_summarize` left off, the provider still enforces the
+real context window. `agent_timeout_sec` replaces the task agent timeout for
+the whole attempt. Omitting `enable_summarize` keeps it off. Omitting
+`max_turns` keeps the runtime default of 50. A task that sets
+`continue_until_timeout` still ignores the turn cap.
+
 ### Quickstart: submit through the API
 
 Use a user-owned API token that can submit work for the intended team (see

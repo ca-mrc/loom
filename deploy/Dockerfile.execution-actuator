@@ -43,7 +43,8 @@ COPY src/loom/db ./src/loom/db
 COPY src/loom/security ./src/loom/security
 COPY src/loom/models/__init__.py src/loom/models/healthcheck.py src/loom/models/mcp.py \
     src/loom/models/networking.py src/loom/models/skill.py src/loom/models/task.py \
-    src/loom/models/types.py src/loom/models/trial.py src/loom/models/resource_usage.py \
+    src/loom/models/types.py src/loom/models/trial.py src/loom/models/harbor_config.py \
+    src/loom/models/resource_usage.py \
     src/loom/models/harbor.py src/loom/models/compose.py src/loom/models/task_compatibility.py ./src/loom/models/
 COPY src/loom/pipeline/__init__.py src/loom/pipeline/keys.py ./src/loom/pipeline/
 COPY src/loom_control_plane/__init__.py src/loom_control_plane/execution_admission.py \
