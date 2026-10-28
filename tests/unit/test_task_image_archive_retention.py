@@ -25,7 +25,8 @@ def fixture():
     return claim, intent, owned
 
 
-def test_receipt_lost_recovery_finds_only_issued_exact_versions_and_repeated_delete_is_safe():
+@pytest.mark.parametrize("metadata_case", [str.lower, str.title, str.upper], ids=["lower", "nebius-title", "upper"])
+def test_receipt_lost_recovery_finds_only_issued_exact_versions_and_repeated_delete_is_safe(metadata_case):
     claim, intent, owned = fixture()
     versions = {'owned-version': owned, 'foreign-version': {**owned, 'VersionId': 'foreign-version',
         'Metadata': {'loom-image-write-id': str(uuid4()), 'loom-image-ref': owned['Metadata']['loom-image-ref']}}}
@@ -34,7 +35,8 @@ def test_receipt_lost_recovery_finds_only_issued_exact_versions_and_repeated_del
         assert kwargs['Bucket'] == claim['source_bucket'] and kwargs['Key'] == intent['object_key']
         if kwargs['VersionId'] not in versions:
             raise ClientError({'Error': {'Code': 'NoSuchVersion'}}, 'HeadObject')
-        return versions[kwargs['VersionId']]
+        response = versions[kwargs['VersionId']]
+        return {**response, 'Metadata': {metadata_case(k): v for k, v in response['Metadata'].items()}}
     def delete(**kwargs):
         assert kwargs['VersionId'] == 'owned-version'
         deleted.append(kwargs['VersionId'])
@@ -88,3 +90,17 @@ async def test_cancelled_sdk_operation_keeps_fence_until_real_worker_exits():
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await worker
+
+
+@pytest.mark.parametrize("owner_value", ["conflicting-owner", "same-owner"])
+def test_recovery_handles_case_aliases_without_overwriting_ownership(owner_value):
+    claim, intent, owned = fixture()
+    owned["Metadata"]["Loom-Image-Write-Id"] = (intent["write_id"] if owner_value == "same-owner" else str(uuid4()))
+    pages = [{"Versions": [{"Key": intent["object_key"], "VersionId": "owned-version"}]}]
+    client = SimpleNamespace(head_object=lambda **kwargs: owned,
+        get_paginator=lambda name: SimpleNamespace(paginate=lambda **kwargs: pages))
+    if owner_value == "same-owner":
+        assert len(recover_archive_versions(client, claim, bucket="archive-bucket")) == 1
+    else:
+        with pytest.raises(ValueError, match="metadata"):
+            recover_archive_versions(client, claim, bucket="archive-bucket")
