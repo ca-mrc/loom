@@ -443,7 +443,7 @@ artifacts.
 The agent and verifier are phases in one execution lease and one Job. The
 controller withholds `tests/**`, `verifier/**`, `solution/**`,
 `upstream-task.toml` and `.loom/**` during the agent phase. After the harness
-returns, it refuses planted private paths, injects verifier inputs, and runs the
+returns, it injects verifier inputs, and runs the
 verifier against the same `task-sandbox`. This preserves live services,
 sockets and other process state that cannot be archived.
 

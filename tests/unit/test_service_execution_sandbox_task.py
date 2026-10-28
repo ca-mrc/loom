@@ -1006,6 +1006,50 @@ async def test_shared_harbor_private_inputs_and_report_leave_business_tree_untou
     assert (tmp_path / "verifier/run.sh").read_bytes() == wrapper  # Input remains immutable.
 
 
+async def test_shared_harbor_grades_when_business_workdir_already_contains_tests(tmp_path, monkeypatch):
+    """#2696: a fixture tests directory is not a reason to skip grading.
+
+    sanitize-git-repo's image workdir already contains tests/. Shared Harbor
+    grading uploads the real tests under the private verifier root and still runs.
+    """
+    from loom import service_execution_sandbox_task as module
+    from loom.harbor_verifier_script import native_verifier_run_sh_bytes
+
+    controller, sandbox = tmp_path / "controller", tmp_path / "sandbox"
+    controller.mkdir()
+    business = sandbox / "app" / "dclm"
+    business.mkdir(parents=True)
+    (business / "tests").mkdir()
+    (business / "tests" / "from-image").write_text("fixture tests stay in the workdir")
+    private = sandbox / "loom/verifier/task"
+    task, trial, _ = _inputs()
+    task = task.model_copy(update={"environment": task.environment.model_copy(update={
+        "workdir": PurePosixPath(business),
+    })})
+    task.verifier.args["script_path"] = "verifier/run.sh"
+    trial = trial.model_copy(update={"verifier_env_mode": "shared"})
+    (controller / "verifier").mkdir()
+    (controller / "verifier/run.sh").write_bytes(native_verifier_run_sh_bytes())
+    (controller / "tests").mkdir()
+    (controller / "tests/test.sh").write_text(
+        "#!/bin/sh\nset -eu\n"
+        "test \"$LOOM_TASK_DIR\" != \"$PWD\"\n"
+        "test ! -f \"$LOOM_TASK_DIR/tests/from-image\"\n"
+        "echo private > \"$LOOM_HARBOR_LOG_DIR/source.txt\"\n"
+        "echo 1 > \"$LOOM_HARBOR_LOG_DIR/reward.txt\"\n",
+    )
+    driver = _FilesystemSandbox(sandbox)
+    monkeypatch.setattr(module, "_PRIVATE_VERIFIER_INPUT_ROOT", PurePosixPath(private))
+    monkeypatch.setattr(module, "sandbox_driver", lambda *_: driver)
+    await run_verifier(controller, task, trial)
+    result = json.loads((controller / ".loom/verifier/output.json").read_text())
+    assert result["rewards"]["reward"] == 1
+    assert (business / "tests" / "from-image").read_text() == "fixture tests stay in the workdir"
+    assert not (business / "tests" / "test.sh").exists()
+    assert "fixture tests stay in the workdir" not in (private / "tests/test.sh").read_text()
+    assert (sandbox / "logs" / "source.txt").read_text() == "private\n"
+
+
 @pytest.mark.parametrize("raw", ["", "not-a-budget", "0", "-1", str(10 * 1024**3 + 1)])
 def test_workspace_archive_budget_rejects_invalid_controller_limits(tmp_path, monkeypatch, raw):
     from loom import service_execution_sandbox_task as module

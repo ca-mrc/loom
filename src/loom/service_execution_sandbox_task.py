@@ -76,7 +76,6 @@ from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_pat
 from loom.trial.workspace import (
     WorkspaceStagingPolicy,
     materialize_workspace,
-    refuse_planted_private_paths,
 )
 from loom.trial.workspace_references import (
     HandoffOmissions,
@@ -761,8 +760,7 @@ async def run_agent(
                             else:
                                 await driver.stop_processes()
                     if solution_staged and driver_started:
-                        # Before the snapshot, and before an in-place verifier
-                        # refuses planted private paths.
+                        # Before the snapshot.
                         await remove_oracle_solution(
                             driver, task.environment.workdir, solution_dir=solution_dir,
                         )
@@ -944,11 +942,6 @@ async def _run_verifier(
     try:
         await driver.start()
         driver_started = True
-        if in_place:
-            try:
-                await refuse_planted_private_paths(driver, task.environment.workdir)
-            except RuntimeError as exc:
-                raise ServiceExecutionTaskError(str(exc)) from exc
         await materialize_workspace(
             driver=driver, task_dir=workspace, dst=input_root,
             policy=_POLICY, phase="verifier",

@@ -347,8 +347,8 @@ class LocalTrialRunner:
                 sandbox_extra_hosts=self.sandbox_extra_hosts,
                 workspace_staging_policy=self.workspace_staging_policy,
                 # #2418: every task-sandbox trial withholds private paths. Separate
-                # verification always gets a fresh driver; shared injects after
-                # refuse_planted_private_paths.
+                # verification always gets a fresh driver; shared grading injects
+                # verifier inputs after the agent phase.
                 verifier_driver_factory=self.driver_factory,
                 cp_event_sink=self.cp_event_sink,
                 # #896: forward per-container caps into the trial container.
