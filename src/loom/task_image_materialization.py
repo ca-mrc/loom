@@ -17,9 +17,11 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from sqlalchemy import and_, case, exists, func, or_, select
+from sqlalchemy import and_, case, exists, func, inspect, or_, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import undefer
 from sqlalchemy.sql.elements import ColumnElement
 
 from loom.db.schema import (
@@ -186,9 +188,22 @@ def current_task_image_reference(row: Any) -> ColumnElement[bool]:
     """Match the catalog revision without broadening exact historical trial pins."""
     key = "bundle_content_manifest_sha256"
     digest = row.bundle_content_manifest_sha256
+    # A whole-row JSON lookup yields NULL on retained schemas without the new
+    # field, instead of issuing a physical-column reference. Keep aliases bound
+    # to their own outer row so correlated retention queries remain exact.
+    inspected = inspect(row)
+    source = TaskImageMaterialization.__table__.alias() if inspected.is_instance else inspected.selectable
+    revision: ColumnElement[str] = func.coalesce(
+        func.to_jsonb(source.table_valued(), type_=JSONB)["preparation_revision"].astext,
+        "",
+    )
+    if inspected.is_instance:
+        # GC also supplies a locked ORM snapshot. Its deferred field must not
+        # lazy-load; read the optional value by that exact id in the same SQL.
+        revision = select(revision).where(source.c.id == row.id).scalar_subquery()
     return and_(
         Task.id == row.task_id,
-        row.preparation_revision == case(
+        revision == case(
             (Task.config["upstream_conversion"]["importer"].astext == "loom.harbor-native.v1",
              NATIVE_HARBOR_PREPARATION), else_="",
         ),
@@ -306,6 +321,7 @@ async def _lock_task_image_materializations(
     _assert_no_pending_task_image_writes(session)
 
     task_checksum = canonical_task_checksum(task_row.checksum)
+    preparation_revision = native_preparation_revision(task_row.config)
     manifest_digest = task_bundle_content_manifest_digest(task_row.source_provenance)
     if manifest_digest and task.task.id != task_row.id:
         raise TaskImageSnapshotConflictError("frozen task snapshot identity differs from the materialization")
@@ -316,7 +332,7 @@ async def _lock_task_image_materializations(
     keys = {
         cpu_arch: task_image_materialization_key(
             task_id=task_row.id,
-            preparation_revision=native_preparation_revision(task_row.config),
+            preparation_revision=preparation_revision,
             task_checksum=task_checksum,
             cpu_arch=cpu_arch,
             bundle_content_manifest_sha256=manifest_digest,
@@ -329,7 +345,9 @@ async def _lock_task_image_materializations(
             .values(
                 id=uuid4(),
                 materialization_key=keys[cpu_arch],
-                preparation_revision=native_preparation_revision(task_row.config),
+                # New native producers require the current schema. Legacy
+                # writers omit the field entirely on audited older layouts.
+                **({"preparation_revision": preparation_revision} if preparation_revision else {}),
                 task_id=task_row.id,
                 task_checksum=task_checksum,
                 bundle_content_manifest_sha256=manifest_digest,
@@ -342,23 +360,20 @@ async def _lock_task_image_materializations(
             .on_conflict_do_nothing(index_elements=["materialization_key"])
         )
 
-    rows = (
-        (
-            await session.execute(
-                select(TaskImageMaterialization)
-                .where(TaskImageMaterialization.materialization_key.in_(keys.values()))
-                .order_by(TaskImageMaterialization.cpu_arch, TaskImageMaterialization.id)
-                .execution_options(populate_existing=True)
-                .with_for_update()
-            )
-        )
-        .scalars()
-        .all()
+    query = (
+        select(TaskImageMaterialization)
+        .where(TaskImageMaterialization.materialization_key.in_(keys.values()))
+        .order_by(TaskImageMaterialization.cpu_arch, TaskImageMaterialization.id)
+        .execution_options(populate_existing=True)
+        .with_for_update()
     )
+    if preparation_revision:
+        query = query.options(undefer(TaskImageMaterialization.preparation_revision))
+    rows = (await session.execute(query)).scalars().all()
     by_arch = {row.cpu_arch: row for row in rows}
     if set(by_arch) != set(architectures):
         raise TaskImageSnapshotConflictError("task image materialization identity conflict")
-    if (manifest_digest or native_preparation_revision(task_row.config)) and any(
+    if (manifest_digest or preparation_revision) and any(
         row.bundle_content_manifest_sha256 != manifest_digest
         or row.task_id != task_row.id
         or row.task_checksum != task_checksum
@@ -369,11 +384,11 @@ async def _lock_task_image_materializations(
     ):
         raise TaskImageSnapshotConflictError("frozen content-manifest snapshot conflicts with existing materialization")
     for row in rows:
-        if row.preparation_revision != native_preparation_revision(task_row.config):
+        if preparation_revision and row.preparation_revision != preparation_revision:
             raise TaskImageSnapshotConflictError("task image preparation differs from requested cache identity")
         if row.task_config != task_row.config:
             raise TaskImageSnapshotConflictError("task image materialization snapshot conflicts with task checksum")
-        if row.state == "retired" and not manifest_digest and not row.preparation_revision:
+        if row.state == "retired" and not manifest_digest and not preparation_revision:
             # Legacy caches may need current upload objects after retention GC.
             # Manifest-bearing sources retain the exact admitted journal identity.
             row.task_source = task_row.source

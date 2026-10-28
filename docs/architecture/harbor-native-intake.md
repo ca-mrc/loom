@@ -260,6 +260,13 @@ it never deletes their results to permit rollback. Older binaries are not
 qualified to consume new-recipe rows. Active frozen trials are not rebound or
 restarted by this change.
 
+The preparation field is loaded explicitly only by current native producers.
+Legacy pool readers and writers continue to operate on the audited retained
+schemas without selecting, inserting or implicitly returning that newer column.
+Catalog retention compares its optional value through the whole row, including
+aliased rows; missing historical fields mean the empty legacy revision. New
+native builds still require migration0181 and never fall back to an old recipe.
+
 The native reward bridge runs the original `tests/test.sh`, removes stale
 reward/output files, and accepts finite numeric scalar or JSON rewards,
 including zero and fractional scores. Like Harbor, `reward.json` takes precedence

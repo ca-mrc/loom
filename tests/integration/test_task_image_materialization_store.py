@@ -482,7 +482,12 @@ async def test_retired_same_checksum_rebuild_relocates_collected_source(
 
 
 async def test_native_recipe_creates_new_image_without_rebinding_ready_legacy_snapshot(materialization_session):
-    from loom.task_image_materialization import task_image_materialization_key
+    from sqlalchemy.orm import aliased
+
+    from loom.task_image_materialization import (
+        current_task_image_reference,
+        task_image_materialization_key,
+    )
     from loom.task_image_recipe import NATIVE_HARBOR_PREPARATION
 
     task_id = f"native-recipe/{uuid4()}"
@@ -510,5 +515,9 @@ async def test_native_recipe_creates_new_image_without_rebinding_ready_legacy_sn
         old = await session.get(TaskImageMaterialization, old_id)
         assert old.state == "ready" and old.materialization_key == old_key
         assert old.registry_images == {"task": "registry.test/old@sha256:" + "d" * 64}
+        for model in (TaskImageMaterialization, aliased(TaskImageMaterialization)):
+            assert await session.scalar(select(model.id).where(current_task_image_reference(model))) == current.id
+        assert await session.scalar(select(Task.id).where(current_task_image_reference(current))) == task_id
+        assert await session.scalar(select(Task.id).where(current_task_image_reference(old))) is None
         repeated, = await ensure_task_image_materializations(session, task_row=task)
         assert repeated.id == current.id
