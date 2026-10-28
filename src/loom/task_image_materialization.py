@@ -17,7 +17,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
@@ -34,13 +34,25 @@ from loom.models.task import TaskConfig
 from loom.sandbox_identity import published_supplementary_groups
 from loom.task_image_archives import PreparedImageArchiveV1, compose_archive_components
 from loom.task_image_metadata import TaskImageRuntimeMetadataV1
+from loom.task_image_recipe import (
+    NATIVE_HARBOR_PREPARATION,
+    native_preparation_revision,
+)
+from loom.task_image_recipe import (
+    canonical_task_checksum as canonical_task_checksum,
+)
+from loom.task_image_recipe import (
+    task_image_materialization_key as task_image_materialization_key,
+)
+from loom.task_image_recipe import (
+    task_image_materialization_keys as task_image_materialization_keys,
+)
 
 if TYPE_CHECKING:
     from loom.task_bundle_source import TaskBundleSourceSpecV1
 
 NativeCPUArch = Literal["x86_64", "arm64"]
 _CHECKSUM_RE = re.compile(r"[0-9a-f]{64}")
-_KEY_DOMAIN = "task-image-materialization-v1"
 _BareSHA256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 ImmutableRegistryImage = Annotated[
     str,
@@ -99,7 +111,8 @@ class TaskImageExecutionGrantV1(BaseModel):
             if metadata.image_ref != self.registry_images.get(component):
                 raise ValueError("OCI runtime metadata does not match the published image")
         manifest_digest = task_bundle_content_manifest_digest(self.task_source_provenance)
-        if manifest_digest and self.materialization_key != task_image_materialization_key(
+        if manifest_digest and self.materialization_key not in task_image_materialization_keys(
+            task_config=self.task_config,
             task_id=task.task.id,
             task_checksum=self.task_checksum,
             cpu_arch=self.cpu_arch,
@@ -168,12 +181,6 @@ def resolve_prepared_task(
     return TaskConfig.model_validate(payload)
 
 
-def canonical_task_checksum(task_checksum: str) -> str:
-    checksum = task_checksum.removeprefix("sha256:")
-    if _CHECKSUM_RE.fullmatch(checksum) is None:
-        raise ValueError("task_checksum must be a SHA-256 digest")
-    return checksum
-
 
 def current_task_image_reference(row: Any) -> ColumnElement[bool]:
     """Match the catalog revision without broadening exact historical trial pins."""
@@ -181,6 +188,10 @@ def current_task_image_reference(row: Any) -> ColumnElement[bool]:
     digest = row.bundle_content_manifest_sha256
     return and_(
         Task.id == row.task_id,
+        row.preparation_revision == case(
+            (Task.config["upstream_conversion"]["importer"].astext == "loom.harbor-native.v1",
+             NATIVE_HARBOR_PREPARATION), else_="",
+        ),
         or_(
             Task.checksum == row.task_checksum,
             Task.checksum == func.concat("sha256:", row.task_checksum),
@@ -262,43 +273,6 @@ def validate_task_image_registry_images(
     return dict(registry_images)
 
 
-def task_image_materialization_key(
-    *,
-    task_id: str,
-    task_checksum: str,
-    cpu_arch: str,
-    bundle_content_manifest_sha256: str = "",
-) -> str:
-    """Preserve v1 identities; opt-in content manifests select a separate domain.
-
-    The empty discriminator means historical, checksum-only identity. A supplied
-    digest is deliberately bare and strict, unlike the legacy checksum input.
-    Producers must not opt in until their complete reader path verifies content.
-    """
-    if cpu_arch not in {"x86_64", "arm64"}:
-        raise ValueError("cpu_arch must be x86_64 or arm64")
-    checksum = canonical_task_checksum(task_checksum)
-    if type(bundle_content_manifest_sha256) is not str or (
-        bundle_content_manifest_sha256 != ""
-        and _CHECKSUM_RE.fullmatch(bundle_content_manifest_sha256) is None
-    ):
-        raise ValueError("bundle_content_manifest_sha256 must be empty or a bare SHA-256 digest")
-    if bundle_content_manifest_sha256:
-        if "\0" in task_id:
-            raise ValueError("task_id must not contain an identity separator")
-        material = "\0".join(
-            (
-                "task-image-materialization-v2",
-                task_id,
-                checksum,
-                cpu_arch,
-                bundle_content_manifest_sha256,
-            )
-        )
-    else:
-        material = "\0".join((_KEY_DOMAIN, task_id, checksum, cpu_arch))
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
-
 
 async def ensure_task_image_materializations(
     session: AsyncSession,
@@ -342,6 +316,7 @@ async def _lock_task_image_materializations(
     keys = {
         cpu_arch: task_image_materialization_key(
             task_id=task_row.id,
+            preparation_revision=native_preparation_revision(task_row.config),
             task_checksum=task_checksum,
             cpu_arch=cpu_arch,
             bundle_content_manifest_sha256=manifest_digest,
@@ -354,6 +329,7 @@ async def _lock_task_image_materializations(
             .values(
                 id=uuid4(),
                 materialization_key=keys[cpu_arch],
+                preparation_revision=native_preparation_revision(task_row.config),
                 task_id=task_row.id,
                 task_checksum=task_checksum,
                 bundle_content_manifest_sha256=manifest_digest,
@@ -382,7 +358,7 @@ async def _lock_task_image_materializations(
     by_arch = {row.cpu_arch: row for row in rows}
     if set(by_arch) != set(architectures):
         raise TaskImageSnapshotConflictError("task image materialization identity conflict")
-    if manifest_digest and any(
+    if (manifest_digest or native_preparation_revision(task_row.config)) and any(
         row.bundle_content_manifest_sha256 != manifest_digest
         or row.task_id != task_row.id
         or row.task_checksum != task_checksum
@@ -393,9 +369,11 @@ async def _lock_task_image_materializations(
     ):
         raise TaskImageSnapshotConflictError("frozen content-manifest snapshot conflicts with existing materialization")
     for row in rows:
+        if row.preparation_revision != native_preparation_revision(task_row.config):
+            raise TaskImageSnapshotConflictError("task image preparation differs from requested cache identity")
         if row.task_config != task_row.config:
             raise TaskImageSnapshotConflictError("task image materialization snapshot conflicts with task checksum")
-        if row.state == "retired" and not manifest_digest:
+        if row.state == "retired" and not manifest_digest and not row.preparation_revision:
             # Legacy caches may need current upload objects after retention GC.
             # Manifest-bearing sources retain the exact admitted journal identity.
             row.task_source = task_row.source
@@ -475,7 +453,8 @@ async def admit_task_image_source(
         raise ValueError("registered source manifest differs from materialization identity")
     if not digest:
         return None
-    if row.materialization_key != task_image_materialization_key(
+    if row.materialization_key not in task_image_materialization_keys(
+        task_config=row.task_config,
         task_id=row.task_id, task_checksum=row.task_checksum, cpu_arch=row.cpu_arch,
         bundle_content_manifest_sha256=digest,
     ):

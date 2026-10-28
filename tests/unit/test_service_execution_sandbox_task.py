@@ -911,7 +911,7 @@ async def test_shared_native_harbor_executes_with_clean_business_tree(
     )
     driver = _FilesystemSandbox(sandbox)
     monkeypatch.setattr(module, "_PRIVATE_VERIFIER_INPUT_ROOT", PurePosixPath(private))
-    monkeypatch.setattr(module, "_PRIVATE_ORACLE_SOLUTION_DIR", PurePosixPath(private.parent / "oracle/solution"), raising=False)
+    monkeypatch.setattr(module, "_NATIVE_ORACLE_SOLUTION_DIR", PurePosixPath(private.parent / "oracle/solution"))
     monkeypatch.setattr(module, "sandbox_driver", lambda *_: driver)
     monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
     monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
@@ -923,7 +923,7 @@ async def test_shared_native_harbor_executes_with_clean_business_tree(
     await run_agent(controller, task, trial)
     assert not driver.stopped_processes  # Shared service/process lifetime is preserved.
     assert not (private / "tests/test.sh").exists()  # Withheld until grading.
-    assert not (private.parent / "oracle/solution").exists()  # Cleaned before snapshot.
+    assert not list((private.parent / "oracle/solution").iterdir())  # Empty before snapshot.
     if extra_business_file:
         (business / "unexpected.txt").write_text("must remain a failure")
     await run_verifier(controller, task, trial)
@@ -1037,3 +1037,51 @@ def test_workspace_archive_budget_is_independent_and_bounded_by_storage(
     driver = module.sandbox_driver("task-sandbox", task, trial)
     assert driver._max_transfer == (300 if guest else 256) * 1024**2
     assert driver._max_workspace_archive == expected_mib * 1024**2
+
+
+@pytest.mark.parametrize("agent_name", ["oracle", "terminus-2"])
+async def test_harbor_delivers_only_oracle_reference_tree_at_absolute_solution(tmp_path, monkeypatch, agent_name):
+    from loom import service_execution_sandbox_task as module
+    from loom.harbor_verifier_script import native_verifier_run_sh_bytes
+    from loom.models.trial import TrialConfig
+
+    task, model_trial, _ = _inputs()
+    task.verifier.args["script_path"] = "verifier/run.sh"
+    trial = (TrialConfig(agent_name="oracle", agent_model=None)
+             if agent_name == "oracle" else model_trial)
+    (tmp_path / "verifier").mkdir()
+    (tmp_path / "verifier/run.sh").write_bytes(native_verifier_run_sh_bytes())
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/private.py").write_text("private grader")
+    (tmp_path / "solution/helpers").mkdir(parents=True)
+    (tmp_path / "solution/solve.sh").write_text("#!/bin/sh\npython3 /solution/helpers/solve.py\n")
+    (tmp_path / "solution/helpers/solve.py").write_text("print('solved')\n")
+    (tmp_path / "instruction.md").write_text("Do the task")
+    (tmp_path / "README.md").write_text("Documentation must not overwrite read-only business files")
+
+    class ReadOnlyBusiness(Sandbox):
+        async def upload(self, src, dst):
+            if dst.is_relative_to("/app"):
+                raise PermissionError("business tree is read-only for image USER nobody")
+            await super().upload(src, dst)
+
+    driver = ReadOnlyBusiness()
+    driver.filesystem[PurePosixPath("/app/authored.txt")] = b"image content"
+    monkeypatch.setattr(module, "sandbox_driver", lambda *_: driver)
+    monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
+    monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
+    async def identity(_):
+        return uuid4(), uuid4()
+    async def execute(**kwargs):
+        assert driver.filesystem[PurePosixPath("/app/authored.txt")] == b"image content"
+        assert not any(p.is_relative_to("/tests") or p.is_relative_to("/loom/verifier") for p in driver.filesystem)
+        if agent_name == "oracle":
+            assert kwargs["solution_dir"] == PurePosixPath("/solution")
+            assert kwargs["execution_cwd"] == PurePosixPath("/app")
+            assert driver.filesystem[PurePosixPath("/solution/helpers/solve.py")] == b"print('solved')\n"
+        else:
+            assert not any(p.is_relative_to("/solution") for p in driver.filesystem)
+        (kwargs["workspace"] / "trajectory.jsonl").write_bytes(b"")
+    monkeypatch.setattr(module, "_execution_identity", identity)
+    monkeypatch.setattr(module, "run_oracle" if agent_name == "oracle" else "run_terminus2", execute)
+    await module.run_agent(tmp_path, task, trial)

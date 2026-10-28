@@ -461,7 +461,9 @@ async def test_native_oracle_accepts_staged_solution_and_business_cwd(tmp_path: 
         driver, task.environment.workdir, solution_dir=solution_dir,  # type: ignore[arg-type]
     )
     assert driver.commands[-1] == (
-        "rm -rf -- " + shlex.quote(str(solution_dir)), task.environment.workdir,
+        f"test ! -L {shlex.quote(str(solution_dir))} && test -d {shlex.quote(str(solution_dir))} && "
+        f"find {shlex.quote(str(solution_dir))} -mindepth 1 -maxdepth 1 -exec rm -rf -- {{}} +",
+        task.environment.workdir,
     )
 
 

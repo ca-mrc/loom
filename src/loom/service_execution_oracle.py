@@ -98,7 +98,14 @@ async def remove_oracle_solution(
 ) -> None:
     """The snapshot and an in-place verifier must not see the reference solution."""
     target = solution_dir or workdir / "solution"
-    result = await driver.exec("rm -rf -- " + shlex.quote(target.as_posix()), cwd=workdir)
+    quoted = shlex.quote(target.as_posix())
+    # A prepared root can be owned by the task USER while / stays root-owned.
+    # Keep that root; clear every delivered entry (including dotfiles), without
+    # following a replaced symlink or swallowing a cleanup failure.
+    command = (f"test ! -L {quoted} && test -d {quoted} && "
+               f"find {quoted} -mindepth 1 -maxdepth 1 -exec rm -rf -- {{}} +"
+               if solution_dir is not None else "rm -rf -- " + quoted)
+    result = await driver.exec(command, cwd=workdir)
     if result.return_code:
         raise AgentError("Oracle solution could not be removed from the task sandbox")
 

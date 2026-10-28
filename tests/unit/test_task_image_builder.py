@@ -292,14 +292,23 @@ async def test_published_image_architecture_must_match_claim(
         )
 
 
+@pytest.mark.parametrize("native_recipe", [False, True])
 async def test_materialization_builds_and_publishes_every_dockerfile_component(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    native_recipe: bool,
 ) -> None:
     claim = _claim()
+    if native_recipe:
+        from loom.task_image_recipe import NATIVE_HARBOR_PREPARATION, task_image_materialization_key
+        claim.task_config["upstream_conversion"] = {"importer": "loom.harbor-native.v1", "original_config": "upstream-task.toml", "changes": []}
+        claim = replace(claim, materialization_key=task_image_materialization_key(
+            task_id=claim.task_id, task_checksum=claim.task_checksum, cpu_arch=claim.cpu_arch,
+            preparation_revision=NATIVE_HARBOR_PREPARATION,
+        ))
     task_dir = tmp_path / "task"
     (task_dir / "environment").mkdir(parents=True)
-    (task_dir / "environment" / "Dockerfile").write_text("FROM alpine\n")
+    (task_dir / "environment" / "Dockerfile").write_text("FROM alpine:3.20\n")
     (task_dir / "environment" / "database.Dockerfile").write_text("FROM postgres\n")
     observed: dict[str, Any] = {}
     monkeypatch.setattr(task_image_builder, "host_cpu_arch", lambda: "x86_64")
@@ -311,6 +320,8 @@ async def test_materialization_builds_and_publishes_every_dockerfile_component(
 
     async def resolve(**kwargs: Any) -> str:
         observed["resolve"] = kwargs
+        assert ("mkdir -p /solution" in (task_dir / "environment/Dockerfile").read_text()) is native_recipe
+        assert kwargs["task_checksum"] == (claim.materialization_key if native_recipe else claim.task_checksum)
         return "loom-task:base"
 
     async def sidecars(**kwargs: Any) -> dict[str, str]:
