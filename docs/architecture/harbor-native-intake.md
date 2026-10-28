@@ -213,6 +213,13 @@ The inner helper writes its PID privately and atomically renames the completed
 file before the controller validates it and separately releases the execution
 gate. Invalid PIDs remain fatal; cancellation and normal teardown remove any
 unpublished PID file as well as the marker and gate.
+Control failures retain the operation, return code and execution duration; if
+cleanup also fails, both results remain visible without command, environment or
+output contents. A return code of 124 alone does not distinguish an execution
+deadline from the runtime's bounded output-pipe wait.
+For 124 results, the runtime console records only the fixed reason (deadline,
+cancellation, output-pipe wait or process exit), effective timeout and duration;
+the execution response fields and timeout behavior remain unchanged.
 Native independent-verifier artifact transfer preserves source
 paths and exclusions, replaces each declared directory with its collected tree,
 and rejects unsafe links and private paths. Excluded or agent-deleted files do

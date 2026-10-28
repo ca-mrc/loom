@@ -509,6 +509,23 @@ execution test also proves that the pool lane has identical `all` and `nebius`
 module sets before exercising its 20 shards once, instead of repeating identical
 selector/subprocess coverage. Root scopes still execute independently.
 
+Ordinary pool runs can apply `default_pins` over the shared-qualification pins.
+Scheduled run 40523588535 placed the retained development module (about 671s)
+and installation (about 354s) on shard 3, while ordinary shard 8 took 39s.
+Only the retained module now moves to shard 8 when shared simulations are
+disabled. Both the matrix and execution selector use the same effective pins;
+the default set remains 102 modules, each executed once. The mixed successor
+module retains 25 fast publication/configuration/authority cases. Its 10 full
+cutover/legacy-restoration/manager-refresh scenarios live in the manual-only
+`test_nebius_shared_pool_refresh_successor.py`, with their original assertions,
+fixture behavior and 60/420-second bounds. They require an unlaunched completed
+pool baseline and do not run in ordinary or candidate supplementary validation.
+Explicit shared qualification has 125 modules after this file split; every
+original 124-module shard keeps its ordered paths, with the new simulation
+file pinned to shard 9. The census separation below is retained.
+The timing sample motivates placement; it is not
+a measured end-to-end speedup of the new head.
+
 Run 39471175183 (October 20) exhausted shard 8's budget after its handoff module
 alone took 2445 seconds. Activation, cutover, gateway retirement and recovery
 release now use two existing lightly loaded shards (288 and 280 seconds in that
@@ -556,6 +573,55 @@ pins separating the guest runtime and build-cache tests. Guest payloads are buil
 only when the selected files consume them. Every required gate still waits for
 all selected shards. Required platform tests are retained.
 
+Guest Compose retains its two-phase handshake: a bounded read-only probe waits
+for the supervised process identity, then the controller validates the returned
+PID before a separate request releases the command gate. A cancelled Docker CLI
+does not retire its container's inner exec, so a late probe must never release
+that gate. Each probe performs at most one read. An observed absent marker is
+the only not-ready status (75) that permits another probe within the existing
+30-second activation budget; the dedicated inner status distinguishes absence
+from a Docker CLI failure (1). An existing unreadable marker (2), execution
+deadline (124), or any other failure is reported immediately with its exit code,
+without command, environment or stderr contents. The 5-second request limit and
+separate gate request remain. Cleanup
+reads the marker once so a supervisor's normal EXIT removal cannot race a
+separate existence check; an existing invalid marker still fails. If activation
+or execution fails and cleanup also fails, the diagnostic names both phases and
+preserves the first exception as its cause, without including authored commands
+or environment values. Inspect that first failure before attributing an
+activation expiry to cancellation cleanup.
+
+A local ARM64 host-Docker witness held two accepted read probes with controlled
+SIGSTOP: each client expired at the original 5 seconds while the inner probes
+remained alive, then both retired after resume. This demonstrates ownership and
+overlap under injected delay, not the physical cause of a native CI expiry. A
+single missing-marker observation measured the former 19 external sleep calls
+at 1.137 seconds and a single read at 0.061 seconds on that host. The inner
+polling loop is removed; these measurements establish smaller per-probe work,
+not an end-to-end CI speedup or a qualified cure for the original TCG timeout.
+Native qualification on the final source must still exercise the original
+240/120/30/5-second bounds and cancellation, collection and teardown assertions.
+
+The Compose HTTP fixture keeps its listening socket open while individual
+response workers run. Responses include their actual Content-Length; a health
+request must not retire the only listener before the next client connects.
+HTTP failures retain the original assertion and only project safe state fields
+from the fixture's own containers, without repeating the request.
+
+The TLS rotation test prepares only its pinned Traefik and Python images on the
+host before starting K3s, using the existing Skopeo OCI fixture transport. It
+imports the original references and verifies their manifest digests in the
+disposable containerd. This avoids a nested Docker Hub token/DNS dependency;
+classic Docker archives can reconstruct manifests and change those identities.
+The existing acquisition policy and the full 240-second TLS/rotation test remain.
+
+For a disposable K3s sandbox stall, early Flannel bootstrap warnings are not
+enough to explain a later Pending Pod. The existing five-second process snapshot
+slot retains owned netfilter/CNI kernel waits through a bounded host reader;
+container cgroups and process identities limit which stacks can be read. It
+does not change network policy, kernel modules or the networking backend. The
+physical wait-chain cause tracked in #2611 remains separate from this diagnostic.
+
 MinIO preparation follows selected fixture imports and parent conftests. Fast
 integration normally needs only the testcontainers release; TLS storage tests
 also need the newer release. Source-built fallback images retain their pinned
@@ -580,6 +646,13 @@ digest stay fixed.
 System smoke uses a Compose project per run/attempt and Docker-assigned loopback
 ports; it discovers actual service endpoints once and passes the registry endpoint
 to the image builder without changing the original port mappings.
+PostgreSQL health probes use TCP on `127.0.0.1` and the test database. The
+official image's temporary initialization server listens only on a Unix socket;
+accepting that server as healthy can release host-side migrations before the
+final TCP server starts. The cold-init barrier regression runs in the existing
+Docker integration tier. Health intervals, retry counts and migration behavior
+remain unchanged.
+Its FIFO release uses the same `postgres` OS user that creates the init barrier.
 Failed Compose commands print a bounded, redacted tail of their captured output,
 so image-build errors remain visible even before service containers exist.
 

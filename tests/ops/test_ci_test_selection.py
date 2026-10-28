@@ -130,6 +130,71 @@ def test_independent_edit_does_not_start_empty_shards(tmp_path: Path) -> None:
     assert selected == (tracked[0],)
 
 
+@pytest.mark.parametrize("include_shared_pool", [False, True])
+def test_default_pool_balance_preserves_manual_layout(include_shared_pool: bool) -> None:
+    from scripts import component_ownership as ownership
+
+    root = Path(__file__).resolve().parents[2]
+    manifest = ownership.load_manifest(root / "config/component-ownership.toml")
+    tracked = ownership._tracked_paths(root)
+    policy = manifest.test_shard_policy("nebius-pool")
+    assert policy is not None
+    complete = ownership.test_paths_for_lane(manifest, tracked_paths=tracked, lane="nebius-pool")
+    original = [ownership.shard_paths(complete, shard_index=index, shard_count=policy.shard_count,
+                                     strategy=policy.strategy, salt=policy.salt, pins=policy.pins)
+                for index in range(policy.shard_count)]
+    expected = [tuple(path for path in shard if include_shared_pool
+                      or not manifest.test_owner_for_path(path).manual_only) for shard in original]
+    retained = "tests/ops/test_nebius_development_pool_retained.py"
+    assert retained in original[2]
+    if not include_shared_pool:
+        expected[2] = tuple(path for path in expected[2] if path != retained)
+        expected[7] = tuple(path for path in complete if path in {*expected[7], retained})
+    actual = [ownership.selected_test_paths(
+        manifest, tracked_paths=tracked, lane="nebius-pool", repo_root=root,
+        include_shared_pool=include_shared_pool, shard_index=index, shard_count=policy.shard_count,
+    ) for index in range(policy.shard_count)]
+    assert actual == expected
+    flattened = [path for shard in actual for path in shard]
+    assert len(flattened) == len(set(flattened))
+    assert set(flattened) == {path for path in complete if include_shared_pool
+                             or not manifest.test_owner_for_path(path).manual_only}
+    matrix = ownership.test_shard_matrix(manifest, tracked_paths=tracked, lane="nebius-pool",
+                                        repo_root=root, include_shared_pool=include_shared_pool)
+    assert [row["shard_index"] for row in matrix] == [index for index, shard in enumerate(actual) if shard]
+
+
+@pytest.mark.parametrize("include_shared_pool", [False, True])
+def test_default_pool_pin_plans_the_same_independent_test_it_executes(
+    tmp_path: Path, include_shared_pool: bool,
+) -> None:
+    from dataclasses import replace
+
+    from scripts import component_ownership as ownership
+
+    root = Path(__file__).resolve().parents[2]
+    manifest = ownership.load_manifest(root / "config/component-ownership.toml")
+    retained = "tests/ops/test_nebius_development_pool_retained.py"
+    tracked = (retained, "tests/ops/test_nebius_legacy_pool_completion.py")
+    for name in tracked:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("def test_independent(): assert True\n")
+    manifest = replace(manifest, test_sharding=tuple(
+        replace(policy, pins=(ownership.TestShardPin(retained, 2),),
+                default_pins=(ownership.TestShardPin(retained, 7),))
+        if policy.lane == "nebius-pool" else policy for policy in manifest.test_sharding
+    ))
+    arguments = dict(manifest=manifest, tracked_paths=tracked, lane="nebius-pool", repo_root=tmp_path,
+                     changed_paths=(retained,), include_shared_pool=include_shared_pool)
+    matrix = ownership.test_shard_matrix(**arguments)
+    assert len(matrix) == 1
+    assert matrix[0]["shard_index"] == (2 if include_shared_pool else 7)
+    selected = ownership.selected_test_paths(**arguments, shard_index=matrix[0]["shard_index"],
+                                             shard_count=matrix[0]["shard_count"])
+    assert selected == (retained,)
+
+
 def test_no_diff_is_explicit_full_regression(tmp_path: Path) -> None:
     tracked = _repository(tmp_path)
     paths = (tracked[0], tracked[1])

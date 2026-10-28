@@ -99,6 +99,14 @@ class TestShardPolicy:
     strategy: str
     salt: str | None
     pins: tuple[TestShardPin, ...]
+    default_pins: tuple[TestShardPin, ...] = ()
+
+    def selection_pins(self, *, include_shared_pool: bool) -> tuple[TestShardPin, ...]:
+        """Keep manual qualification placement while balancing ordinary runs."""
+        if include_shared_pool or not self.default_pins:
+            return self.pins
+        overridden = {pin.path for pin in self.default_pins}
+        return tuple(pin for pin in self.pins if pin.path not in overridden) + self.default_pins
 
 
 @dataclass(frozen=True)
@@ -524,7 +532,7 @@ def _test_shard_pin(raw: dict[str, Any], *, context: str) -> TestShardPin:
 
 def _test_shard_policy(raw: dict[str, Any]) -> TestShardPolicy:
     context = f"test shard policy {raw.get('lane', '<missing>')!r}"
-    _reject_unknown_keys(raw, {"lane", "shard_count", "strategy", "salt", "pins"}, context)
+    _reject_unknown_keys(raw, {"lane", "shard_count", "strategy", "salt", "pins", "default_pins"}, context)
     lane = _required_slug(raw, "lane", context)
     shard_count = raw.get("shard_count")
     if type(shard_count) is not int or shard_count < 2:
@@ -538,31 +546,37 @@ def _test_shard_policy(raw: dict[str, Any]) -> TestShardPolicy:
             raise ManifestError(f"{context}.salt must be a non-empty string for stable-hash")
     elif salt is not None:
         raise ManifestError(f"{context}.salt is only valid for stable-hash")
-    raw_pins = raw.get("pins", [])
-    if not isinstance(raw_pins, list) or not all(isinstance(item, dict) for item in raw_pins):
-        raise ManifestError(f"{context}.pins must be an array of tables")
-    pins = tuple(
-        _test_shard_pin(item, context=f"{context}.pins[{index}]")
-        for index, item in enumerate(raw_pins)
-    )
-    duplicate_paths = sorted(
-        path for path, count in Counter(pin.path for pin in pins).items() if count > 1
-    )
-    if duplicate_paths:
-        raise ManifestError(
-            f"{context}.pins must not contain duplicate paths: {', '.join(duplicate_paths)}"
+    parsed_pins = {}
+    for field in ("pins", "default_pins"):
+        raw_pins = raw.get(field, [])
+        if not isinstance(raw_pins, list) or not all(isinstance(item, dict) for item in raw_pins):
+            raise ManifestError(f"{context}.{field} must be an array of tables")
+        pins = tuple(
+            _test_shard_pin(item, context=f"{context}.{field}[{index}]")
+            for index, item in enumerate(raw_pins)
         )
-    for pin in pins:
-        if pin.shard_index >= shard_count:
+        duplicate_paths = sorted(
+            path for path, count in Counter(pin.path for pin in pins).items() if count > 1
+        )
+        if duplicate_paths:
             raise ManifestError(
-                f"{context} pin shard index must be below {shard_count}: {pin.path}"
+                f"{context}.{field} must not contain duplicate paths: {', '.join(duplicate_paths)}"
             )
+        for pin in pins:
+            if pin.shard_index >= shard_count:
+                raise ManifestError(
+                    f"{context} pin shard index must be below {shard_count}: {pin.path}"
+                )
+        parsed_pins[field] = pins
+    if parsed_pins["default_pins"] and lane != "nebius-pool":
+        raise ManifestError(f"{context}.default_pins requires the nebius-pool lane")
     return TestShardPolicy(
         lane=lane,
         shard_count=shard_count,
         strategy=strategy,
         salt=salt,
-        pins=pins,
+        pins=parsed_pins["pins"],
+        default_pins=parsed_pins["default_pins"],
     )
 
 
@@ -880,7 +894,7 @@ def validate_manifest(
                 f"test shard policy has fewer paths than shards: {shard_policy.lane}: "
                 f"{len(lane_paths)} < {shard_policy.shard_count}"
             )
-        for pin in shard_policy.pins:
+        for pin in (*shard_policy.pins, *shard_policy.default_pins):
             if pin.path not in tracked_paths:
                 errors.append(
                     f"test shard pin path is not tracked: {shard_policy.lane}: {pin.path}"
@@ -889,6 +903,8 @@ def validate_manifest(
             owners = manifest.test_owners_for_path(pin.path)
             if len(owners) != 1 or owners[0].lane != shard_policy.lane:
                 errors.append(f"test shard pin crosses CI lane: {shard_policy.lane}: {pin.path}")
+            elif pin in shard_policy.default_pins and owners[0].manual_only:
+                errors.append(f"test shard default pin selects a manual-only test: {pin.path}")
     for policy in manifest.execution_policies:
         if not any(suite.execution_policy == policy.id for suite in manifest.test_suites):
             errors.append(f"execution policy has no test suite owner: {policy.id}")
@@ -1769,7 +1785,7 @@ def selected_test_paths(
         paths, shard_index=shard_index, shard_count=shard_count,
         strategy=policy.strategy if policy is not None else shard_strategy or "round-robin",
         salt=policy.salt if policy is not None else None,
-        pins=policy.pins if policy is not None else (),
+        pins=policy.selection_pins(include_shared_pool=include_shared_pool) if policy is not None else (),
     ) if path in selected)
     if suite is not None:
         paths = tuple(path for path in paths if manifest.test_owner_for_path(path).id == suite)
@@ -1835,7 +1851,7 @@ def test_shard_matrix(
             paths, shard_index=index, shard_count=count,
             strategy=policy.strategy if policy is not None else "round-robin",
             salt=policy.salt if policy is not None else None,
-            pins=policy.pins if policy is not None else (),
+            pins=policy.selection_pins(include_shared_pool=include_shared_pool) if policy is not None else (),
         )) & selected_set
         if shard:
             matrix.append({"shard": f"{index + 1}-of-{count}", "shard_index": index,

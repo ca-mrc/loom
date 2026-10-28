@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.cluster import test_nebius_ingress_installation as rotation
 from tests.cluster import test_nebius_ingress_operation as fixture
 
 
@@ -213,3 +214,112 @@ def test_a_healthy_mirror_serves_every_fixture_image(monkeypatch, tmp_path):
     assert len(next(archives)) == 4
     archives.close()
     assert copies == ["public.ecr.aws"] * 8
+
+
+@pytest.mark.parametrize("failure", [None, "preparation", "consumer"])
+def test_rotation_archives_cleanup_includes_unimported_images(monkeypatch, tmp_path, failure):
+    prepared = []
+    limited_states = []
+
+    def prepare(image, directory, mirror_limited):
+        path = directory / str(len(prepared))
+        path.write_text(image)
+        prepared.append(path)
+        limited_states.append(mirror_limited)
+        if failure == "preparation" and len(prepared) == 2:
+            raise subprocess.CalledProcessError(1, "skopeo", stderr="connection refused")
+        return path
+
+    monkeypatch.setattr(rotation, "_prepare_fixture_image", prepare)
+    archives = rotation.rotation_images.__wrapped__(tmp_path)
+    if failure == "preparation":
+        with pytest.raises(subprocess.CalledProcessError):
+            next(archives)
+    else:
+        images = next(archives)
+        assert tuple(images) == (fixture.TRAEFIK, fixture.PYTHON)
+        assert all(path.exists() for path in images.values())
+        if failure == "consumer":
+            with pytest.raises(RuntimeError, match="consumer failed before import"):
+                archives.throw(RuntimeError("consumer failed before import"))
+        else:
+            archives.close()
+    assert len(prepared) == 2
+    assert limited_states[0] is limited_states[1]
+    assert all(not path.exists() for path in prepared)
+    assert not list(tmp_path.iterdir())
+
+
+def test_rotation_imports_prepared_pins_without_nested_registry_pulls(monkeypatch, tmp_path):
+    # This exercises the real test's preparation control flow, stopping before
+    # the TLS body. It does not stand in for the disposable Kubernetes proof.
+    events = []
+    image = "cr.eu-north1.nebius.cloud/test/traefik@" + fixture.TRAEFIK.split("@", 1)[1]
+    boundary = RuntimeError("original immutable alias read back; TLS proof not exercised")
+
+    def prepare(reference, directory, mirror_limited):
+        events.append(("prepare", reference))
+        archive = directory / reference.split("@", 1)[1]
+        archive.write_text(reference)
+        return archive
+
+    container = SimpleNamespace(
+        get_wrapped_container=lambda: SimpleNamespace(id="rotation-node"),
+        stop=lambda: events.append(("stop",)),
+    )
+
+    def start(**kwargs):
+        assert events == [("prepare", fixture.TRAEFIK), ("prepare", fixture.PYTHON)]
+        events.append(("start",))
+        return container
+
+    def import_image(node, reference, archive):
+        assert node is container and archive.read_text() == reference
+        events.append(("import", reference))
+
+    def run(node, *args, **kwargs):
+        assert node is container
+        if args == ("ctr", "images", "tag", fixture.TRAEFIK, image):
+            events.append(("alias",))
+            return ""
+        if args == ("ctr", "images", "ls", "-q"):
+            events.append(("readback",))
+            return image + "\n"
+        assert args[:2] == ("kubectl", "wait"), "no nested registry pull or unqualified image"
+        raise boundary
+
+    core = SimpleNamespace(
+        create_namespace=lambda namespace: SimpleNamespace(metadata=SimpleNamespace(
+            uid="20000000-0000-4000-8000-000000000001")),
+        read_namespace=lambda namespace: SimpleNamespace(metadata=SimpleNamespace(
+            uid="20000000-0000-4000-8000-000000000002")),
+    )
+    binding = rotation.TLSBinding(
+        installation_id="30000000-0000-4000-8000-000000000001",
+        certificate_installation_id="30000000-0000-4000-8000-000000000002",
+        namespace="fixture", namespace_uid="20000000-0000-4000-8000-000000000003",
+        kube_system_uid="20000000-0000-4000-8000-000000000004",
+        child_domain="dev.example.test", management_host="management.example.test",
+    )
+    monkeypatch.setattr(rotation, "_prepare_fixture_image", prepare)
+    monkeypatch.setattr(rotation, "_import_fixture_image", import_image)
+    monkeypatch.setattr(rotation, "_start_k3s", start)
+    monkeypatch.setattr(rotation, "_load_client", lambda node: (None, core, None))
+    monkeypatch.setattr(rotation, "_run", run)
+    archives = rotation.rotation_images.__wrapped__(tmp_path)
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            rotation.test_real_traefik_rotation_qualifies_fresh_pods_and_preserves_previous_secret(
+                ({}, binding, None, None, None, None),
+                {"foundation": {"ingress_namespace": "loom-ingress"}},
+                tmp_path, monkeypatch, next(archives),
+            )
+        assert caught.value is boundary
+        assert events == [
+            ("prepare", fixture.TRAEFIK), ("prepare", fixture.PYTHON), ("start",),
+            ("import", fixture.TRAEFIK), ("import", fixture.PYTHON),
+            ("alias",), ("readback",), ("stop",),
+        ]
+    finally:
+        archives.close()
+    assert not list(tmp_path.iterdir())
