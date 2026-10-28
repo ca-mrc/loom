@@ -72,6 +72,11 @@ _BUNDLE_BYTES = 512 * 1024 * 1024
 _CACHE_BYTES = 1024 * 1024 * 1024
 _CACHE_TOTAL_BYTES = 4 * 1024 * 1024 * 1024
 _CACHE_REUSE_BYTES = 256 * 1024 * 1024
+_CACHE_TAR_ENTRIES = 10000
+# Linux paths plus ordinary PAX time/identity records fit an 8 KiB extension.
+# The writer checks the same bound that the reader checks before allocation.
+_CACHE_TAR_EXTENDED_HEADER_BYTES = 8 * 1024
+_CACHE_TAR_HEADER_BYTES = _CACHE_TAR_ENTRIES * (tarfile.BLOCKSIZE + _CACHE_TAR_EXTENDED_HEADER_BYTES)
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _KEY = re.compile(r"[0-9a-f]{64}\Z")
 # Stable Job-log markers for stage timing (Phase 2). Logs only — no DB schema.
@@ -339,17 +344,69 @@ def download_bundle(claim: dict[str, Any], client: Any, directory: Path) -> None
         raise BuildPreparationError("task bundle file modes do not match its frozen revision")
 
 
+def _cache_tar_byte_limit() -> int:
+    # Logical payload excludes each main header, up to 511 payload-padding
+    # bytes, bounded PAX/GNU headers, two EOF blocks and record alignment.
+    return (_CACHE_BYTES + _CACHE_TAR_ENTRIES * (2 * tarfile.BLOCKSIZE - 1)
+            + _CACHE_TAR_HEADER_BYTES + 2 * tarfile.BLOCKSIZE + tarfile.RECORDSIZE)
+
+
+class _CacheTarInfo(tarfile.TarInfo):
+    """Keep stdlib tar parsing, but bound extension reads before allocation."""
+
+    def tobuf(self, format: Literal[0, 1, 2] | None = tarfile.DEFAULT_FORMAT,
+              encoding: str | None = tarfile.ENCODING,
+              errors: str = "surrogateescape") -> bytes:
+        header = super().tobuf(format, encoding, errors)
+        if len(header) > _CACHE_TAR_EXTENDED_HEADER_BYTES + 2 * tarfile.BLOCKSIZE:
+            raise BuildPreparationError("build cache tar header exceeds byte limit")
+        return header
+
+    def _proc_member(self, archive: Any) -> Any:
+        if self.size < 0 or self.type == tarfile.GNUTYPE_SPARSE:
+            raise BuildPreparationError("build cache contains unsupported content")
+        extended = self.type in (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE,
+                                 tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK)
+        if not extended:
+            return super()._proc_member(archive)  # type: ignore[misc]  # stdlib parser hook is not in typeshed
+        padded = (self.size + tarfile.BLOCKSIZE - 1) // tarfile.BLOCKSIZE * tarfile.BLOCKSIZE
+        headers = getattr(archive, "_cache_header_bytes", 0) + tarfile.BLOCKSIZE + padded
+        depth = getattr(archive, "_cache_header_depth", 0)
+        if self.size > _CACHE_TAR_EXTENDED_HEADER_BYTES or headers > _CACHE_TAR_HEADER_BYTES or depth >= 2:
+            raise BuildPreparationError("build cache tar header exceeds byte limit")
+        archive._cache_header_bytes = headers
+        archive._cache_header_depth = depth + 1
+        try:
+            member = super()._proc_member(archive)  # type: ignore[misc]
+        finally:
+            archive._cache_header_depth = depth
+        # Global headers may accumulate across members. Bound that retained
+        # dictionary as well as each individual extension read.
+        if sum(len(key.encode("utf-8", "surrogateescape")) + len(value.encode("utf-8", "surrogateescape"))
+               for key, value in archive.pax_headers.items()) > _CACHE_TAR_EXTENDED_HEADER_BYTES:
+            raise BuildPreparationError("build cache tar global header exceeds byte limit")
+        return member
+
+    def _proc_gnusparse_10(self, *_args: Any) -> None:
+        # Its sparse map is read from payload, outside the bounded PAX body.
+        # Ordinary pack_cache never emits sparse formats; it streams all bytes.
+        raise BuildPreparationError("build cache contains unsupported content")
+
+
 def unpack_cache(archive: Path, directory: Path) -> None:
     """Cache is untrusted data: reject links, devices and path traversal."""
     directory.mkdir(parents=True, exist_ok=False)
+    info = archive.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_size > _cache_tar_byte_limit():
+        raise BuildPreparationError("build cache tar exceeds transfer byte limit")
     total = 0
-    with tarfile.open(archive, "r:") as source:
+    with tarfile.open(archive, "r|", tarinfo=_CacheTarInfo) as source:
         for index, member in enumerate(source):
-            if index >= 10000 or member.size < 0:
+            if index >= _CACHE_TAR_ENTRIES or member.size < 0:
                 raise BuildPreparationError("build cache exceeds file limit")
             _validate_bundle_relative_path(member.name)
             total += member.size
-            if total > _CACHE_BYTES or not (member.isdir() or member.isfile()):
+            if total > _CACHE_BYTES or member.sparse is not None or not (member.isdir() or member.isfile()):
                 raise BuildPreparationError("build cache contains unsupported content")
             target = directory / member.name
             if member.isdir():
@@ -361,6 +418,9 @@ def unpack_cache(archive: Path, directory: Path) -> None:
                 with stream, target.open("xb") as output:
                     while chunk := stream.read(1024 * 1024):
                         output.write(chunk)
+            # Extraction uses this member directly, never name lookups. Do not
+            # retain every PAX dictionary while streaming thousands of entries.
+            source.members.clear()  # type: ignore[attr-defined]  # stdlib streaming member cache
 
 
 def _cache_prefix(claim: dict[str, Any]) -> str:
@@ -699,7 +759,7 @@ def _try_import_legacy_tar(
             bucket=claim["cache_bucket"],
             key=f"task-build-cache/{key}/{index}.tar",
             destination=archive,
-            limit=_CACHE_BYTES,
+            limit=_cache_tar_byte_limit(),
         )
     except ClientError as error:
         if _object_absent(error):
@@ -881,10 +941,10 @@ def pack_cache(directory: Path, archive: Path) -> None:
     if not stat.S_ISDIR(directory.lstat().st_mode):
         raise BuildPreparationError("cache root must be a real directory")
     total = 0
-    with tarfile.open(archive, "w:", dereference=True) as output:
+    with tarfile.open(archive, "w:", dereference=True, tarinfo=_CacheTarInfo) as output:
         for index, path in enumerate(sorted(directory.rglob("*"))):
             mode = path.lstat().st_mode
-            if index >= 10000 or not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+            if index >= _CACHE_TAR_ENTRIES or not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
                 raise BuildPreparationError("build cache contains unsupported content")
             if path.is_file():
                 total += path.stat().st_size

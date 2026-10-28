@@ -336,9 +336,10 @@ safe for every component count or authored Dockerfile.
 Before adopting the pilot, retain complete logical cache sizes, transfer bytes
 and stage durations, and measure peak disk use for the intended resource and
 component envelope. Keep the OCI limit and GC target unchanged. Also account
-for tar transport overhead: the legacy download currently uses the same byte
-limit as logical cache contents, so headers can make an exact-budget export
-too large to reimport. A larger logical limit alone does not fix that boundary.
+for tar transport overhead: legacy download and unpack now use a separate,
+derived physical limit for bounded headers and padding. An exact-budget logical
+export can round-trip without increasing its logical capacity. Keep that
+transport headroom separate when evaluating a larger logical limit.
 This assessment changes no build resource, timeout, deployment or acceptance
 policy, and does not claim hosted task-set acceptance.
 
