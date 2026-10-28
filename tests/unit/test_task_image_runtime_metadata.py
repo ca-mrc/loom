@@ -106,6 +106,30 @@ def test_last_layer_passwd_replaces_previous_identity(tmp_path):
     assert (result["uid"], result["gid"], result["home"], result["workdir"]) == (2001, 2002, "/home/final", "/")
 
 
+@pytest.mark.parametrize("directory", [False, True])
+def test_literal_backslashes_in_linux_layer_names_do_not_alias_identity(tmp_path, directory):
+    # Fedora's systemd RPM installs these escaped unit names in retro-console-soc.
+    # A backslash is a literal POSIX filename character, including in a name
+    # resembling passwd: it must neither reject the image nor replace /etc/passwd.
+    layer = _layer({
+        "etc/passwd": PASSWD, "etc/group": GROUP,
+        r"usr/lib/systemd/system/system-systemd\x2dcryptsetup.slice": b"[Unit]\n",
+        r"usr/lib/systemd/system/system-systemd\x2dveritysetup.slice": b"[Unit]\n",
+        r"etc\passwd": b"worker:x:2001:2002::/home/spoofed:/bin/sh\n",
+    })
+    image = _image(tmp_path / "image", [layer], {"User": "worker"}, directory=directory)
+    result = read_task_image_runtime_metadata(image, directory=directory)
+    assert (result["uid"], result["gid"], result["home"]) == (1001, 1002, "/home/worker")
+    assert not (tmp_path / "etc").exists()
+
+
+@pytest.mark.parametrize("name", ["/etc/passwd", "etc/./passwd", "etc/x/../passwd", "etc//passwd"])
+def test_identity_path_aliases_remain_rejected(tmp_path, name):
+    image = _image(tmp_path / "image", [_layer({name: PASSWD})], {"User": "worker"})
+    with pytest.raises(ValueError, match=r"^OCI runtime metadata unsupported$"):
+        read_task_image_runtime_metadata(image)
+
+
 @pytest.mark.parametrize("whiteout", ["etc/.wh.passwd", "etc/.wh..wh..opq", ".wh.etc", ".wh..wh..opq"])
 def test_whiteouts_remove_lower_identity_even_when_tar_order_is_reversed(tmp_path, whiteout):
     image = _image(tmp_path / "image", [_layer({"etc/passwd": PASSWD}), _layer({whiteout: b""})],
