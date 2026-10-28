@@ -182,3 +182,48 @@ async def test_nonroot_harbor_reference_tree_and_cleanup_use_original_user(
         await driver.stop(delete=True)
         container.remove(force=True, v=True)
         socket_directory.cleanup()
+
+
+@pytest.mark.parametrize(
+    "declaration,user,expected,buildargs",
+    [
+        ("ARG TASK_USER=root\n", "${TASK_USER}", "nobody", {"TASK_USER": "nobody"}),
+        ("ENV TASK_USER=nobody TASK_GROUP=nogroup\n", "$TASK_USER:$TASK_GROUP", "nobody:nogroup", {}),
+        ("", "65534:65534", "65534:65534", {}),
+        ("ARG TASK_USER=nobody\nENV LOOM_PREPARATION_OWNER=root\nARG LOOM_PREPARATION_OWNER_1=root\n",
+         "${TASK_USER}", "nobody", {"LOOM_PREPARATION_OWNER_2": "root"}),
+    ],
+)
+def test_prepared_image_expands_authored_user_without_runtime_environment(declaration, user, expected, buildargs):
+    import docker
+
+    client = docker.from_env()
+    image = None
+    container = None
+    authored = (
+        "FROM python:3.12-slim\n"
+        "RUN mkdir -p /app && chmod 755 /app\n"
+        + declaration + f"USER {user}\nWORKDIR /app\n"
+    )
+    try:
+        image, _ = client.images.build(
+            fileobj=io.BytesIO(append_terminus_runtime_tools(authored, prepare_harness_dirs=True, build_arg_names=buildargs).encode()),
+            tag="loom-oracle-reference-" + uuid4().hex,
+            buildargs=buildargs, rm=True, labels={"loom.task": "2292-oracle-reference"},
+        )
+        assert image.attrs["Config"]["User"] == expected
+        assert image.attrs["Config"]["WorkingDir"] == "/app"
+        assert [value for value in image.attrs["Config"]["Env"] if value.startswith("LOOM_PREPARATION_OWNER")] == (["LOOM_PREPARATION_OWNER=root"] if "ENV LOOM_PREPARATION_OWNER=root" in declaration else [])
+        container = client.containers.run(
+            image.id, ["/bin/sh", "-c", 'test "$(id -u)" = 65534 && test "$PWD" = /app && test ! -w /app && test -w /solution && touch /solution/helper && rm /solution/helper'],
+            detach=True, network_mode="none", cap_drop=["ALL"], security_opt=["no-new-privileges"],
+            mem_limit="256m", nano_cpus=1_000_000_000, pids_limit=32,
+            labels={"loom.task": "2292-oracle-reference"},
+        )
+        assert container.wait(timeout=30)["StatusCode"] == 0, container.logs()
+    finally:
+        if container is not None:
+            container.remove(force=True, v=True)
+        if image is not None:
+            client.images.remove(image.id, force=True)
+        client.close()

@@ -1016,3 +1016,42 @@ def test_fedora_runtime_tools_preserve_user_and_prohibit_package_upgrades():
     assert 'dnf ' in prepared and 'apt-get' not in prepared
     assert prepared.rstrip().endswith('USER agent')
     assert 'command -v tmux' in prepared
+
+
+def test_harness_directory_owner_uses_docker_user_expansion_not_shell_evaluation(tmp_path):
+    import os
+    import subprocess
+
+    authored = "FROM python:3.12-slim\nARG TASK_USER=nobody\nUSER ${TASK_USER}\nWORKDIR /app\n"
+    prepared = append_terminus_runtime_tools(authored, prepare_harness_dirs=True)
+    assert "ARG LOOM_PREPARATION_OWNER=${TASK_USER}\n" in prepared
+    assert 'chown "$LOOM_PREPARATION_OWNER" ' in prepared
+    assert prepared.rstrip().endswith("USER ${TASK_USER}")
+    assert "ENV LOOM_PREPARATION_OWNER" not in prepared
+    # A value from Docker ARG expansion stays one operand, even if its bytes
+    # resemble shell substitution. Do not eval or interpolate it into shell code.
+    marker = tmp_path / "unexpected"
+    value = f"$(touch {marker}):nogroup"
+    command = next(line[4:] for line in prepared.splitlines() if line.startswith("RUN test ! -L /solution"))
+    chown_operand = command.split(" && chown ", 1)[1].split(" /solution", 1)[0]
+    result = subprocess.run(
+        ["/bin/sh", "-c", "printf '%s' " + chown_operand],
+        env={**os.environ, "LOOM_PREPARATION_OWNER": value}, capture_output=True, text=True, check=True,
+    )
+    assert result.stdout == value
+    assert not marker.exists()
+
+
+
+def test_harness_owner_internal_arg_avoids_authored_names_and_frozen_build_arguments():
+    authored = (
+        "FROM python:3.12-slim\nARG TASK_USER=nobody\n"
+        "ENV LOOM_PREPARATION_OWNER=root\nARG LOOM_PREPARATION_OWNER_1=root\n"
+        "USER ${TASK_USER}\n"
+    )
+    prepared = append_terminus_runtime_tools(
+        authored, prepare_harness_dirs=True, build_arg_names={"LOOM_PREPARATION_OWNER_2"},
+    )
+    assert "ARG LOOM_PREPARATION_OWNER_3=${TASK_USER}\n" in prepared
+    assert 'chown "$LOOM_PREPARATION_OWNER_3" ' in prepared
+    assert prepared.startswith(authored)

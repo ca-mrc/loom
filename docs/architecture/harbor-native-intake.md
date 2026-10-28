@@ -242,7 +242,11 @@ Custom and offline workspace staging retain their existing behavior.
 Native Harbor preparation revision `harbor-reference-directory-v1` creates and
 assigns only the fixed harness directories (`/solution`, `/tests`,
 `/logs/verifier`, `/loom/verifier`) to the authored image user. It does
-not recursively change business files or change `USER` or `WORKDIR`. This recipe
+not recursively change business files or change `USER` or `WORKDIR`. Variable
+`USER` arguments use Docker's own ARG/ENV expansion via an unused build-only
+argument name, avoiding authored names and frozen build arguments. The shell
+reads its value as one quoted operand without `eval`; no runtime environment
+variable is added. This recipe
 participates in the existing materialization cache identity: new native requests
 build new rows instead of reusing legacy ready images without these directories.
 Existing rows, grants, and frozen build claims retain their old recipe and exact

@@ -263,6 +263,7 @@ async def materialize_and_publish_task_images(
                     dockerfile = task_dir / environment.dockerfile
                     dockerfile.write_text(append_terminus_runtime_tools(
                         dockerfile.read_text(), prepare_harness_dirs=True,
+                        build_arg_names=environment.docker_build_args,
                     ))
             image_cache_checksum = claim.materialization_key
 
