@@ -66,6 +66,49 @@ def test_apply_harbor_config_dict_is_idempotent() -> None:
     assert twice["request_params"] == {"top_p": 0.9}
 
 
+@pytest.mark.parametrize(
+    ("request_limit", "harbor_limit"),
+    [
+        ("max_tokens", "max_completion_tokens"),
+        ("max_completion_tokens", "max_tokens"),
+    ],
+)
+@pytest.mark.parametrize("trial_model", [False, True], ids=["api_normalizer", "trial_model"])
+def test_rejects_output_limits_split_across_config_inputs(
+    request_limit: str, harbor_limit: str, trial_model: bool,
+) -> None:
+    config = {
+        "request_params": {request_limit: 16},
+        "harbor_config": {harbor_limit: 32},
+    }
+    with pytest.raises(ValueError, match="max_tokens or max_completion_tokens, not both"):
+        if trial_model:
+            _trial(**config)
+        else:
+            apply_harbor_config_dict(config)
+
+
+@pytest.mark.parametrize("limit", ["max_tokens", "max_completion_tokens"])
+def test_output_limit_keeps_same_field_conflict(limit: str) -> None:
+    with pytest.raises(ValueError, match=f"harbor_config.{limit} conflicts with request_params.{limit}"):
+        apply_harbor_config_dict({
+            "request_params": {limit: 16},
+            "harbor_config": {limit: 32},
+        })
+
+
+@pytest.mark.parametrize("limit", ["max_tokens", "max_completion_tokens"])
+def test_matching_output_limit_merges_idempotently(limit: str) -> None:
+    config = {
+        "request_params": {limit: 16, "temperature": 0},
+        "harbor_config": {limit: 16, "top_p": 0.9},
+    }
+    once = apply_harbor_config_dict(config)
+    assert once["request_params"] == {limit: 16, "temperature": 0, "top_p": 0.9}
+    assert apply_harbor_config_dict(once) == once
+    assert _trial(**once).request_params == once["request_params"]
+
+
 def test_stale_running_reads_harbor_agent_timeout() -> None:
     assert (
         effective_agent_timeout_sec(

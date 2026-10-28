@@ -87,7 +87,29 @@ class GatewayCallLedger:
                 row for row in correlated
                 if int(row.get("episode") or -1) == int(episode)
             ]
-            by_episode.sort(key=lambda row: int(row.get("call_ordinal") or 0))
+            if len(by_episode) > 1:
+                # Harbor's native summarization makes several LLM calls in
+                # one episode. Its main turn must not bind to the first
+                # summarization call merely because it has a lower ordinal.
+                input_tokens, output_tokens = harbor_metrics_tokens(metrics)
+                by_episode = [
+                    row for row in by_episode
+                    if int(row.get("input_tokens") or 0) == input_tokens
+                    and int(row.get("output_tokens") or 0) == output_tokens
+                ]
+                if not by_episode:
+                    raise CheckpointBridgeError(
+                        "no correlated llm_calls row matches Harbor episode metrics "
+                        f"(step_id={self._step_id}, episode={episode}, "
+                        f"input_tokens={input_tokens}, output_tokens={output_tokens})",
+                    )
+                if len(by_episode) > 1:
+                    raise CheckpointBridgeError(
+                        "ambiguous correlated llm_calls rows match Harbor episode metrics "
+                        f"(step_id={self._step_id}, episode={episode}, "
+                        f"input_tokens={input_tokens}, output_tokens={output_tokens}, "
+                        f"matches={len(by_episode)})",
+                    )
             if by_episode:
                 row = by_episode[0]
                 self._consumed_ids.add(str(row["id"]))

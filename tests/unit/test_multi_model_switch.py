@@ -416,6 +416,40 @@ async def test_role_router_beta_all_teacher() -> None:
     assert [c["to_role"] for c in router.applied_switches] == ["teacher"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("execution_id,attempt_id", [
+    (None, None), ("execution", None), (None, "attempt"), ("execution", "attempt"),
+])
+@pytest.mark.parametrize("response_extra", [None, {"provider_request_id": "keep-provider-metadata"}])
+async def test_router_response_preserves_actual_gateway_correlation_id(
+    execution_id: str | None,
+    attempt_id: str | None,
+    response_extra: dict[str, str] | None,
+) -> None:
+    from types import SimpleNamespace
+
+    class ResponseLLM(_FakeLLM):
+        async def call(self, prompt: str = "", **kwargs: Any) -> Any:
+            await super().call(prompt, **kwargs)
+            return SimpleNamespace(extra=dict(response_extra) if response_extra else None)
+
+    student = ResponseLLM(name="openai/student")
+    agent = _FakeAgent(_llm=student, _model_name="openai/student", _n_episodes=1)
+    router = install_role_router(
+        agent, teacher_model_name="openai/teacher", teacher_llm=_FakeLLM(name="openai/teacher"),
+        first_switch_episode=2, return_switch_episode=3,
+        agent_execution_id=execution_id, agent_run_attempt_id=attempt_id,
+    )
+    response = await router.call(prompt="inspect")
+    expected = dict(response_extra or {})
+    if execution_id and attempt_id:
+        expected["loom_client_call_id"] = student.last_kwargs["extra_body"]["loom_client_call_id"]
+        assert response.extra == expected
+    else:
+        assert "extra_body" not in student.last_kwargs
+        assert response.extra == response_extra
+
+
 def test_redact_agent_llm_kwargs() -> None:
     agent = _FakeAgent(_llm=_FakeLLM("x"), _model_name="x")
     redact_agent_llm_kwargs(agent)
@@ -473,6 +507,7 @@ class _HarborOptions:
     api_base: str | None = "http://gateway.test"
     max_thinking_tokens: int | None = 2048
     use_responses_api: bool = True
+    model_info: dict[str, Any] | None = None
 
 
 @dataclass
@@ -580,6 +615,65 @@ def test_options_teacher_preserves_auth_and_constructor_parameters(
     assert agent.captured_init["session_id"] == "agent-sess"
     assert agent.captured_init["max_thinking_tokens"] == 2048
     assert agent.captured_init["use_responses_api"] is True
+
+
+@pytest.mark.parametrize("teacher_model_info", [
+    {"max_input_tokens": 8192},
+    {"max_output_tokens": 2048},
+    {"max_input_tokens": 8192, "max_output_tokens": 2048},
+])
+@pytest.mark.parametrize("through_router", [False, True])
+def test_teacher_context_metadata_reaches_harbor_resolver(
+    teacher_model_info: dict[str, int],
+    through_router: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_harbor_llm_backend: None,
+) -> None:
+    """A custom teacher uses its own limits, independently of student metadata."""
+    agent = _ConstructOptionsAgent(
+        _llm=_StudentLiteLLM("openai/student"),
+        options=_HarborOptions(model_info={"max_input_tokens": 262144}),
+    )
+    resolved: list[tuple[str, Any]] = []
+
+    def resolve(model_name: str, provided: Any) -> Any:
+        resolved.append((model_name, provided))
+        return provided
+
+    monkeypatch.setattr(agent, "_resolve_model_info", resolve)
+    construct = install_role_router if through_router else construct_teacher_llm
+    router_options = (
+        {"first_switch_episode": 2, "return_switch_episode": 3} if through_router else {}
+    )
+    construct(
+        agent,
+        teacher_model_name="openai/custom-teacher",
+        teacher_model_info=teacher_model_info,
+        **router_options,
+    )
+    assert resolved == [("openai/custom-teacher", teacher_model_info)]
+    assert agent.captured_init["model_info"] == teacher_model_info
+    assert agent.captured_init["llm_kwargs"]["api_key"] == "loom_step_dump"
+
+
+def test_teacher_without_context_override_keeps_harbor_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_harbor_llm_backend: None,
+) -> None:
+    agent = _ConstructOptionsAgent(
+        _llm=_StudentLiteLLM("openai/student"),
+        options=_HarborOptions(model_info={"max_input_tokens": 262144}),
+    )
+    resolved: list[tuple[str, Any]] = []
+
+    def resolve(model_name: str, provided: Any) -> dict[str, int]:
+        resolved.append((model_name, provided))
+        return {"max_input_tokens": 4096}
+
+    monkeypatch.setattr(agent, "_resolve_model_info", resolve)
+    construct_teacher_llm(agent, teacher_model_name="openai/known-teacher")
+    assert resolved == [("openai/known-teacher", None)]
+    assert agent.captured_init["model_info"] == {"max_input_tokens": 4096}
 
 
 def test_options_redaction_keeps_live_student_credentials() -> None:
