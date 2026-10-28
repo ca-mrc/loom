@@ -4,7 +4,7 @@ exactly."""
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from loom.models.types import (
     OS,
@@ -57,7 +57,8 @@ class RequiredCapabilities(BaseModel):
     gpu_vendor: GPUVendor
     network_policies: frozenset[NetworkPolicyKind]
     terminus2_model_switch: bool = False
-    mainland_proxy: bool = False
+    # Preserve existing persisted capability JSON when the option is off.
+    mainland_proxy: bool = Field(default=False, exclude_if=lambda value: not value)
 
     def satisfied_by(self, caps: Capabilities) -> bool:
         """True iff `caps` offers everything this requires."""

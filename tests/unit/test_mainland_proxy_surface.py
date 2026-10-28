@@ -22,8 +22,14 @@ def test_mainland_proxy_is_explicit_and_roundtrips(agent):
     enabled = TrialConfig(agent_name=agent, agent_model=None, mainland_proxy=True)
     assert TrialConfig.model_validate(enabled.model_dump(mode="json")).mainland_proxy is True
     task = _task(EnvironmentConfig(os="linux"))
-    assert derive_requires_caps(task).mainland_proxy is False
-    assert derive_requires_caps(task, enabled).mainland_proxy is True
+    default_caps = derive_requires_caps(task)
+    disabled_caps = derive_requires_caps(task, ordinary)
+    enabled_caps = derive_requires_caps(task, enabled)
+    assert default_caps.mainland_proxy is disabled_caps.mainland_proxy is False
+    assert "mainland_proxy" not in default_caps.model_dump(mode="json")
+    assert "mainland_proxy" not in disabled_caps.model_dump(mode="json")
+    assert enabled_caps.model_dump(mode="json")["mainland_proxy"] is True
+    assert RequiredCapabilities.model_validate(enabled_caps.model_dump(mode="json")).mainland_proxy is True
 
 
 @pytest.mark.parametrize("agent", ["claude-code", "codex", "opencode", "custom-inbox"])
