@@ -318,6 +318,53 @@ incarnations, delete references or access source write/version journals. These
 grants apply before any optional global-pool activation and survive bootstrap
 repetition.
 
+## Cache budget sizing
+
+These are independent limits, rather than multiples of a shared cache constant:
+
+| Budget | Current value | Owner |
+| --- | --- | --- |
+| Cache logical file bytes per component | 1 GiB | `task_image_runtime._CACHE_BYTES` |
+| OCI image bytes | 3 GiB | `task_image_oci` validators, including runtime-metadata reads |
+| Cache bucket GC target | 4 GiB | `task_image_runtime._CACHE_TOTAL_BYTES` |
+
+The GC target is soft: the existing seven-day protection period can leave the
+bucket above it. It is neither a provider quota nor a per-Job disk budget.
+Verified cache reuse remains separately bounded at 256 MiB. Archive and blob
+cache transfer continue to enforce their existing limits.
+
+The 2026-10-28 assessment for [#2292](https://github.com/ca-mrc/loom/issues/2292)
+recommends **2 GiB per component as a pilot candidate**, retaining the 1 GiB
+default until actual cache sizes and the aggregate disk envelope are qualified.
+The successful `mp-checkpoint-consolidation` image build failed during cache
+publication above 1 GiB; its complete cache size was not retained. A separate
+local CPU vLLM verifier build produced a 1,249,129,984-byte OCI archive (about
+1.163 GiB). That is an image measurement, not a cache measurement or a cache
+size percentile. It supports investigating a modest increase, but does not
+establish that 2 GiB covers this cache or the whole task set. The local worker
+used the production-pinned rootless/native BuildKit under Docker Desktop with
+amd64 emulation; its timings do not establish Nebius transfer throughput.
+
+A blanket 4 GiB default is not justified by the current resource envelope.
+Prepare imports all components before the build starts, and cache inputs,
+cache outputs and OCI outputs remain until Job cleanup. At the maximum eight
+components, 4 GiB inputs plus 4 GiB outputs per component would occupy 64 GiB
+before OCI output, source, temporary transfers or native snapshots. This is a
+capacity illustration, not an export-enforced disk bound: BuildKit can create
+an oversized local cache before publication checks it. Even 2 GiB would raise
+the maximum imported-cache footprint from 8 to 16 GiB, while the supported
+minimum builder allocation remains 16 GiB. Larger builders do not make that
+safe for every component count or authored Dockerfile.
+
+Before adopting the pilot, retain complete logical cache sizes, transfer bytes
+and stage durations, and measure peak disk use for the intended resource and
+component envelope. Keep the OCI limit and GC target unchanged. Also account
+for tar transport overhead: the legacy download currently uses the same byte
+limit as logical cache contents, so headers can make an exact-budget export
+too large to reimport. A larger logical limit alone does not fix that boundary.
+This assessment changes no build resource, timeout, deployment or acceptance
+policy, and does not claim hosted task-set acceptance.
+
 ## Compatibility and verification
 
 Published migrations and historical materialization, publication and build-grant
