@@ -43,7 +43,7 @@ class Capabilities(BaseModel):
     # CapabilityError rather than silently degrading.
     supports_custom_network: bool = False
     terminus2_model_switch: bool = False
-    mainland_proxy: bool = False
+    mainland_proxy: bool = Field(default=False, exclude_if=lambda value: not value)
 
 
 class RequiredCapabilities(BaseModel):

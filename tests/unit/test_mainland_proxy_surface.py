@@ -58,7 +58,10 @@ def test_mainland_proxy_requires_an_advertised_worker_capability():
     enabled = ordinary.model_copy(update={"mainland_proxy": True})
     assert ordinary.satisfied_by(worker)
     assert not enabled.satisfied_by(worker)
-    assert enabled.satisfied_by(worker.model_copy(update={"mainland_proxy": True}))
+    assert "mainland_proxy" not in worker.model_dump(mode="json")
+    advertised = worker.model_copy(update={"mainland_proxy": True})
+    assert advertised.model_dump(mode="json")["mainland_proxy"] is True
+    assert enabled.satisfied_by(Capabilities.model_validate_json(advertised.model_dump_json()))
 
 
 @pytest.mark.parametrize("backend", ["modal", "fake"])
@@ -146,3 +149,25 @@ async def test_static_nebius_binding_cannot_ignore_mainland_proxy(monkeypatch, e
 
 def test_static_binding_is_not_used_by_local_docker():
     reject_unsupported_mainland_proxy("docker", {"mainland_proxy": True}, has_service_binding=True)
+
+
+@pytest.mark.parametrize("state", ["disabled", "missing-image", "missing-profile", "incomplete", "ready"])
+def test_worker_advertises_mainland_only_when_configured(tmp_path, state):
+    from types import SimpleNamespace
+
+    from loom_worker.main_loop import _DEFAULT_CAPS, _worker_capabilities
+    from tests.unit.test_mainland_network_plan import _snapshot
+
+    profile = _snapshot(tmp_path)
+    settings = SimpleNamespace(mainland_proxy_image="preloaded-mihomo", mainland_proxy_profile_dir=profile)
+    if state in {"disabled", "missing-image"}:
+        settings.mainland_proxy_image = ""
+    if state in {"disabled", "missing-profile"}:
+        settings.mainland_proxy_profile_dir = None
+    if state == "incomplete":
+        (profile / "greatfire-rules.yaml").unlink()
+    expected = [dict(_DEFAULT_CAPS[0])]
+    if state == "ready":
+        expected[0]["mainland_proxy"] = True
+    assert _worker_capabilities(settings) == expected
+    assert Capabilities.model_validate(expected[0]).mainland_proxy is (state == "ready")

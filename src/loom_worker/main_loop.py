@@ -196,12 +196,13 @@ _DEFAULT_CAPS = [
 def _worker_capabilities(settings: WorkerSettings) -> list[dict[str, Any]]:
     caps = dict(_DEFAULT_CAPS[0])
     profile_dir = getattr(settings, "mainland_proxy_profile_dir", None)
-    caps["mainland_proxy"] = bool(
+    if (
         getattr(settings, "mainland_proxy_image", "") and profile_dir
         and all((Path(profile_dir) / name).is_file() for name in (
             "gfw-rules.yaml", "greatfire-rules.yaml", "sources.json", "greatfire-decisions.json",
         ))
-    )
+    ):
+        caps["mainland_proxy"] = True
     return [caps]
 
 
