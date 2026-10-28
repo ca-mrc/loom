@@ -21,12 +21,25 @@ from tests.unit.test_prepared_image_archives import archive_claim
 pytestmark = [pytest.mark.docker, pytest.mark.timeout(120)]
 
 
+@pytest.mark.parametrize("metadata_case", ["native", "nebius-title"])
 async def test_exact_prepared_archive_survives_latest_overwrite_and_receipt_loss(
-    minio_tls, tmp_path, monkeypatch  # noqa: F811
+    minio_tls, tmp_path, monkeypatch, metadata_case, request  # noqa: F811
 ):
     from loom_llm_gateway.routes import service_execution as routes
 
     origin, credentials, _, admin, _ = minio_tls
+
+    # Keep real versioned PUT/HEAD/GET/delete and SDK checksum handling; replay
+    # the observed Nebius HEAD metadata representation at the SDK boundary.
+    def title_case_metadata(parsed, **_kwargs):
+        if "Metadata" in parsed:
+            parsed["Metadata"] = {key.title(): value for key, value in parsed["Metadata"].items()}
+
+    if metadata_case == "nebius-title":
+        admin.meta.events.register("after-call.s3.HeadObject", title_case_metadata)
+        request.addfinalizer(
+            lambda: admin.meta.events.unregister("after-call.s3.HeadObject", title_case_metadata)
+        )
     bucket = "prepared-images-" + uuid4().hex
     admin.create_bucket(Bucket=bucket)
     admin.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})

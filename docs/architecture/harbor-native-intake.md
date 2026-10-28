@@ -180,6 +180,12 @@ The standalone platform renderer defaults it to `loom-task-build-source`, whose
 source binding already uses the canonical artifacts bucket; explicit alternate
 references remain supported. Deployment preflight verifies the required keys.
 
+Archive publication and interrupted-write recovery treat S3 user-metadata
+header names case-insensitively, including Nebius Title-Case HEAD responses.
+Ownership values remain exact: conflicting aliases are rejected, as are changed
+write IDs, image references, versions, checksum shape or invalid object sizes.
+Equivalent key casing does not change the retained object or its ownership.
+
 The existing control-plane materializer loop reconciles interrupted archive
 writes after the actuator observes build Pod removal. It retains admitted
 archives until materialization retirement, persists an exact deletion inventory
