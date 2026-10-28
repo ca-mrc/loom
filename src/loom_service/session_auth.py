@@ -24,6 +24,8 @@ from loom_service.config import LoomServiceSettings
 from loom_service.public_links import configured_public_base_url
 
 _SAFE_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# Activity bookkeeping only; matches the bearer-token touch debounce.
+_SESSION_TOUCH_DEBOUNCE = timedelta(seconds=60)
 
 
 @dataclass(frozen=True)
@@ -465,11 +467,17 @@ async def verify_session_cookie(
     role = next((role for team, role in teams if team.id == team_id), None)
     if role is None:
         return None
-    await session.execute(
-        update(UserSession)
-        .where(UserSession.session_hash == user_session.session_hash)
-        .values(last_seen_at=now),
-    )
+    touch_cutoff = now - _SESSION_TOUCH_DEBOUNCE
+    if user_session.last_seen_at is None or user_session.last_seen_at <= touch_cutoff:
+        await session.execute(
+            update(UserSession)
+            .where(UserSession.session_hash == user_session.session_hash)
+            .where(
+                UserSession.last_seen_at.is_(None)
+                | (UserSession.last_seen_at <= touch_cutoff),
+            )
+            .values(last_seen_at=now),
+        )
     return _ctx_from_session(
         user=user, user_session=user_session, role=role, team_id=team_id,
     )

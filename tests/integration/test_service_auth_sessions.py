@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -27,6 +28,7 @@ from loom.db.schema import (
 )
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from loom_service.dependencies import SessionAndCtx
 
 RAW_ADMIN_TOKEN = "loom_admin_" + "A" * 43
 
@@ -683,6 +685,66 @@ async def test_switched_admin_session_rechecks_authority(auth_setup, change):
                 )
             await session.commit()
         assert (await ac.get("/api/v1/auth/me")).status_code == 401
+
+
+async def test_slow_session_read_does_not_block_same_cookie_requests(auth_setup):
+    """A held business read must not keep the session row locked (#2687)."""
+    from datetime import timedelta
+
+    from sqlalchemy.exc import OperationalError
+
+    app, *_ = auth_setup
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    @app.get("/__test/held-read")
+    async def held_read(sc: SessionAndCtx) -> dict[str, bool]:
+        session, _ctx = sc
+        await session.execute(select(Team.id).limit(1))
+        entered.set()
+        await release.wait()
+        return {"ok": True}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://svc",
+    ) as ac:
+        body, _ = await _login(ac)
+        user_id = UUID(body["user"]["id"])
+        # Make the next request due for an activity touch.
+        async with app.state.session_factory() as session:
+            await session.execute(
+                update(UserSession).where(UserSession.user_id == user_id)
+                .values(last_seen_at=datetime.now(UTC) - timedelta(hours=1)),
+            )
+            await session.commit()
+
+        held = asyncio.create_task(ac.get("/__test/held-read"))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            async with app.state.session_factory() as session:
+                try:
+                    await session.execute(
+                        select(UserSession.session_hash)
+                        .where(UserSession.user_id == user_id)
+                        .with_for_update(nowait=True),
+                    )
+                except OperationalError:
+                    pytest.fail("held read still locks the user_sessions row")
+                await session.rollback()
+            me = await asyncio.wait_for(ac.get("/api/v1/auth/me"), timeout=5)
+            assert me.status_code == 200, me.text
+            # A second read on the same cookie authenticates independently too.
+            again = await asyncio.wait_for(ac.get("/api/v1/auth/whoami"), timeout=5)
+            assert again.status_code == 200, again.text
+            async with app.state.session_factory() as session:
+                touched = (await session.execute(
+                    select(UserSession.last_seen_at).where(UserSession.user_id == user_id),
+                )).scalar_one()
+            assert touched is not None and touched > datetime.now(UTC) - timedelta(minutes=1)
+        finally:
+            # Finish the held request before fixture teardown deletes its row.
+            release.set()
+            held_response = await asyncio.wait_for(held, timeout=10)
+        assert held_response.status_code == 200
 
 
 async def test_retired_staging_exchange_and_existing_cookie_are_rejected(auth_setup, monkeypatch):

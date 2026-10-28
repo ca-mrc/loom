@@ -138,6 +138,10 @@ async def authed_session(
                     reason="csrf",
                 ).inc()
                 raise
+        # End the auth transaction before the handler runs: a cookie touch
+        # holds the user_sessions row lock, and a slow read must not queue
+        # every other request from the same browser behind it (#2687).
+        await session.commit()
         yield session, ctx
 
 
