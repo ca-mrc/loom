@@ -851,6 +851,101 @@ def test_publisher_records_registry_digest_with_optional_cache(
     assert any(key.endswith(f"/blobs/{digest}") for _, key, _ in cache.uploads)
 
 
+def _eight_component_archive_claim(source_bundle):
+    from loom.models.task import TaskConfig
+    from loom.task_image_archives import archive_write_intents
+
+    claim, _ = source_bundle
+    claim["source_bucket"] = "b" * 49
+    claim["registry_repository"] = "registry.example/" + "r" * 39
+    services = ["main", "asset-ledger", "compliance-ledger", "document-vault", "returns-ledger", "warranty-inbox", "warranty-portal"]
+    claim["task_config"]["environment"].update(compose_files=["environment/docker-compose.yaml"], native_compose={
+        "source": "environment/docker-compose.yaml", "services": [{"name": name, "build": {
+            "context": "environment" if name == "main" else "environment/" + name,
+            "dockerfile": "environment/Dockerfile" if name == "main" else f"environment/{name}/Dockerfile",
+        }} for name in services],
+    })
+    claim["task_config"]["verifier"]["environment"] = {
+        "os": "linux", "cpu_arch": "x86_64", "user": "image",
+        "dockerfile": "tests/Dockerfile", "docker_build_context": "tests",
+    }
+    claim["task_config"] = TaskConfig.model_validate(claim["task_config"]).model_dump(mode="json")
+    claim["archive_write_intents"] = archive_write_intents(claim)
+    return claim
+
+
+def test_publisher_retains_all_eight_images_and_seven_archives_in_bounded_receipt(
+    source_bundle, tmp_path, publisher, monkeypatch,
+) -> None:
+    from loom.task_image_archives import validate_archive_receipt
+    from tests.unit.test_prepared_image_archives import VersionedStorage
+
+    claim = _eight_component_archive_claim(source_bundle)
+    _, copies = publisher
+    (tmp_path / "secrets/cache").rmdir()
+    components = runtime.derive_task_image_build_components(claim["task_config"])
+    assert len(components) == 8
+    storage = VersionedStorage()
+    storage.close = lambda: None
+    monkeypatch.setattr(runtime, "_client", lambda *_args: storage)
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    for component in components:
+        _write_native_oci(work / component.oci_output_path, runtime_config={"User": "0:0", "WorkingDir": "/app", "Env": ["HOME=/root", "PATH=/usr/bin"]})
+    receipt_path = tmp_path / "receipt.json"
+    receipt = runtime.publish(claim, work, tmp_path / "secrets", receipt_path=receipt_path)
+    from loom_execution_actuator.image_publication_receipt import decode_publication_receipt
+
+    assert len(copies) == len(receipt["registry_images"]) == 8
+    assert len(receipt["image_archives"]) == 7 and len(receipt["image_runtime_metadata"]) == 1
+    assert len(json.dumps(receipt).encode()) > 4000
+    assert len(receipt_path.read_bytes()) <= 4000
+    assert decode_publication_receipt(receipt_path.read_text()) == receipt
+    assert len(validate_archive_receipt(claim, receipt["registry_images"], receipt["image_archives"])) == 7
+
+
+def test_failure_keeps_complete_last_progress_when_added_diagnostic_cannot_fit(tmp_path, monkeypatch):
+    import sys
+
+    from loom_execution_actuator.image_publication_receipt import (
+        decode_publication_receipt,
+        encode_publication_receipt,
+    )
+
+    image = "registry.example/tasks@sha256:" + "a" * 64
+    progress = {"materialization_id": str(uuid4()), "lease_epoch": 3,
+        "registry_images": {"task": image}, "image_runtime_metadata": {"task": {
+            "image_ref": image, "user": "0:0", "uid": 0, "gid": 0, "home": "/root",
+            "workdir": "/app", "entrypoint": [], "environment": {"PUBLIC_DESCRIPTION": "x" * 3000},
+        }}, "image_archives": {"task": {"image_ref": image, "object": {
+            "bucket": "artifacts", "object_key": "task-image-archives/local/3/main.tar",
+            "version_id": "v" * 1024, "content_sha256": "b" * 64, "size_bytes": 10240,
+        }}}}
+    previous_message = encode_publication_receipt(progress)
+    assert "encoding" in json.loads(previous_message)
+    termination = tmp_path / "termination"
+    termination.write_text(previous_message)
+    monkeypatch.setattr(runtime, "Path", lambda value: termination if str(value) == "/dev/termination-log" else Path(value))
+    monkeypatch.setattr(runtime, "load_claim", lambda _: {})
+    monkeypatch.setattr(sys, "argv", ["image-runtime", "publish", "--claim", str(tmp_path / "claim.json")])
+
+    def publish_failed(*_args, **_kwargs):
+        raise runtime.BuildPreparationError("cache export failed")
+
+    def diagnostic_too_large(receipt):
+        if "error" in receipt:
+            raise ValueError("publication receipt exceeds Kubernetes termination message limit")
+        return encode_publication_receipt(receipt)
+
+    monkeypatch.setattr(runtime, "publish", publish_failed)
+    monkeypatch.setattr(runtime, "encode_publication_receipt", diagnostic_too_large)
+    with pytest.raises(SystemExit) as failed:
+        runtime.main()
+    assert failed.value.code == 1
+    assert termination.read_text() == previous_message
+    assert decode_publication_receipt(termination.read_text()) == progress
+
+
 @pytest.mark.parametrize("failure", [None, "secret", "workdir", "private_workdir", "budget"])
 def test_publisher_binds_final_oci_defaults_and_rejects_unusable_metadata_before_push(
     source_bundle, tmp_path, publisher, failure,

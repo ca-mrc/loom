@@ -77,6 +77,43 @@ def test_receipt_requires_owned_pod_successful_publisher_and_exact_identity():
         publication_receipt(job, materialization_id=image_id, lease_epoch=2)
 
 
+def test_compact_receipt_preserves_existing_identity_owner_and_metadata_checks():
+    from loom.task_image_archives import PreparedImageArchiveV1
+    from loom_execution_actuator.image_publication_receipt import encode_publication_receipt
+
+    image_id, job = receipt_job()
+    terminated = job["pods"][0]["status"]["containerStatuses"][0]["state"]["terminated"]
+    document = json.loads(terminated["message"])
+    image = "registry.example/" + "r" * 39 + "@sha256:" + "a" * 64
+    names = ["task", *(f"compose:service{index}" for index in range(6)), "verifier"]
+    document["registry_images"] = dict.fromkeys(names, image)
+    document["image_runtime_metadata"] = {"task": {
+        "image_ref": image, "user": "0:0", "uid": 0, "gid": 0,
+        "home": "/root", "workdir": "/app", "entrypoint": [], "environment": {},
+    }}
+    document["image_archives"] = {name: PreparedImageArchiveV1.model_validate({
+        "image_ref": image, "object": {
+            "bucket": "b" * 49, "object_key": f"task-image-archives/{image_id}/2/{index}.tar",
+            "version_id": str(uuid4()), "content_sha256": "c" * 64, "size_bytes": 10240,
+        },
+    }).model_dump(mode="json") for index,name in enumerate(names[:-1])}
+    assert len(json.dumps(document).encode()) > 4000
+    terminated["message"] = encode_publication_receipt(document)
+    assert len(terminated["message"].encode()) <= 4000
+    assert publication_receipt(job, materialization_id=image_id, lease_epoch=2) == document["registry_images"]
+    with pytest.raises(ValueError, match="belong"):
+        publication_receipt(job, materialization_id=image_id, lease_epoch=3)
+    document["image_runtime_metadata"]["task"]["image_ref"] = image[:-1] + "b"
+    terminated["message"] = encode_publication_receipt(document)
+    with pytest.raises(ValueError, match="differs"):
+        publication_receipt(job, materialization_id=image_id, lease_epoch=2)
+    document["image_runtime_metadata"]["task"]["image_ref"] = image
+    terminated["message"] = encode_publication_receipt(document)
+    job["pods"][0]["metadata"]["ownerReferences"][0]["uid"] = "foreign"
+    with pytest.raises(ValueError, match="owned Pod"):
+        publication_receipt(job, materialization_id=image_id, lease_epoch=2)
+
+
 @pytest.mark.parametrize('code,retryable', [
     ('image_preparation_base_unsupported', False),
     ('image_preparation_input_invalid', False),

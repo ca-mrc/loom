@@ -51,6 +51,7 @@ from loom_control_plane.task_image_materializations import (
     start_task_image_materialization,
     task_image_materialization_payload,
 )
+from loom_execution_actuator.image_publication_receipt import decode_publication_receipt
 from loom_execution_actuator.metrics import blocked_outcome, record_build_cycle
 from loom_execution_actuator.renderer import ExecutionTargetRuntime
 from loom_execution_actuator.task_image_renderer import render_task_image_job
@@ -401,7 +402,7 @@ def _publication_document(observation: dict[str, Any], *, materialization_id: UU
     message = terminated.get("message", "")
     if not isinstance(message, str) or len(message.encode()) > 4096:
         raise ValueError("invalid publication receipt size")
-    receipt = json.loads(message)
+    receipt = decode_publication_receipt(message)
     if not isinstance(receipt, dict) or receipt.get("materialization_id") != str(materialization_id) or receipt.get("lease_epoch") != lease_epoch:
         raise ValueError("publication receipt does not belong to this build")
     images = receipt.get("registry_images")
@@ -432,7 +433,7 @@ def _phase_error(observation: dict[str, Any], name: str) -> str:
             if not isinstance(message, str) or len(message.encode()) > 4096:
                 continue
             try:
-                receipt = json.loads(message)
+                receipt = decode_publication_receipt(message)
             except ValueError:
                 continue
             if isinstance(receipt, dict) and isinstance(receipt.get("error"), str):
@@ -476,11 +477,11 @@ def build_observation(observation: dict[str, Any]) -> dict[str, Any]:
                     message = detail.get("message", "")
                     if isinstance(message, str) and len(message.encode()) <= 4096:
                         try:
-                            receipt = json.loads(message)
+                            receipt = decode_publication_receipt(message)
                         except ValueError:
                             receipt = None
                         classified = preparation_failure_from_receipt(receipt)
-                        if classified is not None:
+                        if classified is not None and receipt is not None:
                             phase["preparation_error"] = {
                                 key: receipt[key] for key in ('error_schema', 'error_code', 'retryable')
                             }
