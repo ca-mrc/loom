@@ -262,6 +262,7 @@ def render_task_image_job(
     components: tuple[TaskImageBuildComponentV1, ...],
     target: ExecutionTargetRuntime,
     config: TaskImageJobConfig,
+    preserve_active_deadline: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Return an immutable ConfigMap and sequential prepare/build/publish Job.
 
@@ -292,9 +293,12 @@ def render_task_image_job(
         grace_room = MAX_TASK_IMAGE_BUILD_TIMEOUT_SECONDS - task_budget - _JOB_DEADLINE_SLACK_SECONDS
         grace = min(_BUILD_BUDGET_GRACE_SECONDS, max(0, grace_room))
         build_timeout = task_budget + grace
+        # Pool admission already set the remaining absolute deadline. Extending
+        # it would give a later render a fresh job lifetime.
+        raised = max(config.active_deadline_seconds, build_timeout + _JOB_DEADLINE_SLACK_SECONDS)
         deadline = min(
             MAX_TASK_IMAGE_BUILD_TIMEOUT_SECONDS,
-            max(config.active_deadline_seconds, build_timeout + _JOB_DEADLINE_SLACK_SECONDS),
+            config.active_deadline_seconds if preserve_active_deadline else raised,
         )
         config = replace(config, active_deadline_seconds=deadline)
     return render_native_image_job(workload="task", work_id=materialization_id, attempt=lease_epoch,
