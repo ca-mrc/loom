@@ -38,7 +38,6 @@ from loom.db.schema import (
     Benchmark,
     LlmCall,
     ProviderConnection,
-    ProviderModelCache,
     ServiceExecutionLease,
     Task,
     Team,
@@ -137,7 +136,11 @@ from loom_service.multi_model import (
 )
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
-from loom_service.provider_connections_service import preflight_failure_kind
+from loom_service.provider_model_gate import (
+    is_codex,
+    refresh_codex_model_preflight,
+    reject_if_known_failed_provider_model,
+)
 from loom_service.service_execution_status import (
     SERVICE_EXECUTION_LIFECYCLE_STAGES,
     service_execution_lifecycle_case,
@@ -723,57 +726,6 @@ async def _resolve_submission_team_id(
     return requested_team_id
 
 
-async def _reject_if_known_failed_provider_model(
-    session: Any,
-    *,
-    provider_connection_id: UUID | None,
-    provider_model_id: str | None,
-    context: str | None = None,
-) -> None:
-    if provider_connection_id is None or not provider_model_id:
-        return
-    row = (
-        await session.execute(
-            select(ProviderModelCache).where(
-                ProviderModelCache.provider_connection_id == provider_connection_id,
-                ProviderModelCache.model_id == provider_model_id,
-            ),
-        )
-    ).scalar_one_or_none()
-    if row is None:
-        prefix = f"{context}: " if context else ""
-        reject_submission(
-            reason="provider_model_cache",
-            status_code=400,
-            detail=(
-                f"{prefix}provider model {provider_model_id!r} is not in the model cache "
-                "for this provider connection; run `loom providers models "
-                "NAME --refresh` or choose a cached model"
-            ),
-        )
-    # Only a definitive rejection blocks (#948). A timed-out or otherwise
-    # inconclusive probe is not evidence the model is unusable; the run
-    # itself surfaces a real failure if there is one.
-    if preflight_failure_kind(
-        row.last_preflight_status,
-        row.last_preflight_error_code,
-        row.last_preflight_http_status,
-    ) != "rejected":
-        return
-    prefix = f"{context}: " if context else ""
-    detail = f"{prefix}provider model {provider_model_id!r} last preflight failed for this provider connection"
-    if row.last_preflight_error_code:
-        detail += f" ({row.last_preflight_error_code})"
-    if row.last_preflight_at is not None:
-        detail += f" at {row.last_preflight_at.isoformat()}"
-    detail += "; run provider model preflight again or choose another model"
-    reject_submission(
-        reason="provider_model_preflight",
-        status_code=400,
-        detail=detail,
-    )
-
-
 def _effective_provider_fields(
     payload: _CreateBatch,
     combo: Combination | None,
@@ -1215,17 +1167,22 @@ async def _create_batch_record(
     provider_connection: ProviderConnection | None = None
     provider_connection_ids: set[UUID] = set()
     provider_model_checks: list[tuple[UUID | None, str | None, str | None]] = []
+    codex_models: set[tuple[UUID | None, str | None]] = set()
     if payload.combinations:
         for i, combo in enumerate(payload.combinations):
             conn_id, model_id = _effective_provider_fields(payload, combo)
             if conn_id is not None:
                 provider_connection_ids.add(conn_id)
             provider_model_checks.append((conn_id, model_id, _combination_context(i, combo)))
+            if is_codex(combo.agent_name):
+                codex_models.add((conn_id, model_id))
     else:
         conn_id, model_id = _effective_provider_fields(payload, None)
         if conn_id is not None:
             provider_connection_ids.add(conn_id)
         provider_model_checks.append((conn_id, model_id, None))
+        if is_codex(trial_config.get("agent_name")):
+            codex_models.add((conn_id, model_id))
 
     for conn_id in sorted(provider_connection_ids, key=str):
         try:
@@ -1241,8 +1198,14 @@ async def _create_batch_record(
             ).inc()
             raise
 
+    for conn_id, model_id in sorted(codex_models, key=str):
+        await refresh_codex_model_preflight(
+            request.app.state.session_factory,
+            provider_connection_id=conn_id,
+            provider_model_id=model_id,
+        )
     for conn_id, model_id, context in provider_model_checks:
-        await _reject_if_known_failed_provider_model(
+        await reject_if_known_failed_provider_model(
             s,
             provider_connection_id=conn_id,
             provider_model_id=model_id,
@@ -1325,7 +1288,7 @@ async def _create_batch_record(
                         status_code=400,
                         detail=err,
                     )
-                await _reject_if_known_failed_provider_model(
+                await reject_if_known_failed_provider_model(
                     s,
                     provider_connection_id=conn_id,
                     provider_model_id=multi_model_spec.secondary_model.name
@@ -1366,7 +1329,7 @@ async def _create_batch_record(
                     status_code=400,
                     detail=err,
                 )
-            await _reject_if_known_failed_provider_model(
+            await reject_if_known_failed_provider_model(
                 s,
                 provider_connection_id=conn_id,
                 provider_model_id=(

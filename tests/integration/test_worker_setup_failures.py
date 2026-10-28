@@ -24,7 +24,6 @@ from loom_worker.config import WorkerSettings
 from loom_worker.control_plane_client import HttpControlPlaneClient
 from loom_worker.main_loop import _spawn_trial
 from loom_worker.runner_pool import RunnerPool
-from loom_worker.vllm_registry import WorkerVLLMRegistry
 from tests.integration.test_service_trials_read import trials_setup  # noqa: F401
 
 _SECRET_SENTINEL = "setup-secret-do-not-publish"
@@ -134,7 +133,6 @@ async def test_s3_setup_failure_is_bounded_and_visible_to_user(
             await _spawn_trial(
                 pool=pool, settings=settings, cp_client=cp, gateway_client=None,
                 object_store=store, worker_id=worker_id, payload=payload,
-                vllm_registry=WorkerVLLMRegistry(enabled=False),
             )
             assert await asyncio.to_thread(requested.wait, 3), "worker did not reach S3"
             response = await user.get(f"/api/v1/trials/{trial_id}")

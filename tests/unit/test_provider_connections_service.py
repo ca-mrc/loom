@@ -564,6 +564,34 @@ async def test_preflight_timeout_is_recorded_as_inconclusive() -> None:
     ) == "inconclusive"
 
 
+@pytest.mark.parametrize(
+    ("status", "body", "kind"),
+    [
+        # An OpenAI-compatible relay with no channel for the model (#2054).
+        (503, {"error": {"code": "model_not_found", "message": "No available channel"}}, "rejected"),
+        (404, {"error": {"code": "model_not_found"}}, "rejected"),
+        (503, {"error": {"code": "overloaded"}}, "inconclusive"),
+        (503, "upstream unavailable", "inconclusive"),
+    ],
+)
+async def test_preflight_unroutable_model_is_a_rejection_whatever_the_status(
+    status: int, body: object, kind: str,
+) -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if isinstance(body, str):
+            return httpx.Response(status, text=body)
+        return httpx.Response(status, json=body)
+
+    result = await preflight_model(
+        "openai-compatible", "https://api.openai.com/v1", "sk-XYZ", "gpt-unrouted",
+        _client_factory=_client_factory(httpx.MockTransport(_handler)),
+    )
+
+    assert result.status == "failed"
+    assert result.http_status == status
+    assert classify_preflight_failure(result.error_code, result.http_status) == kind
+
+
 def _dripping_response(chunks: int, interval: float) -> httpx.Response:
     """200 whose body keeps making progress: one byte every `interval`s.
 

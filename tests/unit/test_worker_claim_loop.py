@@ -10,7 +10,6 @@ import pytest
 from loom_worker import main_loop as ml
 from loom_worker.runner_pool import RunnerPool
 from loom_worker.setup_admission import NodeHealthSnapshot
-from loom_worker.vllm_registry import WorkerVLLMRegistry
 
 
 class _Settings:
@@ -493,7 +492,6 @@ async def test_claim_cycle_fills_available_pool_capacity(monkeypatch) -> None:  
         gateway_client=None,
         object_store=None,
         worker_id=uuid4(),
-        vllm_registry=WorkerVLLMRegistry(enabled=False),
         sandbox_allocator=None,
         sandbox_singleton=None,
         read_setup_health=_healthy_setup_node,
@@ -516,7 +514,6 @@ async def test_claim_cycle_treats_control_plane_transport_error_as_no_claim() ->
         gateway_client=None,
         object_store=None,
         worker_id=uuid4(),
-        vllm_registry=WorkerVLLMRegistry(enabled=False),
         sandbox_allocator=None,
         sandbox_singleton=None,
         read_setup_health=_healthy_setup_node,
@@ -536,7 +533,6 @@ async def test_claim_cycle_does_not_claim_when_node_is_unhealthy() -> None:
         gateway_client=None,
         object_store=None,
         worker_id=uuid4(),
-        vllm_registry=WorkerVLLMRegistry(enabled=False),
         sandbox_allocator=None,
         sandbox_singleton=None,
         read_setup_health=lambda: NodeHealthSnapshot(
@@ -602,7 +598,6 @@ async def test_claim_cycle_rechecks_node_health_before_each_claim(monkeypatch) -
         gateway_client=None,
         object_store=None,
         worker_id=uuid4(),
-        vllm_registry=WorkerVLLMRegistry(enabled=False),
         sandbox_allocator=None,
         sandbox_singleton=None,
         read_setup_health=lambda: next(snapshots),

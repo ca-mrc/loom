@@ -33,7 +33,6 @@ from loom_worker.main_loop import (
     _verify_materialized_tb21_bundle_checksum,
 )
 from loom_worker.runner_pool import RunnerPool
-from loom_worker.vllm_registry import WorkerVLLMRegistry
 
 
 class _RecordingDriver:
@@ -259,7 +258,6 @@ async def test_worker_rejects_tb21_bundle_mutated_after_its_clean_audit(
             "attempt_count": 1,
             "config": {"agent_name": "oracle", "agent_model": None},
         },
-        vllm_registry=WorkerVLLMRegistry(enabled=False),
     )
     await pool.wait_all(timeout=2.0)
 

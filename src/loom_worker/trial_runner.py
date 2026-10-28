@@ -18,7 +18,6 @@ from uuid import UUID
 
 from loom.agent.base import AgentRuntime
 from loom.agent.gateway_client import LLMGatewayClient
-from loom.agent.local_vllm_client import LocalVLLMGatewayClient
 from loom.driver.base import Driver
 from loom.models.result import FailureReason, TrialResult, TrialState
 from loom.models.task import TaskConfig
@@ -40,7 +39,6 @@ from loom_worker.sandbox_network import (
 )
 from loom_worker.sandbox_singleton import SandboxSingletonManager
 from loom_worker.task_sidecars import DockerTaskSidecarRuntime
-from loom_worker.vllm_registry import WorkerVLLMRegistry
 from loom_worker.worker_health import WorkerUnhealthyError
 
 logger = logging.getLogger(__name__)
@@ -102,10 +100,6 @@ class LocalTrialRunner:
     # through to Trial via TrialContext.llm_calls_fetcher. None means
     # no llm_calls injection at finalize (legacy v0.7 behavior).
     llm_calls_fetcher: Callable[[UUID], Awaitable[list[dict[str, object]]]] | None = None
-    # PR-E: worker-spawned vLLM registry. Optional — when None, any
-    # trial requesting `ModelSpec.source=hf, hf_execution=local-vllm`
-    # surfaces an AgentError instead of silently routing elsewhere.
-    vllm_registry: WorkerVLLMRegistry | None = None
     # #188 / Phase B: optional sandbox-isolation hooks. When BOTH are
     # set, the runner creates a per-trial bridge before driver.start
     # and attaches the singleton to it once the driver is up. None →
@@ -273,15 +267,9 @@ class LocalTrialRunner:
             # Plan 23: agent + model live on TrialConfig and are required.
             # TaskConfig.agent.* is no longer consulted for service-mode
             # trials — every submission specifies which agent + model run.
-            # PR-E: when the model targets a worker-spawned vLLM, swap the
-            # gateway for a direct LocalVLLMGatewayClient before handing
-            # it to the agent factory. The vLLM registry caches across
-            # trials so successive trials of the same model reuse one
-            # subprocess instead of paying the 1-3 min startup each time.
-            effective_gateway = await self._resolve_gateway()
             agent = self.agent_factory(
                 self.task_dir,
-                effective_gateway,
+                self.gateway_client,
                 self.trial_config.agent_model,
                 self.trial_config.agent_name,
             )
@@ -512,32 +500,6 @@ class LocalTrialRunner:
                 exc,
             )
             return False
-
-    async def _resolve_gateway(self) -> LLMGatewayClient:
-        """Pick the gateway client for this trial.
-
-        Default: the worker's `gateway_client` (HTTP to the LLM Gateway
-        service). When the trial's model selects worker-spawned vLLM,
-        substitute a `LocalVLLMGatewayClient` pointed at the registry's
-        cached subprocess URL — bypasses the gateway since the vLLM
-        runs on this same worker host.
-        """
-        model = self.trial_config.agent_model
-        if model is None:
-            return self.gateway_client
-        if model.source != "hf" or model.hf_execution != "local-vllm":
-            return self.gateway_client
-        if self.vllm_registry is None:
-            from loom.errors import AgentError
-
-            raise AgentError(
-                "trial requests source=hf, hf_execution=local-vllm but "
-                "this worker has no vllm_registry configured. Set up a "
-                "worker with `pip install loom[vllm]` or pick a different "
-                "model source.",
-            )
-        handle = await self.vllm_registry.get_or_launch(model.name)
-        return LocalVLLMGatewayClient(base_url=handle.base_url)
 
 
 def _build_result_payload(result: TrialResult) -> dict[str, object]:

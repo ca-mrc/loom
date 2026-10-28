@@ -54,11 +54,6 @@
     "default": "None",
     "required": false
   },
-  "huggingface_api_key": {
-    "annotation": "pydantic.types.SecretStr | None",
-    "default": "None",
-    "required": false
-  },
   "legacy_attempt_deadline_compat_sec": {
     "annotation": "<class 'float'>",
     "default": "86400.0",

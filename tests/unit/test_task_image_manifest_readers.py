@@ -13,7 +13,6 @@ from loom.trajectory.storage import BUNDLE_FILE_METADATA_NAME
 from loom_worker import main_loop, task_image_builder
 from loom_worker.runner_pool import RunnerPool
 from loom_worker.task_bundle_integrity import verified_task_image_cache_identity
-from loom_worker.vllm_registry import WorkerVLLMRegistry
 from tests.unit.test_main_loop_cleanup import _FakeCPClient, _FakeSettings, _RunnerDouble
 from tests.unit.test_task_image_builder import _claim, _settings
 from tests.unit.test_task_image_bundle_content_manifest import _legacy_collision
@@ -196,7 +195,6 @@ async def test_trial_verifies_manifest_before_runtime_and_preserves_legacy_metad
             object_store=None,
             worker_id=uuid4(),
             payload=payload,
-            vllm_registry=WorkerVLLMRegistry(enabled=False),
         )
         await pool.wait_all(timeout=2.0)
     if matching and sidecar != "tampered":

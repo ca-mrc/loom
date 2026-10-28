@@ -55,14 +55,11 @@ async def test_worker_storage_startup_preserves_failure_and_closes_acquired_reso
         return_value=store, side_effect=error if stage == "store" else None,
     ))
     monkeypatch.setattr(ml, "_ensure_runtime_buckets", AsyncMock(side_effect=error))
-    registry = Mock()
-    monkeypatch.setattr(ml, "WorkerVLLMRegistry", registry)
     with pytest.raises(RuntimeError, match="storage startup unavailable") as raised:
         await ml.run_worker(settings)  # type: ignore[arg-type]
     assert raised.value is error
     heartbeat.stop.assert_called_once()
     heartbeat.join.assert_called_once()
-    registry.assert_not_called()
     assert store.close.call_count == (1 if stage == "buckets" else 0)
 
 
@@ -423,7 +420,6 @@ async def _drive_spawn(runner_target: object, *, attempt_count: object = 1) -> P
     ):
         fake_tempfile.mkdtemp.side_effect = capture_mkdtemp
         fake_runner_cls.return_value = runner_target
-        from loom_worker.vllm_registry import WorkerVLLMRegistry
 
         await ml._spawn_trial(
             pool=pool,
@@ -433,7 +429,6 @@ async def _drive_spawn(runner_target: object, *, attempt_count: object = 1) -> P
             object_store=None,  # type: ignore[arg-type]
             worker_id=uuid4(),
             payload=payload,
-            vllm_registry=WorkerVLLMRegistry(enabled=False),
         )
         await pool.wait_all(timeout=2.0)
 
@@ -478,7 +473,6 @@ async def test_tempdir_cleaned_on_runner_exception() -> None:
 
 
 async def test_runner_exception_marks_claimed_trial_failed() -> None:
-    from loom_worker.vllm_registry import WorkerVLLMRegistry
 
     settings = _FakeSettings()
     cp = _FakeCPClient()
@@ -502,7 +496,6 @@ async def test_runner_exception_marks_claimed_trial_failed() -> None:
                 "attempt_count": 1,
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
-            vllm_registry=WorkerVLLMRegistry(enabled=False),
         )
         await pool.wait_all(timeout=2.0)
 
@@ -516,7 +509,6 @@ async def test_runner_exception_marks_claimed_trial_failed() -> None:
 
 
 async def test_spawn_uses_script_verifier_from_task_config() -> None:
-    from loom_worker.vllm_registry import WorkerVLLMRegistry
 
     settings = _FakeSettings()
     cp = _FakeCPClient()
@@ -549,7 +541,6 @@ async def test_spawn_uses_script_verifier_from_task_config() -> None:
                 "attempt_count": 1,
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
-            vllm_registry=WorkerVLLMRegistry(enabled=False),
         )
         await pool.wait_all(timeout=2.0)
 
@@ -560,7 +551,6 @@ async def test_spawn_uses_script_verifier_from_task_config() -> None:
 
 
 async def test_spawn_uses_resolved_task_image_for_dockerfile_task() -> None:
-    from loom_worker.vllm_registry import WorkerVLLMRegistry
 
     settings = _FakeSettings()
     cp = _FakeCPClient()
@@ -600,7 +590,6 @@ async def test_spawn_uses_resolved_task_image_for_dockerfile_task() -> None:
                 "attempt_count": 1,
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
-            vllm_registry=WorkerVLLMRegistry(enabled=False),
         )
         await pool.wait_all(timeout=2.0)
 
@@ -616,7 +605,6 @@ async def test_spawn_uses_resolved_task_image_for_dockerfile_task() -> None:
 
 
 async def test_spawn_uses_frozen_materialization_and_exact_registry_digests() -> None:
-    from loom_worker.vllm_registry import WorkerVLLMRegistry
 
     settings = _FakeSettings()
     settings.trial_cache_registry_repo = "registry.example/wrong-derived-tag"
@@ -705,7 +693,6 @@ async def test_spawn_uses_frozen_materialization_and_exact_registry_digests() ->
             object_store=None,  # type: ignore[arg-type]
             worker_id=uuid4(),
             payload=payload,
-            vllm_registry=WorkerVLLMRegistry(enabled=False),
         )
         await pool.wait_all(timeout=2.0)
 
@@ -727,7 +714,6 @@ async def test_spawn_uses_frozen_materialization_and_exact_registry_digests() ->
 
 async def test_task_image_setup_failure_records_diagnostic_message() -> None:
     from loom_worker.task_image import TaskImageBuildError
-    from loom_worker.vllm_registry import WorkerVLLMRegistry
 
     settings = _FakeSettings()
     cp = _FakeCPClient()
@@ -753,7 +739,6 @@ async def test_task_image_setup_failure_records_diagnostic_message() -> None:
                 "attempt_count": 1,
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
-            vllm_registry=WorkerVLLMRegistry(enabled=False),
         )
         await pool.wait_all(timeout=2.0)
 
@@ -770,7 +755,6 @@ async def test_long_setup_failure_writes_redacted_diagnostic_file(
     tmp_path: Path,
 ) -> None:
     from loom_worker.task_image import TaskImageBuildError
-    from loom_worker.vllm_registry import WorkerVLLMRegistry
 
     settings = _FakeSettings()
     settings.trajectory_cache_dir = tmp_path / "trajectory-cache"
@@ -811,7 +795,6 @@ async def test_long_setup_failure_writes_redacted_diagnostic_file(
                 "attempt_count": 1,
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
-            vllm_registry=WorkerVLLMRegistry(enabled=False),
         )
         await pool.wait_all(timeout=2.0)
 
@@ -828,7 +811,6 @@ async def test_long_setup_failure_writes_redacted_diagnostic_file(
 
 
 async def test_setup_transport_disconnect_requeues_when_trial_policy_allows() -> None:
-    from loom_worker.vllm_registry import WorkerVLLMRegistry
 
     settings = _FakeSettings()
     cp = _FakeCPClient()
@@ -867,7 +849,6 @@ async def test_setup_transport_disconnect_requeues_when_trial_policy_allows() ->
                     },
                 },
             },
-            vllm_registry=WorkerVLLMRegistry(enabled=False),
         )
         await pool.wait_all(timeout=2.0)
 
@@ -994,7 +975,6 @@ async def test_setup_retry_report_false_falls_back_to_terminal_patch() -> None:
 
 
 async def test_tempdir_cleaned_on_cancellation() -> None:
-    from loom_worker.vllm_registry import WorkerVLLMRegistry
 
     class _SlowRunner(_RunnerDouble):
         async def run(self) -> None:
@@ -1031,7 +1011,6 @@ async def test_tempdir_cleaned_on_cancellation() -> None:
                 "attempt_count": 1,
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
-            vllm_registry=WorkerVLLMRegistry(enabled=False),
         )
         await asyncio.sleep(0.05)
         pool.cancel_all()
@@ -1042,7 +1021,6 @@ async def test_tempdir_cleaned_on_cancellation() -> None:
 
 
 async def test_bundle_lookup_failure_marks_trial_failed_without_spawning() -> None:
-    from loom_worker.vllm_registry import WorkerVLLMRegistry
 
     settings = _FakeSettings()
     cp = _Bundle404CPClient()
@@ -1064,7 +1042,6 @@ async def test_bundle_lookup_failure_marks_trial_failed_without_spawning() -> No
             "attempt_count": 1,
             "config": {"agent_name": "oracle", "agent_model": None},
         },
-        vllm_registry=WorkerVLLMRegistry(enabled=False),
     )
 
     await pool.wait_all(timeout=0.1)
@@ -1081,7 +1058,6 @@ async def test_bundle_lookup_failure_marks_trial_failed_without_spawning() -> No
 
 
 async def test_claimed_trial_counts_in_flight_before_setup_finishes() -> None:
-    from loom_worker.vllm_registry import WorkerVLLMRegistry
 
     settings = _FakeSettings()
     cp = _BlockingBundleCPClient()
@@ -1104,7 +1080,6 @@ async def test_claimed_trial_counts_in_flight_before_setup_finishes() -> None:
                     "attempt_count": 1,
                     "config": {"agent_name": "oracle", "agent_model": None},
                 },
-                vllm_registry=WorkerVLLMRegistry(enabled=False),
             )
         )
         await cp.bundle_requested.wait()
@@ -1115,7 +1090,6 @@ async def test_claimed_trial_counts_in_flight_before_setup_finishes() -> None:
 
 
 async def test_pre_start_heartbeat_runs_while_setup_waits() -> None:
-    from loom_worker.vllm_registry import WorkerVLLMRegistry
 
     settings = _FakeSettings()
     cp = _BlockingBundleCPClient()
@@ -1140,7 +1114,6 @@ async def test_pre_start_heartbeat_runs_while_setup_waits() -> None:
                     "attempt_count": 1,
                     "config": {"agent_name": "oracle", "agent_model": None},
                 },
-                vllm_registry=WorkerVLLMRegistry(enabled=False),
             )
         )
         await cp.bundle_requested.wait()
@@ -1155,7 +1128,6 @@ async def test_pre_start_heartbeat_runs_while_setup_waits() -> None:
 
 
 async def test_setup_failure_inside_pool_marks_claimed_trial_failed() -> None:
-    from loom_worker.vllm_registry import WorkerVLLMRegistry
 
     settings = _FakeSettings()
     cp = _BlockingFailingBundleCPClient()
@@ -1178,7 +1150,6 @@ async def test_setup_failure_inside_pool_marks_claimed_trial_failed() -> None:
                 "attempt_count": 1,
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
-            vllm_registry=WorkerVLLMRegistry(enabled=False),
         )
     )
 
@@ -1201,7 +1172,6 @@ async def test_setup_failure_inside_pool_marks_claimed_trial_failed() -> None:
 
 
 async def test_materialize_timeout_marks_claimed_trial_failed() -> None:
-    from loom_worker.vllm_registry import WorkerVLLMRegistry
 
     class _HangingMaterializer:
         def matches(self, source: str | None) -> bool:
@@ -1241,7 +1211,6 @@ async def test_materialize_timeout_marks_claimed_trial_failed() -> None:
                 "attempt_count": 1,
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
-            vllm_registry=WorkerVLLMRegistry(enabled=False),
         )
         try:
             await pool.wait_all(timeout=1.0)
@@ -1263,7 +1232,6 @@ async def test_materialize_timeout_marks_claimed_trial_failed() -> None:
 
 
 async def test_setup_failure_redacts_secret_detail_before_state_patch() -> None:
-    from loom_worker.vllm_registry import WorkerVLLMRegistry
 
     async def fail_materialize(**_kwargs: object) -> Path:
         raise RuntimeError(
@@ -1291,7 +1259,6 @@ async def test_setup_failure_redacts_secret_detail_before_state_patch() -> None:
                 "attempt_count": 1,
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
-            vllm_registry=WorkerVLLMRegistry(enabled=False),
         )
         await pool.wait_all(timeout=2.0)
 

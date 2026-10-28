@@ -20,9 +20,13 @@ import asyncio
 import ipaddress
 import socket
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 from urllib.parse import quote, urlparse
 
 from loom.security.redaction import redact_text
+
+if TYPE_CHECKING:
+    import httpx
 
 # Public IP classifications that are always SSRF targets — rejected
 # even when team.allow_private_endpoints=True. These are network
@@ -270,6 +274,10 @@ def classify_preflight_failure(
     """
     if error_code in _INCONCLUSIVE_PREFLIGHT_ERROR_CODES:
         return "inconclusive"
+    if error_code == "model-not-found":
+        # The upstream names the model as unroutable, whatever the status:
+        # OpenAI-compatible relays answer 503 when no channel serves it.
+        return "rejected"
     if http_status is not None and (http_status in (408, 429) or http_status >= 500):
         return "inconclusive"
     return "rejected"
@@ -433,6 +441,17 @@ async def probe_connection(
     )
 
 
+def _upstream_error_code(resp: httpx.Response) -> str | None:
+    """`error.code` from an OpenAI-shaped error body, if there is one."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    error = body.get("error") if isinstance(body, dict) else None
+    code = error.get("code") if isinstance(error, dict) else None
+    return code if isinstance(code, str) else None
+
+
 async def preflight_model(
     provider_type: str, base_url: str, api_key: str, model_id: str,
     *, _client_factory: object = None,
@@ -510,10 +529,12 @@ async def preflight_model(
     excerpt = (resp.text or "")[:200]
     safe_url = _redact_secret(f"{base}{path}", api_key)
     safe_excerpt = _redact_secret(excerpt, api_key)
-    error_code = (
-        "access-denied" if resp.status_code in (401, 403)
-        else "upstream-http-error"
-    )
+    if resp.status_code in (401, 403):
+        error_code = "access-denied"
+    elif _upstream_error_code(resp) == "model_not_found":
+        error_code = "model-not-found"
+    else:
+        error_code = "upstream-http-error"
     return ModelPreflightResult(
         status="failed",
         http_status=resp.status_code,

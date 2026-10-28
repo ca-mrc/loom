@@ -7,7 +7,7 @@ data. They are not supported deployment procedures or future implementation plan
 - [Legacy schema retirement](legacy-schema-retirement-2026-09.md): migration 0171's disposition, retained data and upgrade/rollback constraints.
 - [Reference audit](shared-cluster-reference-audit.json): the retirement-time snapshot of classified legacy terminology; paths and counts are historical, not a current repository inventory.
 - [Staging data lineage](staging-data-lifecycle.md): identities and constraints used by historical backups and database rows.
-- [Hosted model-source retirement](hosted-model-source-retirement-2026-10.md): retired `hf` and `local-server` sources, the in-flight inventory, and what may be deleted.
+- [Hosted model-source retirement](hosted-model-source-retirement-2026-10.md): retired `hf` and `local-server` sources, the in-flight inventory, and what was removed.
 
 ## Recovering older material
 

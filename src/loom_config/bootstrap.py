@@ -75,7 +75,6 @@ _SMOKE_DEFAULTS: Mapping[str, str] = {
     "openai-api-key":         "smoke-openai",
     "google-api-key":         "smoke-google",
     "together-api-key":       "smoke-together",
-    "huggingface-api-key":    "smoke-hf",
     "batch-runner-cp-token":  "smoke-batch-cp-token",
     "secret-store-master-key": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE",
     # infra_secrets: non-codegen secrets that read from loom-secrets

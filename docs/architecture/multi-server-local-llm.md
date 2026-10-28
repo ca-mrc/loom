@@ -54,7 +54,6 @@ IDs to that same already-running server. Both bare IDs such as `llama3.1` and
 IDs containing slashes are preserved. Managed `hf:` or path specs cannot be combined
 with `--local-server`.
 
-The local launcher exists only in CLI mode. Service-mode local endpoints are
-configured on the LLM Gateway through `gateway_local_providers` or the
-corresponding Gateway settings. See [Local LLMs](local-llm.md) and the
+The local launcher exists only in CLI mode. In service mode, register a local
+endpoint as an OpenAI-compatible Provider Connection. See [Local LLMs](local-llm.md) and the
 [user guide](../user-guide.md#comparing-multiple-models).

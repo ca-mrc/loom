@@ -112,8 +112,6 @@ def render_development_foundation(
                 if row["name"] in {"LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENABLED",
                                    "LOOM_CP_SERVICE_EXECUTION_MATERIALIZER_ENABLED"}:
                     row["value"] = "false"
-        elif name == "loom-llm-gateway":
-            container["env"] = [row for row in env if not row["name"].startswith("LOOM_GW_LOCAL_")]
     migration, = files["30-migrate.yaml"]
     migration["metadata"]["name"] = "loom-development-migrate-" + revision[7:19]
     pod = migration["spec"]["template"]["spec"]

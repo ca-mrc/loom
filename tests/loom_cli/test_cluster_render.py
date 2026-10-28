@@ -245,65 +245,20 @@ def _gateway_env(cfg: ClusterConfig) -> dict[str, dict]:
     return {e["name"]: e for e in gw["spec"]["template"]["spec"]["containers"][0]["env"]}
 
 
-def test_gateway_local_providers_render_env() -> None:
-    """A configured local provider renders LOOM_GW_LOCAL_<NAME>_* env: a
-    literal base URL + an optional secret-backed API key, so agents can
-    route `local/<name>/<model>` through an operator relay (#1141)."""
-    cfg = ClusterConfig(gateway_local_providers=("yibu|https://yibuapi.com/v1|qa-relay-api-key",))
-    env = _gateway_env(cfg)
-    assert env["LOOM_GW_LOCAL_YIBU_BASE_URL"]["value"] == "https://yibuapi.com/v1"
-    key_ref = env["LOOM_GW_LOCAL_YIBU_API_KEY"]["valueFrom"]["secretKeyRef"]
-    assert key_ref == {"name": "loom-secrets", "key": "qa-relay-api-key", "optional": True}
-
-
 def test_gateway_local_providers_absent_by_default() -> None:
-    """Production (empty allowlist) must not leak any local-provider env —
-    keeps the default golden manifest and prod deploys relay-free."""
     env = _gateway_env(ClusterConfig())
     assert not [name for name in env if name.startswith("LOOM_GW_LOCAL_")]
 
 
-def test_gateway_local_providers_name_is_uppercased_and_dash_normalized() -> None:
-    cfg = ClusterConfig(gateway_local_providers=("qa-relay|https://relay.example/v1|relay-key",))
-    env = _gateway_env(cfg)
-    assert "LOOM_GW_LOCAL_QA_RELAY_BASE_URL" in env
-
-
-@pytest.mark.parametrize(
-    "entry",
-    [
-        "yibu|https://yibuapi.com/v1",  # too few fields
-        "yibu|https://yibuapi.com/v1|key|extra",  # too many
-        "|https://yibuapi.com/v1|key",  # empty name
-        "yibu||key",  # empty base_url
-        "yibu|https://yibuapi.com/v1|",  # empty secret_key
-        "yi bu|https://yibuapi.com/v1|key",  # non-env-safe name
-    ],
-)
-def test_gateway_local_providers_rejects_malformed(entry: str) -> None:
-    with pytest.raises(ValueError, match="gateway_local_providers"):
-        render_manifests(ClusterConfig(gateway_local_providers=(entry,)))
-
-
-def test_gateway_local_providers_rejects_duplicate_name() -> None:
-    cfg = ClusterConfig(
-        gateway_local_providers=(
-            "yibu|https://a.example/v1|k1",
-            "yibu|https://b.example/v1|k2",
-        )
-    )
-    with pytest.raises(ValueError, match="duplicate"):
-        render_manifests(cfg)
-
-
-def test_load_config_gateway_local_providers_from_toml(tmp_path: Path) -> None:
+def test_gateway_local_providers_are_retired(tmp_path: Path) -> None:
+    """#2054: an empty key still loads; entries are rejected, not rendered."""
     cfg_path = tmp_path / "cluster.toml"
-    cfg_path.write_text(
-        'gateway_local_providers = ["yibu|https://yibuapi.com/v1|qa-relay-api-key"]\n',
-        encoding="utf-8",
-    )
-    cfg = load_cluster_config(cfg_path)
-    assert cfg.gateway_local_providers == ("yibu|https://yibuapi.com/v1|qa-relay-api-key",)
+    cfg_path.write_text("gateway_local_providers = []\n", encoding="utf-8")
+    render_manifests(load_cluster_config(cfg_path))
+
+    cfg = ClusterConfig(gateway_local_providers=("yibu|https://yibuapi.com/v1|qa-relay-api-key",))
+    with pytest.raises(ValueError, match="gateway_local_providers is retired"):
+        render_manifests(cfg)
 
 
 # ──────────────────────────────────────────────────────────────────────

@@ -468,39 +468,18 @@ def test_chat_rejects_unsupported_provider(app, seed_data):  # type: ignore[no-u
         assert "unsupported provider" in r.json()["detail"]
 
 
-def test_chat_local_vllm_returns_501(app, seed_data):  # type: ignore[no-untyped-def]
-    """PR-D: `local-vllm/...` requests should be handled by the worker,
-    not the gateway. A request reaching the gateway with this prefix
-    means the dispatcher misrouted; surface 501 with a clear hint."""
+@pytest.mark.parametrize(
+    "model", ["local/yibu/glm-5.2", "huggingface/meta-llama/Llama-3-8B", "local-vllm/llama3"],
+)
+def test_chat_rejects_retired_hosted_model_sources(app, seed_data, model):  # type: ignore[no-untyped-def]
+    """#2054: the hosted `local-server` and `hf` routes are retired."""
     team_id, raw_token = seed_data
     with TestClient(app) as client:
         r = client.post(
             "/v1/chat/completions",
             headers={"Authorization": f"Bearer {raw_token}"},
             json={
-                "model": "local-vllm/meta-llama/Llama-3-8B-Instruct",
-                "messages": [{"role": "user", "content": "hi"}],
-                "loom": {
-                    "team_id": str(team_id),
-                    "trial_id": str(uuid4()),
-                    "step_id": "main",
-                },
-            },
-        )
-        assert r.status_code == 501
-        assert "worker" in r.json()["detail"].lower()
-
-
-def test_chat_local_unknown_server_returns_400(app, seed_data):  # type: ignore[no-untyped-def]
-    """PR-D: `local/<name>/...` against an unconfigured server name
-    → 400 with a clear hint about the env var."""
-    team_id, raw_token = seed_data
-    with TestClient(app) as client:
-        r = client.post(
-            "/v1/chat/completions",
-            headers={"Authorization": f"Bearer {raw_token}"},
-            json={
-                "model": "local/nonexistent/llama3",
+                "model": model,
                 "messages": [{"role": "user", "content": "hi"}],
                 "loom": {
                     "team_id": str(team_id),
@@ -510,31 +489,7 @@ def test_chat_local_unknown_server_returns_400(app, seed_data):  # type: ignore[
             },
         )
         assert r.status_code == 400
-        detail = r.json()["detail"]
-        assert "nonexistent" in detail
-        assert "LOOM_GW_LOCAL_" in detail
-
-
-def test_chat_local_malformed_model_string_returns_400(app, seed_data):  # type: ignore[no-untyped-def]
-    """PR-D: `local/<server>` missing the model_id segment → 400 with
-    a clear shape hint."""
-    team_id, raw_token = seed_data
-    with TestClient(app) as client:
-        r = client.post(
-            "/v1/chat/completions",
-            headers={"Authorization": f"Bearer {raw_token}"},
-            json={
-                "model": "local/only-one-segment",
-                "messages": [{"role": "user", "content": "hi"}],
-                "loom": {
-                    "team_id": str(team_id),
-                    "trial_id": str(uuid4()),
-                    "step_id": "main",
-                },
-            },
-        )
-        assert r.status_code == 400
-        assert "local/<server>/<model_id>" in r.json()["detail"]
+        assert "unsupported provider" in r.json()["detail"]
 
 
 def test_chat_rejects_unknown_model_with_400(app, seed_data):  # type: ignore[no-untyped-def]

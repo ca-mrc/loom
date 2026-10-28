@@ -115,10 +115,10 @@ grouping and foreground server registration.
 ## Service-mode boundary
 
 The launcher runs only in the CLI and does not submit servers to an external
-scheduler. Service-mode operators can configure Gateway upstreams through
-`gateway_local_providers`, which renders `LOOM_GW_LOCAL_<NAME>_BASE_URL` and
-optional API-key settings. Hosted users normally register a team-owned
-provider connection. Neither path starts model-serving processes.
+scheduler. In service mode, a local server is registered as a team-owned
+OpenAI-compatible Provider Connection; the Gateway's `local/<name>` route and
+`gateway_local_providers` are retired (#2054). Neither starts model-serving
+processes.
 
 ## Verification coverage
 

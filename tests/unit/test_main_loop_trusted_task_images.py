@@ -12,7 +12,6 @@ import pytest
 
 from loom_worker import main_loop as ml
 from loom_worker.runner_pool import RunnerPool
-from loom_worker.vllm_registry import WorkerVLLMRegistry
 from tests.unit.test_main_loop_cleanup import _FakeCPClient, _FakeSettings
 from tests.unit.test_task_image_publication_signing import NOW
 from tests.unit.test_worker_claim_loop import _healthy_setup_node
@@ -110,7 +109,6 @@ async def test_signed_claim_preparation_and_start_stay_bound(tmp_path, monkeypat
     await ml._spawn_trial(
         pool=pool, settings=settings, cp_client=cp, gateway_client=None,
         object_store=None, worker_id=worker_id, payload=payload,
-        vllm_registry=WorkerVLLMRegistry(enabled=False),
         execution_trust=None if case == "no_root" else trust,
     )
     await pool.wait_all(timeout=2)
@@ -169,7 +167,7 @@ async def test_shared_claim_parser_preserves_signed_wire_and_trusted_context(tmp
         pool=RunnerPool(max_concurrent=1), settings=settings, cp_client=cp,
         gateway_client=None, object_store=None, worker_id=UUID(grant["claim"]["worker_id"]),
         capability_snapshot_digest="sha256:" + "1" * 64,
-        pipeline_run=AsyncMock() if pipeline else None, vllm_registry=WorkerVLLMRegistry(enabled=False),
+        pipeline_run=AsyncMock() if pipeline else None,
         read_setup_health=_healthy_setup_node, execution_trust=trust,
     ) == 1
     assert spawn.call_args.kwargs["payload"]["task_image_execution"] == raw_delivery
@@ -189,7 +187,7 @@ async def test_release_trust_cannot_enable_legacy_body_capability_claims(tmp_pat
             pool=RunnerPool(max_concurrent=1), settings=_FakeSettings(), cp_client=cp,
             gateway_client=None, object_store=None, worker_id=UUID(kwargs["expected_claim"].worker_id),
             capability_snapshot_digest=None, pipeline_run=None,
-            vllm_registry=WorkerVLLMRegistry(enabled=False), execution_trust=trust,
+            execution_trust=trust,
         )
     assert cp.mock_calls == []
 
@@ -270,6 +268,6 @@ async def test_trial_only_reader_rejects_an_unrequested_pipeline_attempt(tmp_pat
     with pytest.raises(RuntimeError, match="mismatched Pipeline claim"):
         await ml._claim_available_work(pool=pool, settings=settings, cp_client=cp, gateway_client=None,
             object_store=None, worker_id=UUID(kwargs["expected_claim"].worker_id), capability_snapshot_digest="sha256:" + "1" * 64,
-            pipeline_run=None, vllm_registry=WorkerVLLMRegistry(enabled=False), read_setup_health=_healthy_setup_node,
+            pipeline_run=None, read_setup_health=_healthy_setup_node,
             execution_trust=trust)
     assert pool.in_flight == 0

@@ -77,7 +77,7 @@ manual SQL.
 
 `loom qa matrix --compatibility-plan` turns the same service-mode agent
 metadata into a login-free provider compatibility matrix. It emits one cell per
-repo-known displayed `service_mode_ready=true` agent and provider endpoint type,
+supported product entry (`service_mode_ready=true`, not deferred) and provider endpoint type,
 including generic `supported_providers=["*"]` agents as per-agent rows. Each
 cell records whether the combination is repo-supported, skipped
 because the harness takes no model, or blocked before submit because the
