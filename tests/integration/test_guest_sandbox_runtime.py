@@ -375,7 +375,7 @@ def test_guest_docker_registry_traffic_uses_outer_allowlist_proxy() -> None:
 @pytest.mark.parametrize("layout", ["directory", "symlink"])
 def test_existing_docker_plugin_layout_does_not_block_guest(layout: str) -> None:
     with guest(docker=True, plugin_layout=layout) as (client, _, _):
-        assert "v0.36.1" in execute(client, "docker buildx version")
+        assert "v0.38.1" in execute(client, "docker buildx version")
         assert execute(client, "echo $DOCKER_CONFIG").strip() == "/loom/docker-client"
 
 
