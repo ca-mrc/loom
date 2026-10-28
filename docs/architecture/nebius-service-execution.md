@@ -1292,8 +1292,15 @@ then deleted, so no capacity is held while grading waits. The control-plane
 scheduler pass reserves one verifier lease per attempt and retry after parent
 cleanup completes. Local reservation derives its request id from the parent
 lease and child plan; global selection retains one immutable outbox proposal.
-Repeated or concurrent passes cannot reserve a second child. The child keeps the parent's target
-and requirements and receives the parent's committed `workspace.tar`,
+Repeated or concurrent passes cannot reserve a second child. The child retains
+the parent's route identity and execution authority. That route remains bound
+to the agent's complete frozen requirements; an independent grader has its own
+complete lease requirements, including its distinct image. Reservation derives
+those requirements from the parent's frozen verifier environment and trial
+configuration, then checks the prepared images, source identity, execution
+class and target's pool, environment, region and residency. A shared-environment
+verifier must retain the parent's requirements and target. The child receives
+the parent's committed `workspace.tar`,
 workspace references and mutable paths through the plan's `handoff_input`. The
 runtime places them under `.loom/` outside the task-bundle digest.
 
