@@ -622,6 +622,15 @@ write encrypted credentials. Service and CP retain application DML permissions;
 only the bootstrap/migration job uses the database superuser. Future schema
 changes must update narrower grants alongside their runtime consumers.
 
+Native Harbor preparation revision `0181` adds an immutable recipe identity to
+task-image materializations. Legacy rows retain the empty recipe; new native
+requests select the harness-directory recipe without relabeling frozen claims.
+Pool activation, manager observation and lease census explicitly qualify this
+schema alongside their retained revisions. The legacy manager default remains
+`0176`, and unknown revisions still reject. Apply the schema through the normal
+backup/guard rollout; older binaries are not qualified for new-recipe rows, and
+downgrade refuses while those rows remain.
+
 The actuator's database grants also cover the existing transaction locks and
 invoker-rights triggers used by its command/reconciliation path:
 
