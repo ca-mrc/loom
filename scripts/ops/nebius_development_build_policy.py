@@ -23,14 +23,15 @@ def _literal(value: Any) -> str:
     return json.dumps(value, separators=(',', ':'), sort_keys=True)
 
 
-def _mount(name: str, path: str, *, readonly: bool = False) -> str:
+def _mount(name: str, path: str, *, readonly: bool = False, subpath: str | None = None) -> str:
     return (f"(m.name == {_literal(name)} && m.mountPath == {_literal(path)} && "
-        + ("has(m.readOnly) && m.readOnly" if readonly else "(!has(m.readOnly) || !m.readOnly)") + ")")
+        + ("has(m.readOnly) && m.readOnly" if readonly else "(!has(m.readOnly) || !m.readOnly)")
+        + " && " + ("!has(m.subPath)" if subpath is None else f"has(m.subPath) && m.subPath == {_literal(subpath)}") + ")")
 
 
 def _mounts(variable: str, allowed: list[str]) -> str:
     return (f"size({variable}.volumeMounts) == {len(allowed)} && {variable}.volumeMounts.all(m, "
-        "!has(m.subPath) && !has(m.subPathExpr) && !has(m.mountPropagation) && (" + ' || '.join(allowed) + '))')
+        "!has(m.subPathExpr) && !has(m.mountPropagation) && (" + ' || '.join(allowed) + '))')
 
 
 def _profile(profile: Any, workload: str) -> str:
@@ -94,6 +95,11 @@ def _profile(profile: Any, workload: str) -> str:
     volumes = ["(v.name == 'claim' && has(v.configMap) && "
         "v.configMap.name.matches('^loom-pool-[0-9a-f]{32}$') && v.configMap.defaultMode == 292 && "
         "(!has(v.configMap.optional) || !v.configMap.optional) && !has(v.configMap.items))"]
+    volumes.append("(v.name == 'builder-subids' && has(v.configMap) && "
+        "v.configMap.name == variables.p.volumes.filter(c, c.name == 'claim')[0].configMap.name && "
+        "v.configMap.defaultMode == 292 && (!has(v.configMap.optional) || !v.configMap.optional) && "
+        "has(v.configMap.items) && v.configMap.items.map(i, [i.key, i.path]) == [['subuid','subuid'],['subgid','subgid']] && "
+        "v.configMap.items.all(i, !has(i.mode)))")
     for name, size in (('build', config.ephemeral_storage_mib), ('builder-tmp', config.ephemeral_storage_mib),
             ('prepare-tmp', config.ephemeral_storage_mib // 4), ('publish-tmp', config.ephemeral_storage_mib // 4),
             ('deadline-runtime', 8)):
@@ -171,8 +177,10 @@ def build_policy_documents(namespace: str, profiles: PoolProfileCatalog) -> tupl
          "variables.build.command[0] == '/loom/deadline-runtime/loom-build-deadline' && "
          "variables.build.command[3] == '--' && variables.build.command[4] == 'sh' && variables.build.command[5] == '-c' && "
          + _mounts('variables.build', [_mount('build', '/loom/build'), _mount('builder-tmp', '/scratch'),
-             _mount('builder-tmp', '/tmp'), _mount('deadline-runtime', '/loom/deadline-runtime', readonly=True)]),
-         'The rootless builder may use only its private scratch and read-only deadline runtime.'),
+             _mount('builder-tmp', '/tmp'), _mount('deadline-runtime', '/loom/deadline-runtime', readonly=True),
+             _mount('builder-subids', '/etc/subuid', readonly=True, subpath='subuid'),
+             _mount('builder-subids', '/etc/subgid', readonly=True, subpath='subgid')]),
+         'The rootless builder may use only private scratch, the read-only deadline runtime and fixed owner-ID files.'),
         (' || '.join(_profile(profile, workload) for profile, workload in builds),
          'Build image, command, placement, resources or credential references differ from the closed catalog.'),
     ]

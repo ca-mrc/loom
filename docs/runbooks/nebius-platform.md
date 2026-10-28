@@ -1344,9 +1344,10 @@ the key to the registry; the publisher restricts output to the configured
 authorization.
 
 The Job runs three phases sequentially. Trusted preparation downloads the frozen
-source and optional cache. Rootless BuildKit receives only disposable data and
-scratch volumes. After that container has stopped, trusted publication reads the
-output volume read-only, checks the local OCI structure and publishes with
+source and optional cache. Rootless BuildKit receives disposable data and
+scratch volumes plus two fixed, read-only owner-ID mapping files. After that
+container has stopped, trusted publication reads the output volume read-only,
+checks the local OCI structure and publishes with
 Skopeo's native digest handling. Registry and storage credentials are absent from
 the Dockerfile container. Supported task and sidecar components use the same
 path, including declared build arguments and multi-stage targets.
@@ -1371,11 +1372,58 @@ addresses. Private registries, private package services, ARM/GPU and nested host
 container requirements need an explicit supported path; they must not fall back
 to a legacy host.
 
-The shell sets `RLIMIT_NPROC` **before** entering RootlessKit. This per-UID limit
-is not evidence of a hard aggregate Pod/cgroup process bound; namespace mappings
-and concurrent Pods must be evaluated on the actual node. Phase 2 requires a
-verified cgroup process limit as well as hard scratch containment. A successful
-local test or an ephemeral-storage eviction limit does not establish either.
+New native task and application build attempts retain the pinned public BuildKit
+image and outer UID/GID 1000. Their immutable claim ConfigMap also contains the
+non-secret `subuid` and `subgid` entries `user:100000:262144` and
+`root:1:262144`. A builder-only
+projection selects exactly these keys and mounts each read-only at `/etc/subuid`
+and `/etc/subgid`; it does not expose `claim.json` or credentials. This preserves
+original source-layer owners such as UID 197609/GID 197121, which the image's
+65536-ID default cannot represent. The same mapping applies to rootless scratch
+cleanup. It is a bounded compatibility range, not support for every possible UID.
+
+Shared-pool admission must install the matching exact volume/mount policy before
+new Jobs use this shape. Only the two fixed file subPaths are allowed; other
+subPaths, additional ConfigMap keys and foreign ConfigMap references remain
+forbidden. The pool wrapper binds both projections to the same attempt ConfigMap.
+Recovery reuses each attempt's frozen ConfigMap and Job, so it does not rewrite an
+existing attempt with the new mapping. A failed old attempt needs the ordinary
+supported new-attempt path after diagnosis, not an in-place ConfigMap edit.
+
+These static subordinate ranges overlap across builder Pods. They are not a
+per-Pod host UID allocation; separate PID namespaces, private volumes, no host
+mounts and unchanged capabilities remain the isolation boundary.
+
+The trusted UID1000 entry retains the runtime's incoming process limit while
+creating RootlessKit namespace A. Within A it sets both soft and hard
+`RLIMIT_NPROC` to the configured `max_processes` (default 512), then explicitly
+creates namespace B. Every daemonless command, BuildKit daemon and Dockerfile
+`RUN`/`USER` executes under B. A maps UID0 to outer UID1000 and IDs1–262144 to
+outer IDs100000–362143; B maps IDs0–262144 identically within A. The private
+creator namespace supplies the aggregate descendant threshold across UID
+changes, without lowering the shared outer UID1000's creator limit first.
+This bounds untrusted B/descendant accounting at the configured threshold;
+trusted outer supervisors and the deadline wrapper add fixed process overhead.
+It is not a claim that the entire Pod has a strict 512-process cgroup limit.
+The runtime's incoming limit and concurrent-node behavior still need installed
+qualification; this does not raise that limit or change any task timeout.
+
+A and B use `/scratch/scope/a` and `/scratch/scope/b`, outside the scratch paths
+removed between components. B uses RootlessKit's private `--copy-up=/run` because
+the pinned daemonless script selects `/run/buildkit` when it sees namespace root.
+The container root filesystem stays read-only. Cleanup uses the same identity
+mapping to remove private directories owned by high UIDs.
+
+The pinned public image contains RootlessKit v3.0.1. Starting B as namespace-root
+prints its upstream unsupported-root warning; do not hide that warning or claim
+upstream support. This namespace UID0 maps to outer UID1000, not host root.
+The path therefore requires real pinned-image BuildKit `RUN`/`USER`, OCI output,
+failure/timeout and cleanup qualification, not only a namespace mechanism test.
+Requalify it before changing the image/RootlessKit version.
+
+Phase 2 still requires a verified hard cgroup process limit and hard scratch
+containment. The namespace-accounting fix and an ephemeral-storage eviction
+limit do not establish either requirement by themselves.
 
 Build CPU, RAM, ephemeral storage and pending/create slots use the same capacity
 admission lock and placement/quota observations as Trials. Reservations remain

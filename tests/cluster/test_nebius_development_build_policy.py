@@ -230,6 +230,27 @@ def documents(namespace, catalog):
     return importlib.import_module(module).build_policy_documents(namespace, catalog)
 
 
+def test_owner_id_projection_is_exact_for_both_pooled_build_workloads(build_inputs):
+    namespace, catalog, pods = policy_inputs(build_inputs)
+    policy, _ = documents(namespace, catalog)
+    expressions = '\n'.join(row['expression'] for row in policy['spec']['validations'])
+    assert 'm.subPath == "subuid"' in expressions and 'm.subPath == "subgid"' in expressions
+    assert '!has(m.subPath)' in expressions
+    assert "!has(m.subPathExpr)" in expressions and "!has(m.mountPropagation)" in expressions
+    assert "v.configMap.items.map(i, [i.key, i.path]) == [['subuid','subuid'],['subgid','subgid']]" in expressions
+    assert "v.configMap.name == variables.p.volumes.filter(c, c.name == 'claim')[0].configMap.name" in expressions
+    for pod in pods:
+        spec = pod['spec']
+        claim = next(v for v in spec['volumes'] if v['name'] == 'claim')['configMap']['name']
+        subids = next(v for v in spec['volumes'] if v['name'] == 'builder-subids')['configMap']
+        assert subids['name'] == claim
+        assert subids['items'] == [{'key': key, 'path': key} for key in ('subuid', 'subgid')]
+        mounts = spec['initContainers'][1]['volumeMounts']
+        assert [m for m in mounts if m['name'] == 'builder-subids'] == [
+            {'name': 'builder-subids', 'mountPath': '/etc/' + key, 'subPath': key, 'readOnly': True}
+            for key in ('subuid', 'subgid')]
+
+
 @pytest.mark.timeout(180)
 @pytest.mark.skipif(os.environ.get('LOOM_RUN_DISPOSABLE_K3S') != '1',
     reason='requires explicitly disposable Kubernetes')
@@ -312,7 +333,9 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
                     'extra-container', 'extra-init', 'trusted-command', 'trusted-image', 'trusted-env',
                     'builder-root', 'builder-capability', 'trusted-escalation', 'env-from', 'hook',
                     'node-name', 'node-group', 'account', 'resources', 'projected-token', 'claim-secret',
-                    'termination-secret', 'priority'):
+                    'termination-secret', 'priority', 'subids-whole-configmap', 'subids-claim-key',
+                    'subids-foreign-configmap', 'subids-writable', 'subids-wrong-subpath',
+                    'subids-wrong-path', 'subids-expression', 'ordinary-subpath'):
                 changed = copy.deepcopy(pod)
                 spec = changed['spec']
                 prepare, build = spec['initContainers']
@@ -354,6 +377,26 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
                 elif damage == 'projected-token':
                     spec['volumes'].append({'name': 'token', 'projected': {'sources': [
                         {'serviceAccountToken': {'path': 'token'}}]}})
+                elif damage.startswith('subids-'):
+                    volume = next(v for v in spec['volumes'] if v['name'] == 'builder-subids')['configMap']
+                    mount = next(m for m in build['volumeMounts'] if m['mountPath'] == '/etc/subuid')
+                    if damage == 'subids-whole-configmap':
+                        volume.pop('items')
+                    elif damage == 'subids-claim-key':
+                        volume['items'][0]['key'] = 'claim.json'
+                    elif damage == 'subids-foreign-configmap':
+                        volume['name'] = 'loom-pool-' + 'f' * 32
+                    elif damage == 'subids-writable':
+                        mount['readOnly'] = False
+                    elif damage == 'subids-wrong-subpath':
+                        mount['subPath'] = 'claim.json'
+                    elif damage == 'subids-wrong-path':
+                        mount['mountPath'] = '/etc/passwd'
+                    elif damage == 'subids-expression':
+                        mount.pop('subPath')
+                        mount['subPathExpr'] = '$(CLAIM)'
+                elif damage == 'ordinary-subpath':
+                    next(m for m in build['volumeMounts'] if m['name'] == 'build')['subPath'] = 'unapproved'
                 elif damage == 'termination-secret':
                     prepare['terminationMessagePath'] = '/var/run/loom-task-build/source/secret-key'
                 elif damage == 'priority':

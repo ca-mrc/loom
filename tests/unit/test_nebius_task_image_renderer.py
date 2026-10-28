@@ -23,6 +23,11 @@ from loom_execution_actuator.task_image_renderer import (
 )
 
 
+def _component_script(script: str) -> str:
+    creator = shlex.split(script.split("exec ", 1)[1])[-1]
+    return shlex.split(creator.split("exec ", 1)[1])[-1]
+
+
 @pytest.fixture
 def inputs():
     return {
@@ -80,11 +85,11 @@ def test_job_serializes_credential_phases_and_never_exposes_auth_to_build(inputs
     assert not any("restartPolicy" in container for container in pod["initContainers"])
     volumes = {volume["name"]: volume for volume in pod["volumes"]}
     builder_volumes = {mount["name"] for mount in builder["volumeMounts"]}
-    assert builder_volumes == {"build", "builder-tmp"}
+    assert builder_volumes == {"build", "builder-tmp", "builder-subids"}
     assert {
         mount["mountPath"] for mount in builder["volumeMounts"] if mount["name"] == "builder-tmp"
     } == {"/scratch", "/tmp"}
-    assert all("emptyDir" in volumes[name] for name in builder_volumes)
+    assert all("emptyDir" in volumes[name] for name in builder_volumes - {"builder-subids"})
     assert {mount["name"] for mount in prepare["volumeMounts"]} & {
         "source",
         "cache",
@@ -123,6 +128,26 @@ def test_job_serializes_credential_phases_and_never_exposes_auth_to_build(inputs
     assert not any("envFrom" in phase for phase in (prepare, builder, publish))
 
 
+
+def test_builder_owner_id_files_are_fixed_readonly_and_do_not_expose_claim(inputs) -> None:
+    configmap, job = render_task_image_job(**inputs)
+    assert configmap["data"]["subuid"] == configmap["data"]["subgid"] == "user:100000:262144\nroot:1:262144\n"
+    pod = job["spec"]["template"]["spec"]
+    prepare, builder = pod["initContainers"]
+    publish, = pod["containers"]
+    volume = next(row for row in pod["volumes"] if row["name"] == "builder-subids")
+    assert volume == {"name": "builder-subids", "configMap": {
+        "name": configmap["metadata"]["name"], "defaultMode": 0o444,
+        "items": [{"key": key, "path": key} for key in ("subuid", "subgid")]}}
+    assert [row for row in builder["volumeMounts"] if row["name"] == "builder-subids"] == [
+        {"name": "builder-subids", "mountPath": "/etc/" + key, "subPath": key, "readOnly": True}
+        for key in ("subuid", "subgid")]
+    assert all(row["name"] != "claim" for row in builder["volumeMounts"])
+    assert all(row["name"] != "builder-subids" for phase in (prepare, publish) for row in phase["volumeMounts"])
+    assert builder["image"] == BUILDKIT_IMAGE
+    assert builder["securityContext"]["runAsUser"] == builder["securityContext"]["runAsGroup"] == 1000
+
+
 def test_native_build_preserves_arguments_target_and_task_deadline(inputs) -> None:
     inputs["claim"]["task_config"] = {
         "task": {"id": "native/build-options", "name": "Native build options"},
@@ -139,6 +164,7 @@ def test_native_build_preserves_arguments_target_and_task_deadline(inputs) -> No
     }
     _, job = render_task_image_job(**inputs)
     script = job["spec"]["template"]["spec"]["initContainers"][1]["command"][2]
+    script = _component_script(script)
     builds = [
         shlex.split(line)[1:] for line in script.splitlines() if "buildctl-daemonless.sh build" in line
     ]
@@ -216,13 +242,20 @@ def test_job_bounds_resources_and_only_builder_has_rootless_exceptions(inputs) -
     assert pod["tolerations"] == list(inputs["target"].tolerations)
 
 
-def test_build_commands_cover_each_component_and_set_limits_before_rootlesskit(inputs) -> None:
+def test_build_commands_bound_descendants_after_private_creator_namespace(inputs) -> None:
     _, job = render_task_image_job(**inputs)
     builder = job["spec"]["template"]["spec"]["initContainers"][1]
     script = builder["command"][-1]
     assert builder["image"] == BUILDKIT_IMAGE
-    assert script.index("ulimit -u 384") < script.index("buildctl-daemonless.sh")
-    assert "ulimit -H" not in script and "ulimit -S" not in script
+    outer = shlex.split(script.split("exec ", 1)[1])
+    assert outer[:4] == ["rootlesskit", "--state-dir=/scratch/scope/a", "sh", "-ec"]
+    assert "ulimit" not in script.split("exec ", 1)[0]
+    creator = outer[4]
+    assert creator.startswith("ulimit -Su 384\nulimit -Hu 384\nexec ")
+    inner = shlex.split(creator.split("exec ", 1)[1])
+    assert inner[:5] == ["rootlesskit", "--state-dir=/scratch/scope/b", "--copy-up=/run", "sh", "-ec"]
+    script = inner[5]
+    assert "/scratch/scope" not in script
     assert script.count("buildctl-daemonless.sh build") == 2
     for fragment in (
         "context=/loom/build/context/env",
@@ -348,7 +381,7 @@ def test_dockerfile_paths_cannot_inject_shell_commands(inputs) -> None:
     )
     _, job = render_task_image_job(**inputs)
     script = job["spec"]["template"]["spec"]["initContainers"][1]["command"][-1]
-    command_line = next(line for line in script.splitlines() if line.startswith("if timeout"))
+    command_line = next(line for line in _component_script(script).splitlines() if line.startswith("if timeout"))
     assert "dockerfile=/loom/build/context/nested/space ' ;$(touch BAD)" in shlex.split(
         command_line
     )
@@ -570,7 +603,8 @@ case "$output" in
 esac
 """)
     cleanup = binary_dir / "rootlesskit"
-    cleanup.write_text('#!/bin/sh\nexec "$@"\n')
+    cleanup.write_text('#!/bin/sh\nwhile [ "${1#--}" != "$1" ]; do shift; done\n'
+                       'if [ "$1" = sh ]; then shift; exec bash "$@"; fi\nexec "$@"\n')
     for binary in (build, cleanup):
         binary.chmod(0o755)
     result = subprocess.run(
