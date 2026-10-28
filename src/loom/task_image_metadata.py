@@ -6,6 +6,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from loom.execution_runtime_contract import ProcessPhaseV1
+from loom.runtime_environment import rejected_task_image_environment
 from loom.sandbox_identity import SandboxIdentityV1, canonical_supplementary_groups
 
 
@@ -52,4 +53,9 @@ class TaskImageRuntimeMetadataV1(BaseModel):
     @field_validator("environment")
     @classmethod
     def _environment(cls, value: dict[str, str]) -> dict[str, str]:
-        return ProcessPhaseV1._environment_is_nonsecret(value)
+        # Fixture names such as PASSWORD belong to the task sandbox. The
+        # controller process keeps validate_runtime_environment.
+        rejection = rejected_task_image_environment(value)
+        if rejection is not None:
+            raise ValueError(rejection)
+        return value

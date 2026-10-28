@@ -133,8 +133,7 @@ def test_identity_link_is_rejected_without_following_it(tmp_path, name, kind):
 
 @pytest.mark.parametrize("config", [{"User": "missing"}, {"User": "worker:missing"}, {"User": False},
     {"Entrypoint": ""}, {"Env": ""},
-    {"User": "2147483648:0", "Env": ["HOME=/home/x"]}, {"Env": ["TOKEN=private-secret"]},
-    {"Env": ["HOME=/root", "HOME=/home/ambiguous"]}, {"WorkingDir": "/app/../private"},
+    {"User": "2147483648:0", "Env": ["HOME=/home/x"]}, {"Env": ["HOME=/root", "HOME=/home/ambiguous"]}, {"WorkingDir": "/app/../private"},
     {"Entrypoint": "private-command"}, {"Entrypoint": ["x" * 20000]}])
 def test_unsupported_metadata_errors_never_expose_config(tmp_path, config):
     image = _image(tmp_path / "image", [_layer({"etc/passwd": PASSWD, "etc/group": GROUP})], config)
@@ -164,13 +163,46 @@ def test_root_directory_tar_record_and_public_gpg_fingerprint_are_supported(tmp_
     assert read_task_image_runtime_metadata(image)["environment"]["GPG_KEY"] == "A" * 40
 
 
-@pytest.mark.parametrize("entry", ["API_KEY=private-value", "GPG_KEY=private-value", "VNC_KEY_DELAY_MS=private-value"])
-def test_secret_environment_values_are_not_exposed(tmp_path, entry):
+@pytest.mark.parametrize("entry", ["API_KEY=private-value", "GPG_KEY=private-value", "VNC_KEY_DELAY_MS=private-value",
+                                   "PASSWORD=diagnostic-fixture-value"])
+def test_authored_fixture_environment_is_kept_for_the_task(tmp_path, entry):
+    name, value = entry.split("=", 1)
     image = _image(tmp_path / "image", [_layer({"etc/passwd": PASSWD})], {"Env": [entry]})
-    with pytest.raises(ValueError, match=r"^OCI runtime metadata unsupported$"):
+    result = read_task_image_runtime_metadata(image)
+    assert result["environment"][name] == value
+
+
+@pytest.mark.parametrize("entry", ["KUBECONFIG=diagnostic-fixture-value", "LOOM_CONTROL=diagnostic-fixture-value",
+                                   "HTTP_PROXY=diagnostic-fixture-value"])
+def test_reserved_image_environment_names_the_variable_without_its_value(tmp_path, entry):
+    name, value = entry.split("=", 1)
+    image = _image(tmp_path / "image", [_layer({"etc/passwd": PASSWD})], {"Env": [entry]})
+    with pytest.raises(ValueError, match=rf"^task image environment rejected {name}$") as caught:
         read_task_image_runtime_metadata(image)
+    assert value not in str(caught.value)
+    assert caught.value.__cause__ is None
 
 
 def test_public_vnc_keyboard_delay_is_preserved(tmp_path):
     image = _image(tmp_path / "image", [_layer({"etc/passwd": PASSWD})], {"Env": ["VNC_KEY_DELAY_MS=35"]})
     assert read_task_image_runtime_metadata(image)["environment"]["VNC_KEY_DELAY_MS"] == "35"
+
+
+def test_controller_contract_still_rejects_password_and_the_diagnostic_omits_the_value():
+    import os
+
+    from loom.runtime_environment import validate_runtime_environment
+    from loom_execution_actuator.task_image_controller import _platform_diagnostic
+    from loom_execution_actuator.task_image_runtime import _metadata_publication_error
+
+    value = "diagnostic-fixture-value"
+    assert "PASSWORD" not in os.environ
+    with pytest.raises(ValueError, match="forbidden name"):
+        validate_runtime_environment({"PASSWORD": value})
+    message = _metadata_publication_error(ValueError("task image environment rejected KUBECONFIG"))
+    diagnostic = _platform_diagnostic({"error": message}, exit_code=1)
+    assert diagnostic == {"summary": "task image environment rejected KUBECONFIG", "exit_code": 1}
+    assert value not in diagnostic["summary"]
+    hidden = _metadata_publication_error(ValueError(f"USER={value}"))
+    assert hidden == "OCI runtime metadata is unsupported"
+    assert value not in hidden

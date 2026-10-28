@@ -34,3 +34,23 @@ def validate_task_environment(value: dict[str, str], *, allow_runtime_controls: 
         if "\x00" in item or len(item.encode("utf-8")) > MAX_ENV_VALUE_BYTES:
             raise ValueError("task environment value is invalid")
     return value
+
+
+# A publish diagnostic may name the rejected variable. It must not carry the value.
+TASK_IMAGE_ENVIRONMENT_REJECTION = re.compile(
+    r"^task image environment rejected(?: [A-Z_][A-Z0-9_]{0,127}| invalid-name)?$"
+)
+
+
+def rejected_task_image_environment(value: dict[str, str]) -> str | None:
+    """Safe rejection for authored image defaults, or None when they are accepted."""
+
+    if len(value) > 64:
+        return "task image environment rejected"
+    for name, item in value.items():
+        try:
+            validate_task_environment({name: item})
+        except ValueError:
+            shown = name if _ENV_NAME.fullmatch(name) else "invalid-name"
+            return f"task image environment rejected {shown}"
+    return None

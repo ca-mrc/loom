@@ -35,6 +35,7 @@ from botocore.exceptions import (
 from loom_bundle_checksum import sha256_of_dir
 
 from loom.nebius_terminus_image import append_terminus_runtime_tools
+from loom.runtime_environment import TASK_IMAGE_ENVIRONMENT_REJECTION
 from loom.security.redaction import redact_log_text
 from loom.service_execution_materialization import (
     MAX_INPUT_MANIFEST_BYTES,
@@ -98,6 +99,15 @@ _SKOPEO_COPY_TIMEOUT_SECONDS = 300
 _PUBLISH_STDERR_TAIL_BYTES = 4096
 _PUBLISH_ERROR_CHARS = 500
 _DOCKER_REF_RE = re.compile(r"docker://\S+")
+
+
+def _metadata_publication_error(error: BaseException) -> str:
+    """Keep a reserved image-variable name. Hide every other metadata detail."""
+
+    message = str(error)
+    if TASK_IMAGE_ENVIRONMENT_REJECTION.fullmatch(message):
+        return message
+    return "OCI runtime metadata is unsupported"
 
 
 def termination_failure_update(error: BaseException) -> dict[str, Any]:
@@ -1139,8 +1149,8 @@ def publish(
                     preview = TaskImageRuntimeMetadataV1.model_validate({
                         **metadata, "image_ref": claim["registry_repository"] + "@sha256:" + "0" * 64,
                     }).model_dump(mode="json")
-                except ValueError:
-                    raise BuildPreparationError("OCI runtime metadata is unsupported") from None
+                except ValueError as error:
+                    raise BuildPreparationError(_metadata_publication_error(error)) from None
                 preview_receipt = {
                     "materialization_id": claim["id"], "lease_epoch": claim["lease_epoch"],
                     "registry_images": {**images, component.name: preview["image_ref"]},
