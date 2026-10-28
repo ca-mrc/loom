@@ -81,7 +81,14 @@ class HarborNativeAdapter:
                 if name not in package_digests:
                     raise ValueError(f"Harbor materialization lacks package identity for {name}")
                 identity["package_digest"] = package_digests[name]
-            yield BenchmarkInstance(name, split, identity, {"split": split})
+            solution = path.parent / "solution/solve.sh"
+            oracle_eligible = (
+                solution.is_file() and not solution.is_symlink() and solution.stat().st_size > 0
+            )
+            yield BenchmarkInstance(name, split, identity, {
+                "split": split,
+                "oracle_eligible": "true" if oracle_eligible else "false",
+            })
 
     def convert_instance(self, instance: BenchmarkInstance, *, out_dir: Path) -> ConvertedTask:
         source = Path(instance.raw["source_path"])
