@@ -816,7 +816,7 @@ export interface paths {
         put?: never;
         /**
          * Dry Run Batch
-         * @description Run batch admission and resolve every axis without writing anything.
+         * @description Run admission without creating a Batch or Trial; provider probes may cache evidence.
          */
         post: operations["dry_run_batch_api_v1_batches_dry_run_post"];
         delete?: never;
