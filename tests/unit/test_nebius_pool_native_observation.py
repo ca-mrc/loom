@@ -151,3 +151,40 @@ async def test_cancelled_native_read_finishes_before_its_client_closes(sdk_failu
             await task
         resource.close()
     assert not done and not closed_while_reading
+
+
+@pytest.mark.parametrize("failed_phase", ["prepare", "build", "publish", "unrelated"])
+async def test_pool_reader_preserves_bounded_redacted_actual_failed_phase_log(failed_phase):
+    runtime, job, pod, namespace = fixture()
+    job["status"] = {"failed": 1}
+    pod["status"] = {
+        "initContainerStatuses": [
+            {"name": phase, "state": {"terminated": {"exitCode": int(phase == failed_phase)}}}
+            for phase in ("prepare", "build")
+        ],
+        "containerStatuses": [
+            {"name": phase, "state": {"terminated": {"exitCode": int(phase == failed_phase)}}}
+            for phase in ("unrelated", "publish")
+        ],
+    }
+    calls = []
+
+    def read_log(name, requested_namespace, **kwargs):
+        calls.append(kwargs)
+        assert (name, requested_namespace) == (pod["metadata"]["name"], runtime.namespace.name)
+        return "failure token=must-not-retain password=private-value " + "x" * 20000
+
+    api = NativeBuildKubernetesApi.__new__(NativeBuildKubernetesApi)
+    api._json = lambda value: copy.deepcopy(value)
+    api._batch = SimpleNamespace(read_namespaced_job=lambda *_args, **_kwargs: job)
+    api._core = SimpleNamespace(
+        read_namespace=lambda *_args, **_kwargs: namespace,
+        list_namespaced_pod=lambda *_args, **_kwargs: {"apiVersion": "v1", "kind": "PodList", "items": [pod]},
+        read_namespaced_pod=lambda *_args, **_kwargs: pod,
+        read_namespaced_pod_log=read_log,
+    )
+    result = await api.observe_pool(runtime)
+    assert calls == [{"container": failed_phase if failed_phase != "unrelated" else "build",
+                      "tail_lines": 100, "limit_bytes": 16384, "_request_timeout": 20}]
+    assert "must-not-retain" not in result["builder_log"] and "private-value" not in result["builder_log"]
+    assert "failure" in result["builder_log"] and len(result["builder_log"]) <= 16384

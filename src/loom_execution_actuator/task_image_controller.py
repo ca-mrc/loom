@@ -119,6 +119,18 @@ def _owned_pods(observation: dict[str, Any], uid: str | None) -> list[dict[str, 
     )]
 
 
+def _build_log_phase(pod: dict[str, Any]) -> str:
+    """Select only a known failed phase after the caller qualifies this Pod."""
+    status = pod.get("status", {})
+    rows = (*status.get("initContainerStatuses", []), *status.get("containerStatuses", []))
+    for phase in ("prepare", "build", "publish"):
+        for row in rows:
+            exit_code = row.get("state", {}).get("terminated", {}).get("exitCode")
+            if row.get("name") == phase and type(exit_code) is int and exit_code != 0:
+                return phase
+    return "build"  # Keep successful and ordinary in-progress observations unchanged.
+
+
 def _build_has_progress(native: dict[str, Any], observed: dict[str, Any] | None, uid: str | None) -> bool:
     """Never apply pre-scheduling recovery to started work or terminal results."""
     if native.get("node_name") or (native.get("scheduling") or {}).get("status") == "True":
@@ -249,9 +261,13 @@ class NativeBuildKubernetesApi:
                 return None
             if capture_logs or job.get("status", {}).get("succeeded") or job.get("status", {}).get("failed"):
                 for pod in _owned_pods(job, job["metadata"].get("uid"))[:1]:
+                    phase = _build_log_phase(pod)
                     try:
-                        log = _read_builder_log(self._core, pod["metadata"]["name"], namespace)
-                        job["builder_log"] = _stored_builder_log(str(log))
+                        log = _read_builder_log(
+                            self._core, pod["metadata"]["name"], namespace, container=phase,
+                        )
+                        prefix = f"[{phase}]\n" if phase != "build" else ""
+                        job["builder_log"] = _stored_builder_log(prefix + log)
                     except Exception:
                         pass  # An unscheduled Pod has no build log.
             return job
@@ -306,12 +322,16 @@ class NativeBuildKubernetesApi:
                         raise ValueError("pool_native_pod_changed")
 
                 current_pod()
+                phase = _build_log_phase(pod)
                 try:
-                    log = _read_builder_log(self._core, pod["metadata"]["name"], runtime.namespace.name)
+                    log = _read_builder_log(
+                        self._core, pod["metadata"]["name"], runtime.namespace.name, container=phase,
+                    )
                 except Exception:
                     pass  # Logs may not exist yet; never fabricate a result.
                 else:
-                    job["builder_log"] = _stored_builder_log(str(log))
+                    prefix = f"[{phase}]\n" if phase != "build" else ""
+                    job["builder_log"] = _stored_builder_log(prefix + log)
                 current_pod()
             namespace()
             return job
@@ -392,10 +412,11 @@ def _platform_diagnostic(receipt: Any, *, exit_code: Any) -> dict[str, Any] | No
 _BUILDER_LOG_LIMIT = 256 * 1024
 
 
-def _read_builder_log(core: Any, name: str, namespace: str) -> str:
-    return core.read_namespaced_pod_log(
-        name, namespace, container="build", limit_bytes=_BUILDER_LOG_LIMIT, _request_timeout=20,
+def _read_builder_log(core: Any, name: str, namespace: str, *, container: str) -> str:
+    value = core.read_namespaced_pod_log(
+        name, namespace, container=container, limit_bytes=_BUILDER_LOG_LIMIT, _request_timeout=20,
     )
+    return value if isinstance(value, str) else str(value)
 
 
 def _stored_builder_log(value: str) -> str:

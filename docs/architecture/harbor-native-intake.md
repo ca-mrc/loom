@@ -271,6 +271,11 @@ and the private-input layout; the runtime-owned bridge uses the current reward
 reader without rewriting task assets. This bridge does not qualify the separate
 verifier's execution backend.
 
+Native image build observations retain the actual failed `prepare`, `build`,
+or `publish` phase's log in the existing `builder_log`, after Pod ownership and
+pool identity qualification, with the existing 100-line/16-KiB read and redaction
+limits; successful and in-progress builds retain their ordinary build-log view.
+
 ## Development evidence and remaining acceptance
 
 [`terminal-bench-4.0.0.json`](../evidence/2282/terminal-bench-4.0.0.json)
