@@ -98,6 +98,17 @@ _SENSITIVE_ENV_KEY_RE = re.compile(
 )
 
 
+_CREDENTIAL_ASSIGNMENT_RE = re.compile(
+    r"""(?i)((?:["']?(?:password|secret(?:[_-]?key)?|(?:api|access)[_-]?key|token)["']?)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)""",
+)
+
+
+def redact_log_text(value: str, *, limit: int | None = None) -> str:
+    """Redact assignment-style secrets, then the shared public-text patterns."""
+
+    return redact_text(_CREDENTIAL_ASSIGNMENT_RE.sub(r"\1[REDACTED]", value), limit=limit)
+
+
 def redact_text(value: str, *, limit: int | None = None) -> str:
     """Redact secret-like material from text while preserving diagnostics."""
 

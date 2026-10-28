@@ -11,6 +11,8 @@ from kubernetes.client import ApiException
 from loom_execution_actuator.task_image_controller import (
     NativeBuildKubernetesApi,
     _matches,
+    _native_failure,
+    _terminal_phase_failure,
     build_observation,
     publication_receipt,
 )
@@ -159,6 +161,40 @@ def test_oci_runtime_metadata_is_bound_to_the_published_component():
     status["message"] = json.dumps(document)
     with pytest.raises(ValueError, match="differs from the published image"):
         publication_receipt(job, materialization_id=image_id, lease_epoch=2)
+
+
+def test_publish_failure_diagnostic_is_bounded_and_not_a_retry_authority():
+    _, job = receipt_job()
+    job["status"] = {"failed": 1}
+    message = json.dumps({
+        "phase": "publish", "error": "writing blob failed token=publish-secret", "exit_code": 1,
+        "registry_images": {"task": "registry.example/tasks@sha256:" + "c" * 64},
+        "argv": "skopeo copy --authfile /secret",
+    })
+    job["pods"][0]["status"]["containerStatuses"][0]["state"]["terminated"] = {
+        "exitCode": 1, "reason": "Error", "message": message,
+    }
+    observed = build_observation(job)
+    diagnostic = observed["phases"][0]["platform_diagnostic"]
+    assert diagnostic == {"exit_code": 1, "summary": "writing blob failed token=[REDACTED]"}
+    assert "publish-secret" not in json.dumps(diagnostic)
+    assert "registry_images" not in diagnostic and "argv" not in diagnostic
+    assert _native_failure(observed) is None
+    reason, failure_message, retryable = _terminal_phase_failure(observed, job)
+    assert reason == "build_publish_failed" and retryable is True
+    assert "publish-secret" not in failure_message
+
+
+@pytest.mark.parametrize("message", ["not-json", "x" * 4097])
+def test_publish_diagnostic_requires_a_bounded_json_receipt(message):
+    _, job = receipt_job()
+    job["status"] = {"failed": 1}
+    job["pods"][0]["status"]["containerStatuses"][0]["state"]["terminated"] = {
+        "exitCode": 1, "reason": "Error", "message": message,
+    }
+    phase = build_observation(job)["phases"][0]
+    assert "platform_diagnostic" not in phase
+    assert phase["state"]["terminated"]["exitCode"] == 1
 
 
 def test_observation_excludes_raw_messages_and_redacts_bounded_builder_log():

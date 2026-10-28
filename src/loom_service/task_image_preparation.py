@@ -18,7 +18,47 @@ from loom.db.schema import (
     Trial,
     TrialTaskImageMaterialization,
 )
+from loom.security.redaction import redact_log_text
 from loom.task_image_failure import image_preparation_failure
+
+_DIAGNOSTIC_PHASES = {
+    "build_publish_failed": "publish",
+    "build_publication_receipt_invalid": "publish",
+    "build_prepare_failed": "prepare",
+}
+
+
+def _public_diagnostic(native: dict[str, Any], reason: str | None) -> dict[str, Any] | None:
+    """Project a platform receipt. Dockerfile build logs are not a diagnostic."""
+
+    phase_name = _DIAGNOSTIC_PHASES.get(reason) if isinstance(reason, str) else None
+    if phase_name is None and isinstance(reason, str) and reason.startswith("image_preparation_"):
+        phase_name = "prepare"
+    if phase_name is None or not isinstance(native.get("phases"), list):
+        return None
+    row = next(
+        (
+            item
+            for item in native["phases"]
+            if isinstance(item, dict) and item.get("name") == phase_name
+        ),
+        None,
+    )
+    diagnostic = row.get("platform_diagnostic") if isinstance(row, dict) else None
+    if not isinstance(diagnostic, dict):
+        return None
+    summary = diagnostic.get("summary")
+    if not isinstance(summary, str):
+        return None
+    summary = redact_log_text(summary, limit=500).strip()[:500]
+    if not summary:
+        return None
+    public: dict[str, Any] = {"phase": phase_name, "summary": summary}
+    code = diagnostic.get("exit_code")
+    if type(code) is int and 0 <= code <= 255:
+        public["exit_code"] = code
+    return public
+
 
 _REASONS = {
     "build_prepare_failed": "Task image source preparation failed. Check that the task source and build context are available.",
@@ -102,20 +142,27 @@ def preparation_response(
     if reason == "build_deadline_exceeded":
         # Job expiry takes precedence: terminating a running wrapper can also
         # yield 124. Never infer a per-command budget from elapsed Pod time.
-        if any(c.get("status") == "True" and c.get("reason") == "DeadlineExceeded"
-               for c in native.get("job_conditions", [])):
+        if any(
+            c.get("status") == "True" and c.get("reason") == "DeadlineExceeded"
+            for c in native.get("job_conditions", [])
+        ):
             message = "Image preparation exceeded the platform Job lifecycle deadline (including setup and publication)."
         elif any(p["name"] == "build" and p.get("exit_code") == 124 for p in phases):
             message = "An image build command exceeded the task's build-time budget."
+    diagnostic = _public_diagnostic(native, reason)
     return {
         "observation_scope": "current_materialization",
         "cpu_arch": row.cpu_arch,
         "state": row.state,
         "attempt_count": row.attempt_count,
         "failure_reason": reason,
-        **({"retryable": typed_failure["retryable"], "attribution": typed_failure["attribution"]}
-           if typed_failure is not None else {}),
+        **(
+            {"retryable": typed_failure["retryable"], "attribution": typed_failure["attribution"]}
+            if typed_failure is not None
+            else {}
+        ),
         "message": message,
+        **({"diagnostic": diagnostic} if diagnostic is not None else {}),
         "next_attempt_at": row.next_attempt_at.isoformat() if row.next_attempt_at else None,
         "phases": phases,
         "resources_released": bool(_timestamp(native.get("capacity_released_at")))

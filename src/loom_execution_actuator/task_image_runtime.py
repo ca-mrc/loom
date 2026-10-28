@@ -35,6 +35,7 @@ from botocore.exceptions import (
 from loom_bundle_checksum import sha256_of_dir
 
 from loom.nebius_terminus_image import append_terminus_runtime_tools
+from loom.security.redaction import redact_log_text
 from loom.service_execution_materialization import (
     MAX_INPUT_MANIFEST_BYTES,
     ServiceExecutionInputManifestV1,
@@ -79,6 +80,85 @@ _IO_FULL = re.compile(
 class BuildPreparationError(TaskImagePreparationError):
     def __init__(self, message: str, *, code: str = "image_preparation_input_invalid") -> None:
         super().__init__(code, message)
+
+
+class PublishCommandError(Exception):
+    """Skopeo failure whose message is already a bounded redacted summary.
+
+    ``str(CalledProcessError)`` includes the argv, so the publisher must not
+    stringify that exception into a termination receipt.
+    """
+
+    def __init__(self, message: str, *, exit_code: int | None = None) -> None:
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+_SKOPEO_COPY_TIMEOUT_SECONDS = 300
+_PUBLISH_STDERR_TAIL_BYTES = 4096
+_PUBLISH_ERROR_CHARS = 500
+_DOCKER_REF_RE = re.compile(r"docker://\S+")
+
+
+def termination_failure_update(error: BaseException) -> dict[str, Any]:
+    """Fields safe to merge into a termination receipt.
+
+    Untyped SDK and process exceptions contribute only their class name.
+    """
+
+    reason = (
+        str(error)
+        if isinstance(error, (BuildPreparationError, NativeOCIArchiveError, PublishCommandError))
+        else type(error).__name__
+    )
+    update: dict[str, Any] = {"error": reason[:_PUBLISH_ERROR_CHARS]}
+    if (
+        isinstance(error, PublishCommandError)
+        and type(error.exit_code) is int
+        and 0 <= error.exit_code <= 255
+    ):
+        update["exit_code"] = error.exit_code
+    return update
+
+
+def _read_tail_text(path: Path, *, limit: int) -> str:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return ""
+    with path.open("rb") as handle:
+        if size > limit:
+            handle.seek(size - limit)
+        data = handle.read(limit)
+    return data.decode("utf-8", errors="replace")
+
+
+def _sanitize_publish_stderr(
+    text: str, *, registry_repository: str, authfile: str, argv: list[str],
+) -> str:
+    rendered = " ".join(argv)
+    if rendered:
+        text = text.replace(rendered, "")
+    if authfile:
+        text = text.replace(authfile, "[authfile]")
+    if registry_repository:
+        text = text.replace(registry_repository, "[registry]")
+    text = _DOCKER_REF_RE.sub("docker://[registry]", text)
+    summary = redact_log_text(text).strip()
+    if len(summary) > _PUBLISH_ERROR_CHARS:
+        summary = summary[-_PUBLISH_ERROR_CHARS:]
+    return summary or "skopeo copy failed"
+
+
+def _publish_command_error(
+    stderr_path: Path, *, registry_repository: str, authfile: str, argv: list[str], exit_code: int,
+) -> PublishCommandError:
+    summary = _sanitize_publish_stderr(
+        _read_tail_text(stderr_path, limit=_PUBLISH_STDERR_TAIL_BYTES),
+        registry_repository=registry_repository, authfile=authfile, argv=argv,
+    )
+    bounded_exit = exit_code if 0 <= exit_code <= 255 else None
+    return PublishCommandError(summary, exit_code=bounded_exit)
 
 
 def emit_stage(stage: str, event: str, **fields: Any) -> None:
@@ -1071,26 +1151,29 @@ def publish(
             tag = f"{claim['registry_repository']}:{claim['materialization_key']}-{claim['lease_epoch']}-{index}"
             with tempfile.TemporaryDirectory() as temporary:
                 digest_file = Path(temporary) / "digest"
+                stderr_path = Path(temporary) / "skopeo.stderr"
                 with stage_span("publish", component_index=index):
-                    subprocess.run(
-                        [
-                            "skopeo",
-                            "--tmpdir",
-                            temporary,
-                            "copy",
-                            "--authfile",
-                            str(registry_auth),
-                            "--preserve-digests",
-                            "--digestfile",
-                            str(digest_file),
-                            skopeo_source,
-                            f"docker://{tag}",
-                        ],
-                        check=True,
-                        timeout=300,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
+                    argv = [
+                        "skopeo", "--tmpdir", temporary, "copy",
+                        "--authfile", str(registry_auth),
+                        "--preserve-digests", "--digestfile", str(digest_file),
+                        skopeo_source, f"docker://{tag}",
+                    ]
+                    try:
+                        with stderr_path.open("w+b") as stderr_handle:
+                            subprocess.run(
+                                argv, check=True, timeout=_SKOPEO_COPY_TIMEOUT_SECONDS,
+                                stdout=subprocess.DEVNULL, stderr=stderr_handle,
+                            )
+                    except subprocess.CalledProcessError as error:
+                        raise _publish_command_error(
+                            stderr_path, registry_repository=claim["registry_repository"],
+                            authfile=str(registry_auth), argv=argv, exit_code=error.returncode,
+                        ) from None
+                    except subprocess.TimeoutExpired:
+                        raise PublishCommandError(
+                            f"skopeo copy timed out after {_SKOPEO_COPY_TIMEOUT_SECONDS} seconds",
+                        ) from None
                     digest = digest_file.read_text().strip()
                     if not _DIGEST.fullmatch(digest):
                         raise BuildPreparationError("registry did not return an OCI digest")
@@ -1179,17 +1262,14 @@ def main() -> None:
             Path("/dev/termination-log").write_text(json.dumps(receipt))
     except Exception as error:
         # SDK/tool exceptions can carry credentials, endpoints or task-controlled text.
-        reason = (
-            str(error)
-            if isinstance(error, (BuildPreparationError, NativeOCIArchiveError))
-            else type(error).__name__
-        )
         error_receipt: dict[str, Any] = {}
         try:
-            error_receipt = json.loads(Path("/dev/termination-log").read_text())
+            parsed = json.loads(Path("/dev/termination-log").read_text())
         except (OSError, ValueError):
-            pass
-        error_receipt.update(phase=args.phase, error=reason[:500])
+            parsed = None
+        if isinstance(parsed, dict):
+            error_receipt = parsed
+        error_receipt.update(phase=args.phase, **termination_failure_update(error))
         if args.phase == "prepare":
             error_receipt.update(classify_preparation_failure(error).receipt())
         Path("/dev/termination-log").write_text(json.dumps(error_receipt))

@@ -187,6 +187,13 @@ nonretryable guard code is accepted from build output. Original build failures
 and timeouts retain their existing policies; ordinary prose is not parsed into
 source or connection failures.
 
+Prepare and publish termination messages may also carry a platform diagnostic:
+`phase`, a redacted `error` of at most 500 characters, and `exit_code` when the
+failed command has one. The controller copies those fields onto the attempt as
+`platform_diagnostic` before the Job is deleted. Trial detail projects that
+record as `diagnostic` for the current attempt. The summary is not retry
+authority. Dockerfile build logs remain on the attempt row.
+
 Task-source recovery inventories only versions whose stored metadata matches the
 committed write intent. Its shared `loom.trajectory.immutable_object` reader then
 fetches the exact non-null S3 `VersionId` and verifies the returned version, byte

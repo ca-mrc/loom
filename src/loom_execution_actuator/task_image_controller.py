@@ -30,7 +30,7 @@ from loom.nebius_kubernetes import (
     read_sdk_before_close,
 )
 from loom.nebius_pool_native_runtime import PoolNativeRuntimeV1
-from loom.security.redaction import redact_text
+from loom.security.redaction import redact_log_text
 from loom.task_image_build_plan import derive_task_image_build_components
 from loom.task_image_errors import package_guard_failure, preparation_failure_from_receipt
 from loom_control_plane.execution_capacity import (
@@ -368,11 +368,27 @@ class NativeBuildKubernetesApi:
 
 
 def _safe_log(value: str) -> str:
-    value = re.sub(
-        r'''(?i)((?:["']?(?:password|secret(?:[_-]?key)?|(?:api|access)[_-]?key|token)["']?)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)''',
-        r"\1[REDACTED]", value,
-    )
-    return redact_text(value, limit=16384)
+    return redact_log_text(value, limit=16384)
+
+
+def _platform_diagnostic(receipt: Any, *, exit_code: Any) -> dict[str, Any] | None:
+    """Copy the publisher's bounded error. Unknown receipt keys stay private."""
+
+    if not isinstance(receipt, dict):
+        return None
+    error = receipt.get("error")
+    if not isinstance(error, str):
+        return None
+    summary = _safe_log(error).strip()[:500]
+    if not summary:
+        return None
+    diagnostic: dict[str, Any] = {"summary": summary}
+    code = receipt.get("exit_code")
+    if type(code) is not int:
+        code = exit_code
+    if type(code) is int and 0 <= code <= 255:
+        diagnostic["exit_code"] = code
+    return diagnostic
 
 
 def _publication_document(observation: dict[str, Any], *, materialization_id: UUID, lease_epoch: int) -> dict[str, Any]:
@@ -458,19 +474,24 @@ def build_observation(observation: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(reason, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,63}", reason):
                     safe["reason"] = reason
                 phase["state"] = {kind: safe}
-                if row["name"] == "prepare" and kind == "terminated":
+                if kind == "terminated" and row["name"] in {"prepare", "publish"}:
                     message = detail.get("message", "")
+                    receipt = None
                     if isinstance(message, str) and len(message.encode()) <= 4096:
                         try:
                             receipt = json.loads(message)
                         except ValueError:
                             receipt = None
+                    if row["name"] == "prepare":
                         classified = preparation_failure_from_receipt(receipt)
                         if classified is not None:
                             phase["preparation_error"] = {
                                 key: receipt[key] for key in ('error_schema', 'error_code', 'retryable')
                             }
                             phase["preparation_error"]["error"] = _safe_log(classified[1])
+                    diagnostic = _platform_diagnostic(receipt, exit_code=safe.get("exitCode"))
+                    if diagnostic is not None:
+                        phase["platform_diagnostic"] = diagnostic
             phases.append(phase)
         result["phases"] = phases
     if observation.get("builder_log"):
@@ -865,6 +886,18 @@ async def fail_native_build(session: AsyncSession, row: TaskImageMaterialization
             attempt.native_build = {**attempt.native_build, "retry_budget_refunded": True}
 
 
+def _terminal_phase_failure(native: dict[str, Any], observed: dict[str, Any]) -> tuple[str, str, bool]:
+    """Classify a terminal Job without treating publisher prose as retry authority."""
+
+    phase = next((item["name"] for item in native.get("phases", [])
+        if item.get("state", {}).get("terminated", {}).get("exitCode", 0)), "job")
+    return _native_failure(native) or (
+        "build_" + phase + "_failed",
+        ("Native build phase " + phase + " failed. " + native.get("builder_log", ""))
+        if phase == "build" else "Native build phase " + phase + " failed: " + _phase_error(observed, phase),
+        phase not in {"build", "prepare"})
+
+
 async def record_native_build_result(session: AsyncSession, row: TaskImageMaterialization,
                                      attempt: TaskImageMaterializationAttempt, *, builder_id: str,
                                      observed: dict[str, Any], registry_repository: str) -> None:
@@ -934,13 +967,7 @@ async def record_native_build_result(session: AsyncSession, row: TaskImageMateri
         await fail_native_build(session, row, "build_publication_receipt_invalid", builder_id=builder_id,
             retryable=False, message=invalid_message)
     else:
-        phase = next((phase["name"] for phase in native.get("phases", [])
-            if phase.get("state", {}).get("terminated", {}).get("exitCode", 0)), "job")
-        reason, message, retryable = _native_failure(native) or (
-            "build_" + phase + "_failed",
-            ("Native build phase " + phase + " failed. " + native.get("builder_log", ""))
-            if phase == "build" else "Native build phase " + phase + " failed: " + _phase_error(observed, phase),
-            phase not in {"build", "prepare"})
+        reason, message, retryable = _terminal_phase_failure(native, observed)
         try:
             await fail_native_build(session, row, reason, builder_id=builder_id, retryable=retryable, images=images, message=message)
         except TaskImageCompletionError:
