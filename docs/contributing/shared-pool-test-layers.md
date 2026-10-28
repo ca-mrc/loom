@@ -34,6 +34,8 @@ change restoring automatic coverage. Manual tests do not authorize activation.
 | --- | --- | --- |
 | Fast activation record | Both result-loss boundaries for opening, release and fencing; write-ahead intent; ordered one-dispatch behavior; failed persistence; runtime refusal | Fresh in-memory storage/transaction ports exercising the unchanged production engine |
 | Connected ordinary activation stage | Both transaction types in each direction, including response loss before and after commit; retained authority, malformed records and cancellation | Four representative real-journal transaction cases; the complete eight-combination rule matrix remains in fast tests |
+| Fast successor boundary | 25 publication/source, configuration and retained-authority checks | Original ordinary successor module, without completing a pool cutover |
+| Completed-pool successor simulation | 10 original full cutover, legacy restoration and manager-refresh scenarios | Explicit manual-only successor module; original fixtures, assertions and 60/420-second bounds |
 | Connected shared activation and process observation | Installed binding, activation transport and live observer qualification | Real predecessor reads, current journals and the existing remote transport doubles |
 | Forward/recovery process contracts | The complete original SQL, process and fault matrices | A case-local snapshot of fixed predecessor inputs, with current child journals and remote observations exercised normally |
 

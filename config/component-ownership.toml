@@ -211,6 +211,9 @@ pins = [
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_templates.py", shard_index = 14 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_roles.py", shard_index = 15 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_reopening.py", shard_index = 16 },
+  # The full cutover/legacy refresh scenarios retain their original bounds.
+  # This split adds no cases; keep them off the existing heavy recovery shard.
+  { path = "tests/ops/test_nebius_shared_pool_refresh_successor.py", shard_index = 8 },
   { path = "tests/ops/test_nebius_pool_participant_delivery_transport.py", shard_index = 17 },
   { path = "tests/ops/test_nebius_pool_participant_delivery_job_failures.py", shard_index = 13 },
   { path = "tests/ops/test_nebius_pool_participant_delivery_completion.py", shard_index = 3 },

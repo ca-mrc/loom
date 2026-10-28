@@ -514,9 +514,16 @@ Scheduled run 40523588535 placed the retained development module (about 671s)
 and installation (about 354s) on shard 3, while ordinary shard 8 took 39s.
 Only the retained module now moves to shard 8 when shared simulations are
 disabled. Both the matrix and execution selector use the same effective pins;
-the default set remains 102 modules, each executed once. Explicit shared
-qualification retains its original 124-module layout on every shard, including
-the census separation below. The timing sample motivates placement; it is not
+the default set remains 102 modules, each executed once. The mixed successor
+module retains 25 fast publication/configuration/authority cases. Its 10 full
+cutover/legacy-restoration/manager-refresh scenarios live in the manual-only
+`test_nebius_shared_pool_refresh_successor.py`, with their original assertions,
+fixture behavior and 60/420-second bounds. They require an unlaunched completed
+pool baseline and do not run in ordinary or candidate supplementary validation.
+Explicit shared qualification has 125 modules after this file split; every
+original 124-module shard keeps its ordered paths, with the new simulation
+file pinned to shard 9. The census separation below is retained.
+The timing sample motivates placement; it is not
 a measured end-to-end speedup of the new head.
 
 Run 39471175183 (October 20) exhausted shard 8's budget after its handoff module

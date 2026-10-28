@@ -13,5 +13,7 @@ def _skip_pool_journal_fsync(request: pytest.FixtureRequest, monkeypatch: pytest
     Durability ordering keeps real coverage in the certificate and DNS writer
     tests, which record fsync calls themselves.
     """
-    if request.module.__name__.rsplit(".", 1)[-1].startswith("test_nebius_pool_"):
+    # The successor simulation was split unchanged from the ordinary module.
+    module = request.module.__name__.rsplit(".", 1)[-1]
+    if module.startswith("test_nebius_pool_") or module == "test_nebius_shared_pool_refresh_successor":
         monkeypatch.setattr(os, "fsync", lambda descriptor: None)
