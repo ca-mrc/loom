@@ -1344,9 +1344,10 @@ the key to the registry; the publisher restricts output to the configured
 authorization.
 
 The Job runs three phases sequentially. Trusted preparation downloads the frozen
-source and optional cache. Rootless BuildKit receives only disposable data and
-scratch volumes. After that container has stopped, trusted publication reads the
-output volume read-only, checks the local OCI structure and publishes with
+source and optional cache. Rootless BuildKit receives disposable data and
+scratch volumes plus two fixed, read-only owner-ID mapping files. After that
+container has stopped, trusted publication reads the output volume read-only,
+checks the local OCI structure and publishes with
 Skopeo's native digest handling. Registry and storage credentials are absent from
 the Dockerfile container. Supported task and sidecar components use the same
 path, including declared build arguments and multi-stage targets.
@@ -1370,6 +1371,29 @@ policy permits cluster DNS and public HTTP(S), excluding private/link-local
 addresses. Private registries, private package services, ARM/GPU and nested host
 container requirements need an explicit supported path; they must not fall back
 to a legacy host.
+
+New native task and application build attempts retain the pinned public BuildKit
+image and outer UID/GID 1000. Their immutable claim ConfigMap also contains the
+non-secret `subuid` and `subgid` values `user:100000:262144`. A builder-only
+projection selects exactly these keys and mounts each read-only at `/etc/subuid`
+and `/etc/subgid`; it does not expose `claim.json` or credentials. This preserves
+original source-layer owners such as UID 197609/GID 197121, which the image's
+65536-ID default cannot represent. The same mapping applies to rootless scratch
+cleanup. It is a bounded compatibility range, not support for every possible UID.
+
+Shared-pool admission must install the matching exact volume/mount policy before
+new Jobs use this shape. Only the two fixed file subPaths are allowed; other
+subPaths, additional ConfigMap keys and foreign ConfigMap references remain
+forbidden. The pool wrapper binds both projections to the same attempt ConfigMap.
+Recovery reuses each attempt's frozen ConfigMap and Job, so it does not rewrite an
+existing attempt with the new mapping. A failed old attempt needs the ordinary
+supported new-attempt path after diagnosis, not an in-place ConfigMap edit.
+
+These static subordinate ranges overlap across builder Pods. They are not a
+per-Pod host UID allocation; existing separate PID namespaces, private volumes,
+no host mounts and unchanged capabilities remain the isolation boundary. This
+change does not fix per-host-UID NPROC contention or alter any process/resource
+limit, retry budget or task inputs.
 
 The shell sets `RLIMIT_NPROC` **before** entering RootlessKit. This per-UID limit
 is not evidence of a hard aggregate Pod/cgroup process bound; namespace mappings

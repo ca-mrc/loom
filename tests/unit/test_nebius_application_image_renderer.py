@@ -56,9 +56,11 @@ def test_application_job_keeps_real_source_identity_and_sequential_credential_is
     prepare, build = pod["initContainers"]
     publish, = pod["containers"]
     assert [prepare["name"], build["name"], publish["name"]] == ["prepare", "build", "publish"]
-    assert {mount["name"] for mount in build["volumeMounts"]} == {"build", "builder-tmp"}
+    assert {mount["name"] for mount in build["volumeMounts"]} == {"build", "builder-tmp", "builder-subids"}
     volumes = {volume["name"]: volume for volume in pod["volumes"]}
-    assert all("emptyDir" in volumes[mount["name"]] for mount in build["volumeMounts"])
+    assert cm["data"]["subuid"] == cm["data"]["subgid"] == "user:100000:262144\n"
+    assert volumes["builder-subids"]["configMap"]["items"] == [{"key": key, "path": key} for key in ("subuid", "subgid")]
+    assert all("emptyDir" in volumes[mount["name"]] for mount in build["volumeMounts"] if mount["name"] != "builder-subids")
     assert {mount["name"] for mount in prepare["volumeMounts"]} & {"source", "registry", "cache"} == {"source"}
     assert {mount["name"] for mount in publish["volumeMounts"]} & {"source", "registry", "cache"} == {"registry"}
     assert next(mount for mount in publish["volumeMounts"] if mount["name"] == "build")["readOnly"]

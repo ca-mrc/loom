@@ -50,7 +50,7 @@ def bind_native_build(*, configmap: dict[str, Any], job: dict[str, Any], reserva
             runtime = "/loom/deadline-runtime/loom-build-deadline"
         phase["command"] = [runtime, "--deadline-at", deadline_at.isoformat(), *extra, "--", *phase["command"]]
     for volume in pod["volumes"]:
-        if volume["name"] == "claim":
+        if volume["name"] in {"claim", "builder-subids"}:
             volume["configMap"]["name"] = name
     if (job["spec"]["parallelism"] != 1 or job["spec"]["completions"] != 1
             or pod["nodeSelector"] != target.node_selector

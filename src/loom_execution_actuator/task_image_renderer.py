@@ -24,6 +24,9 @@ BUILDKIT_IMAGE = (
 )
 _IMAGE = re.compile(r"[^\s]+@sha256:[0-9a-f]{64}")
 _DNS_NAME = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?")
+# Public subordinate IDs preserve source-layer ownership above 65535. These
+# are fixed builder configuration, never authored task inputs or credentials.
+_BUILDER_SUBIDS = "user:100000:262144\n"
 _CLAIM = "/loom/claim/claim.json"
 _BUILD = "/loom/build"
 _CREDENTIALS = "/var/run/loom-task-build"
@@ -340,7 +343,7 @@ def render_native_image_job(
         "kind": "ConfigMap",
         "metadata": copy.deepcopy(metadata),
         "immutable": True,
-        "data": {"claim.json": claim_body},
+        "data": {"claim.json": claim_body, "subuid": _BUILDER_SUBIDS, "subgid": _BUILDER_SUBIDS},
     }
     resources = {
         "cpu": f"{config.cpu_millis}m",
@@ -447,6 +450,8 @@ def render_native_image_job(
             # rootlesskit also creates bind0 under literal
             # /tmp even when TMPDIR points into /scratch.
             {"name": "builder-tmp", "mountPath": "/tmp"},
+            *({"name": "builder-subids", "mountPath": "/etc/" + key,
+               "subPath": key, "readOnly": True} for key in ("subuid", "subgid")),
         ],
         "terminationMessagePath": "/dev/termination-log",
         "terminationMessagePolicy": "File",
@@ -470,6 +475,12 @@ def render_native_image_job(
             )
         ),
     ]
+    # Project only these two public files; the untrusted builder never sees
+    # claim.json or any trusted prepare/publish credential volume.
+    volumes.append({"name": "builder-subids", "configMap": {
+        "name": name, "defaultMode": 0o444,
+        "items": [{"key": key, "path": key} for key in ("subuid", "subgid")],
+    }})
     for role, secret_name in (
         ("source", config.source_secret_name),
         ("cache", config.cache_secret_name),

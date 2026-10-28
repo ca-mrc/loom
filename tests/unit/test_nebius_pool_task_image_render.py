@@ -72,8 +72,9 @@ def test_native_adapter_renders_actual_sequential_peak_and_loadable_protected_cl
     assert [row["name"] for row in pod["initContainers"]] == ["prepare", "build"]
     assert [row["name"] for row in pod["containers"]] == ["publish"]
     assert pod["volumes"][0]["configMap"]["name"] == prepared.configmap["metadata"]["name"]
+    assert next(v for v in pod["volumes"] if v["name"] == "builder-subids")["configMap"]["name"] == prepared.configmap["metadata"]["name"]
     assert pod["serviceAccountName"] == "build-sa" and pod["automountServiceAccountToken"] is False
-    assert {mount["name"] for mount in pod["initContainers"][1]["volumeMounts"]} == {"build", "builder-tmp", "deadline-runtime"}
+    assert {mount["name"] for mount in pod["initContainers"][1]["volumeMounts"]} == {"build", "builder-tmp", "builder-subids", "deadline-runtime"}
     assert prepared.job["spec"]["template"]["metadata"]["labels"]["loom.lease-epoch"] == "3"
     assert prepared.job["spec"]["template"]["metadata"]["annotations"]["loom.openai.com/target-id"] == "native"
     path = tmp_path / "claim.json"

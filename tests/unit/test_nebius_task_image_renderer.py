@@ -80,11 +80,11 @@ def test_job_serializes_credential_phases_and_never_exposes_auth_to_build(inputs
     assert not any("restartPolicy" in container for container in pod["initContainers"])
     volumes = {volume["name"]: volume for volume in pod["volumes"]}
     builder_volumes = {mount["name"] for mount in builder["volumeMounts"]}
-    assert builder_volumes == {"build", "builder-tmp"}
+    assert builder_volumes == {"build", "builder-tmp", "builder-subids"}
     assert {
         mount["mountPath"] for mount in builder["volumeMounts"] if mount["name"] == "builder-tmp"
     } == {"/scratch", "/tmp"}
-    assert all("emptyDir" in volumes[name] for name in builder_volumes)
+    assert all("emptyDir" in volumes[name] for name in builder_volumes - {"builder-subids"})
     assert {mount["name"] for mount in prepare["volumeMounts"]} & {
         "source",
         "cache",
@@ -121,6 +121,26 @@ def test_job_serializes_credential_phases_and_never_exposes_auth_to_build(inputs
         "secret-key",
     }
     assert not any("envFrom" in phase for phase in (prepare, builder, publish))
+
+
+
+def test_builder_owner_id_files_are_fixed_readonly_and_do_not_expose_claim(inputs) -> None:
+    configmap, job = render_task_image_job(**inputs)
+    assert configmap["data"]["subuid"] == configmap["data"]["subgid"] == "user:100000:262144\n"
+    pod = job["spec"]["template"]["spec"]
+    prepare, builder = pod["initContainers"]
+    publish, = pod["containers"]
+    volume = next(row for row in pod["volumes"] if row["name"] == "builder-subids")
+    assert volume == {"name": "builder-subids", "configMap": {
+        "name": configmap["metadata"]["name"], "defaultMode": 0o444,
+        "items": [{"key": key, "path": key} for key in ("subuid", "subgid")]}}
+    assert [row for row in builder["volumeMounts"] if row["name"] == "builder-subids"] == [
+        {"name": "builder-subids", "mountPath": "/etc/" + key, "subPath": key, "readOnly": True}
+        for key in ("subuid", "subgid")]
+    assert all(row["name"] != "claim" for row in builder["volumeMounts"])
+    assert all(row["name"] != "builder-subids" for phase in (prepare, publish) for row in phase["volumeMounts"])
+    assert builder["image"] == BUILDKIT_IMAGE
+    assert builder["securityContext"]["runAsUser"] == builder["securityContext"]["runAsGroup"] == 1000
 
 
 def test_native_build_preserves_arguments_target_and_task_deadline(inputs) -> None:
