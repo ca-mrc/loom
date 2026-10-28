@@ -100,6 +100,11 @@ changed task content returns to pending. Historical native profiles cannot be
 reactivated or republished. TB2.1 continues to require its existing audited
 `datasets activate` flow.
 
+Native preparation derives the per-task `oracle_eligible` marker from a regular,
+nonempty `solution/solve.sh`. Missing, empty, directory and symlink entries stay
+ineligible. Oracle submission checks this existing capability marker; runtime
+qualification continues to require completed execution evidence.
+
 ## Field mapping and execution admission
 
 | Harbor declaration | Persistent Loom representation |

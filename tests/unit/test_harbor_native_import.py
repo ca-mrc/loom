@@ -85,6 +85,32 @@ def native_tree(root, raw=None):
     return task
 
 
+@pytest.mark.parametrize("solver_kind", ["file", "missing", "empty", "directory", "symlink"])
+def test_native_oracle_marker_comes_from_the_actual_reference_script(tmp_path, solver_kind):
+    from loom_service.task_compat import task_provides_capability
+
+    source = tmp_path / "source"
+    task = native_tree(source)
+    solution = task / "solution"
+    solution.mkdir()
+    script = solution / "solve.sh"
+    if solver_kind == "file":
+        script.write_text("#!/bin/sh\necho reference\n")
+    elif solver_kind == "empty":
+        script.touch()
+    elif solver_kind == "directory":
+        script.mkdir()
+    elif solver_kind == "symlink":
+        (task / "reference.sh").write_text("#!/bin/sh\necho reference\n")
+        script.symlink_to("../reference.sh")
+    instance, = HarborNativeAdapter(spec()).list_instances(source_dir=source, split="test")
+    expected = solver_kind == "file"
+    assert instance.tags.get("oracle_eligible") == str(expected).lower()
+    assert task_provides_capability(
+        {"verifier": {"name": "script"}}, "solution_solve_sh", tags=instance.tags,
+    ) is expected
+
+
 def test_projection_is_pure_and_preserves_independent_requirements():
     raw = source_task()
     original = deepcopy(raw)
