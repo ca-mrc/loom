@@ -1371,6 +1371,11 @@ Skopeo's native digest handling. Registry and storage credentials are absent fro
 the Dockerfile container. Supported task and sidecar components use the same
 path, including declared build arguments and multi-stage targets.
 
+OCI runtime identity reads treat backslashes inside Linux layer filenames as
+literal characters, including systemd's escaped unit names. They do not alias
+`/etc/passwd` or `/etc/group`. Identity traversal, links and whiteouts remain
+checked; the outer OCI blob layout still rejects unsafe paths.
+
 `environment.build_timeout_sec` starts when each BuildKit build command starts;
 it does not include node provisioning, input preparation, scratch cleanup or
 registry publication. `active_deadline_seconds` remains the separate bounded

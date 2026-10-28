@@ -69,7 +69,9 @@ def _layer_identity(stream: IO[bytes], media_type: str, state: dict[str, bytes],
             name = name.rstrip("/")
             if name in {"", "."} and member.isdir():
                 continue
-            if (name.startswith("/") or "\\" in name
+            # Linux layer names use POSIX separators. A literal backslash (for
+            # example a systemd escaped unit name) never aliases /etc/passwd.
+            if (name.startswith("/")
                     or any(part in {"", ".", ".."} for part in name.split("/"))):
                 raise ValueError(_FAILURE)
             if name in {".wh.etc", ".wh..wh..opq", "etc/.wh..wh..opq"}:
