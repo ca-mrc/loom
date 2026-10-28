@@ -95,8 +95,9 @@ from loom.verifier_runtime import native_independent_verifier_handoff, resolve_v
 _PRIVATE_PATHS = ("tests/**", "verifier/**", "solution/**", "upstream-task.toml", ".loom/**")
 _POLICY = WorkspaceStagingPolicy(_PRIVATE_PATHS, _PRIVATE_PATHS, ())
 _PRIVATE_VERIFIER_INPUT_ROOT = PurePosixPath("/loom/verifier/task")
-# Image preparation creates /loom/verifier for the resolved sandbox identity.
-# Keep trusted Oracle assets there, never in the business/Git working tree.
+# Harbor reference scripts may use absolute helper paths. The prepared image
+# supplies this root for its original USER, outside the business/Git tree.
+_NATIVE_ORACLE_SOLUTION_DIR = PurePosixPath("/solution")
 _PRIVATE_ORACLE_SOLUTION_DIR = PurePosixPath("/loom/verifier/oracle/solution")
 
 
@@ -566,6 +567,7 @@ async def run_agent(
     # before the sandbox can return a task-controlled replacement task.toml.
     input_exclusions = _agent_input_exclusions(original_task if original_task is not None else task)
     harbor_inputs = _uses_harbor_private_inputs(workspace, task)
+    native_harbor = _harbor_verifier_kind(workspace, task) == "native"
     native_handoff = native_independent_verifier_handoff(task) and _harbor_verifier_kind(workspace, task) == "native"
     if harbor_inputs:
         # The existing image/workdir contract forbids /, /tmp and overlap with
@@ -594,7 +596,8 @@ async def run_agent(
     lifecycle = task.environment.service_lifecycle
     spec = _workspace_spec(trial)
     solution_staged = False
-    solution_dir = _PRIVATE_ORACLE_SOLUTION_DIR if harbor_inputs else None
+    solution_dir = (_NATIVE_ORACLE_SOLUTION_DIR if native_harbor else
+                    _PRIVATE_ORACLE_SOLUTION_DIR if harbor_inputs else None)
     timed_out = False
     finalizing = False
     termination_signals = 0
@@ -622,16 +625,18 @@ async def run_agent(
                 driver, compose_runtime = await _compose_main_driver(root_driver, workspace, task, trial)
                 # Only Oracle's own sandbox receives the reference solution.
                 solution_staged = spec.stages_solution
-                await materialize_workspace(
-                    driver=driver, task_dir=workspace, dst=task.environment.workdir, policy=_POLICY,
-                    excluded_paths=input_exclusions,
-                    trusted_private_paths=(
-                        ORACLE_SOLUTION_PATHS if spec.stages_solution and not harbor_inputs else ()
-                    ),
-                )
+                if not native_harbor:
+                    await materialize_workspace(
+                        driver=driver, task_dir=workspace, dst=task.environment.workdir, policy=_POLICY,
+                        excluded_paths=input_exclusions,
+                        trusted_private_paths=(
+                            ORACLE_SOLUTION_PATHS if spec.stages_solution and not harbor_inputs else ()
+                        ),
+                    )
                 if spec.stages_solution and solution_dir is not None:
                     await materialize_workspace(
                         driver=driver, task_dir=workspace / "solution", dst=solution_dir,
+                        preserve_source_files=native_harbor,
                     )
                 if task.environment.preserve_acls:
                     from loom.trial.workspace_acls import require_acl_support

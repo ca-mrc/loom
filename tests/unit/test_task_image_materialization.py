@@ -216,12 +216,15 @@ def test_only_absent_manifest_provenance_selects_legacy() -> None:
     )
 
 
-def test_strong_execution_grant_requires_manifest_qualified_key() -> None:
+@pytest.mark.parametrize("native_recipe", [False, True])
+def test_strong_execution_grant_requires_manifest_qualified_key(native_recipe: bool) -> None:
     from uuid import uuid4
 
     config = _task_config(cpu_arch="arm64", dockerfile="environment/Dockerfile").model_dump(
         mode="json"
     )
+    if native_recipe:
+        config["upstream_conversion"] = {"importer": "loom.harbor-native.v1", "original_config": "upstream-task.toml", "changes": []}
     payload = dict(
         schema_version="loom.task-image-execution-grant.v1",
         materialization_id=uuid4(),
@@ -244,6 +247,7 @@ def test_strong_execution_grant_requires_manifest_qualified_key() -> None:
         task_checksum="a" * 64,
         cpu_arch="arm64",
         bundle_content_manifest_sha256="b" * 64,
+        preparation_revision="harbor-reference-directory-v1" if native_recipe else "",
     )
     assert (
         TaskImageExecutionGrantV1.model_validate(payload).materialization_key

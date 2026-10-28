@@ -237,10 +237,14 @@ async def materialize_workspace(
     phase: WorkspacePhase = "agent",
     trusted_private_paths: tuple[str, ...] = (),
     excluded_paths: tuple[str, ...] = (),
+    preserve_source_files: bool = False,
 ) -> int:
     """Recursively upload every regular file under `task_dir` to `dst`
     inside the sandbox, preserving the relative path layout. Returns
     the number of files uploaded.
+
+    `preserve_source_files` retains authored reference helpers normally treated
+    as development caches; it does not bypass the phase/private-path policy.
 
     Empty directories are not created — the driver's `upload()` calls
     `mkdir -p` on each file's parent before writing, which is the only
@@ -261,9 +265,9 @@ async def materialize_workspace(
             continue
         # Skip if ANY path segment matches a skip name (catches both
         # top-level `.git/` AND nested `src/__pycache__/`).
-        if any(part in _SKIP_NAMES for part in rel.parts):
+        if not preserve_source_files and any(part in _SKIP_NAMES for part in rel.parts):
             continue
-        if src.suffix in _SKIP_SUFFIXES:
+        if not preserve_source_files and src.suffix in _SKIP_SUFFIXES:
             continue
         if policy is not None:
             private = policy.is_private(PurePosixPath(*rel.parts))

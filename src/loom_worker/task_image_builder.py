@@ -15,6 +15,7 @@ import shutil
 import socket
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import asdict
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -29,11 +30,13 @@ from loom.driver.task_image import (
 )
 from loom.execution_architecture import execution_cpu_arch
 from loom.models.task import TaskConfig
+from loom.nebius_terminus_image import append_terminus_runtime_tools
 from loom.task_image_materialization import (
     required_task_image_architectures,
     task_bundle_content_manifest_digest,
-    task_image_materialization_key,
+    task_image_materialization_keys,
 )
+from loom.task_image_recipe import frozen_preparation_revision
 from loom.trajectory.storage import bundle_file_metadata_sha256
 from loom_worker.config import WorkerSettings
 from loom_worker.control_plane_client import HttpControlPlaneClient, TaskImageBuildClaim
@@ -201,7 +204,8 @@ async def materialize_and_publish_task_images(
     if manifest_digest and (
         task_config.task.id != claim.task_id
         or claim.materialization_key
-        != task_image_materialization_key(
+        not in task_image_materialization_keys(
+            task_config=claim.task_config,
             task_id=claim.task_id,
             task_checksum=claim.task_checksum,
             cpu_arch=claim.cpu_arch,
@@ -250,6 +254,17 @@ async def materialize_and_publish_task_images(
                         f"expected={expected_metadata_checksum} "
                         f"actual={actual_metadata_checksum}"
                     )
+
+        if frozen_preparation_revision(asdict(claim)):
+            # Verification above owns the immutable source boundary. Only this
+            # disposable build copy changes, and its local cache includes recipe.
+            for environment in (task_config.environment, task_config.verifier.environment):
+                if environment is not None and environment.dockerfile is not None:
+                    dockerfile = task_dir / environment.dockerfile
+                    dockerfile.write_text(append_terminus_runtime_tools(
+                        dockerfile.read_text(), prepare_harness_dirs=True,
+                    ))
+            image_cache_checksum = claim.materialization_key
 
         local_images: dict[str, str] = {}
         if task_config.environment.dockerfile is not None:

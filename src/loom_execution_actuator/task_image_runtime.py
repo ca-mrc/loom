@@ -47,6 +47,7 @@ from loom.task_image_bundle_manifest import capture_task_image_bundle_manifest
 from loom.task_image_errors import TaskImagePreparationError, classify_preparation_failure
 from loom.task_image_materialization import task_bundle_content_manifest_digest
 from loom.task_image_metadata import TaskImageRuntimeMetadataV1
+from loom.task_image_recipe import frozen_preparation_revision
 from loom.trajectory.storage import (
     BUNDLE_FILE_METADATA_NAME,
     _parse_bundle_file_metadata,
@@ -936,7 +937,9 @@ def _install_terminus_runtime_tools(claim: dict[str, Any], context: Path) -> Non
             continue
         dockerfile = context / component.dockerfile_path
         try:
-            rewritten = append_terminus_runtime_tools(dockerfile.read_text())
+            rewritten = append_terminus_runtime_tools(
+                dockerfile.read_text(), prepare_harness_dirs=bool(frozen_preparation_revision(claim)),
+            )
         except TaskImagePreparationError as exc:
             raise BuildPreparationError(str(exc), code=exc.code) from exc
         except (OSError, UnicodeError, ValueError) as exc:

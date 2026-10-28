@@ -98,6 +98,7 @@ def test_manifest_identity_preserves_legacy_and_versions_uniqueness(
             "task_checksum",
             "cpu_arch",
             COLUMN,
+            "preparation_revision",
         ]
         with pytest.raises(DBAPIError, match="manifest-qualified materializations"):
             command.downgrade(config, "0135")
@@ -320,3 +321,51 @@ async def test_legacy_insert_cannot_silently_reuse_ready_row_for_strong_provenan
             ).all() == before
     finally:
         await engine.dispose()
+
+
+@pytest.mark.parametrize("manifest", ["", "b" * 64])
+def test_native_preparation_upgrade_keeps_old_rows_and_rejects_wrong_keys_or_relabeling(isolated_migration_postgres_url, manifest):
+    from loom.task_image_recipe import NATIVE_HARBOR_PREPARATION, task_image_materialization_key
+
+    config = _config(isolated_migration_postgres_url)
+    command.downgrade(config, "0180")
+    engine = create_engine(isolated_migration_postgres_url)
+    native = json.dumps({"upstream_conversion": {"importer": "loom.harbor-native.v1"}})
+    legacy_id = uuid4()
+    identity = dict(task_id="native-recipe-upgrade", task_checksum=CHECKSUM, cpu_arch="arm64")
+    legacy_key = task_image_materialization_key(**identity)
+    current_key = task_image_materialization_key(**identity, preparation_revision=NATIVE_HARBOR_PREPARATION, bundle_content_manifest_sha256=manifest)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("""INSERT INTO task_image_materializations
+                (id,materialization_key,task_id,task_checksum,cpu_arch,task_config,state,registry_images)
+                VALUES (:id,:key,:task_id,:task_checksum,:cpu_arch,CAST(:config AS jsonb),'ready',CAST(:images AS jsonb))"""),
+                {**identity,"id":legacy_id,"key":legacy_key,"config":native,"images":json.dumps({"task":"registry.test/old@sha256:"+"d"*64})})
+        command.upgrade(config, "head")
+        with engine.begin() as connection:
+            row = connection.execute(text("SELECT id,materialization_key,preparation_revision,state,registry_images FROM task_image_materializations WHERE id=:id"),{"id":legacy_id}).one()
+            assert row == (legacy_id,legacy_key,"","ready",{"task":"registry.test/old@sha256:"+"d"*64})
+        statement = text("""INSERT INTO task_image_materializations
+            (id,materialization_key,task_id,task_checksum,cpu_arch,task_config,preparation_revision,bundle_content_manifest_sha256,task_source_provenance)
+            VALUES (:id,:key,:task_id,:task_checksum,:cpu_arch,CAST(:config AS jsonb),:recipe,:manifest,CAST(:provenance AS jsonb))""")
+        values = {**identity,"id":uuid4(),"key":current_key,"config":native,"recipe":NATIVE_HARBOR_PREPARATION,"manifest":manifest,"provenance":json.dumps({"bundle_content_manifest_sha256":manifest} if manifest else {})}
+        for changes in ({"key":"f"*64},{"recipe":"unknown"},{"config":"{}"}):
+            with pytest.raises(DBAPIError, match="manifest_key_check"):
+                with engine.begin() as connection:
+                    connection.execute(statement,{**values,**changes})
+        with engine.begin() as connection:
+            connection.execute(statement,values)
+        for row_id,assignment in ((legacy_id,"preparation_revision='harbor-reference-directory-v1'"),
+                                  (values["id"],"preparation_revision=''"),
+                                  (values["id"],"task_source='s3://different/source'"),
+                                  (values["id"],"task_config=task_config || jsonb_build_object('different',true)")):
+            with pytest.raises(DBAPIError):
+                with engine.begin() as connection:
+                    connection.execute(text(f"UPDATE task_image_materializations SET {assignment} WHERE id=:id"),{"id":row_id})
+        with pytest.raises(DBAPIError,match="recipe-qualified materializations prevent downgrade"):
+            command.downgrade(config,"0180")
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT count(*) FROM task_image_materializations")) == 2
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == service_schema_head()
+    finally:
+        engine.dispose()

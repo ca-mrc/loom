@@ -646,7 +646,7 @@ def _terminus_package_install(
     )
 
 
-def append_terminus_runtime_tools(dockerfile: str) -> str:
+def append_terminus_runtime_tools(dockerfile: str, *, prepare_harness_dirs: bool = False) -> str:
     """Install the Harbor terminus package set onto an authored task Dockerfile.
 
     The appended ``RUN`` fails the image build when bash, tmux, or asciinema
@@ -681,6 +681,15 @@ def append_terminus_runtime_tools(dockerfile: str) -> str:
         ),
         "",
     )
+    if prepare_harness_dirs:
+        # These are harness input/output roots, never the authored business tree.
+        # Keep the image USER (including numeric user:group) and WORKDIR intact.
+        roots = "/solution /tests /logs/verifier /loom/verifier"
+        checks = " && ".join(f"test ! -L {path}" for path in ("/solution", "/tests", "/logs", "/logs/verifier", "/loom", "/loom/verifier"))
+        prepared += _run_instruction(
+            f"{checks} && mkdir -p {roots} && chown {shlex.quote(last_user or 'root')} {roots} && chmod u+rwx {roots}",
+            custom_shell=custom_shell,
+        )
     if last_user and last_user not in {"root", "0"}:
         prepared += f"USER {last_user}\n"
     if suse:

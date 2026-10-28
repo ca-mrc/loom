@@ -18,7 +18,7 @@ from loom.task_image_build_plan import _canonical_bundle_location
 from loom.task_image_materialization import (
     NativeCPUArch,
     declared_task_image_architectures,
-    task_image_materialization_key,
+    task_image_materialization_keys,
 )
 
 _Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
@@ -91,7 +91,8 @@ class PoolTaskImageWorkloadV1(BaseModel):
                     source.catalog_task_id, source.manifest.task_checksum, source.task_config_json):
                 raise ValueError("pool_build_registered_source_mismatch")
             content_digest = source.manifest.digest
-        if self.materialization_key != task_image_materialization_key(
+        if self.materialization_key not in task_image_materialization_keys(
+                task_config=payload,
             task_id=self.task_id, task_checksum=self.task_checksum, cpu_arch=self.cpu_arch,
             bundle_content_manifest_sha256=content_digest,
         ):

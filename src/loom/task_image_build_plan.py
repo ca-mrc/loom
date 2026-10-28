@@ -24,7 +24,7 @@ from loom.native_image_build import canonical_relative_path as _canonical_relati
 from loom.task_image_materialization import (
     declared_task_image_architectures,
     task_bundle_content_manifest_digest,
-    task_image_materialization_key,
+    task_image_materialization_keys,
 )
 
 if TYPE_CHECKING:
@@ -402,7 +402,8 @@ def derive_task_image_build_plan(
             or admitted_source.source_uri != row.task_source
             or admitted_source.task_config != row.task_config
             or any(row.task_source_provenance.get(key) != value for key, value in admitted_source.provenance.items())
-            or getattr(row, "materialization_key", None) != task_image_materialization_key(
+            or getattr(row, "materialization_key", None) not in task_image_materialization_keys(
+                task_config=row.task_config,
                 task_id=row.task_id, task_checksum=row.task_checksum, cpu_arch=row.cpu_arch,
                 bundle_content_manifest_sha256=manifest,
             )
