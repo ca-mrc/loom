@@ -211,6 +211,9 @@ Control failures retain the operation, return code and execution duration; if
 cleanup also fails, both results remain visible without command, environment or
 output contents. A return code of 124 alone does not distinguish an execution
 deadline from the runtime's bounded output-pipe wait.
+For 124 results, the runtime console records only the fixed reason (deadline,
+cancellation, output-pipe wait or process exit), effective timeout and duration;
+the execution response fields and timeout behavior remain unchanged.
 Native independent-verifier artifact transfer preserves source
 paths and exclusions, replaces each declared directory with its collected tree,
 and rejects unsafe links and private paths. Excluded or agent-deleted files do
