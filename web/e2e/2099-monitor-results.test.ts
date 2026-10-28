@@ -142,6 +142,43 @@ test("Batch run plan explains TaskSet purpose, task count and state-count naviga
   await page.screenshot({ path: testInfo.outputPath("batch-run-plan.png") });
 });
 
+test("Batch trial badges match expanded counts when execution attempts differ", async ({ apiHarness, browserHarness, page }) => {
+  const trialCounts = { queued: 21, "protected-pending": 0, claimed: 0, running: 23, materializing: 0, succeeded: 28, failed: 6, cancelled: 0 };
+  await apiHarness.install({ role: "user", overrides: [
+    json("batch with different trial and attempt counts", "/api/v1/batches/review-batch", {
+      ...batch, state: "running", expected_trial_count: 78, finished_at: null,
+      trial_summary: trialCounts,
+      service_execution_summary: {
+        lease_count: 54, lifecycle_stages: { running: 24, succeeded: 29, failed: 1 },
+        output_commit_states: { committed: 30 }, materialization_states: { committed: 30 },
+        canonical_ready_count: 30,
+      },
+    }),
+  ] });
+  await page.goto(`${browserHarness.baseURL}/batches/review-batch`);
+  const badges = page.getByRole("group", { name: "Trial state counts", exact: true });
+  for (const [state, count] of Object.entries(trialCounts)) {
+    if (count > 0) await expect(badges.getByText(`${state} ${count}`, { exact: true })).toBeVisible();
+  }
+  const table = page.getByRole("table", { name: "Trial states", exact: true });
+  await expect(table).toBeHidden();
+  await page.getByText("Trial counts by state", { exact: true }).click();
+  for (const [state, count] of Object.entries(trialCounts)) {
+    const row = table.getByRole("row").filter({ has: page.getByText(state, { exact: true }) });
+    await expect(row.getByRole("cell").nth(1)).toHaveText(String(count));
+  }
+  const attempts = page.getByRole("group", { name: "Latest execution attempt state counts", exact: true });
+  await expect(attempts).toBeHidden();
+  await page.getByText("Latest execution attempt stages", { exact: true }).click();
+  await expect(attempts.getByText("running 24", { exact: true })).toBeVisible();
+  await expect(attempts.getByText("succeeded 29", { exact: true })).toBeVisible();
+  await expect(attempts.getByText("failed 1", { exact: true })).toBeVisible();
+  await expect(badges.getByText("failed 6", { exact: true })).toBeVisible();
+  const violations = (await new AxeBuilder({ page }).analyze()).violations.filter((item) => item.impact === "critical" || item.impact === "serious");
+  expect(violations).toEqual([]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1)).toBe(false);
+});
+
 test("cancelled Batch observes children, canonical output and cleanup without reload", async ({ apiHarness, browserHarness, page }, testInfo) => {
   // Drive the browser's polling cadence separately from real response latency.
   // Pause before navigation so a slow assertion cannot consume another state.

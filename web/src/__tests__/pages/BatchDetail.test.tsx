@@ -435,6 +435,48 @@ describe("BatchDetail run plan", () => {
     ).toHaveAttribute("href", `/monitor?view=trials&batch_id=${BATCH_ID}`);
   });
 
+  it.each(["nebius", "docker"])("keeps %s trial badges consistent with expanded trial counts", async (backend) => {
+    const trialCounts = { queued: 21, "protected-pending": 0, claimed: 0, running: 23, materializing: 0, succeeded: 28, failed: 6, cancelled: 0 };
+    mockBatch({
+      ...BATCH_BODY,
+      backend,
+      expected_trial_count: 78,
+      trial_summary: trialCounts,
+      ...(backend === "nebius" ? { service_execution_summary: {
+        lease_count: 54,
+        lifecycle_stages: { running: 24, succeeded: 29, failed: 1 },
+        output_commit_states: { committed: 30 },
+        materialization_states: { committed: 30 },
+        canonical_ready_count: 30,
+      } } : {}),
+    });
+    renderBatchDetail();
+
+    const toggle = (await screen.findByText("Trial counts by state")).closest("summary")!;
+    for (const [state, count] of Object.entries(trialCounts)) {
+      if (count > 0) expect(within(toggle).getByText(`${state} ${count}`)).toBeInTheDocument();
+      else expect(within(toggle).queryByText(`${state} ${count}`)).not.toBeInTheDocument();
+    }
+    expect(within(toggle).queryByText("running 24")).not.toBeInTheDocument();
+    expect(within(toggle).queryByText("succeeded 29")).not.toBeInTheDocument();
+    expect(within(toggle).queryByText("failed 1")).not.toBeInTheDocument();
+
+    await userEvent.click(toggle);
+    const table = screen.getByRole("table", { name: "Trial states" });
+    for (const [state, count] of Object.entries(trialCounts)) {
+      const row = within(table).getByText(state, { exact: true }).closest("tr")!;
+      expect(within(row).getByText(String(count), { exact: true })).toBeInTheDocument();
+    }
+    if (backend === "nebius") {
+      await userEvent.click(screen.getByText("Latest execution attempt stages", { exact: true }));
+      const attempts = screen.getByRole("group", { name: "Latest execution attempt state counts" });
+      expect(within(attempts).getByText("running 24")).toBeInTheDocument();
+      expect(within(attempts).getByText("succeeded 29")).toBeInTheDocument();
+      expect(within(attempts).getByText("failed 1")).toBeInTheDocument();
+      expect(screen.getByText(/Only trials with an execution attempt are included/)).toBeInTheDocument();
+    }
+  });
+
   it("confirms cancellation and closes only after server success", async () => {
     const fetchMock = mockBatch();
     const invalidateSpy = vi.spyOn(QueryClient.prototype, "invalidateQueries");
