@@ -14,6 +14,10 @@ from scripts import write_trivy_release_policy as policy
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_BYTES = (
     b"exit-code: 1\n"
+    b"db:\n"
+    b"  repository:\n"
+    b"    - ghcr.io/aquasecurity/trivy-db:2\n"
+    b"    - public.ecr.aws/aquasecurity/trivy-db:2\n"
     b"pkg:\n"
     b"  types:\n"
     b"    - os\n"
@@ -27,7 +31,7 @@ CONFIG_BYTES = (
     b"vulnerability:\n"
     b"  ignore-unfixed: false\n"
 )
-CONFIG_SHA256 = "bd8896276b5d8d00d8bb3c3d7a51d359b4931ea2811c21cb8ed692766a7eb8cf"
+CONFIG_SHA256 = "62844e2d381e0fa0f02bd63bcf43f8da3173e8fa8e585eb2bc25cef928575a36"
 IGNORE_BYTES = (
     b"vulnerabilities:\n"
     b"  - id: CVE-2023-45853\n"
@@ -83,6 +87,16 @@ def test_rendered_policy_is_valid_yaml_with_exact_statements() -> None:
     assert [item["statement"] for item in parsed["vulnerabilities"]] == [
         item.statement for item in policy.TRIVY_EXCEPTIONS
     ]
+
+
+def test_controlled_db_sources_preserve_the_complete_scan_policy() -> None:
+    config = yaml.safe_load(policy.TRIVY_CONFIG_BYTES)
+    assert config.pop("db") == {"repository": [
+        "ghcr.io/aquasecurity/trivy-db:2", "public.ecr.aws/aquasecurity/trivy-db:2",
+    ]}
+    assert config == {"exit-code": 1, "pkg": {"types": ["os", "library"]},
+        "scan": {"scanners": ["vuln"]}, "severity": ["CRITICAL"], "timeout": "20m0s",
+        "vulnerability": {"ignore-unfixed": False}}
 
 
 def test_temporary_exceptions_cover_only_required_unfixed_packages() -> None:

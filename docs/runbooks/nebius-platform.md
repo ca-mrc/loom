@@ -158,6 +158,12 @@ Nebius publication uses the existing Trivy 0.74.0 CRITICAL policy with **no
 exceptions**. The empty ignore file is explicit; active or suppressed findings
 cannot pass report validation. Expired exceptions for unrelated legacy images
 do not block this lane before a scan. No exception deadline is extended.
+The controlled policy downloads the vulnerability DB from the official
+`ghcr.io/aquasecurity/trivy-db:2` publisher, then
+`public.ecr.aws/aquasecurity/trivy-db:2`, avoiding the GCR pull-through layer.
+Trivy 0.74.0's native fallback handles 429, selected temporary 5xx errors and
+`BLOB_UNKNOWN`; a bare 404 still fails closed. See the
+[database source configuration](https://trivy.dev/docs/v0.74/guide/configuration/db/).
 The pure-Nebius image CI workflow passes `--no-exceptions` to both
 `write_trivy_release_policy.py` and `validate_trivy_release_report.py`, matching
 the candidate publisher's Python calls. The ordinary image matrix and the
