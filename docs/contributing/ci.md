@@ -652,6 +652,7 @@ accepting that server as healthy can release host-side migrations before the
 final TCP server starts. The cold-init barrier regression runs in the existing
 Docker integration tier. Health intervals, retry counts and migration behavior
 remain unchanged.
+Its FIFO release uses the same `postgres` OS user that creates the init barrier.
 Failed Compose commands print a bounded, redacted tail of their captured output,
 so image-build errors remain visible even before service containers exist.
 

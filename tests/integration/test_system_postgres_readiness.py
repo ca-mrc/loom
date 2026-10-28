@@ -168,7 +168,9 @@ def test_system_postgres_health_waits_for_final_tcp_server(tmp_path, monkeypatch
         assert old_probe.returncode == 0 and tcp_probe.returncode == 2
         assert state["health"] != "healthy", "socket-only initialization was reported ready for TCP"
 
-        docker("exec", container, "sh", "-c", "printf 'release\\n' >/tmp/loom-readiness-release")
+        # Match the init script's owner under sticky-directory FIFO protection.
+        docker("exec", "--user", "postgres", container, "sh", "-c",
+               "printf 'release\\n' >/tmp/loom-readiness-release")
         # Exercise the existing readiness gate and exactly one real migration.
         docker_compose._wait_services_healthy(["postgres"], timeout_sec=300)
         subprocess.run([sys.executable, "-m", "alembic", "-c", str(docker_compose.ALEMBIC_CONFIG),
