@@ -92,27 +92,9 @@ _RESERVED_BODY_KEYS = frozenset(
 
 # Providers we accept on the wire. The Gateway only holds keys for these;
 # any other provider in `model="X/Y"` is rejected with 400 upfront rather
-# than silently passing api_key=None into LiteLLM.
-#
-# PR-D additions:
-# - `local`: routes `model="local/<server>/<model_id>"` to the operator-
-#   configured local OpenAI-compatible server (vLLM / ollama / etc.).
-# - `huggingface`: routes `model="huggingface/<id>"` to HF Inference
-#   Endpoints via LiteLLM. Requires LOOM_GW_HF_TOKEN (Plan D follow-up
-#   adds the explicit setting; LiteLLM falls back to HF_TOKEN env).
-# - `local-vllm`: reserved for worker-spawned vLLM (`source=hf` +
-#   `hf_execution=local-vllm`). The worker handles this directly without
-#   round-tripping the gateway; if a request lands here we surface 501.
-_SUPPORTED_PROVIDERS = frozenset(
-    {
-        "anthropic",
-        "openai",
-        "together",
-        "local",
-        "huggingface",
-        "local-vllm",
-    }
-)
+# than silently passing api_key=None into LiteLLM. The hosted `local`,
+# `huggingface` and `local-vllm` routes are retired (#2054).
+_SUPPORTED_PROVIDERS = frozenset({"anthropic", "openai", "together"})
 
 
 class _LoomBlock(BaseModel):
@@ -277,75 +259,11 @@ async def chat_completions(
             detail=(f"unsupported provider {provider!r}; allowed: {sorted(_SUPPORTED_PROVIDERS)}"),
         )
 
-    # PR-D: worker-spawned vLLM bypasses the gateway entirely. If a
-    # request lands here something is misconfigured upstream.
-    if provider == "local-vllm":
-        raise HTTPException(
-            status_code=501,
-            detail=(
-                "local-vllm execution is handled by the worker, not "
-                "the gateway. The agent should call the worker's local "
-                "vLLM directly. If you see this error, the worker "
-                "dispatcher is forwarding HF+local-vllm requests to "
-                "the gateway by mistake."
-            ),
-        )
-
-    # PR-D: per-provider dispatch. Three paths converge into a single
-    # acompletion call with different (model_string, api_key, api_base,
-    # rate_card) tuples. Local servers don't yet have rate cards →
-    # cost=0; HF Inference models often don't either → cost=0.
+    # Per-provider dispatch: a BYO connection or the platform path yields
+    # the (model_string, api_key, api_base, rate_card) for one acompletion.
     api_base: str | None = None
     entry: object | None
-    if provider == "local":
-        # `local/<server>/<id>` — split off the server name.
-        try:
-            server_name, local_model_id = model_name.split("/", 1)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"local model string must be 'local/<server>/<model_id>', got {raw_model!r}"
-                ),
-            ) from exc
-        cfg = settings.local_providers.get(server_name)
-        if cfg is None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"local server {server_name!r} is not configured. "
-                    "Set LOOM_GW_LOCAL_<NAME>_BASE_URL."
-                ),
-            )
-        # LiteLLM's openai/ dialect + api_base override hits any
-        # OpenAI-compatible endpoint (ollama, vLLM, lm-studio, etc.).
-        litellm_model = f"openai/{local_model_id}"
-        api_key = cfg.api_key or "no-key"
-        api_base = cfg.base_url
-        entry = None
-    elif provider == "huggingface":
-        # LiteLLM resolves `huggingface/<id>` against HF Inference
-        # Endpoints. Requires HF_TOKEN in the gateway env (LiteLLM
-        # auto-reads it).
-        litellm_model = raw_model
-        api_key = (
-            settings.huggingface_api_key.get_secret_value()
-            if (settings.huggingface_api_key is not None)
-            else None
-        )
-        # HF models may not have a rate card; allow None → cost=0.
-        table = await request.app.state.rate_card_cache.get()
-        spec = ModelSpec(
-            provider=provider,
-            name=model_name,
-            tier=requested_tier,
-            region=requested_region,
-        )
-        try:
-            entry = lookup_entry(table, spec)
-        except RateCardNotFoundError:
-            entry = None
-    elif byo_row is not None:
+    if byo_row is not None:
         # BYO connection path (#178 + #179): override destination +
         # auth so the call hits the team's upstream, not the platform-
         # default endpoint. Cost honors the connection's

@@ -34,7 +34,6 @@ class WorkerSettings(BaseSettings):
     docker_api_timeout_sec: int = 1800
     docker_socket: Path = Path("/var/run/docker.sock")
     drain_timeout_sec: int = 600
-    enable_worker_vllm: bool = False
     executor_worker_credential: SecretStr | None = Field(default=None, validation_alias="LOOM_EXECUTOR_WORKER_CREDENTIAL")
     family_state_download_timeout_sec: float = 120.0
     fixtures_root: Path | None = None
@@ -96,8 +95,6 @@ class WorkerSettings(BaseSettings):
     trial_cancel_poll_interval_sec: float = 30.0
     trial_hard_deadline_grace_sec: float = 600.0
     trial_hard_deadline_multiplier: float = 3.0
-    vllm_gpu_memory_utilization: float = 0.9
-    vllm_tensor_parallel_size: int = 1
 
 
 WorkerSettings.model_rebuild()

@@ -112,7 +112,6 @@ from loom_worker.trial_cancellation_watchdog import (
     run_with_watchdog,
 )
 from loom_worker.trial_runner import AgentFactory, LocalTrialRunner
-from loom_worker.vllm_registry import WorkerVLLMRegistry
 from loom_worker.worker_health import WorkerUnhealthyError, hard_exit_unhealthy_worker
 
 _DOCKER_HOST_GATEWAY_EXTRA_HOSTS: tuple[tuple[str, str], ...] = (
@@ -490,7 +489,6 @@ async def run_worker(
         )
         hb.start()
 
-        vllm_registry: WorkerVLLMRegistry | None = None
         try:
             pool = RunnerPool(
                 max_concurrent=settings.max_concurrent,
@@ -515,16 +513,6 @@ async def run_worker(
                 after_seconds=settings.idle_exit_after_seconds,
             )
             image_eviction = _PeriodicMaintenanceTracker(interval_seconds=3_600)
-            # PR-E: per-worker vLLM registry. Opt-in via settings; the
-            # `enabled=False` path still constructs the object so the
-            # trial runner gets a deterministic AgentError instead of
-            # a None-dereference when a trial requests local-vllm.
-            vllm_registry = WorkerVLLMRegistry(
-                enabled=settings.enable_worker_vllm,
-                default_gpu_memory_utilization=(settings.vllm_gpu_memory_utilization),
-                default_tensor_parallel_size=(settings.vllm_tensor_parallel_size),
-            )
-
             # #188 / Phase B: per-worker sandbox-isolation resources.
             # Allocator is always built (cheap); singleton is started
             # only when isolation is on so default-off workers don't
@@ -564,7 +552,6 @@ async def run_worker(
                         else None
                     ),
                     pipeline_run=pipeline_run,
-                    vllm_registry=vllm_registry,
                     sandbox_allocator=sandbox_allocator,
                     sandbox_singleton=sandbox_singleton,
                     resource_usage_outbox=resource_usage_outbox,
@@ -610,11 +597,6 @@ async def run_worker(
             hb.stop()
             hb.join(timeout=10.0)
             sync_http.close()
-            # PR-E: tear down any worker-spawned vLLMs on graceful
-            # drain. Hard-kill via signal handlers in vllm_runner
-            # covers crash paths.
-            if vllm_registry is not None:
-                await vllm_registry.shutdown()
 
 
 async def _register_worker_with_retry(
@@ -793,7 +775,6 @@ async def _claim_available_trials(
     gateway_client: HttpLLMGatewayClient,
     object_store: ObjectStore,
     worker_id: UUID,
-    vllm_registry: WorkerVLLMRegistry,
     sandbox_allocator: SandboxNetworkAllocator | None = None,
     sandbox_singleton: SandboxSingletonManager | None = None,
     read_setup_health: Callable[[], Any] | None = None,
@@ -844,7 +825,6 @@ async def _claim_available_trials(
             object_store=object_store,
             worker_id=worker_id,
             payload=trial_payload,
-            vllm_registry=vllm_registry,
             sandbox_allocator=sandbox_allocator,
             sandbox_singleton=sandbox_singleton,
             resource_usage_outbox=resource_usage_outbox,
@@ -863,7 +843,6 @@ async def _claim_available_work(
     worker_id: UUID,
     capability_snapshot_digest: str | None,
     pipeline_run: Callable[[ExecutionAttemptClaimV1], Coroutine[Any, Any, None]] | None,
-    vllm_registry: WorkerVLLMRegistry,
     sandbox_allocator: SandboxNetworkAllocator | None = None,
     sandbox_singleton: SandboxSingletonManager | None = None,
     read_setup_health: Callable[[], Any] | None = None,
@@ -886,7 +865,6 @@ async def _claim_available_work(
             gateway_client=gateway_client,
             object_store=object_store,
             worker_id=worker_id,
-            vllm_registry=vllm_registry,
             sandbox_allocator=sandbox_allocator,
             sandbox_singleton=sandbox_singleton,
             read_setup_health=read_setup_health,
@@ -950,7 +928,6 @@ async def _claim_available_work(
                 object_store=object_store,
                 worker_id=worker_id,
                 payload=payload.model_dump(mode="json", by_alias=True),
-                vllm_registry=vllm_registry,
                 sandbox_allocator=sandbox_allocator,
                 sandbox_singleton=sandbox_singleton,
                 resource_usage_outbox=resource_usage_outbox,
@@ -1072,7 +1049,6 @@ async def _spawn_trial(
     object_store: ObjectStore,
     worker_id: UUID,
     payload: dict[str, Any],
-    vllm_registry: WorkerVLLMRegistry,
     sandbox_allocator: SandboxNetworkAllocator | None = None,
     sandbox_singleton: SandboxSingletonManager | None = None,
     resource_usage_outbox: ResourceUsageOutbox | None = None,
@@ -1500,10 +1476,6 @@ async def _spawn_trial(
             # the object-store trajectory remains the durable fallback.
             cp_event_sink=trial_cp_event_sink,
             model_switch_plan=payload.get("model_switch_plan"),
-            # PR-E: worker-spawned vLLM registry. Shared across trials
-            # claimed by this worker process so the 1-3 min vLLM startup
-            # is amortised across many same-model trials.
-            vllm_registry=vllm_registry,
             # #188 / Phase B: per-trial sandbox isolation. Both None →
             # legacy direct-network behavior. Both populated → per-trial
             # bridge + singleton attach.

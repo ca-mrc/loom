@@ -12,6 +12,7 @@ import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 import pytest
@@ -28,6 +29,10 @@ from scripts.ops.nebius_ingress_gateway import (
 )
 
 from loom.nebius_shared_ingress import SharedIngressInstallation, render_shared_ingress
+from tests.cluster.test_nebius_ingress_operation import (
+    _import_fixture_image,
+    _prepare_fixture_image,
+)
 from tests.cluster.test_nebius_shared_ingress import (
     PYTHON,
     SERVER,
@@ -181,8 +186,19 @@ server.serve_forever()
         container.stop()
 
 
+@pytest.fixture
+def rotation_images(tmp_path):
+    # Preserve original manifest bytes before starting the disposable node;
+    # its containerd does not share the host Docker cache or registry mirror.
+    mirror_limited = set()
+    with TemporaryDirectory(dir=tmp_path) as directory:
+        yield {image: _prepare_fixture_image(image, Path(directory), mirror_limited)
+               for image in (TRAEFIK, PYTHON)}
+
+
 @pytest.mark.timeout(240)
-def test_real_traefik_rotation_qualifies_fresh_pods_and_preserves_previous_secret(inputs, ingress_input, tmp_path, monkeypatch):
+def test_real_traefik_rotation_qualifies_fresh_pods_and_preserves_previous_secret(
+        inputs, ingress_input, tmp_path, monkeypatch, rotation_images):
     """Local image alias is not live registry mirroring or public cutover evidence."""
     config, fixture_binding, _fake, roots, _selected, root = inputs
     namespace = ingress_input["foundation"]["ingress_namespace"]
@@ -194,11 +210,8 @@ def test_real_traefik_rotation_qualifies_fresh_pods_and_preserves_previous_secre
         binding = replace(fixture_binding, namespace=namespace, namespace_uid=ns.metadata.uid,
                           kube_system_uid=core.read_namespace("kube-system").metadata.uid)
         ident = container.get_wrapped_container().id
-        # Docker's classic archive can rebuild the manifest with a different
-        # digest. Pull the pinned manifest in containerd itself; this preserves
-        # the qualified registry identity on both local and CI Docker backends.
-        _run(container, "ctr", "images", "pull", TRAEFIK)
-        _run(container, "ctr", "images", "pull", PYTHON)
+        for reference, archive in rotation_images.items():
+            _import_fixture_image(container, reference, archive)
         image = "cr.eu-north1.nebius.cloud/test/traefik@" + TRAEFIK.split("@", 1)[1]
         _run(container, "ctr", "images", "tag", TRAEFIK, image)
         assert image in _run(container, "ctr", "images", "ls", "-q").splitlines()

@@ -31,6 +31,7 @@ from loom.task_image_archives import (
     PreparedImageArchiveV1,
     archive_version,
     checked_archive_intents,
+    normalized_archive_metadata,
 )
 
 
@@ -73,7 +74,7 @@ def recover_archive_versions(client: Any, claim: dict[str, Any], *, bucket: str)
                     continue
                 version_id = version["VersionId"]
                 head = client.head_object(Bucket=bucket, Key=key, VersionId=version_id, ChecksumMode="ENABLED")
-                metadata = head.get("Metadata", {})
+                metadata = normalized_archive_metadata(head.get("Metadata", {}))
                 if metadata.get("loom-image-write-id") != write_id:
                     continue
                 recovered.append(archive_version(client, bucket=bucket, key=key, version_id=version_id,

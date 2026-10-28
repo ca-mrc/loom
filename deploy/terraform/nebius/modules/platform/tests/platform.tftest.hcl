@@ -14,7 +14,7 @@ variables {
 run "disabled_is_empty" {
   command = plan
   assert {
-    condition     = output.integration_platform == null && length(nebius_mk8s_v1_node_group.integration) == 0 && length(nebius_storage_v1_bucket.integration) == 0 && length(nebius_iam_v1_access_permit.integration_catalog_metadata) == 0
+    condition     = output.integration_platform == null && length(nebius_mk8s_v1_node_group.integration) == 0 && length(nebius_storage_v1_bucket.integration) == 0 && length(nebius_iam_v1_access_permit.integration_catalog_metadata) == 0 && length(nebius_iam_v1_access_permit.integration_native_builder_metadata) == 0
     error_message = "No platform resources without explicit configuration."
   }
 }
@@ -250,7 +250,7 @@ run "disabled_preserves_existing_buckets" {
   command = plan
   variables { integration_platform = { bucket_prefix = "loom-native-test-artifacts" } }
   assert {
-    condition     = length(nebius_storage_v1_bucket.integration["artifacts"].bucket_policy.rules) == 1
+    condition     = length(nebius_storage_v1_bucket.integration["artifacts"].bucket_policy.rules) == 1 && length(nebius_iam_v1_access_permit.integration_native_builder_metadata) == 0
     error_message = "Disabled builder must not change bucket access."
   }
 }
@@ -258,8 +258,8 @@ run "enabled_scopes_access_and_retention" {
   command = plan
   variables { integration_platform = { bucket_prefix = "loom-native-test-artifacts", native_builder_group_id = "group-e00nativebuilder" } }
   assert {
-    condition     = length(nebius_storage_v1_bucket.integration["artifacts"].bucket_policy.rules) == 3
-    error_message = "Builder requires two scoped rules in addition to canonical access."
+    condition     = length(nebius_storage_v1_bucket.integration["artifacts"].bucket_policy.rules) == 4
+    error_message = "Builder requires read access plus separate cache and image archive write scopes."
   }
   assert {
     condition     = alltrue([for key in ["source", "backups", "trajectories"] : length(nebius_storage_v1_bucket.integration[key].bucket_policy.rules) == 1 && length(nebius_storage_v1_bucket.integration[key].lifecycle_configuration.rules) == 1])
@@ -267,11 +267,49 @@ run "enabled_scopes_access_and_retention" {
   }
   assert {
     condition     = nebius_storage_v1_bucket.integration["artifacts"].bucket_policy.rules[2].paths == tolist(["task-build-cache/*"])
-    error_message = "Write permission must be restricted to cache."
+    error_message = "Existing cache write permission must retain its exact prefix."
   }
   assert {
     condition     = nebius_storage_v1_bucket.integration["artifacts"].lifecycle_configuration.rules[1].filter.prefix == "task-build-cache/" && nebius_storage_v1_bucket.integration["artifacts"].lifecycle_configuration.rules[1].noncurrent_version_expiration.noncurrent_days == 1
     error_message = "Version retention must be scoped to cache."
+  }
+}
+
+run "native_archive_publication_has_scoped_write_access" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-native-test-artifacts", native_builder_group_id = "group-e00nativebuilder" } }
+  override_resource {
+    target          = nebius_iam_v1_group.integration_store["canonical"]
+    override_during = plan
+    values          = { id = "group-e00canonical" }
+  }
+  override_resource {
+    target          = nebius_storage_v1_bucket.integration["artifacts"]
+    override_during = plan
+    values          = { id = "storagebucket-e00artifacts" }
+  }
+  assert {
+    condition = anytrue([
+      for rule in nebius_storage_v1_bucket.integration["artifacts"].bucket_policy.rules :
+      rule.group_id == "group-e00nativebuilder" && rule.paths == tolist(["task-image-archives/*"]) && rule.roles == tolist(["storage.object-editor"])
+    ])
+    error_message = "Native Compose publication must write prepared image archives using its existing builder identity, scoped to the archive prefix."
+  }
+  assert {
+    condition = (
+      length(nebius_iam_v1_access_permit.integration_native_builder_metadata) == 1 &&
+      nebius_iam_v1_access_permit.integration_native_builder_metadata["integration"].parent_id == "group-e00nativebuilder" &&
+      nebius_iam_v1_access_permit.integration_native_builder_metadata["integration"].resource_id == "storagebucket-e00artifacts" &&
+      nebius_iam_v1_access_permit.integration_native_builder_metadata["integration"].role == "storage.viewer"
+    )
+    error_message = "The builder's versioning read must be scoped to the artifacts bucket, without project or bucket-management permissions."
+  }
+  assert {
+    condition = alltrue([
+      for rule in nebius_storage_v1_bucket.integration["artifacts"].bucket_policy.rules :
+      rule.group_id != "group-e00nativebuilder" || rule.roles != tolist(["storage.object-editor"]) || contains(["task-build-cache/*", "task-image-archives/*"], one(rule.paths))
+    ])
+    error_message = "Builder writes must not expand beyond cache and prepared image archive prefixes."
   }
 }
 

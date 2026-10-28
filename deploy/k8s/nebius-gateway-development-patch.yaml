@@ -6,10 +6,3 @@ spec:
           env:
             - name: LOOM_ENV
               value: development
-            - name: LOOM_GW_LOCAL_YIBU_BASE_URL
-              value: https://yibuapi.com/v1
-            - name: LOOM_GW_LOCAL_YIBU_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: loom-nebius-model-provider
-                  key: api-key

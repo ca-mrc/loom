@@ -211,10 +211,19 @@ pins = [
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_templates.py", shard_index = 14 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_roles.py", shard_index = 15 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_reopening.py", shard_index = 16 },
+  # The full cutover/legacy refresh scenarios retain their original bounds.
+  # This split adds no cases; keep them off the existing heavy recovery shard.
+  { path = "tests/ops/test_nebius_shared_pool_refresh_successor.py", shard_index = 8 },
   { path = "tests/ops/test_nebius_pool_participant_delivery_transport.py", shard_index = 17 },
   { path = "tests/ops/test_nebius_pool_participant_delivery_job_failures.py", shard_index = 13 },
   { path = "tests/ops/test_nebius_pool_participant_delivery_completion.py", shard_index = 3 },
   { path = "tests/ops/test_nebius_development_pool_retained_runtime_stages.py", shard_index = 11 },
+]
+# Scheduled run 40523588535: retained (671s) shared shard 3 with installation
+# (354s), while default shard 8 took 39s. Move only the ordinary retained module;
+# explicit shared qualification keeps every original pin and census separation.
+default_pins = [
+  { path = "tests/ops/test_nebius_development_pool_retained.py", shard_index = 7 },
 ]
 
 [[test_sharding]]
@@ -1180,6 +1189,7 @@ exclude_paths = [
   "tests/integration/test_task_service_lifecycle_docker.py",
   "tests/integration/test_nebius_harbor_verifier_docker.py",
   "tests/integration/test_harbor_native_verifier_defaults_docker.py",
+  "tests/integration/test_system_postgres_readiness.py",
   "tests/integration/test_structured_artifacts_docker.py",
   "tests/integrations/behavior/**/*.py",
 ]
@@ -1259,6 +1269,7 @@ include_paths = [
   "tests/integration/test_task_service_lifecycle_docker.py",
   "tests/integration/test_nebius_harbor_verifier_docker.py",
   "tests/integration/test_harbor_native_verifier_defaults_docker.py",
+  "tests/integration/test_system_postgres_readiness.py",
   "tests/integration/test_structured_artifacts_docker.py",
 ]
 

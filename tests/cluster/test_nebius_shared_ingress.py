@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import http.client
+import inspect
 import json
 import os
 import socket
 import ssl
 import subprocess
+import sys
 import time
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
@@ -101,6 +103,142 @@ def _run(container, *args, payload=None, timeout=120):
     return result.stdout
 
 
+def _kernel_wait_snapshot(ident, *, proc_root="/proc", module_root="/sys/module"):
+    """Read only kernel fields of processes verified to belong to this node."""
+    # Self-contained: the failure observer runs this function in a bounded child,
+    # without importing the test module or relying on a responsive node exec.
+    import json
+    import os
+    import re
+    import subprocess
+    from pathlib import Path
+
+    if not isinstance(ident, str) or re.fullmatch(r"[0-9a-f]{64}", ident) is None:
+        return {"error": "invalid_container_id"}
+    proc = Path(proc_root)
+    if not (proc / "self/stat").exists():
+        return {"error": "host_proc_unavailable"}
+    result = {"kernel_release": "unavailable", "modules": {}, "processes": [], "top": []}
+    allowed = {"iptables", "ip6tables", "iptables-save", "ip6tables-save",
+               "iptables-restor", "ip6tables-resto", "flannel", "bridge"}
+
+    def read(fd, name, limit=4096):
+        child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+        try:
+            return os.read(child, limit).decode(errors="replace").strip()
+        finally:
+            os.close(child)
+
+    def identity(fd):
+        stat = read(fd, "stat")
+        fields = stat[stat.rindex(")") + 2:].split()
+        cgroup = read(fd, "cgroup")
+        if re.search(r"(?:^|/)(?:docker-)?" + ident + r"(?:\.scope)?(?:/|$)",
+                     cgroup, re.MULTILINE) is None:
+            raise ValueError("unowned_process")
+        return read(fd, "comm", 64), fields[19], fields[0], fields[1]
+
+    def open_pid(pid):
+        return os.open(proc / str(pid), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+
+    def token(path):
+        with path.open() as handle:
+            value = handle.read(128).strip()
+        return value if re.fullmatch(r"[A-Za-z0-9_.+\-]+", value) else "unavailable"
+
+    try:
+        result["kernel_release"] = token(proc / "sys/kernel/osrelease")
+    except OSError as error:
+        result["kernel_release"] = type(error).__name__
+    for module in ("nf_tables", "nft_compat", "ip_tables", "ip6_tables", "br_netfilter"):
+        result["modules"][module] = {}
+        for name in ("initstate", "refcnt"):
+            try:
+                result["modules"][module][name] = token(Path(module_root) / module / name)
+            except OSError as error:
+                result["modules"][module][name] = type(error).__name__
+    init_fd = None
+    try:
+        # This observer never follows a persisted or environment-selected remote
+        # Docker context. Ownership must resolve against this host's own /proc.
+        docker = ["docker", "--host", "unix:///var/run/docker.sock"]
+        inspect_result = subprocess.run([*docker, "inspect", "--format={{.State.Pid}}", ident],
+                                        text=True, capture_output=True, timeout=1)
+        pid_text = inspect_result.stdout.strip()
+        if inspect_result.returncode or not pid_text.isdecimal() or not 0 < int(pid_text) < 2**31:
+            return {"error": "node_pid_unavailable"}
+        init_fd = open_pid(int(pid_text))
+        initial = identity(init_fd)
+        top = subprocess.run([*docker, "top", ident, "-eo", "pid,ppid,stat,wchan:32,comm"],
+                             text=True, capture_output=True, timeout=1)
+        if top.returncode:
+            return {"error": "node_top_unavailable"}
+        rows = []
+        for line in top.stdout.splitlines()[:257]:
+            fields = line.split()
+            if len(fields) != 5 or not all(x.isdecimal() for x in fields[:2]):
+                continue
+            pid, ppid = map(int, fields[:2])
+            state, wchan, comm = fields[2:]
+            if (not 0 < pid < 2**31 or re.fullmatch(r"[DIRSTtWXZx][<NLsl+]{0,8}", state) is None
+                    or not all(re.fullmatch(r"[A-Za-z0-9_.+\-]{1,64}", x) for x in (wchan, comm))):
+                continue
+            if re.fullmatch(r"(?:0x)?[0-9a-f]{8,}", wchan):
+                wchan = "address_redacted"
+            rows.append({"pid": pid, "ppid": ppid, "state": state, "wchan": wchan, "comm": comm})
+        result["top"] = rows[:32]
+        # Sleeping CNI helpers can precede every blocked netfilter child. Spend
+        # the existing eight-stack cap on D-state targets first, stably ordered.
+        candidates = sorted((row for row in rows if row["comm"] in allowed),
+                            key=lambda row: not row["state"].startswith("D"))
+        for row in candidates[:8]:
+            pid, comm = row["pid"], row["comm"]
+            item = {"pid": pid}
+            fd = None
+            try:
+                fd = open_pid(pid)
+                before = identity(fd)
+                if before[0] != comm:
+                    raise ValueError("changed_process")
+                wchan = read(fd, "wchan", 64)
+                if re.fullmatch(r"[A-Za-z0-9_.+\-]{1,64}", wchan) is None:
+                    wchan = "unavailable"
+                elif re.fullmatch(r"(?:0x)?[0-9a-f]{8,}", wchan):
+                    wchan = "address_redacted"
+                item.update(comm=comm, state=before[2], ppid=int(before[3]), wchan=wchan)
+                try:
+                    # Retain function/module names, never kernel addresses.
+                    frames = re.findall(r"([A-Za-z_][A-Za-z0-9_.$]*)\+0x[0-9a-f]+/0x[0-9a-f]+"
+                                        r"(?:\s+\[([A-Za-z0-9_.\-]+)\])?", read(fd, "stack", 1024))
+                    item["stack"] = [{"function": function, "module": module or "kernel"}
+                                     for function, module in frames[:16]]
+                except OSError as error:
+                    item["stack_error"] = type(error).__name__
+                if identity(fd)[:2] != before[:2]:
+                    raise ValueError("changed_process")
+            except (OSError, ValueError, IndexError) as error:
+                item = {"pid": pid, "error": type(error).__name__}
+            finally:
+                if fd is not None:
+                    os.close(fd)
+            result["processes"].append(item)
+        if identity(init_fd)[:2] != initial[:2]:
+            return {"error": "changed_node_process"}
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError) as error:
+        return {"error": type(error).__name__}
+    finally:
+        if init_fd is not None:
+            os.close(init_fd)
+    while len(json.dumps(result)) > 15000:
+        if result["top"]:
+            result["top"].pop()
+        elif result["processes"]:
+            result["processes"].pop()
+        else:
+            return {"error": "snapshot_limit"}
+    return result
+
+
 def _add_failure_diagnostics(container, namespace, error, *, core=None):
     """Best-effort reads must not hide the original failing assertion/timeout."""
     if core is not None:
@@ -121,10 +259,27 @@ def _add_failure_diagnostics(container, namespace, error, *, core=None):
                 detail = type(diagnostic_error).__name__
             error.add_note(label + "\n" + detail[-16384:])
     ident = container.get_wrapped_container().id
+    try:
+        from scripts.configure_ci_registry_mirror import disposable_runner
+
+        # Existing CI guests already permit sudo for daemon/tool setup. Never elevate
+        # on a developer/shared host or a machine without Linux host proc access.
+        privilege = ["sudo", "-n"] if (
+            sys.platform == "linux" and Path("/proc/self/stat").exists()
+            and os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_OS") == "Linux"
+            and not os.environ.get("DOCKER_HOST") and not os.environ.get("DOCKER_CONTEXT")
+            and disposable_runner()
+        ) else []
+        kernel_command = [*privilege, sys.executable, "-c", inspect.getsource(_kernel_wait_snapshot)
+                          + "\nimport json, sys\nprint(json.dumps(_kernel_wait_snapshot(sys.argv[1])))", ident]
+    except Exception as diagnostic_error:
+        # Source/permission-scope discovery must remain best effort as well.
+        error.add_note("owned-node kernel observer unavailable: " + type(diagnostic_error).__name__)
+        kernel_command = ["docker", "top", ident, "-eo", "pid,ppid,stat,wchan:32,comm"]
     commands = [
         ["docker", "logs", "--tail=100", ident],
         ["docker", "inspect", "--format={{json .State}}", ident],
-        ["docker", "top", ident, "-eo", "pid,ppid,stat,wchan:32,comm"],
+        kernel_command,
         *[["docker", "exec", ident, *command] for command in (
             ["kubectl", "--request-timeout=3s", "get", "pods", "-A", "-o", "wide"],
             ["kubectl", "--request-timeout=3s", "get", "events", "-A", "--sort-by=.metadata.creationTimestamp"],
@@ -141,7 +296,9 @@ def _add_failure_diagnostics(container, namespace, error, *, core=None):
     for command in commands:
         try:
             result = subprocess.run(command, text=True, capture_output=True, timeout=5)
-            detail = f"exit={result.returncode}\n{(result.stdout + result.stderr)[-16300:]}"
+            output = ("collector unavailable" if command is kernel_command and result.returncode
+                      else result.stdout + result.stderr)
+            detail = f"exit={result.returncode}\n{output[-16300:]}"
         except subprocess.TimeoutExpired as diagnostic_error:
             # communicate() carries bytes even with text=True on a timeout.
             output = diagnostic_error.output or b""
@@ -152,8 +309,10 @@ def _add_failure_diagnostics(container, namespace, error, *, core=None):
                 stderr = stderr.decode(errors="replace")
             detail = f"TimeoutExpired\n{(output + stderr)[-16300:]}"
         except Exception as diagnostic_error:
-            detail = f"{type(diagnostic_error).__name__}: {diagnostic_error}"
-        error.add_note(" ".join(command) + "\n" + detail[-16384:])
+            detail = (type(diagnostic_error).__name__ if command is kernel_command
+                      else f"{type(diagnostic_error).__name__}: {diagnostic_error}")
+        label = "owned-node kernel wait snapshot" if command is kernel_command else " ".join(command)
+        error.add_note(label + "\n" + detail[-16384:])
 
 
 @pytest.mark.parametrize("original", [AssertionError("readiness failed"),
@@ -254,12 +413,262 @@ def test_failure_diagnostics_read_api_without_exec_or_pod_specs(monkeypatch, pod
     notes = "\n".join(original.__notes__)
     assert "FailedCreatePodSandBox" in notes and "sandbox network stalled" in notes
     assert "private-" not in notes
-    assert any("docker top disposable-node" in note and "process-wait-state" in note for note in original.__notes__)
+    assert any("owned-node kernel wait snapshot" in note and "process-wait-state" in note
+               for note in original.__notes__)
     if pods_unavailable:
         assert "RuntimeError" in original.__notes__[0]
     else:
         assert "PodReadyToStartContainers" in notes and "Pending" in notes
     assert all(len(note) < 17000 for note in original.__notes__)
+
+
+@pytest.fixture
+def kernel_proc(tmp_path, monkeypatch):
+    ident = "a" * 64
+    proc = tmp_path / "proc"
+    modules = tmp_path / "module"
+    (proc / "self").mkdir(parents=True)
+    (proc / "self/stat").write_text("supported")
+    (proc / "sys/kernel").mkdir(parents=True)
+    (proc / "sys/kernel/osrelease").write_text("6.14.0-test\n")
+
+    def process(pid, comm, start):
+        directory = proc / str(pid)
+        directory.mkdir()
+        (directory / "stat").write_text(f"{pid} ({comm}) D 100 " + "0 " * 17 + f"{start} 0\n")
+        (directory / "comm").write_text(comm + "\n")
+        (directory / "cgroup").write_text(f"0::/system.slice/docker-{ident}.scope\n")
+        (directory / "wchan").write_text("call_usermodehelper_exec\n")
+        (directory / "stack").write_text("[<ffffffff81234567>] call_usermodehelper_exec+0x1/0x20\n"
+                                        "[<ffffffff81234568>] nft_chain_validate+0x2/0x30 [nf_tables]\n")
+        (directory / "environ").write_text("private-env")
+        (directory / "cmdline").write_text("private-argv")
+        return directory
+
+    process(100, "k3s", 10)
+    target = process(201, "iptables-restor", 20)
+    (modules / "nf_tables").mkdir(parents=True)
+    (modules / "nf_tables/initstate").write_text("live\n")
+    (modules / "nf_tables/refcnt").write_text("3\n")
+    calls = []
+
+    def command(args, **kwargs):
+        calls.append(args)
+        assert args[:3] == ["docker", "--host", "unix:///var/run/docker.sock"]
+        assert args[-1] == ident or args[-1] == "pid,ppid,stat,wchan:32,comm"
+        assert kwargs == {"text": True, "capture_output": True, "timeout": 1}
+        output = "100\n" if "inspect" in args else (
+            "PID PPID STAT WCHAN COMMAND\n100 1 S futex_do_wait k3s\n"
+            "201 100 D call_usermodehelper_exec iptables-restor\n")
+        return subprocess.CompletedProcess(args, 0, output, "")
+
+    monkeypatch.setattr(subprocess, "run", command)
+    return ident, proc, modules, target, calls
+
+
+def test_kernel_wait_snapshot_retains_owned_chain_without_addresses_or_commands(kernel_proc):
+    ident, proc, modules, _, calls = kernel_proc
+    snapshot = _kernel_wait_snapshot(ident, proc_root=proc, module_root=modules)
+    assert snapshot["kernel_release"] == "6.14.0-test"
+    assert snapshot["modules"]["nf_tables"] == {"initstate": "live", "refcnt": "3"}
+    assert snapshot["processes"] == [{"pid": 201, "comm": "iptables-restor", "state": "D",
+        "ppid": 100, "wchan": "call_usermodehelper_exec", "stack": [
+            {"function": "call_usermodehelper_exec", "module": "kernel"},
+            {"function": "nft_chain_validate", "module": "nf_tables"}]}]
+    detail = json.dumps(snapshot)
+    assert "ffffffff" not in detail and "private-" not in detail
+    assert len(detail) < 16384 and len(calls) == 2
+
+
+def test_kernel_wait_snapshot_prioritizes_blocked_targets_before_sleeping_helpers(kernel_proc, monkeypatch):
+    from shutil import copytree
+
+    ident, proc, modules, target, _ = kernel_proc
+    rows = []
+    for pid in range(301, 309):
+        directory = proc / str(pid)
+        copytree(target, directory)
+        (directory / "comm").write_text("bridge\n")
+        (directory / "stat").write_text((directory / "stat").read_text().replace(
+            "201 (iptables-restor) D", f"{pid} (bridge) S"))
+        rows.append(f"{pid} 100 Sl do_wait bridge\n")
+    for pid in range(201, 208):
+        if pid != 201:
+            copytree(target, proc / str(pid))
+        rows.append(f"{pid} 100 D call_usermodehelper_exec iptables-restor\n")
+
+    def command(args, **kwargs):
+        output = "100\n" if "inspect" in args else "PID PPID STAT WCHAN COMMAND\n" + "".join(rows)
+        return subprocess.CompletedProcess(args, 0, output, "")
+
+    monkeypatch.setattr(subprocess, "run", command)
+    snapshot = _kernel_wait_snapshot(ident, proc_root=proc, module_root=modules)
+    assert [item["pid"] for item in snapshot["processes"]] == [*range(201, 208), 301]
+    assert all(item["stack"] for item in snapshot["processes"][:7])
+    assert snapshot["top"][0]["pid"] == 301  # Keep the original top output order.
+    assert len(snapshot["top"]) <= 32 and len(snapshot["processes"]) == 8
+
+
+@pytest.mark.parametrize("state,accepted", [
+    ("D<", True), ("Dl+", True), ("Ss", True), ("SNLs+", True),
+    ("D>", False), ("D;bad", False), ("Q", False),
+])
+def test_kernel_wait_snapshot_accepts_only_standard_ps_state_flags(kernel_proc, monkeypatch, state, accepted):
+    ident, proc, modules, _, _ = kernel_proc
+
+    def command(args, **kwargs):
+        output = "100\n" if "inspect" in args else f"201 100 {state} do_wait iptables-restor\n"
+        return subprocess.CompletedProcess(args, 0, output, "")
+
+    monkeypatch.setattr(subprocess, "run", command)
+    snapshot = _kernel_wait_snapshot(ident, proc_root=proc, module_root=modules)
+    assert bool(snapshot["processes"]) is accepted
+    assert bool(snapshot["top"]) is accepted
+
+
+@pytest.mark.parametrize("ident", ["", "a" * 63, "A" * 64, "a" * 64 + ";", "../201", 201])
+def test_kernel_wait_snapshot_rejects_arbitrary_container_inputs(monkeypatch, ident):
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("must not invoke Docker"))
+    assert _kernel_wait_snapshot(ident) == {"error": "invalid_container_id"}
+
+
+@pytest.mark.parametrize("cgroup", ["0::/docker/" + "b" * 64, "0::/docker/" + "a" * 64 + "-other"])
+def test_kernel_wait_snapshot_never_reads_unowned_stack(kernel_proc, monkeypatch, cgroup):
+    ident, proc, modules, target, _ = kernel_proc
+    (target / "cgroup").write_text(cgroup + "\n")
+    original_open = os.open
+
+    def guarded_open(path, flags, *args, **kwargs):
+        assert path != "stack", "unowned stack must not be read"
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", guarded_open)
+    snapshot = _kernel_wait_snapshot(ident, proc_root=proc, module_root=modules)
+    assert snapshot["processes"] == [{"pid": 201, "error": "ValueError"}]
+
+
+@pytest.mark.parametrize("changed", ["target_starttime", "target_comm", "node_starttime"])
+def test_kernel_wait_snapshot_discards_reused_process_identity(kernel_proc, monkeypatch, changed):
+    ident, proc, modules, target, _ = kernel_proc
+    original_open = os.open
+
+    def changed_open(path, flags, *args, **kwargs):
+        if path == "stack":
+            if changed == "target_comm":
+                (target / "comm").write_text("other\n")
+            else:
+                stat = (proc / "100" if changed == "node_starttime" else target) / "stat"
+                stat.write_text(stat.read_text().replace("10 0\n", "11 0\n").replace("20 0\n", "21 0\n"))
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", changed_open)
+    snapshot = _kernel_wait_snapshot(ident, proc_root=proc, module_root=modules)
+    if changed == "node_starttime":
+        assert snapshot == {"error": "changed_node_process"}
+    else:
+        assert snapshot["processes"] == [{"pid": 201, "error": "ValueError"}]
+
+
+def test_kernel_wait_snapshot_permission_failure_is_safe(kernel_proc, monkeypatch):
+    ident, proc, modules, _, _ = kernel_proc
+    original_open = os.open
+
+    def denied_open(path, flags, *args, **kwargs):
+        if path == "stack":
+            raise PermissionError("private host detail")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", denied_open)
+    snapshot = _kernel_wait_snapshot(ident, proc_root=proc, module_root=modules)
+    assert snapshot["processes"][0]["stack_error"] == "PermissionError"
+    assert "private" not in json.dumps(snapshot)
+
+
+def test_kernel_wait_snapshot_bounds_large_tables_and_redacts_wait_addresses(kernel_proc, monkeypatch):
+    ident, proc, modules, target, _ = kernel_proc
+    (target / "wchan").write_text("ffffffff81234567")
+
+    def command(args, **kwargs):
+        output = "100\n" if "inspect" in args else "201 100 D ffffffff81234567 iptables-restor\n" * 10000
+        return subprocess.CompletedProcess(args, 0, output, "")
+
+    monkeypatch.setattr(subprocess, "run", command)
+    snapshot = _kernel_wait_snapshot(ident, proc_root=proc, module_root=modules)
+    assert len(snapshot["top"]) <= 32 and len(snapshot["processes"]) <= 8
+    assert len(json.dumps(snapshot)) < 16384
+    assert "ffffffff" not in json.dumps(snapshot)
+    assert snapshot["processes"][0]["wchan"] == "address_redacted"
+
+
+def test_kernel_wait_snapshot_unsupported_proc_does_not_invoke_docker(tmp_path, monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("must not invoke Docker"))
+    assert _kernel_wait_snapshot("a" * 64, proc_root=tmp_path) == {"error": "host_proc_unavailable"}
+
+
+@pytest.mark.parametrize("platform,guest,remote,elevated", [
+    ("linux", True, False, True), ("linux", False, False, False),
+    ("darwin", True, False, False), ("linux", True, True, False),
+])
+def test_kernel_observer_elevates_only_existing_local_linux_ci_guests(monkeypatch, platform, guest, remote, elevated):
+    from types import SimpleNamespace
+
+    from scripts import configure_ci_registry_mirror
+
+    monkeypatch.setattr(sys, "platform", platform)
+    original_exists = Path.exists
+    monkeypatch.setattr(Path, "exists", lambda path: True if str(path) == "/proc/self/stat" else original_exists(path))
+    monkeypatch.setattr(configure_ci_registry_mirror, "disposable_runner", lambda: guest)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("RUNNER_OS", "Linux")
+    monkeypatch.delenv("DOCKER_CONTEXT", raising=False)
+    if remote:
+        monkeypatch.setenv("DOCKER_HOST", "ssh://private-host")
+    else:
+        monkeypatch.delenv("DOCKER_HOST", raising=False)
+    calls = []
+
+    def command(args, **kwargs):
+        calls.append(args)
+        assert kwargs["timeout"] == 5
+        return subprocess.CompletedProcess(args, 0, "{}", "")
+
+    monkeypatch.setattr(subprocess, "run", command)
+    error = AssertionError("original")
+    container = SimpleNamespace(get_wrapped_container=lambda: SimpleNamespace(id="a" * 64))
+    _add_failure_diagnostics(container, "test-platform", error)
+    observer = next(args for args in calls if "-c" in args)
+    assert (observer[:2] == ["sudo", "-n"]) is elevated
+    assert len(calls) == 12  # The original top slot is replaced, never added.
+    assert "def _kernel_wait_snapshot" not in "\n".join(error.__notes__)
+    assert "private-host" not in "\n".join(error.__notes__)
+
+
+@pytest.mark.parametrize("failure", ["prepare", "execute"])
+def test_kernel_observer_failure_never_masks_original_or_exposes_program(monkeypatch, failure):
+    from types import SimpleNamespace
+
+    def command(args, **kwargs):
+        if sys.executable in args:
+            raise RuntimeError("private-command-or-environment")
+        return subprocess.CompletedProcess(args, 0, "fixed safe fields", "")
+
+    if failure == "prepare":
+        def unavailable_source(*args):
+            raise OSError("private-source-path")
+        monkeypatch.setattr(inspect, "getsource", unavailable_source)
+    monkeypatch.setattr(subprocess, "run", command)
+    container = SimpleNamespace(get_wrapped_container=lambda: SimpleNamespace(id="a" * 64))
+    original = AssertionError("readiness original")
+    with pytest.raises(AssertionError) as caught:
+        try:
+            raise original
+        except AssertionError as error:
+            _add_failure_diagnostics(container, "test-platform", error)
+            raise
+    assert caught.value is original
+    detail = "\n".join(original.__notes__)
+    assert "private-" not in detail and "def _kernel_wait_snapshot" not in detail
+    assert "owned-node kernel" in detail
 
 
 def _backend(ns, name, port, *, tls=False):

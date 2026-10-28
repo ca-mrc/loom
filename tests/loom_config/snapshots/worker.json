@@ -69,11 +69,6 @@
     "default": "600",
     "required": false
   },
-  "enable_worker_vllm": {
-    "annotation": "<class 'bool'>",
-    "default": "False",
-    "required": false
-  },
   "executor_worker_credential": {
     "annotation": "pydantic.types.SecretStr | None",
     "default": "None",
@@ -377,16 +372,6 @@
   "trial_hard_deadline_multiplier": {
     "annotation": "<class 'float'>",
     "default": "3.0",
-    "required": false
-  },
-  "vllm_gpu_memory_utilization": {
-    "annotation": "<class 'float'>",
-    "default": "0.9",
-    "required": false
-  },
-  "vllm_tensor_parallel_size": {
-    "annotation": "<class 'int'>",
-    "default": "1",
     "required": false
   }
 }

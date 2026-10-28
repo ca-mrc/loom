@@ -1487,6 +1487,69 @@ pins = [
         component_ownership.load_manifest(manifest_path)
 
 
+def test_manifest_parses_default_pool_pin_without_changing_manual_pin(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text('''schema_version = 2
+ci_lanes = ["nebius-pool"]
+[[test_sharding]]
+lane = "nebius-pool"
+shard_count = 20
+strategy = "stable-hash"
+salt = "unchanged"
+pins = [{path = "tests/ops/test_pool.py", shard_index = 2}]
+default_pins = [{path = "tests/ops/test_pool.py", shard_index = 7}]
+''')
+    policy = component_ownership.load_manifest(manifest_path).test_shard_policy("nebius-pool")
+    assert policy is not None
+    assert policy.pins == (component_ownership.TestShardPin("tests/ops/test_pool.py", 2),)
+    assert policy.default_pins == (component_ownership.TestShardPin("tests/ops/test_pool.py", 7),)
+
+
+@pytest.mark.parametrize(("lane", "pins", "message"), [
+    ("nebius-pool", '"not-an-array"', "array of tables"),
+    ("nebius-pool", '[{path = "tests/ops/test_pool.py", shard_index = 1}, '
+                    '{path = "tests/ops/test_pool.py", shard_index = 2}]', "duplicate paths"),
+    ("nebius-pool", '[{path = "tests/ops/test_pool.py", shard_index = 20}]', "below 20"),
+    ("nebius-pool", '[{path = "tests/ops/test_pool.py", shard_index = -1}]', "non-negative integer"),
+    ("nebius-pool", '[{path = "../outside.py", shard_index = 1}]', "safe repository-relative path"),
+    ("integration", '[{path = "tests/integration/test_pool.py", shard_index = 1}]',
+     "requires the nebius-pool lane"),
+])
+def test_manifest_rejects_invalid_default_pool_pins(
+    tmp_path: Path, lane: str, pins: str, message: str,
+) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(f'''schema_version = 2
+ci_lanes = ["{lane}"]
+[[test_sharding]]
+lane = "{lane}"
+shard_count = 20
+strategy = "stable-hash"
+salt = "unchanged"
+default_pins = {pins}
+''')
+    with pytest.raises(component_ownership.ManifestError, match=message):
+        component_ownership.load_manifest(manifest_path)
+
+
+@pytest.mark.parametrize(("path", "message"), [
+    ("tests/ops/test_missing.py", "pin path is not tracked"),
+    ("tests/unit/test_worker_cmd.py", "pin crosses CI lane"),
+    ("tests/ops/test_nebius_shared_pool_handoff.py", "default pin selects a manual-only test"),
+])
+def test_manifest_validation_rejects_unsafe_default_pool_pins(path: str, message: str) -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    pool = manifest.test_shard_policy("nebius-pool")
+    assert pool is not None
+    invalid = replace(pool, default_pins=(component_ownership.TestShardPin(path, 7),))
+    manifest = replace(manifest, test_sharding=tuple(invalid if policy.lane == pool.lane else policy
+                                                   for policy in manifest.test_sharding))
+    errors = component_ownership.validate_manifest(
+        manifest, repo_root=REPO_ROOT, tracked_paths=component_ownership._tracked_paths(REPO_ROOT),
+    )
+    assert any(message in error and path in error for error in errors)
+
+
 @pytest.mark.parametrize(
     ("path", "message"),
     [

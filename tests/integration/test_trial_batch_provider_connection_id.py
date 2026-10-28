@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import boto3
@@ -609,6 +610,113 @@ def test_batch_create_with_uncached_provider_model_returns_400(
     assert "model cache" in detail
     assert "loom providers models" in detail
     assert "sk-" not in detail
+
+
+def _stub_codex_preflight(
+    monkeypatch: pytest.MonkeyPatch, *, http_status: int, error_code: str | None,
+) -> list[str]:
+    """Answer the submission-time preflight without network or a stored key."""
+    calls: list[str] = []
+
+    async def _preflight(provider_type, base_url, api_key, model_id, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(model_id)
+        return SimpleNamespace(
+            status="valid" if error_code is None else "failed",
+            http_status=http_status, error_code=error_code,
+            error_message=None if error_code is None else f"HTTP {http_status}",
+        )
+
+    async def _no_egress_error(session, row):  # type: ignore[no-untyped-def]
+        return None
+
+    async def _api_key(session, row):  # type: ignore[no-untyped-def]
+        return "sk-test"
+
+    routes = "loom_service.routes.provider_connections"
+    monkeypatch.setattr(f"{routes}.preflight_model", _preflight)
+    monkeypatch.setattr(f"{routes}._refresh_current_egress_or_error", _no_egress_error)
+    monkeypatch.setattr(f"{routes}._get_provider_api_key", _api_key)
+    return calls
+
+
+def _cache_model(app: FastAPI, conn_id: UUID, model_id: str, **preflight: object) -> None:
+    sync_engine = create_engine(str(app.state.settings.db_url))
+    with sessionmaker(sync_engine)() as s:
+        s.execute(insert(ProviderModelCache).values(
+            provider_connection_id=conn_id, model_id=model_id, **preflight,
+        ))
+        s.commit()
+    sync_engine.dispose()
+
+
+def _codex_batch(ids: dict[str, UUID], model_id: str) -> dict[str, object]:
+    return {
+        "name": f"codex-{model_id}",
+        "purpose": "evaluation",
+        "task_filter": {"task_ids": [ids["task_id"]]},
+        "trial_config": {"agent_name": "codex", "agent_model": {"provider": "openai", "name": model_id}},
+        "provider_connection_id": str(ids["conn_a"]),
+        "provider_model_id": model_id,
+    }
+
+
+def test_codex_batch_preflights_an_unchecked_model_and_rejects_an_unroutable_one(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2054: Codex retried gpt-5.5 30 times in the run; reject it at submission."""
+    app, tokens, ids = app_setup
+    _cache_model(app, ids["conn_a"], "gpt-unrouted")
+    calls = _stub_codex_preflight(monkeypatch, http_status=503, error_code="model-not-found")
+
+    r = _client(app).post(
+        "/api/v1/batches", headers=_auth(tokens["a"]), json=_codex_batch(ids, "gpt-unrouted"),
+    )
+
+    assert r.status_code == 400, r.text
+    assert "gpt-unrouted" in r.json()["detail"]
+    assert "model-not-found" in r.json()["detail"]
+    assert calls == ["gpt-unrouted"]
+    sync_engine = create_engine(str(app.state.settings.db_url))
+    with sessionmaker(sync_engine)() as s:
+        row = s.execute(select(ProviderModelCache).where(
+            ProviderModelCache.provider_connection_id == ids["conn_a"],
+            ProviderModelCache.model_id == "gpt-unrouted",
+        )).scalar_one()
+    sync_engine.dispose()
+    assert (row.last_preflight_status, row.last_preflight_error_code) == ("failed", "model-not-found")
+
+
+def test_codex_batch_reuses_fresh_preflight_evidence(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, tokens, ids = app_setup
+    _cache_model(app, ids["conn_a"], "gpt-checked", last_preflight_status="valid",
+                 last_preflight_http_status=200, last_preflight_at=datetime.now(UTC))
+    calls = _stub_codex_preflight(monkeypatch, http_status=503, error_code="model-not-found")
+
+    r = _client(app).post(
+        "/api/v1/batches", headers=_auth(tokens["a"]), json=_codex_batch(ids, "gpt-checked"),
+    )
+
+    assert calls == []
+    assert r.status_code == 201, r.text
+
+
+def test_codex_batch_repeats_stale_preflight_evidence(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, tokens, ids = app_setup
+    _cache_model(app, ids["conn_a"], "gpt-stale", last_preflight_status="valid",
+                 last_preflight_http_status=200,
+                 last_preflight_at=datetime.now(UTC) - timedelta(days=2))
+    calls = _stub_codex_preflight(monkeypatch, http_status=503, error_code="model-not-found")
+
+    r = _client(app).post(
+        "/api/v1/batches", headers=_auth(tokens["a"]), json=_codex_batch(ids, "gpt-stale"),
+    )
+
+    assert calls == ["gpt-stale"]
+    assert r.status_code == 400, r.text
 
 
 def test_platform_admin_batch_create_with_explicit_team_uses_target_team_provider(

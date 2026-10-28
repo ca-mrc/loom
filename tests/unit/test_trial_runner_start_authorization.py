@@ -94,7 +94,7 @@ async def test_positive_start_precedes_first_factory_and_stays_one_use(tmp_path)
     assert events == ["authorized", "driver"]
 
 
-@pytest.mark.parametrize("stage", ["gateway", "agent", "verifier", "jwt"])
+@pytest.mark.parametrize("stage", ["agent", "verifier", "jwt"])
 @pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
 async def test_setup_failure_releases_acquired_bridge(tmp_path, monkeypatch, stage, failure):
     from loom_worker import trial_runner as module
@@ -121,9 +121,7 @@ async def test_setup_failure_releases_acquired_bridge(tmp_path, monkeypatch, sta
     cleanup = AsyncMock(side_effect=teardown)
     monkeypatch.setattr(module, "create_sandbox_bridge", create)
     monkeypatch.setattr(module, "teardown_sandbox_bridge", cleanup)
-    if stage == "gateway":
-        monkeypatch.setattr(LocalTrialRunner, "_resolve_gateway", AsyncMock(side_effect=failure("setup failed")))
-    elif stage == "agent":
+    if stage == "agent":
         subject.agent_factory.side_effect = failure("setup failed")
     elif stage == "verifier":
         subject.verifier_factory.side_effect = failure("setup failed")

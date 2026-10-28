@@ -5,13 +5,14 @@ nested conftest.py files.
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
 from collections.abc import Iterator
-from pathlib import Path
+from contextlib import contextmanager
 
 import pytest
+from sqlalchemy.engine import make_url
 from testcontainers.postgres import PostgresContainer
+
+from tests.support.postgres_databases import isolated_migration_database
 
 _TEST_STEP_JWT_SIGNING_KEY = "test-step-jwt-signing-key-do-not-use-in-prod"
 
@@ -37,23 +38,47 @@ def _default_step_jwt_signing_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(scope="session")
-def postgres_url() -> Iterator[str]:
-    """Session-scoped Postgres 16 container with Loom's Alembic schema applied.
-
-    Tests that need a real DB import this fixture; the container is created
-    once per pytest session (~1.5s overhead) and shared.
-    """
+def postgres_cluster_url() -> Iterator[str]:
+    """Own the disposable server without migrating an application database."""
     with PostgresContainer("postgres:16") as pg:
-        url = pg.get_connection_url().replace(
-            "postgresql+psycopg2://",
-            "postgresql+psycopg://",
+        yield pg.get_connection_url().replace(
+            "postgresql+psycopg2://", "postgresql+psycopg://"
         )
-        os.environ["LOOM_DB_URL"] = url
-        repo_root = Path(__file__).resolve().parents[1]
-        subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "upgrade", "head"],
-            cwd=repo_root,
-            check=True,
-        )
-        yield url
 
+
+@pytest.fixture(scope="session")
+def _migration_template_postgres_url(postgres_cluster_url: str) -> Iterator[str]:
+    """Run the real migration chain once and seal the clean session template.
+
+    Both application fixtures and historical migration tests clone this closed
+    template. Initializing a second full chain at the first historical test
+    needlessly consumed its existing per-test setup deadline.
+    """
+    yield from isolated_migration_database(
+        postgres_cluster_url, template_name="template0", prepare_template=True
+    )
+
+
+@pytest.fixture(scope="session")
+def migration_template_postgres_url(_migration_template_postgres_url: str) -> str:
+    """Public fixture alias; module imports reuse the one session template."""
+    return _migration_template_postgres_url
+
+
+@pytest.fixture(scope="session")
+def postgres_url(_migration_template_postgres_url: str) -> Iterator[str]:
+    """Session application database, isolated from the clean migration template."""
+    template_name = make_url(_migration_template_postgres_url).database
+    assert template_name is not None
+    previous = os.environ.get("LOOM_DB_URL")
+    try:
+        with contextmanager(isolated_migration_database)(
+            _migration_template_postgres_url, template_name=template_name, prepare_template=False
+        ) as url:
+            os.environ["LOOM_DB_URL"] = url
+            yield url
+    finally:
+        if previous is None:
+            os.environ.pop("LOOM_DB_URL", None)
+        else:
+            os.environ["LOOM_DB_URL"] = previous

@@ -424,25 +424,39 @@ func (s runtimeServer) execute(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	err := cmd.Run()
 	code := 0
+	reason := ""
 	if err != nil {
 		var exitErr *exec.ExitError
+		contextError := ctx.Err()
 		switch {
-		case ctx.Err() != nil:
+		case contextError != nil:
 			code = 124
+			reason = "cancelled"
+			if errors.Is(contextError, context.DeadlineExceeded) {
+				reason = "deadline"
+			}
 		case errors.Is(err, exec.ErrWaitDelay):
 			// A shell exited but left a child holding output pipes open.
 			// Bound that execution too; tmux's detached server closes its pipes.
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			code = 124
+			reason = "output_pipe_wait"
 		case errors.As(err, &exitErr):
 			code = exitErr.ExitCode()
+			if code == 124 {
+				reason = "process_exit"
+			}
 		default:
 			http.Error(w, "unable to execute sandbox command", http.StatusUnprocessableEntity)
 			return
 		}
 	}
+	duration := time.Since(started).Seconds()
+	if code == 124 {
+		log.Printf("sandbox exec return_code=124 reason=%s timeout_sec=%g duration_sec=%g", reason, deadline.Seconds(), duration)
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(execResult{code, stdout.buffer.Bytes(), stderr.buffer.Bytes(), stdout.truncated || stderr.truncated, time.Since(started).Seconds()})
+	_ = json.NewEncoder(w).Encode(execResult{code, stdout.buffer.Bytes(), stderr.buffer.Bytes(), stdout.truncated || stderr.truncated, duration})
 }
 
 func (s runtimeServer) upload(w http.ResponseWriter, r *http.Request) {

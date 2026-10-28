@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -63,6 +64,25 @@ def checked_archive_intents(claim: dict[str, Any]) -> dict[str, dict[str, str]]:
     return cast(dict[str, dict[str, str]], intents)
 
 
+def normalized_archive_metadata(value: object) -> dict[str, str]:
+    """S3 user-metadata header names are case-insensitive; values are not.
+
+    Nebius HEAD can return Title-Case keys. Preserve exact ownership values and
+    reject conflicting aliases instead of silently choosing one by dict order.
+    """
+    if not isinstance(value, Mapping):
+        raise ValueError("invalid prepared image archive metadata")
+    result: dict[str, str] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not key.isascii() or not isinstance(item, str):
+            raise ValueError("invalid prepared image archive metadata")
+        canonical_key = key.lower()
+        if canonical_key in result and result[canonical_key] != item:
+            raise ValueError("conflicting prepared image archive metadata keys")
+        result[canonical_key] = item
+    return result
+
+
 def archive_version(
     client: Any, *, bucket: str, key: str, version_id: str, write_id: str, image_ref: str
 ) -> PreparedImageArchiveV1:
@@ -74,7 +94,7 @@ def archive_version(
     checksum = base64.b64decode(response.get("ChecksumSHA256", ""), validate=True)
     if (
         response.get("VersionId") != version_id
-        or response.get("Metadata") != expected
+        or normalized_archive_metadata(response.get("Metadata", {})) != expected
         or len(checksum) != 32
         or not 0 < response["ContentLength"] <= MAX_ARCHIVE_BYTES
     ):

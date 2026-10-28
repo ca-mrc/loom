@@ -43,8 +43,6 @@ spec:
           value: /var/run/docker.sock
         - name: LOOM_WORKER_DRAIN_TIMEOUT_SEC
           value: '600'
-        - name: LOOM_WORKER_ENABLE_WORKER_VLLM
-          value: 'False'
         - name: LOOM_WORKER_FAMILY_STATE_DOWNLOAD_TIMEOUT_SEC
           value: '120.0'
         - name: LOOM_WORKER_GATEWAY_URL
@@ -158,10 +156,6 @@ spec:
           value: '600.0'
         - name: LOOM_WORKER_TRIAL_HARD_DEADLINE_MULTIPLIER
           value: '3.0'
-        - name: LOOM_WORKER_VLLM_GPU_MEMORY_UTILIZATION
-          value: '0.9'
-        - name: LOOM_WORKER_VLLM_TENSOR_PARALLEL_SIZE
-          value: '1'
         - name: LOOM_WORKER_MAX_CONCURRENT
           value: '16'
         - name: LOOM_WORKER_POOL_NAME

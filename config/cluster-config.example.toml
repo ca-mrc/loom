@@ -18,7 +18,7 @@ frontend_environment_label = "Local development"
 frontend_route_path = ""
 # Predecessor SPA route prefix during a route migration (e.g. "/dev" while migrating to "/staging"). When set and different from frontend_route_path, the rollout preflight probes the live service at this predecessor route (the live env has not moved yet) while the driver moves the route to frontend_route_path and the post-deploy final gate validates the target. Empty (default) means no route transition. Preflight-only: not consumed by the manifest templates.
 frontend_route_path_from = ""
-# OpenAI-compatible upstreams the llm-gateway exposes as `local/<name>/<model>` routes, one `<name>|<base_url>|<secret_key>` entry each, e.g. ["yibu|https://yibuapi.com/v1|qa-relay-api-key"]. Renders LOOM_GW_LOCAL_<NAME>_BASE_URL (literal) + LOOM_GW_LOCAL_<NAME>_API_KEY (from loom-secrets/<secret_key>, optional) onto the gateway. Env-scoped: set on environments that carry an operator relay; leave empty on production.
+# Retired (#2054). Must be empty; register OpenAI-compatible endpoints as Provider Connections.
 gateway_local_providers = []
 # Image tag applied to every loom-* image.
 image_tag = "0.7"

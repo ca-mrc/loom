@@ -31,7 +31,6 @@ class GatewaySettings(BaseSettings):
     egress_proxy_url: str = ""
     gateway_drain_timeout_sec: float = 270.0
     google_api_key: SecretStr | None = None
-    huggingface_api_key: SecretStr | None = None
     legacy_attempt_deadline_compat_sec: float = 86400.0
     llm_retry_base_backoff_sec: float = 0.5
     llm_retry_budget_sec: float = 60.0

@@ -136,6 +136,19 @@ credential; a successful operator IAM read does not prove that the publisher can
 use the S3 API. Preserve versioning and require a real version ID on a bounded
 publication-storage probe.
 
+Native Compose image publication uses the existing native-builder identity,
+which is separate from the canonical catalog identity. When that builder is
+enabled, it also receives an artifacts-bucket-scoped `storage.viewer` permit
+for `GetBucketVersioning`, plus `storage.object-editor` on
+`task-image-archives/*` for the prepared OCI archives. The publisher requires
+versioning to be enabled before `PutObject` and verifies the returned immutable
+version with `HeadObject`. The existing source read/list and cache write scopes
+remain unchanged; archive objects do not inherit cache expiration rules.
+Validate versioning with the actual builder archive credential after applying
+the reviewed plan. A successful catalog-credential check does not establish
+builder access. Complete a normal native Compose publication and versioned
+archive readback before treating this permission repair as live-verified.
+
 When adopting an existing operator-created permit, import its verified ID into
 the platform root before applying, using the existing protected backend and
 variable file:

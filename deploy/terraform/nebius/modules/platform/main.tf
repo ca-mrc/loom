@@ -62,6 +62,11 @@ locals {
       group_id = var.integration_platform.native_builder_group_id
       paths    = ["task-build-cache/*"]
       roles    = ["storage.object-editor"]
+    },
+    {
+      group_id = var.integration_platform.native_builder_group_id
+      paths    = ["task-image-archives/*"]
+      roles    = ["storage.object-editor"]
     }
   ] : []
   native_builder_lifecycle = [
@@ -151,6 +156,15 @@ resource "nebius_storage_v1_bucket" "integration" {
 resource "nebius_iam_v1_access_permit" "integration_catalog_metadata" {
   for_each    = local.integration
   parent_id   = nebius_iam_v1_group.integration_store["canonical"].id
+  resource_id = nebius_storage_v1_bucket.integration["artifacts"].id
+  role        = "storage.viewer"
+}
+
+# Native Compose publishers use the existing builder identity to preserve
+# versioned image archives. Object access alone cannot read bucket versioning.
+resource "nebius_iam_v1_access_permit" "integration_native_builder_metadata" {
+  for_each    = local.native_builder_enabled ? local.integration : {}
+  parent_id   = each.value.native_builder_group_id
   resource_id = nebius_storage_v1_bucket.integration["artifacts"].id
   role        = "storage.viewer"
 }

@@ -33,20 +33,6 @@ spec:
               value: "{{ runtime_environment }}"
             - name: LOOM_NAMESPACE
               value: "{{ namespace }}"
-            {# Operator-configured OpenAI-compatible upstreams exposed as
-               `local/<name>/<model>` routes (out-of-schema, multi-name env
-               pattern — see loom_llm_gateway.config.local_providers). Renders
-               nothing when gateway_local_providers is empty (production). #}
-            {% for lp in gateway_local_providers %}
-            - name: LOOM_GW_LOCAL_{{ lp.env_stem }}_BASE_URL
-              value: {{ lp.base_url | tojson }}
-            - name: LOOM_GW_LOCAL_{{ lp.env_stem }}_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: loom-secrets
-                  key: {{ lp.secret_key }}
-                  optional: true
-            {% endfor %}
           ports:
             - containerPort: 9100
           readinessProbe:

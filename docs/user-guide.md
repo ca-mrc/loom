@@ -966,11 +966,19 @@ submission:
   model as a pair. The resolved pair is stored on each combination, and preflight,
   budget, fan-out and results all use it.
 - Oracle takes no provider fields; sending them is an error.
+- A model whose last preflight was a definite rejection is refused. A timeout or
+  transient upstream error does not block. An upstream `model_not_found` is a
+  rejection whatever its HTTP status.
+- Codex models need preflight evidence from the last 24 hours. Without it,
+  submission runs one preflight first, so a model the connection cannot route
+  is refused before any trial starts rather than failing after Codex's retries.
 - The same model on two connections gets distinct automatic labels
   (`…@<connection name>`).
 - `/api/v1/models` lists models of connections owned by or shared with your
-  team; each item's `responses_route` says how Codex requests would be served
-  (`native`, `translated`, or `unprobed` until the first call).
+  team; each item's `responses_route` says how Codex requests would be served:
+  `native`, `translated`, `unprobed` until the first call, or `inconclusive`
+  when a probe neither confirmed nor ruled out native Responses (Gateway then
+  tries native and falls back to Chat).
 
 Reruns, clones and artifact reuse create new trials, so they follow the same
 rules. A rerun keeps the original connection. A clone or reuse runs every
@@ -1134,11 +1142,9 @@ cache_read_per_mtok = 0.0
 cache_write_per_mtok = 0.0
 ```
 
-Service-mode operators register local providers through
-`gateway_local_providers`, which renders
-`LOOM_GW_LOCAL_<NAME>_BASE_URL=http://...` and an optional Secret-backed API
-key. Gateway requests using `model=local/<name>/<model-id>` are routed to that
-configured OpenAI-compatible upstream.
+In service mode, register a local server as an OpenAI-compatible Provider
+Connection. The Gateway's `local/<name>/<model-id>` route and the
+`gateway_local_providers` setting are retired (#2054).
 
 ### `loom serve` reference
 

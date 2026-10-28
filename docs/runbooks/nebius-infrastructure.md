@@ -820,10 +820,10 @@ only the attachment JSON cannot detect a same-name Secret value change, and
 updating a CronJob template does not restart a Job already in progress.
 
 `local_providers_secret_name` is a required, dedicated Nebius-namespace Secret
-containing only the existing `LOOM_GW_LOCAL_<NAME>_BASE_URL` and
-`LOOM_GW_LOCAL_<NAME>_API_KEY` entries needed for staging's operator-configured
-models such as `local/yibu/...`. Use an empty dedicated Secret when no local
-models are configured. Verify this key allowlist before deployment: the
+copied from the canonical Gateway's `LOOM_GW_LOCAL_<NAME>_BASE_URL` and
+`LOOM_GW_LOCAL_<NAME>_API_KEY` entries. The Gateway's `local/<name>` route is
+retired (#2054) and the canonical Gateway no longer sets these, so the Secret is
+empty; the field stays required until the attachment schema drops it. Verify this key allowlist before deployment: the
 renderer reads no Secret payload. The reference is loaded through `envFrom`;
 DB, canonical/source storage and identity bindings stay explicit `env` entries,
 which take precedence over `envFrom`. No new JSON provider parser or raw API key

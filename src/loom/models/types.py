@@ -49,14 +49,11 @@ class ModelSpec(BaseModel):
     `source` discriminates execution path (default "api" preserves the
     existing catalog-backed-API path and keeps old rows valid):
 
-    - **api**: provider's hosted API (Anthropic/OpenAI/Google/HF Inference).
-      Routed through the LLM Gateway.
-    - **local-server**: pre-configured OpenAI-compatible local server
-      (ollama, lm-studio, llama.cpp, vLLM). `local_server` names the
-      operator's entry; the worker reads its base_url from config.
-    - **hf**: HuggingFace model. `hf_execution` picks how to run it —
-      "local-vllm" (default) spawns vLLM on a GPU worker;
-      "inference-api" calls HF Inference Endpoints (managed, metered).
+    - **api**: provider's hosted API, routed through the LLM Gateway. The
+      only source hosted submissions admit.
+    - **local-server** and **hf** (with `hf_execution`): retired for hosted
+      execution (#2054). They still parse so historical records stay
+      readable; the standalone CLI resolves local models on its own.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -75,17 +72,9 @@ class ModelSpec(BaseModel):
         """Serialize this spec into the string the gateway's chat route
         parses as `provider/name`.
 
-        Mapping (PR-D):
-
-        - api: `<provider>/<name>` (existing — anthropic/openai/together)
-        - local-server: `local/<local_server>/<name>` (gateway reads the
-          operator-configured base_url for `local_server` and proxies the
-          OpenAI-compatible request)
-        - hf + inference-api: `huggingface/<name>` (LiteLLM's HF
-          Inference path, requires `HF_TOKEN` on the gateway)
-        - hf + local-vllm: `local-vllm/<name>` (worker-spawned vLLM
-          subprocess; the gateway returns a clear 501 today and the
-          worker handles this path directly in a follow-up)
+        `api` maps to `<provider>/<name>`. The retired sources keep their
+        historical strings (`local/<server>/<name>`, `huggingface/<name>`,
+        `local-vllm/<name>`), which the Gateway now rejects (#2054).
         """
         if self.source == "api":
             return f"{self.provider}/{self.name}"

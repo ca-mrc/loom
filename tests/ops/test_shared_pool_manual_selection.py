@@ -8,10 +8,13 @@ from scripts import plan_ci_validations as planner
 from scripts.ops import nebius_pool_test_plan as candidate
 
 ROOT = Path(__file__).resolve().parents[2]
+FAST_SUCCESSOR = "tests/ops/test_nebius_pool_refresh_successor.py"
+SIMULATED_SUCCESSOR = "tests/ops/test_nebius_shared_pool_refresh_successor.py"
 
 
 @pytest.mark.parametrize("event", ["pull_request", "merge_group", "push", "schedule", "workflow_dispatch"])
-@pytest.mark.parametrize("change", ["uv.lock", "scripts/ops/nebius_shared_pool_api.py"])
+@pytest.mark.parametrize("change", ["uv.lock", "scripts/ops/nebius_shared_pool_api.py",
+                                   FAST_SUCCESSOR, SIMULATED_SUCCESSOR])
 def test_default_events_exclude_simulations_but_keep_pool_operators(event, change):
     plan = planner.plan_validations(changed_paths=[change], labels=(), event_name=event)
     manifest = ownership.load_manifest(ROOT / "config/component-ownership.toml")
@@ -22,6 +25,8 @@ def test_default_events_exclude_simulations_but_keep_pool_operators(event, chang
     assert not any(manifest.test_owner_for_path(path).id == "nebius-shared-pool-ops" for path in paths)
     if change == "uv.lock":
         assert paths and all(manifest.test_owner_for_path(path).id == "nebius-pool-ops" for path in paths)
+    if change in {"uv.lock", FAST_SUCCESSOR}:
+        assert FAST_SUCCESSOR in paths
     assert plan.github_outputs()["shared_pool_simulations"] == "false"
 
 
@@ -35,7 +40,7 @@ def test_explicit_manual_selection_matches_every_shard_execution():
                 changed_paths=plan.test_changes, diff_paths=plan.test_diff, include_shared_pool=True)
     paths = ownership.selected_test_paths(**args)
     shared = {path for path in paths if manifest.test_owner_for_path(path).id == "nebius-shared-pool-ops"}
-    assert shared
+    assert SIMULATED_SUCCESSOR in shared and FAST_SUCCESSOR in paths
     matrix = ownership.test_shard_matrix(**args)
     executed = [path for row in matrix for path in ownership.selected_test_paths(
         **args, shard_index=row["shard_index"], shard_count=row["shard_count"])]
@@ -64,6 +69,7 @@ def test_candidate_default_does_not_execute_or_claim_simulations(monkeypatch):
     value = candidate.plan(ROOT, "a" * 40, read=lambda _: [])
     paths = [path for row in value["matrix"]["include"] for path in row["paths"]]
     assert paths and not any("/test_nebius_shared_pool_" in path for path in paths)
+    assert FAST_SUCCESSOR in paths
     assert value["reused_files"] == 0
 
 
