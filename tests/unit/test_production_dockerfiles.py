@@ -108,7 +108,7 @@ def test_service_image_contains_capacity_guard_migrations() -> None:
 def test_service_image_contains_digest_pinned_kubectl_for_personal_lifecycle() -> None:
     text = (ROOT / "deploy" / "Dockerfile.service").read_text()
 
-    assert "registry.k8s.io/kubectl:v1.36.2@sha256:" in text
+    assert "registry.k8s.io/kubectl:v1.36.6@sha256:" in text
     assert "COPY --from=kubectl /bin/kubectl /usr/local/bin/kubectl" in text
 
 

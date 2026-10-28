@@ -754,7 +754,7 @@ HTTPS readiness checks both TLS and the SPA; `default_sni` handles Kubelet's
 numeric Pod-IP probe, while its Host header selects the public route. Kubelet
 skips certificate validation, so readiness alone is not public TLS acceptance.
 
-The web build uses stock Caddy v2.11.4 with Go 1.26.8 and `x/crypto` v0.55.0.
+The web build uses stock Caddy v2.11.4 with Go 1.26.10 and `x/crypto` v0.55.0.
 The dependency override fixes CVE-2026-56854 in the official v2.11.4 binary's
 `x/crypto` v0.52.0; remove it when an upstream Caddy release incorporates the
 fix. The resulting binary is scanned as part of the existing web-image policy.

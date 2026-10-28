@@ -39,6 +39,23 @@ def test_trial_show_progress_and_unknown_timeline(stage, mock_server, capsys):
     assert "reward:           0" in out
 
 
+def test_trial_show_prints_publish_diagnostic(mock_server, capsys):
+    mock_server.canned[("GET", f"/api/v1/trials/{_TRIAL_ID}")] = httpx.Response(200, json={
+        "id": _TRIAL_ID, "state": "failed", "failure_reason": "task_image_build_failed",
+        "task_environment_preparation": [{
+            "failure_reason": "build_publish_failed",
+            "message": "Task image publication failed. Contact the platform operator to check registry availability.",
+            "diagnostic": {"phase": "publish", "exit_code": 1, "summary": "writing blob: unauthorized"},
+        }],
+    })
+    capsys.readouterr()
+    assert main(["eval", "trial", "show", _TRIAL_ID]) == 0
+    out = capsys.readouterr().out
+    assert "image_preparation: build_publish_failed" in out
+    assert "image_diagnostic:  publish exit 1: writing blob: unauthorized" in out
+    assert "Contact the platform operator" in out
+
+
 def _watch_transport(monkeypatch, handler):
     def client(cfg, *, timeout=30.0):
         return httpx.Client(base_url=cfg.server_url, transport=httpx.MockTransport(handler), timeout=timeout)
