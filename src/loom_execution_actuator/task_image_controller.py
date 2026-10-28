@@ -482,7 +482,7 @@ def build_observation(observation: dict[str, Any]) -> dict[str, Any]:
                             receipt = json.loads(message)
                         except ValueError:
                             receipt = None
-                    if row["name"] == "prepare":
+                    if row["name"] == "prepare" and isinstance(receipt, dict):
                         classified = preparation_failure_from_receipt(receipt)
                         if classified is not None:
                             phase["preparation_error"] = {
