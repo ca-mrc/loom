@@ -56,6 +56,21 @@ class HoldingCoordinator:
         raise ProviderBlockedError('test_stop_observed')
 
 
+async def _wait_for_lifecycle_entry(coordinator, worker_task):
+    """Keep the entry deadline and expose an actual early worker failure."""
+    entered = asyncio.create_task(coordinator.entered.wait())
+    try:
+        async with asyncio.timeout(2):
+            done, _ = await asyncio.wait({entered, worker_task}, return_when=asyncio.FIRST_COMPLETED)
+            if worker_task in done:
+                worker_task.result()
+                raise AssertionError("worker exited before lifecycle entry observation completed")
+            await entered
+    finally:
+        entered.cancel()
+        await asyncio.gather(entered, return_exceptions=True)
+
+
 async def test_poll_excludes_claimed_terminal_and_superseded_generations(applications):
     registry, factory, (alice, bob), prepare, _, _ = applications
     first = await registry.create(principal=alice, idempotency_key='first', **prepare())
@@ -133,7 +148,7 @@ async def test_heartbeat_renews_then_cancels_stale_work_without_changing_success
     coordinator = HoldingCoordinator(registry)
     task = asyncio.create_task(ApplicationWorker(registry, coordinator, lease_seconds=3).reconcile_once(operation.operation_id))
     try:
-        await asyncio.wait_for(coordinator.entered.wait(), 2)
+        await _wait_for_lifecycle_entry(coordinator, task)
         await asyncio.sleep(3.1)
         assert await registry.claim(operation.operation_id) is None
         await expire(factory, coordinator.calls[0][1])
@@ -369,3 +384,62 @@ async def test_stalled_database_attempt_boundaries_preserve_uncertain_state(appl
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("entered_first", [False, True])
+@pytest.mark.parametrize("failure", [OSError("application_database_timeout"), RuntimeError("startup_failed")])
+async def test_lifecycle_entry_reports_worker_failure_and_reaps_observer(monkeypatch, failure, entered_first):
+    coordinator = HoldingCoordinator(None)
+
+    async def fail():
+        if entered_first:
+            coordinator.entered.set()
+        raise failure
+
+    worker_task = asyncio.create_task(fail())
+    create_task = asyncio.create_task
+    observers = []
+
+    def track_observer(coroutine, *args, **kwargs):
+        observer = create_task(coroutine, *args, **kwargs)
+        observers.append(observer)
+        return observer
+
+    monkeypatch.setattr(asyncio, "create_task", track_observer)
+    try:
+        with pytest.raises(type(failure), match=str(failure)):
+            await _wait_for_lifecycle_entry(coordinator, worker_task)
+        assert worker_task.exception() is failure
+        assert observers and all(observer.done() for observer in observers)
+        assert coordinator.entered.is_set() is entered_first
+    finally:
+        worker_task.cancel()
+        await asyncio.gather(worker_task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("entered_first", [False, True])
+async def test_lifecycle_entry_rejects_clean_exit_before_start_and_reaps_observer(monkeypatch, entered_first):
+    coordinator = HoldingCoordinator(None)
+
+    async def finish():
+        if entered_first:
+            coordinator.entered.set()
+
+    worker_task = asyncio.create_task(finish())
+    create_task = asyncio.create_task
+    observers = []
+
+    def track_observer(coroutine, *args, **kwargs):
+        observer = create_task(coroutine, *args, **kwargs)
+        observers.append(observer)
+        return observer
+
+    monkeypatch.setattr(asyncio, "create_task", track_observer)
+    try:
+        with pytest.raises(AssertionError, match="worker exited before lifecycle entry"):
+            await _wait_for_lifecycle_entry(coordinator, worker_task)
+        assert worker_task.done() and worker_task.exception() is None
+        assert observers and all(observer.done() for observer in observers)
+    finally:
+        worker_task.cancel()
+        await asyncio.gather(worker_task, return_exceptions=True)

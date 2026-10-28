@@ -14,7 +14,7 @@ import tarfile
 import tempfile
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path, PurePosixPath
-from typing import Any, cast
+from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -26,6 +26,31 @@ from loom.models.compose import ComposeServiceSpec, NativeComposeSpec
 from loom.models.exec import ExecResult
 from loom.models.healthcheck import HealthcheckSpec
 from loom.models.networking import NetworkPolicy
+
+
+class _ComposeControlError(DriverError):
+    """Keep only safe result numbers from a fixed control operation."""
+
+    def __init__(self, phase: Literal["identity", "identity read", "activation", "cleanup"],
+                 *, return_code: int, duration_sec: float) -> None:
+        self.phase = phase
+        self.return_code = return_code
+        self.duration_sec = duration_sec
+        message = {
+            "identity": "guest Compose process identity is invalid",
+            "identity read": "guest Compose process identity read failed",
+            "activation": "guest Compose process activation failed",
+            "cleanup": "guest Compose process group cleanup failed",
+        }[phase]
+        super().__init__(f"{message} (exit_code={return_code}, duration_sec={duration_sec:.6f})")
+
+
+def _safe_control_failure(error: BaseException) -> str:
+    detail = type(error).__name__
+    if isinstance(error, _ComposeControlError):
+        detail += (f", phase={error.phase}, exit_code={error.return_code}, "
+                   f"duration_sec={error.duration_sec:.6f}")
+    return detail
 
 
 def _docker_transport_archive(source: Path, target: Path, manifest: dict[str, Any]) -> None:
@@ -285,6 +310,7 @@ class GuestComposeRuntime:
 
 class GuestComposeServiceDriver:
     _SUPERVISOR = "/loom/compose-tools/busybox"
+    _IDENTITY_NOT_READY = 75  # Inner EX_TEMPFAIL; Docker CLI failures commonly use 1.
     def __init__(self, runtime: GuestComposeRuntime, service: str) -> None:
         self.runtime, self.service = runtime, service
         self.capabilities = runtime.guest.capabilities
@@ -324,12 +350,18 @@ class GuestComposeServiceDriver:
         argv, marker = self._controlled(["/bin/sh", "-c", cmd])
         operation = asyncio.create_task(self.runtime.guest.exec(
             shlex.join(self._exec(argv, user=user, cwd=cwd, env=env)), timeout_sec=timeout_sec))
+        failure: BaseException | None = None
+        phase = "activation"
         try:
             await self._activate(marker, operation)
+            phase = "execution"
             return await operation
+        except BaseException as exc:
+            failure = exc
+            raise
         finally:
             try:
-                await self._cleanup_control(marker)
+                await self._cleanup_with_context(marker, failure, phase)
             finally:
                 if not operation.done():
                     operation.cancel()
@@ -351,9 +383,9 @@ class GuestComposeServiceDriver:
             )
         try:
             await self._activate(marker)
-        except BaseException:
+        except BaseException as exc:
             try:
-                await self._cleanup_control(marker)
+                await self._cleanup_with_context(marker, exc, "activation")
             finally:
                 await handle.kill()
             raise
@@ -399,29 +431,62 @@ class GuestComposeServiceDriver:
                 if operation is not None and operation.done():
                     await operation
                     raise DriverError("guest Compose process exited before activation")
+                # Keep this probe read-only: cancelling Docker's client does
+                # not stop an inner exec already accepted by its daemon. Only
+                # the controller may release the gate after observing the PID.
+                # Keep each accepted inner exec small: killing its Docker CLI
+                # does not reap an inner polling helper. An observed absent
+                # marker gets a dedicated status distinct from Docker errors.
+                helper = self._SUPERVISOR
+                script = (f"if test ! -e {marker}; then exit {self._IDENTITY_NOT_READY}; fi; "
+                          f"if {helper} cat {marker} 2>/dev/null; then exit 0; "
+                          f"elif test ! -e {marker}; then exit {self._IDENTITY_NOT_READY}; "
+                          "else exit 2; fi")
                 result = await self.runtime.guest.exec(shlex.join(self._exec(
-                    [self._SUPERVISOR, "cat", marker], user="0:0")), timeout_sec=5)
-                value = result.stdout.decode().strip()
+                    [helper, "sh", "-c", script], user="0:0")), timeout_sec=5)
                 if result.return_code == 0:
+                    value = result.stdout.decode().strip()
                     if not value.isdecimal() or not 1 < int(value) < 2**31:
-                        raise DriverError("guest Compose process identity is invalid")
+                        raise _ComposeControlError("identity", return_code=result.return_code,
+                                                   duration_sec=result.duration_sec)
                     activated = await self.runtime.guest.exec(shlex.join(self._exec(
-                        [self._SUPERVISOR, "touch", marker + ".go"], user="0:0")), timeout_sec=5)
+                        [helper, "touch", marker + ".go"], user="0:0")), timeout_sec=5)
                     if activated.return_code:
-                        raise DriverError("guest Compose process activation failed")
+                        raise _ComposeControlError("activation", return_code=activated.return_code,
+                                                   duration_sec=activated.duration_sec)
                     return
+                if result.return_code != self._IDENTITY_NOT_READY:
+                    raise _ComposeControlError("identity read", return_code=result.return_code,
+                                               duration_sec=result.duration_sec)
                 await asyncio.sleep(.05)
+
+    async def _cleanup_with_context(self, marker: str, failure: BaseException | None, phase: str) -> None:
+        try:
+            await self._cleanup_control(marker)
+        except Exception as cleanup:
+            if failure is None:
+                raise
+            # Report both failures without publishing commands, stderr or env.
+            # A cleanup error must not misidentify an earlier activation expiry
+            # as the first fault, nor may a cleanup failure be suppressed.
+            raise DriverError(
+                f"guest Compose {phase} failed ({_safe_control_failure(failure)}); "
+                f"process group cleanup failed ({_safe_control_failure(cleanup)})"
+            ) from failure
 
     async def _cleanup_control(self, marker: str) -> None:
         helper = self._SUPERVISOR
         # Marker is controller-generated; PID is checked inside this container
         # before a negative process-group signal can be constructed.
-        script = (f"if test -s {marker}; then p=$({helper} cat {marker}); "
+        # Read the identity once. The supervisor's EXIT trap may remove it
+        # between a separate existence check and cat; only a still-existing
+        # unreadable marker is an error, not an already-retired supervisor.
+        script = (f"if p=$({helper} cat {marker} 2>/dev/null); then "
                   "case \"$p\" in ''|*[!0-9]*) exit 1;; esac; "
                   'test "$p" -gt 1 && test "$p" -lt 2147483648 || exit 1; '
                   f"{helper} kill -TERM -- -\"$p\" 2>/dev/null || true; {helper} sleep 0.1; "
-                  f"{helper} kill -KILL -- -\"$p\" 2>/dev/null || true; fi; "
-                  f"{helper} rm -f {marker} {marker}.go {marker}.pending")
+                  f"{helper} kill -KILL -- -\"$p\" 2>/dev/null || true; "
+                  f"elif test -e {marker}; then exit 1; fi; {helper} rm -f {marker} {marker}.go {marker}.pending")
         operation = asyncio.create_task(self.runtime.guest.exec(shlex.join(self._exec(
             [helper, "sh", "-c", script], user="0:0")), timeout_sec=5))
         cancelled = False
@@ -432,7 +497,8 @@ class GuestComposeServiceDriver:
                 cancelled = True
         result = operation.result()
         if result.return_code:
-            raise DriverError("guest Compose process group cleanup failed")
+            raise _ComposeControlError("cleanup", return_code=result.return_code,
+                                       duration_sec=result.duration_sec)
         if cancelled:
             raise asyncio.CancelledError
 

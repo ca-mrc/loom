@@ -11,7 +11,6 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
-from alembic import command as alembic_command
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, delete, insert, select, text, update
 from sqlalchemy.dialects import postgresql
@@ -26,6 +25,7 @@ from tests.integration.gateway_db import (
     delete_teams_and_quotas,
     insert_gateway_trial,
 )
+from tests.support import postgres_databases
 
 
 def test_delete_teams_and_quotas_is_scoped_to_owned_ids() -> None:
@@ -193,14 +193,9 @@ def test_isolated_migration_fixture_disposes_engine_when_drop_fails(
 ) -> None:
     admin_engine = _FailingDropEngine()
     monkeypatch.setattr(
-        integration_conftest,
+        postgres_databases,
         "create_engine",
         lambda *_args, **_kwargs: admin_engine,
-    )
-    monkeypatch.setattr(
-        alembic_command,
-        "upgrade",
-        lambda *_args, **_kwargs: None,
     )
     fixture_factory: Any = (
         integration_conftest.isolated_migration_postgres_url.__wrapped__  # type: ignore[attr-defined]
@@ -220,24 +215,31 @@ def test_isolated_migration_fixture_disposes_engine_when_drop_fails(
 
 
 def test_migration_template_runs_history_once_and_isolates_clones(
-    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+    postgres_cluster_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    upgrade = alembic_command.upgrade
+    # This test owns a complete template migration; it needs only the server,
+    # not another fully migrated application database before its counted chain.
+    run = postgres_databases.subprocess.run
     upgrades = 0
 
-    def counted_upgrade(*args: Any, **kwargs: Any) -> None:
+    def counted_upgrade(args: Any, **kwargs: Any) -> Any:
         nonlocal upgrades
-        upgrades += 1
-        upgrade(*args, **kwargs)
+        if "alembic" in args:
+            upgrades += 1
+        return run(args, **kwargs)
 
-    monkeypatch.setattr(alembic_command, "upgrade", counted_upgrade)
-    template_factory = integration_conftest.migration_template_postgres_url.__wrapped__
+    monkeypatch.setattr(postgres_databases.subprocess, "run", counted_upgrade)
+
+    def template_factory(url: str) -> Any:
+        return postgres_databases.isolated_migration_database(
+            url, template_name="template0", prepare_template=True
+        )
     clone_factory = integration_conftest.isolated_migration_postgres_url.__wrapped__
     names: list[str] = []
-    admin = create_engine(make_url(postgres_url).set(database="postgres"))
+    admin = create_engine(make_url(postgres_cluster_url).set(database="postgres"))
     try:
         with ExitStack() as stack:
-            template = stack.enter_context(closing(template_factory(postgres_url)))
+            template = stack.enter_context(closing(template_factory(postgres_cluster_url)))
             template_url = next(template)
             template_name = make_url(template_url).database
             assert template_name is not None
@@ -300,14 +302,18 @@ def test_failed_migration_template_setup_removes_only_its_owned_database(
 ) -> None:
     names: list[str] = []
 
-    def failed_upgrade(config: Any, _revision: str) -> None:
-        name = make_url(config.get_main_option("sqlalchemy.url")).database
+    def failed_upgrade(_args: Any, **kwargs: Any) -> None:
+        name = make_url(kwargs["env"]["LOOM_DB_URL"]).database
         assert name is not None
         names.append(name)
         raise RuntimeError("synthetic template migration failure")
 
-    monkeypatch.setattr(alembic_command, "upgrade", failed_upgrade)
-    factory = integration_conftest.migration_template_postgres_url.__wrapped__
+    monkeypatch.setattr(postgres_databases.subprocess, "run", failed_upgrade)
+
+    def factory(url: str) -> Any:
+        return postgres_databases.isolated_migration_database(
+            url, template_name="template0", prepare_template=True
+        )
     with closing(factory(postgres_url)) as fixture:
         with pytest.raises(RuntimeError, match="synthetic template migration failure"):
             next(fixture)

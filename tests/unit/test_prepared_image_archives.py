@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 
 from loom.task_image_archives import (
+    archive_version,
     archive_write_intents,
     publish_image_archive,
     validate_archive_receipt,
@@ -52,8 +53,14 @@ class VersionedStorage:
         return self.objects[kwargs["VersionId"]]
 
 
-def test_archive_publish_reuses_exact_issued_key_version_and_native_checksum(tmp_path):
+@pytest.mark.parametrize("metadata_case", [str.lower, str.title, str.upper], ids=["lower", "nebius-title", "upper"])
+def test_archive_publish_reuses_exact_issued_key_version_and_native_checksum(tmp_path, monkeypatch, metadata_case):
     client = VersionedStorage()
+    original_head = client.head_object
+    def head(**kwargs):
+        result = original_head(**kwargs)
+        return {**result, "Metadata": {metadata_case(k): v for k, v in result["Metadata"].items()}}
+    monkeypatch.setattr(client, "head_object", head)
     claim = archive_claim()
     path = tmp_path / "image.tar"
     path.write_bytes(b"prepared-oci-transport")
@@ -157,3 +164,38 @@ async def test_source_broker_checks_exact_lease_grant_and_prepared_service(monke
         await module.resolve_service_execution_image_archives(
             Session(), lease=lease, artifacts_bucket="artifacts"
         )
+
+
+@pytest.mark.parametrize("damage", [
+    "write-id", "image-value", "extra-key", "missing-key", "conflicting-case-alias",
+    "version", "checksum", "empty-size", "oversized",
+])
+def test_archive_head_casing_does_not_relax_write_identity_or_content(damage):
+    from loom.task_image_archives import MAX_ARCHIVE_BYTES
+    write_id = str(uuid4())
+    image = "registry.example/image@sha256:" + "a" * 64
+    metadata = {"Loom-Image-Write-Id": write_id, "Loom-Image-Ref": image}
+    response = {"VersionId": "owned-version", "Metadata": metadata, "ContentLength": 7,
+                "ChecksumSHA256": base64.b64encode(b"a" * 32).decode()}
+    if damage == "write-id":
+        metadata["Loom-Image-Write-Id"] = str(uuid4())
+    elif damage == "image-value":
+        metadata["Loom-Image-Ref"] = image.upper()
+    elif damage == "extra-key":
+        metadata["Other"] = "unrelated"
+    elif damage == "missing-key":
+        del metadata["Loom-Image-Ref"]
+    elif damage == "conflicting-case-alias":
+        metadata["loom-image-write-id"] = str(uuid4())
+    elif damage == "version":
+        response["VersionId"] = "foreign-version"
+    elif damage == "checksum":
+        response["ChecksumSHA256"] = base64.b64encode(b"short").decode()
+    elif damage == "empty-size":
+        response["ContentLength"] = 0
+    else:
+        response["ContentLength"] = MAX_ARCHIVE_BYTES + 1
+    client = SimpleNamespace(head_object=lambda **kwargs: response)
+    with pytest.raises(ValueError):
+        archive_version(client, bucket="artifacts", key="owned", version_id="owned-version",
+                        write_id=write_id, image_ref=image)

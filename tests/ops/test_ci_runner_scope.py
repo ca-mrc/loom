@@ -57,7 +57,7 @@ def test_runner_scope_does_not_hide_shared_or_unknown_inputs(shared, manual):
     )
     assert pool == full and pool
     assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
-    assert sum("/test_nebius_shared_pool_" in path for path in pool) == (22 if manual else 0)
+    assert sum("/test_nebius_shared_pool_" in path for path in pool) == (23 if manual else 0)
 
 
 @pytest.mark.parametrize("operator", ["scripts/ops/nebius_pool_activation_stage.py",

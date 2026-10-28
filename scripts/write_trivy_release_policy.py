@@ -41,6 +41,10 @@ _POSTGRES_EXCEPTION_STATEMENT = (
 )
 TRIVY_CONFIG_BYTES = (
     b"exit-code: 1\n"
+    b"db:\n"
+    b"  repository:\n"
+    b"    - ghcr.io/aquasecurity/trivy-db:2\n"
+    b"    - public.ecr.aws/aquasecurity/trivy-db:2\n"
     b"pkg:\n"
     b"  types:\n"
     b"    - os\n"
@@ -121,7 +125,7 @@ def _render_ignore_bytes(exceptions: tuple[TrivyException, ...]) -> bytes:
 
 TRIVY_IGNORE_BYTES = _render_ignore_bytes(TRIVY_EXCEPTIONS)
 TRIVY_NO_EXCEPTIONS_BYTES = b"vulnerabilities: []\n"
-TRIVY_CONFIG_SHA256 = "bd8896276b5d8d00d8bb3c3d7a51d359b4931ea2811c21cb8ed692766a7eb8cf"
+TRIVY_CONFIG_SHA256 = "62844e2d381e0fa0f02bd63bcf43f8da3173e8fa8e585eb2bc25cef928575a36"
 TRIVY_IGNORE_SHA256 = "2fe828560a3df13427bff6634f08509ec6be55ca75de9fb7e3fd095805a28c12"
 
 

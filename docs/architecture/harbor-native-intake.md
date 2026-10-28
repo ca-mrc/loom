@@ -180,6 +180,12 @@ The standalone platform renderer defaults it to `loom-task-build-source`, whose
 source binding already uses the canonical artifacts bucket; explicit alternate
 references remain supported. Deployment preflight verifies the required keys.
 
+Archive publication and interrupted-write recovery treat S3 user-metadata
+header names case-insensitively, including Nebius Title-Case HEAD responses.
+Ownership values remain exact: conflicting aliases are rejected, as are changed
+write IDs, image references, versions, checksum shape or invalid object sizes.
+Equivalent key casing does not change the retained object or its ownership.
+
 The existing control-plane materializer loop reconciles interrupted archive
 writes after the actuator observes build Pod removal. It retains admitted
 archives until materialization retirement, persists an exact deletion inventory
@@ -207,6 +213,13 @@ The inner helper writes its PID privately and atomically renames the completed
 file before the controller validates it and separately releases the execution
 gate. Invalid PIDs remain fatal; cancellation and normal teardown remove any
 unpublished PID file as well as the marker and gate.
+Control failures retain the operation, return code and execution duration; if
+cleanup also fails, both results remain visible without command, environment or
+output contents. A return code of 124 alone does not distinguish an execution
+deadline from the runtime's bounded output-pipe wait.
+For 124 results, the runtime console records only the fixed reason (deadline,
+cancellation, output-pipe wait or process exit), effective timeout and duration;
+the execution response fields and timeout behavior remain unchanged.
 Native independent-verifier artifact transfer preserves source
 paths and exclusions, replaces each declared directory with its collected tree,
 and rejects unsafe links and private paths. Excluded or agent-deleted files do
