@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, cast
@@ -50,6 +51,7 @@ from loom_control_plane.task_image_materializations import (
     start_task_image_materialization,
     task_image_materialization_payload,
 )
+from loom_execution_actuator.metrics import blocked_outcome, record_build_cycle
 from loom_execution_actuator.renderer import ExecutionTargetRuntime
 from loom_execution_actuator.task_image_renderer import render_task_image_job
 from loom_execution_actuator.task_image_settings import (
@@ -533,6 +535,7 @@ class NativeTaskImageController:
         ))).all())
 
     async def run_once(self) -> None:
+        started = time.monotonic()
         # Database scans recover missing Jobs, stale epochs and ambiguous creates.
         async with self.sessions() as session:
             attempt_ids = [attempt.id for attempt in await self._outstanding(session)]
@@ -545,20 +548,31 @@ class NativeTaskImageController:
             except Exception as error:
                 unexpected = True
                 _LOG.warning("Native build reconcile deferred attempt=%s error=%s", attempt_id, type(error).__name__)
-        if unexpected:
-            raise RuntimeError("Native build reconciliation failed; inspect bounded actuator diagnostics")
+        reconciled, outcome = time.monotonic(), "error"
+        try:
+            if unexpected:
+                raise RuntimeError("Native build reconciliation failed; inspect bounded actuator diagnostics")
+            outcome = await self._admit()
+        finally:
+            record_build_cycle("native", outstanding=len(attempt_ids), reconcile_seconds=reconciled - started,
+                               outcome=outcome, admission_seconds=time.monotonic() - reconciled)
+
+    async def _admit(self) -> str:
         jobs = await self.kubernetes.inventory(self.settings.namespace)
         if self.settings.max_concurrent is not None and len(jobs) >= self.settings.max_concurrent:
-            return
+            return "capped"
         try:
             claimed_attempt_id = await self._claim()
+        except ExecutionProvisioningBlockedError as error:
+            # The entire claim/reservation transaction was rolled back.
+            return blocked_outcome(error.reason)
+        if claimed_attempt_id is None:
+            return "idle"
+        try:
+            await self._reconcile(claimed_attempt_id)
         except ExecutionProvisioningBlockedError:
-            return  # The entire claim/reservation transaction was rolled back.
-        if claimed_attempt_id is not None:
-            try:
-                await self._reconcile(claimed_attempt_id)
-            except ExecutionProvisioningBlockedError:
-                pass
+            pass
+        return "claimed"
 
     async def _claim(self) -> UUID | None:
         async with self.sessions() as session, session.begin():

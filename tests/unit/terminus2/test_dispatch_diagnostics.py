@@ -266,3 +266,61 @@ async def test_parsed_checkpoint_failure_prevents_command_dispatch(failure):
         result = await agent._handle_llm_interaction(chat)
         await agent._execute_commands(result[0])
     assert operations == ["persist"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_uses_final_handoff_order_and_explicit_call_identity():
+    operations = []
+    recorded = []
+    chat = SimpleNamespace(total_input_tokens=0, total_output_tokens=0, total_cache_tokens=0)
+
+    class Agent:
+        _n_episodes = 2
+
+        def __init__(self):
+            self._trajectory_steps = [SimpleNamespace(source="user")]
+
+        async def _handle_llm_interaction(self, chat, *args):
+            chat.total_input_tokens, chat.total_output_tokens = 10, 5
+            return ([SimpleNamespace(keystrokes="ls\n", duration_sec=0.1)], False, "", "inspect", "run",
+                    SimpleNamespace(reasoning_content="", extra={"loom_client_call_id": "main-call"}))
+
+        async def _execute_commands(self, *args):
+            operations.append("send")
+
+    async def record(step, episode):
+        assert episode == 2
+        recorded.append(step)
+        operations.append("persist")
+
+    agent = Agent()
+    install_dispatch_checkpoint(agent, record=record, require_active=lambda: None)
+    result = await agent._handle_llm_interaction(chat)
+    # Harbor itself inserts these rows between parsing and execution.
+    agent._trajectory_steps.extend([SimpleNamespace(source="system"), SimpleNamespace(source="user")])
+    await agent._execute_commands(result[0])
+    assert operations == ["persist", "send"]
+    assert recorded[0]["step_id"] == 4
+    assert recorded[0]["extra"]["loom_client_call_id"] == "main-call"
+
+
+@pytest.mark.asyncio
+async def test_explicit_call_identity_disambiguates_summary_and_agent_metrics(tmp_path):
+    local = tmp_path / "events.jsonl"
+    writer = TrajectoryWriter(local_path=local, store=FakeObjectStore(), bucket="t", key="t")
+
+    class CP:
+        async def get_trial_llm_calls(self, trial_id):
+            base = (await _CP().get_trial_llm_calls(trial_id))[0]
+            return [{**base, "id": name, "episode": 1, "call_ordinal": ordinal,
+                     "client_call_id": name, "correlation_status": "correlated"}
+                    for ordinal, name in enumerate(["summary-call", "main-call"], start=1)]
+
+    bridge = HarborCheckpointBridge(trajectory=writer, trial_id=uuid4(), step_id="agent",
+                                    model=ModelSpec(provider="openai", name="test"), cp_client=CP())
+    step = {**_step(), "extra": {"loom_client_call_id": "main-call"}}
+    async with writer:
+        await bridge.record_dispatch(step, episode=1)
+    events = [json.loads(line) for line in local.read_text().splitlines()]
+    turn = next(event for event in events if event["kind"] == "terminus2_turn")
+    assert turn["gateway_request_id"] == "main-call"

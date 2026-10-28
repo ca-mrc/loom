@@ -704,15 +704,23 @@ export default function BatchDetail(): JSX.Element {
               <StatCard label="Output committed" value={c.service_execution_summary.output_commit_states.committed ?? 0} />
               <StatCard label="Archiving output" value={c.service_execution_summary.lifecycle_stages.materializing ?? 0} />
             </div>
-            <div className="flex flex-wrap gap-2">
-              {Object.entries(c.service_execution_summary.lifecycle_stages)
-                .filter(([, count]) => count > 0)
-                .map(([stage, count]) => (
-                  <StatusPill key={stage} variant={trialStateVariant(stage)}>
-                    {stage} {count}
-                  </StatusPill>
-                ))}
-            </div>
+            <details>
+              <summary className="cursor-pointer text-sm font-medium text-slate-800">
+                Latest execution attempt stages
+              </summary>
+              <p className="mt-2 text-sm text-slate-600">
+                Only trials with an execution attempt are included. Queued trials and failures before execution can be absent, and output archiving can continue after a trial finishes. These stages are tracked separately from the trial states below.
+              </p>
+              <div role="group" aria-label="Latest execution attempt state counts" className="mt-2 flex flex-wrap gap-2">
+                {Object.entries(c.service_execution_summary.lifecycle_stages)
+                  .filter(([, count]) => count > 0)
+                  .map(([stage, count]) => (
+                    <StatusPill key={stage} variant={trialStateVariant(stage)}>
+                      {stage} {count}
+                    </StatusPill>
+                  ))}
+              </div>
+            </details>
             <Link
               to={`/monitor?view=trials&batch_id=${c.id}`}
               className="inline-block text-sm font-medium text-accent hover:text-accent-hover"
@@ -729,7 +737,18 @@ export default function BatchDetail(): JSX.Element {
             className="flex cursor-pointer items-center gap-2 border-b border-slate-200 px-5 py-4 text-sm font-semibold text-slate-800"
             title="Expand the per-state trial counts for this batch."
           >
-            <span className="flex-1">Trial counts by state</span>
+            <span className="min-w-0 flex-1">
+              <span>Trial counts by state</span>
+              <span role="group" aria-label="Trial state counts" className="mt-2 flex flex-wrap gap-2 font-normal">
+                {Object.entries(c.trial_summary)
+                  .filter(([, count]) => count > 0)
+                  .map(([state, count]) => (
+                    <StatusPill key={state} variant={trialStateVariant(state)}>
+                      {state} {count}
+                    </StatusPill>
+                  ))}
+              </span>
+            </span>
             <span className="text-slate-600 transition-transform group-open:rotate-90">
               ›
             </span>
