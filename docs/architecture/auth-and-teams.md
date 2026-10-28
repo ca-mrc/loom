@@ -142,6 +142,13 @@ session and CSRF secrets. The CSRF secret is returned in authentication JSON
 and kept in application or CLI memory; it is sent as `X-Loom-CSRF` on unsafe
 session-authenticated requests.
 
+Session verification debounces the `user_sessions.last_seen_at` touch to at most
+once per session per 60 seconds, and the shared `authed_session` dependency
+commits the authentication transaction before the route handler runs. A slow
+business read therefore never holds the session row lock, so other requests from
+the same browser, including startup's `/auth/me`, authenticate independently
+(#2687).
+
 `GET /api/v1/auth/me` returns a stable CSRF proof without rotating the session's
 CSRF nonce, so an identity read in another tab cannot invalidate a pending write.
 The proof is HMAC-SHA256 keyed by the raw HttpOnly session cookie over
