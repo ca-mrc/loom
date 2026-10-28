@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -222,8 +223,27 @@ func (b *workloadBroker) materializeManifest(
 	if err != nil {
 		return "", err
 	}
+	// The wire inventory is sorted by complete POSIX path, but the published
+	// bundle checksum uses Python pathlib's component-wise ordering. Keep the
+	// original manifest indices for broker requests while visiting a sorted
+	// copy of those indices for the existing streaming checksum.
+	indices := make([]int, len(manifest.Files))
+	for index := range indices {
+		indices[index] = index
+	}
+	sort.Slice(indices, func(i, j int) bool {
+		left := strings.Split(manifest.Files[indices[i]].RelativePath, "/")
+		right := strings.Split(manifest.Files[indices[j]].RelativePath, "/")
+		for part := 0; part < len(left) && part < len(right); part++ {
+			if left[part] != right[part] {
+				return left[part] < right[part]
+			}
+		}
+		return len(left) < len(right)
+	})
 	bundleDigest := sha256.New()
-	for index, file := range manifest.Files {
+	for _, index := range indices {
+		file := manifest.Files[index]
 		destination := filepath.Join(workspace, filepath.FromSlash(file.RelativePath))
 		if !isWithin(workspace, destination) {
 			return "", fmt.Errorf("task input path escapes workspace")
