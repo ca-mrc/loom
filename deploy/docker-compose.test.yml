@@ -15,7 +15,8 @@ services:
       # Manual compose use keeps the familiar loopback-only default.
       - "127.0.0.1:${LOOM_SYSTEM_POSTGRES_PORT:-55432}:5432"
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "loom"]
+      # initdb's temporary server accepts Unix sockets before final TCP startup.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "loom", "-d", "loom"]
       interval: 2s
       timeout: 2s
       retries: 20

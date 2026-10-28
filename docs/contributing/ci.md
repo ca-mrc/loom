@@ -629,6 +629,12 @@ digest stay fixed.
 System smoke uses a Compose project per run/attempt and Docker-assigned loopback
 ports; it discovers actual service endpoints once and passes the registry endpoint
 to the image builder without changing the original port mappings.
+PostgreSQL health probes use TCP on `127.0.0.1` and the test database. The
+official image's temporary initialization server listens only on a Unix socket;
+accepting that server as healthy can release host-side migrations before the
+final TCP server starts. The cold-init barrier regression runs in the existing
+Docker integration tier. Health intervals, retry counts and migration behavior
+remain unchanged.
 Failed Compose commands print a bounded, redacted tail of their captured output,
 so image-build errors remain visible even before service containers exist.
 
