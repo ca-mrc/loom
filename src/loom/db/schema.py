@@ -1081,6 +1081,9 @@ class TaskImageMaterialization(Base):
     """Per-architecture prerequisite, optionally qualified by a strong manifest."""
 
     __tablename__ = "task_image_materializations"
+    # Retained pool schemas predate preparation_revision. Legacy ORM inserts
+    # must not request this newer server default through implicit RETURNING.
+    __mapper_args__ = {"eager_defaults": False}  # noqa: RUF012 -- SQLAlchemy mapper configuration
     __table_args__ = (
         ForeignKeyConstraint(
             ["ready_publication_operation_id", "id"],
@@ -1194,7 +1197,9 @@ class TaskImageMaterialization(Base):
     bundle_content_manifest_sha256: Mapped[str] = mapped_column(
         String(64), nullable=False, server_default=text("''"), default="",
     )
-    preparation_revision: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"), default="")
+    preparation_revision: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("''"), deferred=True,
+    )
     cpu_arch: Mapped[str] = mapped_column(String(16), nullable=False)
     task_config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     task_source: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -6,19 +6,81 @@ from uuid import uuid4
 
 import pytest
 from alembic import command
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import Session, aliased
 
 from loom.db.schema import Task, TaskImageMaterialization
 from loom.db.schema_startup import service_schema_head
-from loom.task_image_materialization import ensure_task_image_materializations
+from loom.task_image_materialization import (
+    current_task_image_reference,
+    ensure_task_image_materializations,
+)
 from tests.integration.test_task_image_materialization_store import _task_values
 from tests.integration.test_task_image_registry_credential_migration import _config
 
 TABLE = "task_image_materializations"
 COLUMN = "bundle_content_manifest_sha256"
 CHECKSUM = "a" * 64
+
+
+@pytest.mark.parametrize("revision", ["0175", "0180", "0181"])
+def test_legacy_materialization_model_reads_and_writes_retained_layouts(
+    isolated_migration_postgres_url, revision,
+):
+    """Exercise actual omitted defaults/RETURNING and aliased catalog lookup."""
+    command.downgrade(_config(isolated_migration_postgres_url), revision)
+    engine = create_engine(isolated_migration_postgres_url)
+    task_id = f"retained-model/{uuid4()}"
+    values = _task_values(task_id=task_id, checksum=CHECKSUM)
+    image_id = uuid4()
+    try:
+        with Session(engine) as session, session.begin():
+            session.add(Task(**values))
+            row = TaskImageMaterialization(
+                id=image_id, materialization_key="f" * 64, task_id=task_id,
+                task_checksum=CHECKSUM, cpu_arch="x86_64", task_config=values["config"],
+            )
+            session.add(row)
+            # Implicit server-default RETURNING must not name a missing field.
+            session.flush()
+            session.expire(row)
+            assert session.get(TaskImageMaterialization, image_id).state == "queued"
+            assert "preparation_revision" in inspect(row).unloaded
+            row.max_attempts = 4
+            session.flush()
+            for model in (TaskImageMaterialization, aliased(TaskImageMaterialization)):
+                assert session.scalar(select(model.id).where(
+                    model.id == image_id, current_task_image_reference(model),
+                )) == image_id
+            assert session.scalar(select(Task.id).where(current_task_image_reference(row))) == task_id
+            assert "preparation_revision" in inspect(row).unloaded
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("revision", ["0175", "0180"])
+async def test_new_native_producer_does_not_fall_back_on_retained_layout(
+    isolated_migration_postgres_url, revision,
+):
+    command.downgrade(_config(isolated_migration_postgres_url), revision)
+    engine = create_async_engine(isolated_migration_postgres_url)
+    values = _task_values(task_id=f"current-native/{uuid4()}", checksum=CHECKSUM)
+    values["config"]["upstream_conversion"] = {
+        "importer": "loom.harbor-native.v1", "original_config": "upstream-task.toml", "changes": [],
+    }
+    try:
+        async with AsyncSession(engine, expire_on_commit=False) as session, session.begin():
+            task = Task(**values)
+            session.add(task)
+            await session.flush()
+            with pytest.raises(DBAPIError, match="preparation_revision"):
+                async with session.begin_nested():
+                    await ensure_task_image_materializations(session, task_row=task)
+            assert await session.scalar(select(TaskImageMaterialization.id)) is None
+    finally:
+        await engine.dispose()
 
 
 def _key(digest: str = "") -> str:
