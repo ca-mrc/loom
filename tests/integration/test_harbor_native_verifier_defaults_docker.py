@@ -21,7 +21,7 @@ from loom.harbor_verifier_script import (
 from loom.models.task import TaskConfig
 from loom.sandbox_identity import resolve_sandbox_identity
 from loom.task_image_materialization import TaskImageExecutionGrantV1, resolve_prepared_task
-from loom_execution_actuator.task_image_metadata import read_task_image_runtime_metadata
+from loom_execution_actuator import task_image_runtime
 
 pytestmark = [pytest.mark.docker, pytest.mark.timeout(120)]
 
@@ -86,9 +86,13 @@ def _metadata_archive_from_docker_save(saved: Path, target: Path) -> tuple[str, 
         return manifest["digest"], architecture
 
 
+@pytest.mark.parametrize("verifier_workdir", [None, "/tests", "/grading"])
 def test_independent_native_verifier_runs_with_own_image_defaults_and_json_reward(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    verifier_workdir: str | None,
 ) -> None:
+    expected_workdir = verifier_workdir or "/"
     bundle = tmp_path / "bundle"
     (bundle / "environment").mkdir(parents=True)
     (bundle / "tests").mkdir()
@@ -101,13 +105,13 @@ def test_independent_native_verifier_runs_with_own_image_defaults_and_json_rewar
     (bundle / "tests/Dockerfile").write_text(
         "FROM python:3.11-slim\n"
         "RUN mkdir -p /tests /audit && chmod 755 /tests /audit\n"
-        "WORKDIR /grading\n",
+        + (f"WORKDIR {verifier_workdir}\n" if verifier_workdir is not None else ""),
     )
     (bundle / "tests/sentinel").write_text("private tests were injected\n")
     (bundle / "tests/test.sh").write_text(
         "set -eu\n"
         'test "$(id -u)" = 0\n'
-        'test "$PWD" = /grading\n'
+        f'test "$PWD" = {expected_workdir}\n'
         'test "$(cat /tests/sentinel)" = "private tests were injected"\n'
         'printf "uid=%s cwd=%s\\n" "$(id -u)" "$PWD" > /audit/observed\n'
         'echo .7 > "$LOOM_HARBOR_LOG_DIR/reward.txt"\n'
@@ -138,13 +142,14 @@ def test_independent_native_verifier_runs_with_own_image_defaults_and_json_rewar
     output.mkdir()
     tags: dict[str, str] = {}
     images: dict[str, str] = {}
-    metadata = {}
+    work = tmp_path / "publication"
+    (work / "oci").mkdir(parents=True)
     container_name = f"loom-grader-defaults-{uuid4().hex}"
     try:
         for component, directory in (("task", "environment"), ("verifier", "tests")):
             tag = f"loom-grader-defaults-{uuid4().hex}"
             tags[component] = tag
-            archive = tmp_path / f"{component}.tar"
+            archive = work / "oci" / f"{len(images):04}.tar"
             saved = tmp_path / f"{component}-docker.tar"
             built = _docker("build", "--tag", tag, str(bundle / directory))
             assert built.returncode == 0, built.stderr
@@ -152,10 +157,26 @@ def test_independent_native_verifier_runs_with_own_image_defaults_and_json_rewar
             assert exported.returncode == 0, exported.stderr
             digest, architecture = _metadata_archive_from_docker_save(saved, archive)
             images[component] = f"{tag}@{digest}"
-            metadata[component] = {
-                "image_ref": images[component],
-                **read_task_image_runtime_metadata(archive, architecture=architecture),
-            }
+        # Run the actual publisher against real built OCI bytes. Only registry
+        # transport is stubbed; no private registry or credentials are needed.
+        published = []
+
+        def copy_to_registry(argv, **kwargs):
+            assert argv[:1] == ["skopeo"] and "copy" in argv
+            component = ("task", "verifier")[len(published)]
+            Path(argv[argv.index("--digestfile") + 1]).write_text(images[component].split("@", 1)[1])
+            published.append(component)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        claim = {"id": str(uuid4()), "lease_epoch": 1, "materialization_key": "1" * 64,
+                 "cpu_arch": "arm64" if architecture == "arm64" else "x86_64",
+                 "task_config": task.model_dump(mode="json"), "registry_repository": "registry.invalid/native"}
+        with monkeypatch.context() as patch:
+            patch.setattr(task_image_runtime.subprocess, "run", copy_to_registry)
+            receipt = task_image_runtime.publish(claim, work, tmp_path / "secrets",
+                                                  receipt_path=tmp_path / "publication.json")
+        assert published == ["task", "verifier"]
+        assert receipt["image_runtime_metadata"]["verifier"]["workdir"] == expected_workdir
         grant = TaskImageExecutionGrantV1(
             schema_version="loom.task-image-execution-grant.v1",
             materialization_id=uuid4(),
@@ -165,8 +186,8 @@ def test_independent_native_verifier_runs_with_own_image_defaults_and_json_rewar
             task_config=task.model_dump(mode="json"),
             task_source=None,
             task_source_provenance={},
-            registry_images=images,
-            image_runtime_metadata=metadata,
+            registry_images=receipt["registry_images"],
+            image_runtime_metadata=receipt["image_runtime_metadata"],
         )
         resolved = resolve_prepared_task(task, grant)
         verifier = resolved.verifier.environment
@@ -208,12 +229,12 @@ def test_independent_native_verifier_runs_with_own_image_defaults_and_json_rewar
         assert resolved.environment.user == "65532:65532"
         assert str(resolved.environment.workdir) == "/agent-work"
         assert verifier.user == "0:0"
-        assert str(verifier.workdir) == "/grading"
-        assert result.stdout.strip() == "uid=0 cwd=/grading"
+        assert str(verifier.workdir) == expected_workdir
+        assert result.stdout.strip() == f"uid=0 cwd={expected_workdir}"
         assert json.loads((output / "result.json").read_text())["rewards"] == {"reward": 0.73}
     finally:
         _docker("rm", "--force", container_name)
-        for component, tag in tags.items():
+        for index, (component, tag) in enumerate(tags.items()):
             _docker("image", "rm", "--force", tag)
-            (tmp_path / f"{component}.tar").unlink(missing_ok=True)
+            (work / "oci" / f"{index:04}.tar").unlink(missing_ok=True)
             (tmp_path / f"{component}-docker.tar").unlink(missing_ok=True)

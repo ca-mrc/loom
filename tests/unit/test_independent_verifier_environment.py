@@ -31,7 +31,7 @@ def independent_inputs():
     return task, trial, profile
 
 
-def verifier_grant(task, profile):
+def verifier_grant(task, profile, workdir='/grading'):
     verifier_image = 'registry.example/verifier@sha256:' + 'a' * 64
     return TaskImageExecutionGrantV1(
         schema_version='loom.task-image-execution-grant.v1', materialization_id=uuid4(),
@@ -40,7 +40,7 @@ def verifier_grant(task, profile):
         registry_images={'task':profile.task_image_ref,'verifier':verifier_image},
         image_runtime_metadata={'verifier':{
             'image_ref':verifier_image,'user':'grader','uid':1002,'gid':1003,'home':'/home/grader',
-            'workdir':'/grading','entrypoint':['/init-grader'],'environment':{'FROM_IMAGE':'yes'},
+            'workdir':workdir,'entrypoint':['/init-grader'],'environment':{'FROM_IMAGE':'yes'},
         }},
     )
 
@@ -76,12 +76,12 @@ def test_independent_verifier_rejects_missing_image_metadata():
         resolve_prepared_task(task, grant)
 
 
-def _independent_plan():
+def _independent_plan(workdir='/grading'):
     from loom.hosted_harness import hosted_harness
     from loom.service_execution_materialization import service_execution_input_binding
     from loom.task_sandbox_planner import TaskSandboxPlanRequest, compile_task_sandbox_plan
     task, trial, profile = independent_inputs()
-    grant = verifier_grant(task, profile)
+    grant = verifier_grant(task, profile, workdir)
     prepared = resolve_prepared_task(task, grant)
     plan = compile_task_sandbox_plan(TaskSandboxPlanRequest(
         spec=hosted_harness('terminus-2'), task=prepared, trial=trial, profile=profile,
@@ -94,7 +94,8 @@ def _independent_plan():
     return task, prepared, trial, plan
 
 
-def test_deferred_verifier_keeps_own_image_identity_resources_and_environment():
+@pytest.mark.parametrize('workdir', ['/grading', '/', '/tests', '/opt/verifier'])
+def test_deferred_verifier_keeps_own_image_identity_resources_and_environment(workdir):
     from loom.execution_contract import workload_requirements_from_task
     from loom.execution_runtime_contract import (
         RuntimeHandoffInputV1,
@@ -102,7 +103,8 @@ def test_deferred_verifier_keeps_own_image_identity_resources_and_environment():
     )
     from loom.task_sandbox_planner import compile_deferred_verifier_plan
     from loom.verifier_runtime import validate_prepared_sandbox_images, verifier_execution_task
-    task, prepared, trial, plan = _independent_plan()
+    task, prepared, trial, plan = _independent_plan(workdir)
+    assert str(prepared.verifier.environment.workdir) == workdir
     deferred = compile_deferred_verifier_plan(plan, task, verifier_timeout_seconds=150,
         handoff_input=RuntimeHandoffInputV1(manifest_sha256='sha256:'+'a'*64,file_count=1,total_bytes=1))
     sandbox, = [s for s in deferred.sidecars if s.private_sandbox]

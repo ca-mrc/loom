@@ -38,7 +38,9 @@ class TaskImageRuntimeMetadataV1(BaseModel):
     @field_validator("workdir")
     @classmethod
     def _workdir(cls, value: str) -> str:
-        if not value.startswith("/") or str(PurePosixPath(value)) != value or ".." in PurePosixPath(value).parts:
+        if (not value.startswith("/") or value.startswith("//") or "\x00" in value
+                or len(value.encode("utf-8")) > 4096
+                or str(PurePosixPath(value)) != value or ".." in PurePosixPath(value).parts):
             raise ValueError("OCI workdir must be a canonical absolute path")
         return value
 
