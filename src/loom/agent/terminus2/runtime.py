@@ -34,6 +34,7 @@ from loom.agent.terminus2.task_metadata import harbor_mcp_documents
 from loom.attempt_deadline import AttemptDeadline, AttemptDeadlineExceededError
 from loom.driver.base import Driver
 from loom.errors import AgentContinuationError, AgentError, exception_info
+from loom.models.harbor_config import HarborConfig
 from loom.models.mcp import MCPConnection
 from loom.models.trajectory import (
     Terminus2EpisodeCheckpointEvent,
@@ -612,6 +613,7 @@ class LoomTerminus2Runtime:
     emits_gateway_llm_call_events: bool = True
     provider_connection_id: str | None = None
     request_params: dict[str, Any] = field(default_factory=dict)
+    harbor_config: HarborConfig | None = None
     multi_model: MultiModelSwitchSpec | None = None
     model_switch_plan: dict[str, Any] | None = None
     max_turns: int = 50
@@ -783,11 +785,33 @@ class LoomTerminus2Runtime:
         # These compatibility overrides are observable behavior, independent
         # of Harbor's source revision. Reuse the exact constructor options in
         # provenance so a version upgrade cannot silently claim default parity.
+        harbor = self.harbor_config
+        if isinstance(harbor, dict):
+            harbor = HarborConfig.model_validate(harbor)
+            self.harbor_config = harbor
+        max_turns = self.max_turns
+        enable_summarize = False
+        if harbor is not None:
+            if harbor.max_turns is not None:
+                max_turns = harbor.max_turns
+            if harbor.enable_summarize is not None:
+                enable_summarize = harbor.enable_summarize
         harbor_options: dict[str, Any] = {
-            "max_turns": None if self.continue_until_timeout else self.max_turns,
+            "max_turns": None if self.continue_until_timeout else max_turns,
             "record_terminal_session": True,
-            "enable_summarize": False,
+            "enable_summarize": enable_summarize,
         }
+        if harbor is not None:
+            if harbor.proactive_summarization_threshold is not None:
+                harbor_options["proactive_summarization_threshold"] = (
+                    harbor.proactive_summarization_threshold
+                )
+            if harbor.max_thinking_tokens is not None:
+                harbor_options["max_thinking_tokens"] = harbor.max_thinking_tokens
+            if harbor.max_input_tokens is not None:
+                harbor_options["model_info"] = {
+                    "max_input_tokens": harbor.max_input_tokens,
+                }
         await bridge.emit_provenance(effective_options={
             **harbor_options,
             "continue_until_timeout": self.continue_until_timeout,
@@ -803,6 +827,14 @@ class LoomTerminus2Runtime:
         )
 
         generation_params = sanitize_request_extras(self.request_params)
+        if harbor is not None:
+            for key, value in harbor.completion_parameters().items():
+                current = generation_params.get(key)
+                if current is not None and current != value:
+                    raise AgentError(
+                        f"harbor_config.{key} conflicts with request_params.{key}",
+                    )
+                generation_params[key] = value
         # Harbor binds reasoning_effort explicitly while expanding llm_kwargs.
         # Passing it in both places raises before the first model call.
         reasoning_effort = generation_params.pop("reasoning_effort", None)

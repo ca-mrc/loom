@@ -76,12 +76,15 @@ def _patch_harbor(
     reasoning_seen: list[object] | None = None,
     lifecycle: list[str] | None = None,
     deadline_clock: list[float] | None = None,
+    constructed: list[dict[str, object]] | None = None,
 ) -> None:
     class _FakeTerminus2:
         capabilities = SimpleNamespace(skills=True, mcp_servers=True)
 
         def __init__(self, logs_dir, **kwargs: object) -> None:
             self._logs_dir = logs_dir
+            if constructed is not None:
+                constructed.append(dict(kwargs))
             if reasoning_seen is not None:
                 reasoning_seen.append(kwargs.get("reasoning_effort"))
             llm_kwargs = kwargs.get("llm_kwargs")
@@ -173,6 +176,51 @@ async def test_single_model_forwards_generation_params_without_reserved_override
         "temperature": 0.2, "max_tokens": 4096,
         "extra_body": {"top_k": 20}, "api_key": "token-1",
     }]
+
+
+@pytest.mark.asyncio
+async def test_harbor_config_reaches_terminus_constructor(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    constructed: list[dict[str, object]] = []
+    _patch_harbor(monkeypatch, tokens_seen=[], constructed=constructed)
+    runtime = LoomTerminus2Runtime(
+        model=ModelSpec(provider="openai", name="glm-5.2"), team_id=str(uuid4()),
+        trial_id=uuid4(), cp_client=_TokenCP(), gateway_url="http://127.0.0.1:9000",
+        harbor_config={
+            "max_turns": 128,
+            "max_input_tokens": 262144,
+            "enable_summarize": False,
+            "max_thinking_tokens": 2048,
+            "temperature": 1,
+            "top_p": 0.9,
+            "max_tokens": 16384,
+        },
+    )
+    driver = FakeDriver()
+    await driver.start()
+    async with TrajectoryWriter(
+        local_path=tmp_path / "events.jsonl", store=FakeObjectStore(),
+        bucket="test", key="events.jsonl", min_part_bytes=0,
+    ) as trajectory:
+        await runtime.run(
+            instruction="task", env=driver, trajectory=trajectory,
+            mcp=[], skills_dir=None, step_id="agent",
+        )
+    assert len(constructed) == 1
+    kwargs = constructed[0]
+    assert kwargs["max_turns"] == 128
+    assert kwargs["enable_summarize"] is False
+    assert kwargs["max_thinking_tokens"] == 2048
+    assert kwargs["model_info"] == {"max_input_tokens": 262144}
+    llm_kwargs = kwargs["llm_kwargs"]
+    assert isinstance(llm_kwargs, dict)
+    assert llm_kwargs["temperature"] == 1
+    assert llm_kwargs["top_p"] == 0.9
+    assert llm_kwargs["max_tokens"] == 16384
+    assert "max_input_tokens" not in llm_kwargs
+    assert "model_info" not in llm_kwargs
 
 
 @pytest.mark.asyncio
