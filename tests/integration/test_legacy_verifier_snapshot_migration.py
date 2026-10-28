@@ -8,11 +8,10 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, delete, insert, text
+from sqlalchemy import MetaData, Table, create_engine, insert, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from loom.db.schema import TaskImageMaterialization
 from loom.task_image_materialization import (
     ensure_task_image_materializations,
     task_image_materialization_key,
@@ -60,7 +59,10 @@ def _seed(connection, *, state="queued", current=None, snapshot=None,
     snapshot_checksum = snapshot_checksum or checksum.removeprefix("sha256:")
     provenance = ({"bundle_content_manifest_sha256": snapshot_manifest}
                   if snapshot_manifest else {})
-    connection.execute(insert(TaskImageMaterialization).values(
+    # Seed the schema under test, without injecting defaults from today's ORM.
+    images = Table("task_image_materializations", MetaData(),
+                   autoload_with=connection, resolve_fks=False)
+    connection.execute(insert(images).values(
         id=uuid4(), task_id=task_id, task_checksum=snapshot_checksum, cpu_arch=cpu_arch,
         materialization_key=task_image_materialization_key(
             task_id=task_id, task_checksum=snapshot_checksum, cpu_arch=cpu_arch,
@@ -76,9 +78,18 @@ def _seed(connection, *, state="queued", current=None, snapshot=None,
 
 
 def _snapshot_rows(connection):
-    return connection.execute(text(
+    return [dict(row) for row in connection.execute(text(
         "SELECT * FROM task_image_materializations ORDER BY id"
-    )).mappings().all()
+    )).mappings()]
+
+
+def _assert_frozen_rows(connection, frozen):
+    upgraded = _snapshot_rows(connection)
+    for row in upgraded:
+        # 0181 adds an empty legacy preparation revision; every historical
+        # column, including timestamps and publication evidence, must survive.
+        assert row.pop("preparation_revision") == ""
+    assert upgraded == frozen
 
 
 async def _ensure(engine, task):
@@ -106,8 +117,16 @@ def test_0167_drift_is_repaired_without_rewriting_frozen_images(repair_database,
         broken = connection.execute(text("SELECT * FROM tasks WHERE id=:id"),
                                     {"id": task_id}).mappings().one()
         assert broken["config"]["verifier"]["env_mode"] == "separate"
-    with pytest.raises(RuntimeError, match="snapshot conflicts with task checksum"):
-        asyncio.run(_ensure(repair_database, broken))
+        # A current ORM cannot run against 0167. Observe the same conflicting
+        # persisted snapshot directly, then exercise the current runtime after
+        # upgrading to its supported schema below.
+        assert connection.execute(text("""
+            SELECT m.task_checksum = regexp_replace(t.checksum, '^sha256:', ''),
+                   m.task_config <> t.config
+            FROM tasks t JOIN task_image_materializations m ON m.task_id = t.id
+            WHERE t.id = :id
+        """), {"id": task_id}).one() == (True, True)
+        assert _snapshot_rows(connection) == frozen
 
     migrate(repair_database, "upgrade", "head")
     with repair_database.connect() as connection:
@@ -118,11 +137,11 @@ def test_0167_drift_is_repaired_without_rewriting_frozen_images(repair_database,
         assert repaired["checksum"] == broken["checksum"]
         assert repaired["source"] == broken["source"]
         assert repaired["source_provenance"] == broken["source_provenance"]
-        assert _snapshot_rows(connection) == frozen
+        _assert_frozen_rows(connection, frozen)
     asyncio.run(_ensure(repair_database, repaired))
     migrate(repair_database, "upgrade", "head")
     with repair_database.connect() as connection:
-        assert _snapshot_rows(connection) == frozen
+        _assert_frozen_rows(connection, frozen)
         version_before_downgrade = connection.scalar(
             text("SELECT version_num FROM alembic_version")
         )
@@ -130,7 +149,7 @@ def test_0167_drift_is_repaired_without_rewriting_frozen_images(repair_database,
         migrate(repair_database, "downgrade", "0168")
     with repair_database.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == version_before_downgrade
-        assert _snapshot_rows(connection) == frozen
+        _assert_frozen_rows(connection, frozen)
 
 
 @pytest.mark.parametrize("case", [
@@ -158,9 +177,9 @@ def test_repair_does_not_reinterpret_unrelated_revisions(repair_database, case):
             _seed(connection, task_id=task_id, snapshot=different,
                   cpu_arch="arm64", add_task=False)
         if case == "no_snapshot":
-            connection.execute(delete(TaskImageMaterialization).where(
-                TaskImageMaterialization.task_id == task_id,
-            ))
+            connection.execute(text(
+                "DELETE FROM task_image_materializations WHERE task_id = :id"
+            ), {"id": task_id})
         frozen = _snapshot_rows(connection)
     migrate(repair_database, "upgrade", "head")
     with repair_database.connect() as connection:
@@ -168,4 +187,4 @@ def test_repair_does_not_reinterpret_unrelated_revisions(repair_database, case):
                                   {"id": task_id}).mappings().one()
         assert task["config"] == current
         assert task["legacy_separate_verifier_checksum"] is None
-        assert _snapshot_rows(connection) == frozen
+        _assert_frozen_rows(connection, frozen)
