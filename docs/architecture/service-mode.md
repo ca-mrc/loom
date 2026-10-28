@@ -637,6 +637,12 @@ Core pages include:
   includes `service_execution_summary.execution_states` for cleanup observation.
   Polling stops once those projections settle; cancelled trials with no output
   do not wait for a canonical bundle. Hidden-tab pauses and blur backoff apply.
+  The visible trial-state badges and expanded state-count table both use
+  `trial_summary`, covering all trials in the batch. Nebius latest execution
+  attempt stages are a separate, explicitly labeled expandable breakdown from
+  `service_execution_summary`: trials without an execution attempt are absent,
+  and output lifecycle stages can differ from trial states. Canonical readiness
+  and output-commit totals retain this execution-attempt scope.
   Multi-benchmark batch detail responses include `benchmark_summary`,
   grouped server-side from trial task ids to task benchmark ids and
   benchmark display names, so the SPA can show per-benchmark score,
