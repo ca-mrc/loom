@@ -158,6 +158,10 @@ Nebius publication uses the existing Trivy 0.74.0 CRITICAL policy with **no
 exceptions**. The empty ignore file is explicit; active or suppressed findings
 cannot pass report validation. Expired exceptions for unrelated legacy images
 do not block this lane before a scan. No exception deadline is extended.
+The web runtime pins Alpine 3.21 `brotli-libs=1.1.1-r0`, the distribution's
+[fixed package for CVE-2026-111497](https://secdb.alpinelinux.org/v3.21/main.json).
+Updating a compiler does not replace inherited OS libraries; the final web
+image must pass the same scan and non-root SPA startup checks.
 The controlled policy downloads the vulnerability DB from the official
 `ghcr.io/aquasecurity/trivy-db:2` publisher, then
 `public.ecr.aws/aquasecurity/trivy-db:2`, avoiding the GCR pull-through layer.
