@@ -1226,6 +1226,15 @@ bucket:
 | `blobs` (default) | Content-addressed `task-build-cache/v2/{mat}/{index}/manifest.json` plus shared `task-build-cache/v2/blobs/{sha256}`. Prepare dual-reads legacy `…/{mat}/{index}.tar` on blob miss so mixed rollouts stay warm. Publish uploads only missing digests under the **current** materialization key. |
 | `tar` | Whole-archive path only (instant rollback to pre-blob behavior). |
 
+The component cache budget is 1 GiB of logical file bytes. It is independent
+of the OCI validator's 3 GiB image limit (archive bytes and logical contents,
+or directory contents) and the 4 GiB cache GC target below. Changing one budget
+must not implicitly change either of the others. The OCI validator also owns
+the image limit when publication reads runtime metadata.
+
+For the cache-sizing assessment and the conditions for a 2 GiB pilot, see
+[task-image cache sizing](../architecture/task-image-materialization.md#cache-budget-sizing).
+
 Trim/GC still runs in-process on publish, before the new cache upload. It reads
 every v2 manifest first. If any retained manifest cannot be fetched, read, or
 parsed, the sweep stops and deletes nothing; the Job log emits

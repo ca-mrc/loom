@@ -68,8 +68,9 @@ _derive_task_image_build_components = derive_task_image_build_components
 
 _FILE_LIMIT = 2000
 _BUNDLE_BYTES = 512 * 1024 * 1024
+# Logical bytes per component, independent of OCI publication and cache GC.
 _CACHE_BYTES = 1024 * 1024 * 1024
-_CACHE_TOTAL_BYTES = 4 * _CACHE_BYTES
+_CACHE_TOTAL_BYTES = 4 * 1024 * 1024 * 1024
 _CACHE_REUSE_BYTES = 256 * 1024 * 1024
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _KEY = re.compile(r"[0-9a-f]{64}\Z")
@@ -1049,8 +1050,8 @@ def publish(
                 skopeo_source = f"oci:{output}"
             else:
                 archive = _output_path(work, component.oci_output_path)
-                if archive.stat().st_size > 3 * _CACHE_BYTES:
-                    raise BuildPreparationError("build output is not a bounded regular OCI archive")
+                # The OCI validator owns the independent image-size bound,
+                # including when runtime metadata is read below.
                 if not requires_metadata:
                     validate_native_oci_archive(archive, architecture=architecture)
                 skopeo_source = f"oci-archive:{archive}"
