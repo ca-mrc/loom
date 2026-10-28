@@ -495,6 +495,64 @@ async def test_cleanup_failure_keeps_the_original_activation_failure(shell_contr
     assert error.value.__cause__ is original
 
 
+@pytest.mark.parametrize("failed_phase", ["identity read", "activation"])
+async def test_control_failures_retain_both_safe_result_numbers(failed_phase):
+    import asyncio
+
+    from loom.driver.fake import FakeDriver
+    from loom.driver.guest_compose import GuestComposeRuntime
+    from loom.errors import DriverError
+    from loom.models.compose import ComposeServiceSpec, NativeComposeSpec
+    from loom.models.exec import ExecResult
+
+    started, cancelled = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    class FailedControls(FakeDriver):
+        async def exec(self, command, **kwargs):
+            if "old_umask=$(umask)" in command:
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+            await started.wait()
+            if "kill -TERM" in command:
+                phase, code, duration = "cleanup", 124, 5.875
+            elif " cat " in command:
+                phase = "identity read"
+                code, duration = (124, 5.125) if failed_phase == phase else (0, .125)
+            elif " touch " in command:
+                phase, code, duration = "activation", 124, 5.625
+            else:
+                pytest.fail("unexpected control request")
+            calls.append(phase)
+            if calls.count(phase) != 1:
+                pytest.fail("failed control request was retried")
+            return ExecResult(return_code=code, duration_sec=duration,
+                              stdout=b"123" if code == 0 else b"private-stdout-sentinel",
+                              stderr=b"private-stderr-sentinel")
+
+    runtime = GuestComposeRuntime(guest=FailedControls(), topology=NativeComposeSpec(source="fixture",
+        services=(ComposeServiceSpec(name="main", image="fixture"),)), image_archives={})
+    runtime.containers["main"] = "f" * 64
+    runtime.main_environment = {"PRIVATE": "private-env-sentinel"}
+    with pytest.raises(DriverError) as error:
+        await runtime.driver("main").exec("printf private-command-sentinel")
+    diagnostic = str(error.value)
+    original = error.value.__cause__
+    assert isinstance(original, DriverError)
+    assert diagnostic.count("exit_code=124") == 2
+    assert f"duration_sec={5.125 if failed_phase == 'identity read' else 5.625:.6f}" in diagnostic
+    assert "duration_sec=5.875000" in diagnostic
+    assert failed_phase in diagnostic and "cleanup" in diagnostic
+    assert "exit_code=124" in str(original) and "duration_sec=" in str(original)
+    assert "private-" not in diagnostic + str(original)
+    assert cancelled.is_set()
+    assert calls == (["identity read", "cleanup"] if failed_phase == "identity read"
+                     else ["identity read", "activation", "cleanup"])
+
+
 async def test_stream_activation_cleanup_failure_still_kills_the_outer_handle(shell_control, monkeypatch):
     from pathlib import PurePosixPath
 
