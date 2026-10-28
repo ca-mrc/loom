@@ -1238,8 +1238,18 @@ it deletes blobs older than 7 days that no manifest names, then evicts the
 oldest past-grace manifests and legacy tars. A blob's bytes count once and are
 reclaimed only when its last manifest reference disappears. Roots and blobs
 newer than 7 days stay. If those protected objects leave the bucket over the
-4 GiB target, the log emits `reason=grace_protected` and the sweep stops. Cache
-errors never mark a materialization ready.
+4 GiB target, the log emits `reason=grace_protected` and the sweep stops.
+Each component's optional cache export has a 1 GiB logical-file-byte budget.
+When a cache tree contains only valid regular files and directories but exceeds
+that budget, publication defers its entire cache export before any cache write,
+with `cache_export` / `deferred` and `reason=byte_budget_exceeded`,
+`logical_bytes` and `budget_bytes`. Required registry images, archives and runtime
+metadata still have to publish successfully. This capacity deferral preserves
+the budget; it does not truncate a cache or increase image/build resource limits.
+The complete cache tree, including directory paths, is validated before that
+decision; its 10,000-entry limit matches the archive transport's bound in both
+transfer modes. Links, special files, invalid paths, excess entries and
+storage/SDK errors remain failures and never mark a materialization ready.
 
 Publishers and GC serialize cache mutations using a conditional S3 lock object
 at `task-build-cache/.mutation-lock`. Each mutation first probes the endpoint's
