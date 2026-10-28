@@ -29,7 +29,11 @@ def test_pinned_harbor_continuation_and_cancellation():
             ], cwd=root, check=True, capture_output=True, timeout=540)
         manifest = json.loads(subprocess.check_output(["docker", "image", "inspect", image]))[0]
         assert manifest["Config"]["Labels"]["io.loom.harbor_source_revision"] == HARBOR_COMPAT_SHA
-        for probe in ("terminus_continuation_probe.py", "terminus_conformance_probe.py"):
+        for probe in (
+            "terminus_continuation_probe.py",
+            "terminus_conformance_probe.py",
+            "terminus_summarization_probe.py",
+        ):
             result = subprocess.run([
                 "docker", "run", "--rm", "--network", "none", "--cap-drop", "ALL",
                 "--security-opt", "no-new-privileges", "--memory", "1g", "--cpus", "1",

@@ -1347,10 +1347,32 @@ loom eval batch create \
 `frequency_penalty`, and `presence_penalty` are copied into Harbor `llm_kwargs`.
 `max_turns`, `enable_summarize`, `proactive_summarization_threshold`,
 `max_thinking_tokens`, and `reasoning_effort` are Terminus constructor arguments.
-`max_input_tokens` is passed as Harbor `model_info` and only affects the
-summarizer; with `enable_summarize` left off, the provider still enforces the
-real context window. `agent_timeout_sec` replaces the task agent timeout for
-the whole attempt. Omitting `enable_summarize` keeps it off. Omitting
+`max_input_tokens` overrides the student's Harbor `model_info` for local
+context accounting; with `enable_summarize` left off, the provider still
+enforces the real context window. Existing `agent_model.max_input_tokens`
+and `max_output_tokens` supply model metadata when provided. In multi-model
+runs, the teacher uses its own `secondary_model` metadata or Harbor's model
+registry; it does not inherit the student's context override.
+
+`proactive_summarization_threshold` is the number of remaining context tokens
+below which Harbor proactively summarizes, not a percentage of used context.
+The comparison is strict: equality does not trigger summarization. `0`
+disables proactive summarization, including when history already exceeds the
+local context window; with `enable_summarize=true`, Harbor's reactive
+context-length recovery remains enabled. An empty conversation first receives
+the complete initial protocol prompt before it can be summarized. Eligible
+summaries and handoffs use Harbor's native implementation.
+
+`agent_timeout_sec` replaces the agent-phase timeout for each attempt. Queueing,
+image preparation, verification, and finalization are outside this allowance;
+process termination/cleanup can take additional time. It is not a wall-clock
+limit for the entire Batch or task lifecycle.
+
+Set either `max_tokens` or `max_completion_tokens`, including across
+`harbor_config` and `request_params`; setting both is rejected. Conflicting
+same-name sampling values or agent timeouts are also rejected.
+
+Omitting `enable_summarize` keeps it off. Omitting
 `max_turns` keeps the runtime default of 50. A task that sets
 `continue_until_timeout` still ignores the turn cap.
 

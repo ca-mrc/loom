@@ -571,6 +571,27 @@ class _RouterEventSink:
         )
 
 
+def _install_proactive_summarization_guard(agent: Any) -> None:
+    """Preserve the first prompt and proactive-off contract with pinned Harbor.
+
+    Compatibility for #2678: an empty-history summary returns the bare task
+    instruction, replacing its initial protocol prompt. A zero threshold also
+    needs an explicit off check when history exceeds the context window.
+    Delegate every eligible summary to Harbor's existing implementation; remove
+    these guards when the pinned upstream revision enforces both contracts.
+    """
+    original = getattr(agent, "_check_proactive_summarization", None)
+    if not callable(original):
+        raise AgentError("Harbor is missing the proactive summarization boundary")
+
+    async def check(chat: Any, *args: Any, **kwargs: Any) -> Any:
+        if not chat.messages or agent.options.proactive_summarization_threshold == 0:
+            return None
+        return await original(chat, *args, **kwargs)
+
+    agent._check_proactive_summarization = check
+
+
 def _install_continuation_policy(agent: Any, deadline: AttemptDeadline) -> None:
     """Keep the pinned Harbor session running after real completion actions.
 
@@ -801,6 +822,10 @@ class LoomTerminus2Runtime:
             "record_terminal_session": True,
             "enable_summarize": enable_summarize,
         }
+        model_info = {
+            key: value for key in ("max_input_tokens", "max_output_tokens")
+            if (value := getattr(self.model, key)) is not None
+        }
         if harbor is not None:
             if harbor.proactive_summarization_threshold is not None:
                 harbor_options["proactive_summarization_threshold"] = (
@@ -809,9 +834,9 @@ class LoomTerminus2Runtime:
             if harbor.max_thinking_tokens is not None:
                 harbor_options["max_thinking_tokens"] = harbor.max_thinking_tokens
             if harbor.max_input_tokens is not None:
-                harbor_options["model_info"] = {
-                    "max_input_tokens": harbor.max_input_tokens,
-                }
+                model_info["max_input_tokens"] = harbor.max_input_tokens
+        if model_info:
+            harbor_options["model_info"] = model_info
         await bridge.emit_provenance(effective_options={
             **harbor_options,
             "continue_until_timeout": self.continue_until_timeout,
@@ -848,6 +873,8 @@ class LoomTerminus2Runtime:
             **harbor_options,
             **task_options,
         )
+        if enable_summarize:
+            _install_proactive_summarization_guard(agent)
         if self.continue_until_timeout:
             assert self._attempt_deadline is not None
             _install_continuation_policy(agent, self._attempt_deadline)
@@ -905,6 +932,10 @@ class LoomTerminus2Runtime:
             last_call_ordinal = recovery.get("last_call_ordinal")
             router_kwargs: dict[str, Any] = {
                 "teacher_model_name": _harbor_model_name(teacher),
+                "teacher_model_info": {
+                    key: value for key in ("max_input_tokens", "max_output_tokens")
+                    if (value := getattr(teacher, key)) is not None
+                } or None,
                 "student_model_name": _harbor_model_name(student),
                 "agent_execution_id": str(recovery.get("agent_execution_id") or ""),
                 "agent_run_attempt_id": str(recovery.get("agent_run_attempt_id") or ""),

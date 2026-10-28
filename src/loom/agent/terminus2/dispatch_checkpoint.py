@@ -16,16 +16,20 @@ def install_dispatch_checkpoint(
 ) -> None:
     """Hook the pinned Harbor parse/dispatch boundary, instance locally.
 
-    The upstream agent writes its Step only after ``_execute_commands``. A
-    shell-exit exception in that call otherwise erases the current model turn.
+    Harbor inserts its summarization/handoff Steps after parsing, then writes
+    the agent Step after ``_execute_commands``. Capture the parsed result but
+    wait for that execution boundary to bind it to Harbor's final step order.
     Neither a failed persistence nor an expired/fenced attempt may send keys.
     """
     original = getattr(agent, "_handle_llm_interaction", None)
     execute = getattr(agent, "_execute_commands", None)
     if not callable(original) or not callable(execute):
         raise AgentError("Harbor is missing the parsed-command checkpoint boundary")
+    pending: tuple[dict[str, Any], int] | None = None
 
     async def handle(chat: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal pending
+        pending = None
         before = (chat.total_input_tokens, chat.total_output_tokens, chat.total_cache_tokens)
         result = await original(chat, *args, **kwargs)
         commands, complete, feedback, analysis, plan, response = result
@@ -39,8 +43,7 @@ def install_dispatch_checkpoint(
                  for i, cmd in enumerate(commands)]
         if complete:
             calls.append({"function_name": "mark_task_complete", "arguments": {}})
-        step = {
-            "step_id": len(agent._trajectory_steps) + 1,
+        step: dict[str, Any] = {
             "source": "agent",
             "message": f"Analysis: {analysis or ''}\nPlan: {plan or ''}",
             "reasoning_content": getattr(response, "reasoning_content", "") or "",
@@ -51,11 +54,22 @@ def install_dispatch_checkpoint(
             },
             "tool_calls": calls,
         }
-        await record(step, episode)
-        require_active()
+        response_extra = getattr(response, "extra", None)
+        client_call_id = response_extra.get("loom_client_call_id") if isinstance(response_extra, dict) else None
+        if isinstance(client_call_id, str) and client_call_id:
+            step["extra"] = {"loom_client_call_id": client_call_id}
+        pending = (step, episode)
         return result
 
     async def execute_with_fence(*args: Any, **kwargs: Any) -> Any:
+        nonlocal pending
+        require_active()
+        if pending is None:
+            raise AgentError("Harbor command dispatch has no parsed-turn checkpoint")
+        step, episode = pending
+        pending = None
+        step["step_id"] = len(agent._trajectory_steps) + 1
+        await record(step, episode)
         require_active()
         return await execute(*args, **kwargs)
 

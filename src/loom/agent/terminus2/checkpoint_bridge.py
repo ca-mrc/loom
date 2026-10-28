@@ -283,7 +283,12 @@ class HarborCheckpointBridge:
         if dispatched is not None:
             turn_id, batch_id, _ = dispatched
         else:
-            llm_row = self._gateway_ledger.resolve_for_metrics(metrics, episode=episode)
+            extra = step.get("extra") or {}
+            client_call_id = extra.get("loom_client_call_id") if isinstance(extra, dict) else None
+            llm_row = self._gateway_ledger.resolve_for_metrics(
+                metrics, episode=episode,
+                client_call_id=client_call_id if isinstance(client_call_id, str) else None,
+            )
             gateway_request_id = str(llm_row["id"])
             turn_id = str(uuid4())
             batch_id = str(uuid4())

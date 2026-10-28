@@ -205,6 +205,32 @@ class HarborConformanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recovered._llm_kwargs, teacher._llm_kwargs)
         self.assertEqual(recovered._temperature, teacher._temperature)
 
+    def test_real_teacher_context_limits_are_per_model(self):
+        logs = Path(self.directory.name) / "per-model-limits"
+        logs.mkdir()
+        agent = Terminus2(
+            logs_dir=logs,
+            model_name="openai/loom-student-context-qualification",
+            model_info={"max_input_tokens": 262144},
+            api_base="http://gateway/openai/v1",
+            session_id="fixture-context-session",
+            enable_summarize=True,
+            llm_kwargs={"api_key": "loom_step_fixture_credential", "top_p": 0.8},
+        )
+        student = agent._llm
+        teacher = construct_teacher_llm(
+            agent,
+            teacher_model_name="openai/loom-teacher-context-qualification",
+            teacher_model_info={"max_input_tokens": 8192, "max_output_tokens": 1024},
+        )
+        self.assertEqual(student.get_model_context_limit(), 262144)
+        self.assertEqual(teacher.get_model_context_limit(), 8192)
+        self.assertEqual(teacher.get_model_output_limit(), 1024)
+        self.assertEqual(teacher._api_base, student._api_base)
+        self.assertEqual(teacher._session_id, agent._session_id)
+        self.assertEqual(teacher._llm_kwargs["api_key"], "loom_step_fixture_credential")
+        self.assertEqual(teacher._llm_kwargs["top_p"], 0.8)
+
     async def pair(
         self, responses, *, max_turns=50, timeout=False, instruction_suffix="", request_params=None
     ):
