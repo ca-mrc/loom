@@ -78,6 +78,7 @@ from loom_service.delivery_export_errors import DeliveryExportError
 from loom_service.dependencies import SessionAndCtx
 from loom_service.diagnosis import build_trial_diagnosis
 from loom_service.effective_combination import ProviderRouteError, resolve_provider_route
+from loom_service.execution_admission import admit_execution_backend
 from loom_service.forwarders import forward, propagate
 from loom_service.monitor_filters import (
     apply_trial_monitor_filters,
@@ -97,6 +98,8 @@ from loom_service.routes.object_downloads import stream_object_response
 from loom_service.service_execution_status import service_execution_lifecycle_stage
 from loom_service.stale_running_debug import trial_stale_running_debug_context
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
+from loom_service.task_filter import resolve_task_filter_with_diagnostics
+from loom_service.task_image_admission import image_preparation_reader
 from loom_service.task_image_preparation import task_image_preparation_for_trial
 from loom_service.trial_bundles import CanonicalTrialBundle, canonical_bundle_for_trial
 from loom_service.trial_execution_provenance import (
@@ -1505,6 +1508,28 @@ async def submit_trial(
             submission_configs=[payload.config],
         )
     if is_codex(payload.config.get("agent_name")):
+        # CP idempotency replays return their original accepted Trial before
+        # catalog/target checks. Keep that frozen path available after retirement.
+        replay_id = None
+        if payload.idempotency_key is not None:
+            replay_id = await s.scalar(select(Trial.id).where(
+                Trial.idempotency_key == payload.idempotency_key,
+                Trial.team_id == ctx.team_id,
+            ))
+        if replay_id is None:
+            # Visibility/agent compatibility and provider ownership passed above.
+            # Reuse the catalog/hardware selector before a generation probe;
+            # the CP still owns its final transactional admission and replay.
+            await resolve_task_filter_with_diagnostics(
+                s, {"task_ids": [payload.task_id]}, team_id=ctx.team_id,
+            )
+            if not local_execution_enabled():
+                await admit_execution_backend(
+                    s, backend=NEBIUS_BACKEND, task_ids=[payload.task_id],
+                    trial_config=payload.config, combinations=[],
+                    runtime_profile_json=request.app.state.settings.service_execution_runtime_profile_json,
+                    image_preparation_reader=image_preparation_reader(request.app.state.settings),
+                )
         await refresh_codex_model_preflight(
             request.app.state.session_factory,
             provider_connection_id=payload.provider_connection_id,

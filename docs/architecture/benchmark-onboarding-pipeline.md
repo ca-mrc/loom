@@ -92,6 +92,11 @@ Batch/Trial/model creation. Quota/capacity pressure remains a queue/preflight
 condition. Product support/deferred records live in reviewed platform catalog
 policy; an uploaded descriptor cannot enable an excluded workload.
 
+New batch, dry-run and single-Trial requests pass catalog and declared-hardware
+admission before automatic provider-model preflight. That probe can invoke a
+model and persist cache evidence independently of a rejected submission.
+Authorized idempotent replays retain the original frozen execution contract.
+
 Runtime qualification remains `unknown` in a catalog projection without exact
 task/source/config/runtime/harness-bound Trial/result/artifact/export/cleanup
 evidence. Existing results retain their own scope. A copied `runtime_verified`
