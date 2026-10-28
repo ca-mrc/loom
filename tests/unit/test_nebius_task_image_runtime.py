@@ -903,7 +903,10 @@ def test_publisher_records_registry_digest_with_optional_cache(
     assert any(key.endswith(f"/blobs/{digest}") for _, key, _ in cache.uploads)
 
 
-@pytest.mark.parametrize("failure", [None, "secret", "workdir", "private_workdir", "budget"])
+@pytest.mark.parametrize(
+    "failure",
+    [None, "fixture_secret", "workdir", "private_workdir", "budget", "reserved"],
+)
 def test_publisher_binds_final_oci_defaults_and_rejects_unusable_metadata_before_push(
     source_bundle, tmp_path, publisher, failure,
 ):
@@ -912,8 +915,10 @@ def test_publisher_binds_final_oci_defaults_and_rejects_unusable_metadata_before
     claim["task_config"]["environment"].update(user="image", image_entrypoint=True, image_workdir=True)
     config = {"User": "0:0", "WorkingDir": "/app/database", "Entrypoint": ["/entrypoint.sh"],
               "Env": ["HOME=/root", "PATH=/usr/bin"]}
-    if failure == "secret":
+    if failure == "fixture_secret":
         config["Env"].append("PROVIDER_API_KEY=private-value")
+    elif failure == "reserved":
+        config["Env"].append("KUBECONFIG=private-value")
     elif failure == "workdir":
         config["WorkingDir"] = "/"
     elif failure == "private_workdir":
@@ -924,7 +929,7 @@ def test_publisher_binds_final_oci_defaults_and_rejects_unusable_metadata_before
     (work / "oci").mkdir(parents=True)
     _write_native_oci(work / "oci/0000.tar", runtime_config=config)
     receipt_file = tmp_path / "receipt.json"
-    if failure:
+    if failure not in {None, "fixture_secret"}:
         with pytest.raises(ValueError) as rejected:
             runtime.publish(claim, work, tmp_path / "secrets", receipt_path=receipt_file)
         assert "private-value" not in str(rejected.value)
@@ -936,7 +941,10 @@ def test_publisher_binds_final_oci_defaults_and_rejects_unusable_metadata_before
     assert metadata["image_ref"] == receipt["registry_images"]["task"]
     assert (metadata["uid"], metadata["gid"], metadata["home"]) == (0, 0, "/root")
     assert metadata["workdir"] == "/app/database" and metadata["entrypoint"] == ["/entrypoint.sh"]
-    assert metadata["environment"] == {"HOME": "/root", "PATH": "/usr/bin"}
+    environment = {"HOME": "/root", "PATH": "/usr/bin"}
+    if failure == "fixture_secret":
+        environment["PROVIDER_API_KEY"] = "private-value"
+    assert metadata["environment"] == environment
 
 
 @pytest.mark.parametrize("linked_directory", ["oci", "cache-out"])
