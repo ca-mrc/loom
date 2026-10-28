@@ -312,9 +312,20 @@ retries = 10
 interval_sec = 2.0
 ```
 
-The Docker driver polls at the fixed `interval_sec` between attempts, up to
-`retries`. Useful for tasks where the agent must wait
-for a service to be ready before solving.
+Workspace controllers (including hosted Oracle, Terminus2 and Codex) run this
+check in the selected task sandbox after startup and input staging, before the
+agent starts. For native Compose, this is the `main` service: Compose dependency
+and service healthchecks finish first, then this task-level check can wait for
+cross-service initialization such as a load generator's completed baseline.
+A failing check fails startup without starting the agent. Response-only harnesses
+have no task-sandbox healthcheck consumer and reject this field.
+
+The shared command probe runs during `start_period_sec`; failures during that
+grace period do not consume `retries`. `start_interval_sec`, when supplied,
+controls startup polling, then `interval_sec` applies. Each probe is bounded by
+`timeout_sec`. An independent verifier's environment check similarly runs before
+its verifier command. These checks do not enable unsupported DNS, host mappings
+or tmpfs options.
 
 ## Per-step instructions
 

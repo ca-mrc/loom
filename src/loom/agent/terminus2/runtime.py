@@ -30,6 +30,7 @@ from loom.agent.terminus2.model_switch import (
     seed_fingerprint,
 )
 from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA, LOOM_BRIDGE_REVISION
+from loom.agent.terminus2.task_metadata import harbor_mcp_documents
 from loom.attempt_deadline import AttemptDeadline, AttemptDeadlineExceededError
 from loom.driver.base import Driver
 from loom.errors import AgentContinuationError, AgentError, exception_info
@@ -73,6 +74,25 @@ def _import_terminus2() -> tuple[type, type]:
             f"terminus-2 requires harbor@{HARBOR_COMPAT_SHA} preinstalled in the controller image",
         ) from exc
     return Terminus2, AgentContext
+
+
+def _harbor_task_options(
+    terminus2_cls: type, mcp: Sequence[MCPConnection], skills_dir: PurePosixPath | None,
+) -> dict[str, Any]:
+    documents = harbor_mcp_documents(mcp)
+    capabilities = getattr(terminus2_cls, "capabilities", None)
+    if (documents and not getattr(capabilities, "mcp_servers", False)) or (
+        skills_dir is not None and not getattr(capabilities, "skills", False)
+    ):
+        raise AgentError("installed Harbor Terminus does not support task MCP/skills metadata")
+    options: dict[str, Any] = {}
+    if documents:
+        from harbor.models.task.config import MCPServerConfig
+
+        options["mcp_servers"] = [MCPServerConfig.model_validate(item) for item in documents]
+    if skills_dir is not None:
+        options["skills_dir"] = str(skills_dir)
+    return options
 
 
 def _openai_gateway_base(gateway_url: str) -> str:
@@ -647,7 +667,6 @@ class LoomTerminus2Runtime:
         self, *, instruction: str, env: Driver, trajectory: TrajectoryWriter,
         mcp: Sequence[MCPConnection], skills_dir: PurePosixPath | None, step_id: str,
     ) -> None:
-        del mcp, skills_dir
         if self.direct_provider is not None:
             if self.direct_ledger is None:
                 raise AgentError("direct Terminus requires a local usage ledger")
@@ -656,6 +675,7 @@ class LoomTerminus2Runtime:
         if self.continue_until_timeout and self._attempt_deadline is None:
             raise AgentContinuationError("continue_until_timeout requires an absolute attempt deadline")
         terminus2_cls, agent_context_cls = _import_terminus2()
+        task_options = _harbor_task_options(terminus2_cls, mcp, skills_dir)
 
         if self.direct_provider is not None:
             step_token = self.direct_provider.api_key
@@ -706,6 +726,7 @@ class LoomTerminus2Runtime:
                 logs_root=logs_root,
                 terminus2_cls=terminus2_cls,
                 agent_context_cls=agent_context_cls,
+                task_options=task_options,
             )
         finally:
             try:
@@ -732,6 +753,7 @@ class LoomTerminus2Runtime:
         logs_root: Path,
         terminus2_cls: type,
         agent_context_cls: type,
+        task_options: dict[str, Any],
     ) -> None:
         trial_paths = make_trial_paths(logs_root)
         trial_paths.mkdir()
@@ -792,6 +814,7 @@ class LoomTerminus2Runtime:
             reasoning_effort=reasoning_effort,
             llm_kwargs={**generation_params, "api_key": step_token},
             **harbor_options,
+            **task_options,
         )
         if self.continue_until_timeout:
             assert self._attempt_deadline is not None

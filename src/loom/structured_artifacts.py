@@ -30,6 +30,7 @@ from loom.trial.workspace_snapshot import (
     WorkspaceSnapshotError,
     _export_workspace_archive,
     _import_workspace_archive,
+    _prepare_workspace_import,
     _validate_workspace_archive,
 )
 
@@ -180,8 +181,13 @@ async def capture_structured_artifacts(
 
 async def restore_structured_artifacts(
     *, archive: Path, sources: Sequence[ArtifactSource], driver: Driver, workdir: PurePosixPath,
+    replace_directories: bool = False,
 ) -> None:
-    """Restore only frozen declared output paths; never trust archive destinations."""
+    """Restore frozen outputs, replacing directories only for native handoff.
+
+    Generic verifiers retain their staged private inputs and image dependencies.
+    Archive destinations never control the restore paths.
+    """
     entries = artifact_entries(sources)
     with tempfile.TemporaryDirectory(prefix=".structured-", dir=archive.parent) as temporary:
         with tarfile.open(archive) as bundle:
@@ -209,8 +215,13 @@ async def restore_structured_artifacts(
                     shutil.copyfileobj(stream, output)
                 target = artifact_source_path(entry.source, workdir)
                 if row["type"] == "directory":
-                    _validate_workspace_archive(payload, _POLICY, root=target)
-                    await _prepare_artifact_overlay(driver, payload, target)
+                    if replace_directories:
+                        # Native Harbor replaces declared directories, including
+                        # files absent from the captured tree and excluded entries.
+                        await _prepare_workspace_import(driver, payload, target, _POLICY)
+                    else:
+                        _validate_workspace_archive(payload, _POLICY, root=target)
+                        await _prepare_artifact_overlay(driver, payload, target)
                     await _import_workspace_archive(driver, payload, target)
                 else:
                     await driver.upload(payload, target)
