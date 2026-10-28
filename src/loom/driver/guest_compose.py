@@ -375,9 +375,14 @@ class GuestComposeServiceDriver:
     def _controlled(self, argv: list[str]) -> tuple[list[str], str]:
         marker = "/tmp/loom-compose-exec-" + uuid4().hex
         helper = self._SUPERVISOR
-        script = (f"old_umask=$(umask); umask 077; printf '%s' \"$$\" > {marker}; "
-                  f"trap '{helper} rm -f {marker}' EXIT; "
-                  "trap 'exit 143' TERM; i=0; "
+        # Redirection exposes an empty file before printf writes the PID. Keep
+        # that intermediate state private, then publish the complete PID with
+        # a same-directory atomic rename before the controller can read it.
+        script = ("old_umask=$(umask); umask 077; "
+                  f"trap '{helper} rm -f {marker} {marker}.pending' EXIT; "
+                  "trap 'exit 143' TERM; "
+                  f"printf '%s' \"$$\" > {marker}.pending && "
+                  f"{helper} mv -f {marker}.pending {marker} || exit 125; i=0; "
                   f"while test ! -f {marker}.go; do i=$((i+1)); test \"$i\" -lt 300 || exit 124; "
                   f"{helper} sleep 0.1; done; umask \"$old_umask\"; \"$@\"")
         # Docker exec starts a process-group leader. Start setsid as a shell
@@ -415,7 +420,8 @@ class GuestComposeServiceDriver:
                   "case \"$p\" in ''|*[!0-9]*) exit 1;; esac; "
                   'test "$p" -gt 1 && test "$p" -lt 2147483648 || exit 1; '
                   f"{helper} kill -TERM -- -\"$p\" 2>/dev/null || true; {helper} sleep 0.1; "
-                  f"{helper} kill -KILL -- -\"$p\" 2>/dev/null || true; fi; {helper} rm -f {marker} {marker}.go")
+                  f"{helper} kill -KILL -- -\"$p\" 2>/dev/null || true; fi; "
+                  f"{helper} rm -f {marker} {marker}.go {marker}.pending")
         operation = asyncio.create_task(self.runtime.guest.exec(shlex.join(self._exec(
             [helper, "sh", "-c", script], user="0:0")), timeout_sec=5))
         cancelled = False

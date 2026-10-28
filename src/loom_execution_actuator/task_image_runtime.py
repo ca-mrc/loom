@@ -1045,7 +1045,10 @@ def publish(
                     architecture=architecture,
                     directory=export_format == "directory",
                 )
-                if environment.get("image_workdir"):
+                # Only the agent transfers its writable workspace. A private
+                # verifier may legitimately start at / or in its own /tests;
+                # its OCI metadata still requires a canonical absolute cwd.
+                if component.name == "task" and environment.get("image_workdir"):
                     from loom.mutable_paths import validate_task_workdir
 
                     try:

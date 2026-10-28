@@ -76,6 +76,9 @@ def effective_agent_timeout_sec(
         if step_timeouts:
             base = max([base, *step_timeouts] if base is not None else step_timeouts)
     override = _float_or_none(trial_config_d.get("override_agent_timeout_sec"))
+    if override is None:
+        harbor = _as_mapping(trial_config_d.get("harbor_config"))
+        override = _float_or_none(harbor.get("agent_timeout_sec")) if harbor else None
     if override is not None:
         base = override
     if base is None:

@@ -40,7 +40,9 @@ def offline_verifier_run_sh_bytes() -> bytes:
     return _OFFLINE_VERIFIER_RUN_SH
 
 
-_NATIVE_VERIFIER_RUN_SH = b"""#!/bin/sh
+# Existing immutable catalog bundles contain this complete V1 template. Keep
+# its bytes recognizable while runtime execution uses the corrected bridge.
+_NATIVE_VERIFIER_RUN_SH_V1 = b"""#!/bin/sh
 # Shared native Harbor reward bridge. Native scripts and rewards are unchanged.
 set -eu
 : "${LOOM_VERIFIER_OUTPUT:?LOOM_VERIFIER_OUTPUT must be set}"
@@ -87,6 +89,27 @@ with open(output, "w") as target:
     target.write(json.dumps({"rewards": rewards, "structured": {"test_sh_returncode": int(sys.argv[3])}}) + "\\n")
 REWARD_PY
 """
+
+
+_NATIVE_VERIFIER_RUN_SH = _NATIVE_VERIFIER_RUN_SH_V1.replace(
+    b"""    if os.path.exists(os.path.join(logs, "reward.txt")):
+        with open(os.path.join(logs, "reward.txt")) as source:
+            rewards = {"resolved": float(source.read().strip())}
+    else:
+        with open(os.path.join(logs, "reward.json")) as source:
+            rewards = json.load(source)""",
+    b"""    if os.path.exists(os.path.join(logs, "reward.json")):
+        with open(os.path.join(logs, "reward.json")) as source:
+            rewards = json.load(source)
+    else:
+        with open(os.path.join(logs, "reward.txt")) as source:
+            rewards = {"reward": float(source.read().strip())}""",
+)
+
+
+def native_verifier_run_sh_templates() -> tuple[bytes, ...]:
+    """Complete known catalog wrappers, including the immutable V1 template."""
+    return (_NATIVE_VERIFIER_RUN_SH, _NATIVE_VERIFIER_RUN_SH_V1)
 
 
 def native_verifier_run_sh_bytes() -> bytes:

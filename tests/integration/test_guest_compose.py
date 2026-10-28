@@ -294,3 +294,47 @@ async def test_real_guest_compose_control_channel_and_service_isolation(image, t
             networks = await control.exec("docker network ls -q --filter label=loom.compose=" + runtime.project)
             assert networks.return_code == 0 and not networks.stdout.strip()
             await control.stop()
+
+
+async def test_task_healthcheck_waits_for_loadgen_baseline_in_selected_main(image):
+    """A task baseline is distinct from Compose main's process readiness."""
+    reference, archive = image
+    services = (
+        ComposeServiceSpec(
+            name="main", image=reference, cpus=.25, memory_mb=64,
+            command=("sh", "-c", "touch /tmp/kv-ready; while true; do "
+                     "printf 'HTTP/1.0 200 OK\\r\\n\\r\\nVALUE\\n' | nc -l -p 9000; "
+                     "touch /tmp/baseline-done; done"),
+            healthcheck=HealthcheckSpec(command="test -f /tmp/kv-ready", interval_sec=.1,
+                                       timeout_sec=1, retries=20),
+        ),
+        ComposeServiceSpec(
+            name="loadgen", image=reference, cpus=.25, memory_mb=64,
+            depends_on={"main": "service_healthy"},
+            command=("sh", "-c", "wget -qO- http://main:9000 >/tmp/baseline-response; sleep infinity"),
+        ),
+    )
+    runtime = GuestComposeRuntime(
+        guest=Control(), topology=NativeComposeSpec(source="environment/compose.yaml", services=services),
+        image_archives=dict.fromkeys((service.name for service in services), archive),
+        startup_timeout_sec=30, supervisor_path=str(archive.parent / "busybox"),
+    )
+    try:
+        await runtime.start()
+        main = runtime.driver("main")
+        await main.run_healthcheck(HealthcheckSpec(
+            command="test -f /tmp/baseline-done", start_period_sec=2, start_interval_sec=.1,
+            interval_sec=.1, timeout_sec=1, retries=10,
+        ))
+        # The sidecar caused the baseline, but its private filesystem is not the
+        # task healthcheck's execution context.
+        assert (await runtime.driver("loadgen").exec("cat /tmp/baseline-response")).stdout.strip() == b"VALUE"
+        assert (await main.exec("test ! -f /tmp/baseline-response")).return_code == 0
+        with pytest.raises(DriverError, match="Healthcheck failed"):
+            await main.run_healthcheck(HealthcheckSpec(
+                command="test -f /tmp/never-ready", interval_sec=.1, timeout_sec=1, retries=0,
+            ))
+    finally:
+        await runtime.stop()
+    assert not subprocess.check_output(["docker", "ps", "-aq", "--filter", "label=loom.compose=" + runtime.project]).strip()
+    assert not subprocess.check_output(["docker", "network", "ls", "-q", "--filter", "label=loom.compose=" + runtime.project]).strip()

@@ -19,7 +19,7 @@ RUN apt-get update -qq && \
     rm -rf /var/lib/apt/lists/* && \
     pip check && \
     python -I -c "import importlib.metadata; assert importlib.metadata.version('harbor') == '${HARBOR_VERSION}'"
-ARG LOOM_BRIDGE_REVISION=1.0
+ARG LOOM_BRIDGE_REVISION=1.1
 ARG LOOM_AGENT_VERSION=development
 ARG LOOM_BUILD_SHA=development
 ENV LOOM_HARBOR_SOURCE_REVISION=${HARBOR_COMPAT_SHA} \

@@ -27,6 +27,15 @@ _STRICT_HEALTH_BRIDGE_SOURCES = frozenset({
 })
 
 
+def supports_terminus_environment_metadata(*, loom_bridge_revision: str, harbor_version: str) -> bool:
+    """Whether this qualified adapter forwards task MCP and skills to Harbor.
+
+    Package version alone is insufficient: earlier Loom bridges discarded both
+    fields. Keep unknown combinations unavailable until their adapter is tested.
+    """
+    return loom_bridge_revision == "1.1" and harbor_version == "0.24.0"
+
+
 class AgentRuntimeBindingV1(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 

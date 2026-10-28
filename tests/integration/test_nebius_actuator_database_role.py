@@ -45,6 +45,137 @@ from tests.integration.test_service_execution_leases import (
 )
 
 
+@pytest.mark.parametrize("retiring", [False, True])
+async def test_bootstrap_actuator_claims_registered_native_source_without_global_role_stage(
+    platform_database: str,  # noqa: F811 -- imported shared pytest fixture
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    retiring: bool,
+) -> None:
+    from sqlalchemy import update
+
+    from loom.db.schema import (
+        Batch,
+        Task,
+        TaskBundleSourceReference,
+        TaskImageMaterialization,
+        TaskImageMaterializationAttempt,
+        TrialTaskImageMaterialization,
+    )
+    from loom.task_image_materialization import ensure_task_image_materializations
+    from loom_control_plane.task_image_materializations import claim_task_image_materialization
+    from tests.integration.test_task_bundle_source_journal import (
+        NOW,
+        _module,
+        _publish,
+        _receipts,
+        _spec,
+        _upload,
+    )
+
+    monkeypatch.setattr(bootstrap, "database_url", lambda _value, _namespace: platform_database)
+    monkeypatch.setenv("LOOM_DB_URL", platform_database)
+    monkeypatch.setenv("LOOM_COLLECTOR_TOKEN", "loom_ecc_" + "f" * 64)
+    monkeypatch.setenv("LOOM_BATCH_RUNNER_TOKEN", "loom_br_" + "b" * 64)
+    password = "restricted-native-source-" + "a" * 32
+    for role in ("SERVICE", "CONTROL_PLANE", "GATEWAY", "ACTUATOR"):
+        monkeypatch.setenv("LOOM_DB_" + role + "_PASSWORD", password)
+    url = make_url(platform_database).set(drivername="postgresql+psycopg")
+    admin = create_async_engine(url)
+    actuator = create_async_engine(url.set(username="loom_actuator", password=password))
+    owners = async_sessionmaker(admin, expire_on_commit=False)
+    restricted = async_sessionmaker(actuator, expire_on_commit=False)
+    trial_ids = []
+    try:
+        # The second pass exercises normal bootstrap replay, without the global
+        # participant role-stage grants that previously masked this missing ACL.
+        for generation in range(1 if retiring else 2):
+            bootstrap.bootstrap_database({"namespace": "loom-nebius-platform"})
+            root = tmp_path / str(generation)
+            root.mkdir()
+            spec = _spec(root)
+            ticket = await _upload(owners, spec)
+            await _receipts(owners, ticket)
+            await _publish(owners, ticket)
+            async with owners.begin() as session:
+                trial_id, target = await _seed_ready_trial(session, now=datetime.now(UTC))
+                trial_ids.append(trial_id)
+                trial = await session.get(Trial, trial_id)
+                assert trial is not None
+                task = Task(id=spec.catalog_task_id, checksum=spec.manifest.task_checksum,
+                    config=spec.task_config, source=spec.source_uri, source_provenance=spec.provenance)
+                batch = Batch(id=uuid4(), team_id=trial.team_id, name="native-source-role",
+                    task_filter={}, trial_config={}, created_by_token_prefix="test", backend="nebius",
+                    service_execution_runtime_profile={"logical_pool_id": target.logical_pool_id})
+                session.add_all([task, batch])
+                await session.flush()
+                image = (await ensure_task_image_materializations(session, task_row=task))[0]
+                image_id = image.id
+                trial.task_id, trial.batch_id = task.id, batch.id
+                trial.requires_caps = {"worker_pool": target.logical_pool_id}
+                session.add(TrialTaskImageMaterialization(trial_id=trial_id, materialization_id=image_id))
+                await session.flush()
+                # Force claim to establish its own retained reference, rather
+                # than merely replaying the publisher's pre-existing pin.
+                await _module().release_task_bundle_reference(session, source_id=spec.id,
+                    reference_kind="materialization", owner_id=str(image_id))
+                if retiring:
+                    await _module().release_task_bundle_reference(session, source_id=spec.id,
+                        reference_kind="catalog", owner_id="catalog")
+                    assert await _module().retire_task_bundle_source(session,
+                        incarnation_id=ticket.incarnation_id, now=NOW)
+
+            async def claim(pool_id, expected_image_id) -> None:
+                async with restricted.begin() as session:
+                    row = await claim_task_image_materialization(session, builder_id="native-source-role",
+                        cpu_arch="x86_64", nebius_pool_id=pool_id)
+                    assert row is not None and row.id == expected_image_id
+
+            if retiring:
+                with pytest.raises(ValueError, match="source has no available incarnation"):
+                    await claim(target.logical_pool_id, image_id)
+            else:
+                await claim(target.logical_pool_id, image_id)
+            async with owners() as session:
+                stored = await session.get(TaskImageMaterialization, image_id)
+                assert stored is not None
+                assert stored.state == ("queued" if retiring else "claimed")
+                assert stored.attempt_count == (0 if retiring else 1)
+                attempts = list(await session.scalars(select(TaskImageMaterializationAttempt).where(
+                    TaskImageMaterializationAttempt.materialization_id == image_id)))
+                assert len(attempts) == (0 if retiring else 1)
+                references = list(await session.scalars(select(TaskBundleSourceReference).where(
+                    TaskBundleSourceReference.source_id == spec.id,
+                    TaskBundleSourceReference.kind == "materialization",
+                    TaskBundleSourceReference.owner_id == str(image_id))))
+                assert len(references) == (0 if retiring else 1)
+
+        with psycopg.connect(url.set(drivername="postgresql", username="loom_actuator",
+                password=password).render_as_string(hide_password=False), autocommit=True) as db:
+            for statement in (
+                "UPDATE task_bundle_sources SET spec_json='{}'::jsonb WHERE false",
+                "INSERT INTO task_bundle_sources DEFAULT VALUES",
+                "DELETE FROM task_bundle_sources WHERE false",
+                "UPDATE task_bundle_source_incarnations SET state='retired' WHERE false",
+                "INSERT INTO task_bundle_source_incarnations DEFAULT VALUES",
+                "DELETE FROM task_bundle_source_incarnations WHERE false",
+                "UPDATE task_bundle_source_references SET owner_id='other' WHERE false",
+                "DELETE FROM task_bundle_source_references WHERE false",
+                "SELECT * FROM task_bundle_source_writes LIMIT 0",
+                "SELECT * FROM task_bundle_source_versions LIMIT 0",
+            ):
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    db.execute(statement)
+    finally:
+        # The module fixture is shared. Leave no build demand for sibling tests;
+        # immutable journal evidence stays until its disposable DB is removed.
+        async with owners.begin() as session:
+            await session.execute(update(Trial).where(Trial.id.in_(trial_ids)).values(
+                state="cancelled", finished_at=datetime.now(UTC)))
+        await actuator.dispose()
+        await admin.dispose()
+
+
 @pytest.mark.parametrize("outcome", ["succeeded", "verifier_error"])
 async def test_restricted_actuator_finalizes_large_results_without_artifact_identity_authority(
     platform_database: str,  # noqa: F811 -- imported shared pytest fixture

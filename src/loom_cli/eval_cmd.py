@@ -1065,6 +1065,8 @@ def _batch_create(args: argparse.Namespace) -> int:
                         "benchmarks (no TaskSet selectors).\n",
                     )
                     return 2
+            if args.harbor_config is not None:
+                trial_config = {**trial_config, "harbor_config": args.harbor_config}
             payload: dict[str, Any] = {
                 "purpose": args.purpose,
                 "task_filter": task_filter,
@@ -2043,6 +2045,20 @@ def dispatch(argv: list[str]) -> int:
         help=(
             "Task filter as JSON (object). Pass a literal JSON string "
             "or `@path/to/file.json` to read from disk."
+        ),
+    )
+    p_bc.add_argument(
+        "--harbor-config",
+        dest="harbor_config",
+        type=lambda raw: _load_task_filter_json(raw, flag="--harbor-config"),
+        default=None,
+        help=(
+            "Terminus-2 run controls as a JSON object or @file. "
+            "Constructor fields: max_turns, agent_timeout_sec, max_input_tokens, "
+            "enable_summarize, proactive_summarization_threshold, max_thinking_tokens, "
+            "reasoning_effort. Completion fields, forwarded as Harbor llm_kwargs: "
+            "temperature, top_p, max_tokens, max_completion_tokens, seed, stop, "
+            "frequency_penalty, presence_penalty. Cannot be combined with --request-json."
         ),
     )
     p_bc.add_argument(

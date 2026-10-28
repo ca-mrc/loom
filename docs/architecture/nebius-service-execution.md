@@ -175,7 +175,13 @@ is selected later from the healthy binding in the Batch's environment. The
 accepted profile is frozen on the Batch, so a later deployment-profile rollout
 cannot reinterpret Trials that are already queued.
 The final plan also binds the published `Task.checksum`, input-manifest digest,
-trial configuration, and declared artifacts. Existing explicitly bound task
+trial configuration, and declared artifacts. Input manifests retain their UTF-8
+POSIX-path string order and file-index addressing. The controller streams those
+files in path-component order when computing the existing bundle checksum,
+matching `loom_bundle_checksum.sha256_of_dir` (for example, `src/client/file.ts`
+precedes `src/client-entry.ts`). It preserves the published revision, manifest
+binding, and each file's size and SHA checks; no new identity or digest layer is
+introduced. Existing explicitly bound task
 revisions remain readable for migration and operator tests, but ordinary users
 do not select a physical target or hand-author a binding.
 
@@ -1286,8 +1292,15 @@ then deleted, so no capacity is held while grading waits. The control-plane
 scheduler pass reserves one verifier lease per attempt and retry after parent
 cleanup completes. Local reservation derives its request id from the parent
 lease and child plan; global selection retains one immutable outbox proposal.
-Repeated or concurrent passes cannot reserve a second child. The child keeps the parent's target
-and requirements and receives the parent's committed `workspace.tar`,
+Repeated or concurrent passes cannot reserve a second child. The child retains
+the parent's route identity and execution authority. That route remains bound
+to the agent's complete frozen requirements; an independent grader has its own
+complete lease requirements, including its distinct image. Reservation derives
+those requirements from the parent's frozen verifier environment and trial
+configuration, then checks the prepared images, source identity, execution
+class and target's pool, environment, region and residency. A shared-environment
+verifier must retain the parent's requirements and target. The child receives
+the parent's committed `workspace.tar`,
 workspace references and mutable paths through the plan's `handoff_input`. The
 runtime places them under `.loom/` outside the task-bundle digest.
 

@@ -48,7 +48,7 @@ CONTROLLER_IMAGE = "registry.example/controller@sha256:" + "9" * 64
 
 
 async def _seed_preparing_trial(
-    session: AsyncSession, *, now: datetime, state: str, fixture: bool = False,
+    session: AsyncSession, *, now: datetime, state: str, fixture: bool = False, independent_verifier: bool = False,
 ) -> tuple[UUID, dict[str, UUID]]:
     trial_id, target = await fixtures._seed_ready_trial(session, now=now)
     await fixtures._configure_scheduler_trial(session, trial_id=trial_id, now=now)
@@ -90,6 +90,10 @@ async def _seed_preparing_trial(
         "verifier": {"name": "script", "args": {"script_path": "verifier/check.sh"}},
         "steps": [{"name": "main", "instruction_file": "instruction.md"}],
     }
+    if independent_verifier:
+        task.config["verifier"]["environment"] = {
+            **task.config["environment"], "dockerfile": "tests/Dockerfile",
+        }
     if fixture:
         task.config["environment"].update({
             "docker_build_context": "environment",
@@ -435,6 +439,195 @@ async def test_fixture_reservation_requires_exact_frozen_components(
                 assert runtime_pod_resources(plan).cpu_millis == runtime_pod_resources(without_fixture).cpu_millis + 100
                 await session.refresh(trial)
                 assert trial.attempt_count == 1
+    finally:
+        async with sessions() as session:
+            await _clean_image_links(session, trial_id)
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("tamper", [
+    None, "image", "source", "environment", "gpu", "target", "class", "candidate",
+    "parent_requirements", "parent_runtime", "parent_route",
+])
+async def test_independent_verifier_reservation_preserves_agent_route(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch, tamper: str | None,
+) -> None:
+    """A distinct grading image must not be compared with the agent route's requirements."""
+    from loom_control_plane import service_execution_scheduler as scheduler
+
+    async def committed_files(*_args, **_kwargs):
+        # Only object-store receipt material is supplied; compiler, immutable image
+        # grant, scheduler selection, route and reservation all use the real DB.
+        return [("artifacts/workspace.tar", 1, "sha256:" + "5" * 64)], ["owned/workspace.tar"]
+
+    monkeypatch.setattr(scheduler, "committed_handoff_files", committed_files)
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    trial_id = None
+    grader_image = "registry.example/grader@sha256:" + "e" * 64
+    try:
+        async with sessions() as session:
+            trial_id, ids = await _seed_preparing_trial(
+                session, now=now, state="queued", independent_verifier=True,
+            )
+            row = await session.get(TaskImageMaterialization, ids["x86_64"])
+            assert row is not None
+            row.state = "ready"
+            row.registry_images = {"task": TASK_IMAGE, "verifier": grader_image}
+            await session.commit()
+            parent = await reserve_next_service_execution(
+                session, environment="staging", pool_id="nebius-cpu",
+                image_admission_keyring=fixtures.IMAGE_ADMISSION_KEYRING, now=now,
+            )
+            assert parent is not None
+            await session.commit()
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None
+            original_route = deepcopy(trial.execution_route_json)
+            original_route_digest = trial.execution_route_sha256
+            from loom.execution_contract import ExecutionRoutingReason
+            from loom_control_plane.service_execution import _bind_kubernetes_execution_route
+            agent_target = await session.get(ServiceExecutionTarget, parent.target_id)
+            assert agent_target is not None
+            with pytest.raises(ServiceExecutionConflict, match="route requirements drift"):
+                _bind_kubernetes_execution_route(
+                    trial=trial, target=agent_target, execution_class_id=parent.execution_class_id,
+                    requirements_digest="sha256:" + "0" * 64,
+                    routing_reason=ExecutionRoutingReason.PREEXISTING_ASSIGNMENT, current_time=now,
+                )
+            await fixtures._hand_off_to_verifier(session, parent_id=parent.id, now=now)
+            parent.cleanup_state = "complete"
+            parent.cleanup_requested_at = now
+            parent.cleanup_deadline_at = now + timedelta(seconds=30)
+            parent.desired_state = "deleted"
+            parent.observed_state = "deleted"
+            parent.deleted_at = now
+            await session.commit()
+            if tamper is not None:
+                from loom.verifier_runtime import verifier_execution_task
+
+                child_plan, deadline = await scheduler.compile_verifier_candidate(
+                    session, parent=parent, trial=trial, maximum_deadline_seconds=32400,
+                    current_time=now + timedelta(seconds=5),
+                )
+                grant = await get_trial_task_image_execution_grant(
+                    session, trial_id=trial_id, cpu_arches=["x86_64"],
+                )
+                assert grant is not None
+                task = resolve_prepared_task(TaskConfig.model_validate(grant.task_config), grant)
+                requirements = workload_requirements_from_task(
+                    verifier_execution_task(task), TrialConfig.model_validate(trial.config),
+                )
+                target_id = parent.target_id
+                expected = ""
+                if tamper == "image":
+                    changed_image = "registry.example/other@sha256:" + "7" * 64
+                    child_plan = child_plan.model_copy(update={
+                        "task_image_ref": changed_image,
+                        "sidecars": tuple(s.model_copy(update={"image_ref": changed_image})
+                                          if s.private_sandbox else s for s in child_plan.sidecars),
+                    })
+                    requirements = requirements.model_copy(update={"image_ref": changed_image})
+                    expected = "prepared image"
+                elif tamper == "source":
+                    assert child_plan.task_input is not None
+                    child_plan = child_plan.model_copy(update={
+                        "task_input": child_plan.task_input.model_copy(update={"manifest_sha256": "sha256:" + "6" * 64}),
+                    })
+                    expected = "parent frozen identity drift"
+                elif tamper == "environment":
+                    import json
+
+                    from loom.task_environment_handoff import RESOLVED_VERIFIER_ENVIRONMENT
+                    env = dict(child_plan.main.environment)
+                    grader = json.loads(env[RESOLVED_VERIFIER_ENVIRONMENT])
+                    grader["workdir"] = "/different"
+                    env[RESOLVED_VERIFIER_ENVIRONMENT] = json.dumps(grader)
+                    child_plan = child_plan.model_copy(update={"main": child_plan.main.model_copy(update={"environment": env})})
+                    expected = "verifier environment"
+                elif tamper == "gpu":
+                    requirements = requirements.model_copy(update={"gpu_vendor": "nvidia", "gpu_count": 1})
+                    expected = "requirements do not match"
+                elif tamper == "target":
+                    _, foreign_target = await fixtures._seed_ready_trial(session, now=now)
+                    target_row = await session.get(ServiceExecutionTarget, foreign_target.target_id)
+                    assert target_row is not None
+                    target_row.region = "different-region"
+                    target_id = target_row.id
+                    expected = "parent execution authority"
+                elif tamper == "class":
+                    from loom.execution_contract import NEBIUS_CPU_WEB_EXECUTION_CLASS_V1
+                    _, wrong_class_target = await fixtures._seed_ready_trial(
+                        session, now=now, execution_class=NEBIUS_CPU_WEB_EXECUTION_CLASS_V1,
+                    )
+                    child_plan = child_plan.model_copy(update={
+                        "execution_class_id": NEBIUS_CPU_WEB_EXECUTION_CLASS_V1.class_id,
+                    })
+                    target_id = wrong_class_target.target_id
+                    expected = "parent execution authority"
+                elif tamper == "candidate":
+                    child_plan = child_plan.model_copy(update={"candidate_sha": "8" * 40})
+                    expected = "parent lease is not eligible"
+                else:
+                    from sqlalchemy.orm.attributes import set_committed_value
+                    # The DB already forbids changing these persisted identities.
+                    # Inject a corrupt loaded snapshot without UPDATE to verify
+                    # the reservation boundary also rejects it before admission.
+                    if tamper == "parent_requirements":
+                        set_committed_value(parent, "workload_requirements_json", {
+                            **parent.workload_requirements_json, "memory_mib": 8192,
+                        })
+                        expected = "parent frozen identity drift"
+                    elif tamper == "parent_runtime":
+                        altered = deepcopy(parent.runtime_contract_json)
+                        altered["main"]["timeout_seconds"] += 1
+                        set_committed_value(parent, "runtime_contract_json", altered)
+                        expected = "parent frozen identity drift"
+                    else:
+                        set_committed_value(parent, "routing_decision_sha256", "sha256:" + "9" * 64)
+                        expected = "parent lease binds a different execution route"
+                child_plan = ExecutionRuntimePlanV1.model_validate(child_plan.canonical_payload())
+                with pytest.raises(ServiceExecutionConflict, match=expected):
+                    await reserve_trial_execution(
+                        session, request_id=uuid4(), trial_id=trial_id,
+                        execution_class_id=child_plan.execution_class_id, target_id=target_id,
+                        requirements=requirements, runtime_contract=child_plan,
+                        image_admission_keyring=fixtures.IMAGE_ADMISSION_KEYRING,
+                        parent_lease_id=parent.id, deadline_at=deadline, now=now + timedelta(seconds=5),
+                    )
+                assert await session.scalar(select(func.count()).select_from(ServiceExecutionLease).where(
+                    ServiceExecutionLease.parent_lease_id == parent.id,
+                )) == 0
+                assert trial.execution_route_json == original_route
+                assert trial.execution_route_sha256 == original_route_digest
+                return
+            reserved = await scheduler.reserve_next_verifier_executions(
+                session, pool_id="nebius-cpu",
+                image_admission_keyring=fixtures.IMAGE_ADMISSION_KEYRING,
+                now=now + timedelta(seconds=5),
+            )
+            assert len(reserved) == 1
+            child = reserved[0]
+            assert child.parent_lease_id == parent.id
+            assert child.workload_requirements_json["image_ref"] == grader_image
+            assert child.workload_requirements_sha256 != parent.workload_requirements_sha256
+            assert {k: v for k, v in child.workload_requirements_json.items() if k != "image_ref"} == {
+                k: v for k, v in parent.workload_requirements_json.items() if k != "image_ref"
+            }
+            assert child.routing_decision_sha256 == original_route_digest
+            assert child.routing_generation == parent.routing_generation
+            assert child.selected_pool_id == parent.selected_pool_id
+            assert child.team_id == parent.team_id
+            assert child.attempt == parent.attempt
+            assert trial.execution_route_json == original_route
+            assert trial.execution_route_sha256 == original_route_digest
+            await session.commit()
+            assert await scheduler.reserve_next_verifier_executions(
+                session, pool_id="nebius-cpu",
+                image_admission_keyring=fixtures.IMAGE_ADMISSION_KEYRING,
+                now=now + timedelta(seconds=6),
+            ) == []
     finally:
         async with sessions() as session:
             await _clean_image_links(session, trial_id)

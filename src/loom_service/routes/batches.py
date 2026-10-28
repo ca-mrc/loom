@@ -52,6 +52,7 @@ from loom.execution_selection import execution_selection_readback, reported_veri
 from loom.hosted_harness import harnesses_supporting, hosted_harness
 from loom.models.batch import Combination
 from loom.models.cancellation import CancellationRequest
+from loom.models.harbor_config import apply_harbor_config_dict
 from loom.models.networking import (
     NetworkPolicy,
     UnsupportedNetworkPolicyOverrideError,
@@ -457,6 +458,15 @@ def _sanitize_trial_config(config: dict[str, Any]) -> dict[str, Any]:
     out = dict(config)
     if "request_params" in out:
         out["request_params"] = sanitize_request_extras(out.get("request_params"))
+    if out.get("harbor_config") is not None:
+        try:
+            out = apply_harbor_config_dict(out)
+        except (ValidationError, ValueError) as exc:
+            reject_submission(
+                reason="invalid_harbor_config",
+                status_code=400,
+                detail=str(exc),
+            )
     return out
 
 

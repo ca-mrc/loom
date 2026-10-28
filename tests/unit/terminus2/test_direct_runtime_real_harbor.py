@@ -34,6 +34,7 @@ from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA
 from loom.agent.terminus2.runtime import LoomTerminus2Runtime
 from loom.driver.fake import FakeDriver
 from loom.models.exec import ExecResult
+from loom.models.mcp import MCPConnection
 from loom.models.types import ModelSpec
 from loom.trajectory.storage import FakeObjectStore
 from loom.trajectory.writer import TrajectoryWriter
@@ -53,6 +54,62 @@ _CASES = [
     ("google", "gemini-2.5-flash", "https://generativelanguage.googleapis.com", 100, 27, 0, 7),
     ("openai", "local-qualification", "http://localhost:8765/v1", 100, 20, 0, 7),
 ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("skill_state", ["available", "missing", "unreadable"])
+async def test_real_harbor_native_task_metadata_in_initial_prompt(tmp_path, monkeypatch, skill_state):
+    """Use the actual pinned constructor, skill discovery, agent loop and fake HTTP LLM."""
+    from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
+
+    expected = json.loads((Path(__file__).resolve().parents[3] / "config/harbor-runtime.json").read_text())
+    distribution = importlib.metadata.distribution("harbor")
+    assert distribution.version == expected["version"] == "0.24.0"
+    assert json.loads(distribution.read_text("direct_url.json"))["vcs_info"]["commit_id"] == expected["source_revision"]
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return _response(request, model="gpt-4o-mini")
+
+    _install_transport(monkeypatch, respond)
+    runtime, _, driver, writer = _runtime(tmp_path, "openai", "gpt-4o-mini", "https://openai.test/v1")
+    original_terminal = driver.exec_handler
+    commands = []
+
+    def terminal(command, *args):
+        commands.append(command)
+        if command.startswith("test -d /app/.agents/skills"):
+            return ExecResult(return_code=1 if skill_state == "missing" else 0,
+                              stdout=b"", stderr=b"", duration_sec=0)
+        if command.startswith("find /app/.agents/skills"):
+            return ExecResult(return_code=0, stdout=b"/app/.agents/skills/layout/SKILL.md\n",
+                              stderr=b"", duration_sec=0)
+        if command == "cat /app/.agents/skills/layout/SKILL.md":
+            return ExecResult(return_code=1 if skill_state == "unreadable" else 0,
+                stdout=b"---\nname: layout\ndescription: Diagnose layout shifts\n---\nUse browser traces.",
+                stderr=b"", duration_sec=0)
+        return original_terminal(command, *args)
+
+    driver.exec_handler = terminal
+    await driver.start()
+    try:
+        async with writer:
+            await runtime.run(instruction="Finish now.", env=driver, trajectory=writer,
+                mcp=[MCPConnection(name="playwright", transport="sse",
+                                   url="http://playwright-mcp:3080/sse")],
+                skills_dir=PurePosixPath("/app/.agents/skills"), step_id="agent")
+        prompt = json.dumps(requests[0]["messages"])
+        assert "playwright: sse transport, url: http://playwright-mcp:3080/sse" in prompt
+        assert ("<available_skills>" in prompt) == (skill_state == "available")
+        if skill_state == "available":
+            assert "Diagnose layout shifts" in prompt
+            assert "/app/.agents/skills/layout/SKILL.md" in prompt
+        assert any(command.startswith("test -d /app/.agents/skills") for command in commands)
+        assert _KEY not in prompt
+    finally:
+        await driver.stop()
+        await GLOBAL_LOGGING_WORKER.stop()
 
 
 @pytest.fixture(autouse=True)

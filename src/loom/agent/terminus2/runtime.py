@@ -30,9 +30,11 @@ from loom.agent.terminus2.model_switch import (
     seed_fingerprint,
 )
 from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA, LOOM_BRIDGE_REVISION
+from loom.agent.terminus2.task_metadata import harbor_mcp_documents
 from loom.attempt_deadline import AttemptDeadline, AttemptDeadlineExceededError
 from loom.driver.base import Driver
 from loom.errors import AgentContinuationError, AgentError, exception_info
+from loom.models.harbor_config import HarborConfig
 from loom.models.mcp import MCPConnection
 from loom.models.trajectory import (
     Terminus2EpisodeCheckpointEvent,
@@ -73,6 +75,25 @@ def _import_terminus2() -> tuple[type, type]:
             f"terminus-2 requires harbor@{HARBOR_COMPAT_SHA} preinstalled in the controller image",
         ) from exc
     return Terminus2, AgentContext
+
+
+def _harbor_task_options(
+    terminus2_cls: type, mcp: Sequence[MCPConnection], skills_dir: PurePosixPath | None,
+) -> dict[str, Any]:
+    documents = harbor_mcp_documents(mcp)
+    capabilities = getattr(terminus2_cls, "capabilities", None)
+    if (documents and not getattr(capabilities, "mcp_servers", False)) or (
+        skills_dir is not None and not getattr(capabilities, "skills", False)
+    ):
+        raise AgentError("installed Harbor Terminus does not support task MCP/skills metadata")
+    options: dict[str, Any] = {}
+    if documents:
+        from harbor.models.task.config import MCPServerConfig
+
+        options["mcp_servers"] = [MCPServerConfig.model_validate(item) for item in documents]
+    if skills_dir is not None:
+        options["skills_dir"] = str(skills_dir)
+    return options
 
 
 def _openai_gateway_base(gateway_url: str) -> str:
@@ -592,6 +613,7 @@ class LoomTerminus2Runtime:
     emits_gateway_llm_call_events: bool = True
     provider_connection_id: str | None = None
     request_params: dict[str, Any] = field(default_factory=dict)
+    harbor_config: HarborConfig | None = None
     multi_model: MultiModelSwitchSpec | None = None
     model_switch_plan: dict[str, Any] | None = None
     max_turns: int = 50
@@ -647,7 +669,6 @@ class LoomTerminus2Runtime:
         self, *, instruction: str, env: Driver, trajectory: TrajectoryWriter,
         mcp: Sequence[MCPConnection], skills_dir: PurePosixPath | None, step_id: str,
     ) -> None:
-        del mcp, skills_dir
         if self.direct_provider is not None:
             if self.direct_ledger is None:
                 raise AgentError("direct Terminus requires a local usage ledger")
@@ -656,6 +677,7 @@ class LoomTerminus2Runtime:
         if self.continue_until_timeout and self._attempt_deadline is None:
             raise AgentContinuationError("continue_until_timeout requires an absolute attempt deadline")
         terminus2_cls, agent_context_cls = _import_terminus2()
+        task_options = _harbor_task_options(terminus2_cls, mcp, skills_dir)
 
         if self.direct_provider is not None:
             step_token = self.direct_provider.api_key
@@ -706,6 +728,7 @@ class LoomTerminus2Runtime:
                 logs_root=logs_root,
                 terminus2_cls=terminus2_cls,
                 agent_context_cls=agent_context_cls,
+                task_options=task_options,
             )
         finally:
             try:
@@ -732,6 +755,7 @@ class LoomTerminus2Runtime:
         logs_root: Path,
         terminus2_cls: type,
         agent_context_cls: type,
+        task_options: dict[str, Any],
     ) -> None:
         trial_paths = make_trial_paths(logs_root)
         trial_paths.mkdir()
@@ -761,11 +785,33 @@ class LoomTerminus2Runtime:
         # These compatibility overrides are observable behavior, independent
         # of Harbor's source revision. Reuse the exact constructor options in
         # provenance so a version upgrade cannot silently claim default parity.
+        harbor = self.harbor_config
+        if isinstance(harbor, dict):
+            harbor = HarborConfig.model_validate(harbor)
+            self.harbor_config = harbor
+        max_turns = self.max_turns
+        enable_summarize = False
+        if harbor is not None:
+            if harbor.max_turns is not None:
+                max_turns = harbor.max_turns
+            if harbor.enable_summarize is not None:
+                enable_summarize = harbor.enable_summarize
         harbor_options: dict[str, Any] = {
-            "max_turns": None if self.continue_until_timeout else self.max_turns,
+            "max_turns": None if self.continue_until_timeout else max_turns,
             "record_terminal_session": True,
-            "enable_summarize": False,
+            "enable_summarize": enable_summarize,
         }
+        if harbor is not None:
+            if harbor.proactive_summarization_threshold is not None:
+                harbor_options["proactive_summarization_threshold"] = (
+                    harbor.proactive_summarization_threshold
+                )
+            if harbor.max_thinking_tokens is not None:
+                harbor_options["max_thinking_tokens"] = harbor.max_thinking_tokens
+            if harbor.max_input_tokens is not None:
+                harbor_options["model_info"] = {
+                    "max_input_tokens": harbor.max_input_tokens,
+                }
         await bridge.emit_provenance(effective_options={
             **harbor_options,
             "continue_until_timeout": self.continue_until_timeout,
@@ -781,6 +827,14 @@ class LoomTerminus2Runtime:
         )
 
         generation_params = sanitize_request_extras(self.request_params)
+        if harbor is not None:
+            for key, value in harbor.completion_parameters().items():
+                current = generation_params.get(key)
+                if current is not None and current != value:
+                    raise AgentError(
+                        f"harbor_config.{key} conflicts with request_params.{key}",
+                    )
+                generation_params[key] = value
         # Harbor binds reasoning_effort explicitly while expanding llm_kwargs.
         # Passing it in both places raises before the first model call.
         reasoning_effort = generation_params.pop("reasoning_effort", None)
@@ -792,6 +846,7 @@ class LoomTerminus2Runtime:
             reasoning_effort=reasoning_effort,
             llm_kwargs={**generation_params, "api_key": step_token},
             **harbor_options,
+            **task_options,
         )
         if self.continue_until_timeout:
             assert self._attempt_deadline is not None
