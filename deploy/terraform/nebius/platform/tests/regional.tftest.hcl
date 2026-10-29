@@ -137,3 +137,34 @@ run "root_preserves_explicit_cpu_execution_capacity" {
     error_message = "The root schema must forward explicit CPU execution sizing without activating a regional pool or changing the capacity ceiling."
   }
 }
+
+run "root_preserves_explicit_regional_execution_shape" {
+  command = plan
+  variables {
+    regional_execution_targets = { west = {
+      target_id                             = "nebius-eu-west1-integration"
+      cluster_scope_id                      = "nebius-eu-west1-execution"
+      project_id                            = "project-e00test"
+      subnet_id                             = "vpcsubnet-e00test"
+      region                                = "eu-west1"
+      node_platform                         = "cpu-d3"
+      kubernetes_version                    = "1.33"
+      service_cidr                          = "172.27.0.0/16"
+      node_registry_pull_service_account_id = "serviceaccount-e00test"
+      execution_preset                      = "32vcpu-128gb"
+      execution_disk_gib                    = 300
+      execution_max_nodes                   = 6
+    } }
+  }
+  assert {
+    condition = (
+      var.regional_execution_targets["west"].execution_preset == "32vcpu-128gb" &&
+      var.regional_execution_targets["west"].execution_disk_gib == 300 &&
+      var.regional_execution_targets["west"].execution_max_nodes == 6 &&
+      !var.regional_execution_targets["west"].suspended &&
+      output.regional_execution_targets["west"].target_id == "nebius-eu-west1-integration" &&
+      output.integration_platform == null
+    )
+    error_message = "The root object type must retain explicit regional sizing when forwarding the full target to the existing module."
+  }
+}
