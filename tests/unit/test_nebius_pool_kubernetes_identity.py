@@ -44,7 +44,7 @@ def test_api_quantity_canonicalization_is_semantically_equal():
     pod = actual["spec"]["template"]["spec"]
     for container in pod["containers"] + pod["initContainers"]:
         for quantities in container["resources"].values():
-            quantities.update(cpu="1", memory="2Gi", **{"ephemeral-storage": "16Gi"})
+            quantities.update(cpu="4", memory="4Gi", **{"ephemeral-storage": "32Gi"})
     assert matches_frozen_workload(actual, expected)
 
 
