@@ -1,6 +1,7 @@
 """Pool-scoped orchestration of the fixed gateway, without new write authority."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -29,33 +30,54 @@ class _Work:
 
 
 class PoolGatewayWorker:
-    def __init__(self, *, gateway: KubernetesPoolGateway, principal: PoolPrincipal) -> None:
+    def __init__(self, *, gateway: KubernetesPoolGateway, principal: PoolPrincipal,
+                 batch_size: int = 100, concurrency: int = 8) -> None:
+        if type(batch_size) is not int or not 1 <= batch_size <= 100:
+            raise ValueError("pool_gateway_batch_size_unavailable")
+        if type(concurrency) is not int or not 1 <= concurrency <= 16:
+            raise ValueError("pool_gateway_concurrency_unavailable")
         self.gateway, self.principal = gateway, principal
+        self.batch_size, self.concurrency = batch_size, concurrency
+        # Scheduling hints only: the durable journal still owns every effect.
+        # Losing these cursors on restart replays retained work safely.
+        self._after: dict[str, tuple[datetime, UUID]] = {}
+        self._ceiling: dict[str, tuple[datetime, UUID]] = {}
 
     async def _pending(self) -> AsyncIterator[UUID]:
+        """Bound each phase independently so create backlog cannot hide cleanup.
+
+        Rotate keyset cursors even when an old effect keeps failing. Each pass
+        reads at most one batch per phase, plus a rotation high-water probe.
+        Newer work remains durable and becomes visible in subsequent passes.
+        """
         row = NebiusPoolRequest
-        query = select(row.created_at, row.request_id).where(
-            row.pool_id == self.principal.pool_id, row.phase.in_(("create_intent", "cleanup_intent")))
         journal = self.gateway.journal
-        async with journal._transaction(self.principal) as (session, _):
-            last = (await session.execute(query.order_by(row.created_at.desc(), row.request_id.desc()).limit(1))).first()
-        if last is None:
-            return
-        ceiling = (last[0], last[1])
-        after: tuple[datetime, UUID] | None = None
-        while True:
-            page = query.where(tuple_(row.created_at, row.request_id) <= ceiling)
-            if after is not None:
-                page = page.where(tuple_(row.created_at, row.request_id) > after)
+        for phase in ("cleanup_intent", "create_intent"):
+            query = select(row.created_at, row.request_id).where(
+                row.pool_id == self.principal.pool_id, row.phase == phase)
             async with journal._transaction(self.principal) as (session, _):
-                values = (await session.execute(page.order_by(row.created_at, row.request_id).limit(100))).all()
-            if not values:
-                return
-            after = (values[-1][0], values[-1][1])
+                if phase not in self._ceiling:
+                    last = (await session.execute(query.order_by(row.created_at.desc(), row.request_id.desc())
+                        .limit(1))).first()
+                    if last is None:
+                        continue
+                    self._ceiling[phase] = (last[0], last[1])
+                ceiling = self._ceiling[phase]
+                page = query.where(tuple_(row.created_at, row.request_id) <= ceiling)
+                after = self._after.get(phase)
+                if after is not None:
+                    page = page.where(tuple_(row.created_at, row.request_id) > after)
+                values = (await session.execute(page.order_by(row.created_at, row.request_id)
+                    .limit(self.batch_size))).all()
+            if values:
+                self._after[phase] = (values[-1][0], values[-1][1])
+            if not values or self._after[phase] == ceiling:
+                # A fixed rotation endpoint guarantees retries of old failures
+                # even if arrivals continually exceed this worker's throughput.
+                self._after.pop(phase, None)
+                self._ceiling.pop(phase, None)
             for _, identity in values:
                 yield identity
-            if after == ceiling:
-                return
 
     async def _work(self, identity: UUID) -> _Work:
         journal = self.gateway.journal
@@ -100,14 +122,25 @@ class PoolGatewayWorker:
 
     async def run_once(self) -> None:
         first_error: Exception | None = None
-        async for identity in self._pending():
+
+        async def reconcile(identity: UUID) -> None:
+            nonlocal first_error
             try:
                 await self._reconcile(identity)
             except PoolKubernetesWaitingError:
-                continue  # Retain the charge and reconcile the exact effect next pass.
+                return  # Retain the charge and reconcile the exact effect next pass.
             except Exception as error:
                 if first_error is None:
                     first_error = error
                 _LOG.warning("Pool gateway deferred reservation=%s error=%s", identity, type(error).__name__)
+
+        pending: list[UUID] = []
+        async for identity in self._pending():
+            pending.append(identity)
+            if len(pending) == self.concurrency:
+                await asyncio.gather(*(reconcile(item) for item in pending))
+                pending.clear()
+        if pending:
+            await asyncio.gather(*(reconcile(item) for item in pending))
         if first_error is not None:
             raise first_error

@@ -18,7 +18,7 @@ import tarfile
 import tempfile
 import time
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -730,6 +730,100 @@ def _blob_exists(client: Any, bucket: str, key: str) -> bool:
 
 
 _CACHE_MUTATION_LOCK = "task-build-cache/.mutation-lock"
+_CACHE_GC_CHECKPOINT = "task-build-cache/.gc-checkpoint.json"
+_CACHE_GC_PUBLICATIONS = 64
+_CACHE_GC_BYTES = 256 * 1024 * 1024
+_CACHE_GC_SECONDS = 300
+
+
+def _read_cache_checkpoint(client: Any, bucket: str) -> dict[str, Any] | None:
+    try:
+        response = client.get_object(Bucket=bucket, Key=_CACHE_GC_CHECKPOINT)
+    except ClientError as error:
+        if _object_absent(error):
+            return None
+        raise
+    body = response["Body"]
+    try:
+        raw = body.read(4097)
+    finally:
+        body.close()
+    try:
+        state = json.loads(raw)
+        if (
+            len(raw) > 4096 or not isinstance(state, dict) or state.get("version") != 1
+            or any(type(state.get(field)) is not int or state[field] < 0
+                   for field in ("retained_bytes", "debt_bytes", "publications"))
+            or type(state.get("scanned_at")) not in {int, float}
+            or not math.isfinite(state["scanned_at"])
+            or not 0 < state["scanned_at"] <= time.time() + 60
+        ):
+            raise ValueError
+    except (ValueError, TypeError, UnicodeError) as error:
+        raise BuildPreparationError("invalid cache GC checkpoint") from error
+    return state
+
+
+def _write_cache_checkpoint(client: Any, bucket: str, state: dict[str, Any]) -> None:
+    client.put_object(Bucket=bucket, Key=_CACHE_GC_CHECKPOINT,
+                      Body=json.dumps(state, separators=(",", ":"), sort_keys=True).encode())
+
+
+def _cache_checkpoint(retained_bytes: int) -> dict[str, Any]:
+    return {"version": 1, "scanned_at": time.time(), "retained_bytes": retained_bytes,
+            "debt_bytes": 0, "publications": 0}
+
+
+def _reserve_cache_publication(
+    client: Any, bucket: str, incoming_bytes: int, *, refresh_incoming: Callable[[], int] | None = None,
+) -> bool:
+    """Under the mutation lock, pre-account an upper bound before writing data.
+
+    Ordinary publication reads/writes one checkpoint, not the retained inventory.
+    A crash or ambiguous PUT can overcount; only a complete sweep resets debt.
+    """
+    try:
+        state = _read_cache_checkpoint(client, bucket)
+        expired = state is not None and time.time() - state["scanned_at"] >= _CACHE_GC_SECONDS
+        over_budget = state is not None and (
+            state["retained_bytes"] + state["debt_bytes"] + incoming_bytes > _CACHE_TOTAL_BYTES
+        )
+        due = state is None or expired or (
+            state["publications"] >= _CACHE_GC_PUBLICATIONS
+            or state["debt_bytes"] + incoming_bytes > _CACHE_GC_BYTES
+            or over_budget
+        )
+        # A just-completed sweep cannot reclaim grace-protected data. Avoid a
+        # full scan for every refused publication while waiting for its next tick.
+        if due and state is not None and not expired and state["publications"] == 0:
+            due = False
+        if due:
+            remaining = _trim_cache_locked(client, bucket, incoming_bytes)
+            if remaining is None:
+                emit_stage("cache_export", "deferred", reason="cache_gc_incomplete")
+                return False
+            state = _cache_checkpoint(remaining)
+            # The sweep may have removed an old unreferenced blob that the
+            # publisher's first HEAD saw. Refresh under this same lock before
+            # reserving or reusing its missing set; never discount deleted data.
+            if refresh_incoming is not None:
+                incoming_bytes = refresh_incoming()
+        assert state is not None
+        if state["retained_bytes"] + state["debt_bytes"] + incoming_bytes > _CACHE_TOTAL_BYTES:
+            emit_stage("cache_export", "deferred", reason="cache_budget_protected",
+                       accounted_bytes=state["retained_bytes"] + state["debt_bytes"],
+                       incoming_bytes=incoming_bytes, budget_bytes=_CACHE_TOTAL_BYTES)
+            return False
+        state = {**state, "debt_bytes": state["debt_bytes"] + incoming_bytes,
+                 "publications": state["publications"] + 1}
+        _write_cache_checkpoint(client, bucket, state)
+    except (BotoCoreError, ClientError, BuildPreparationError, OSError):
+        emit_stage("cache_export", "deferred", reason="cache_checkpoint_unavailable")
+        return False
+    emit_stage("cache_gc", "debt", publications=state["publications"],
+               debt_bytes=state["debt_bytes"], retained_bytes=state["retained_bytes"],
+               publication_limit=_CACHE_GC_PUBLICATIONS, byte_batch=_CACHE_GC_BYTES)
+    return True
 
 
 def _supports_conditional_cache_write(client: Any, bucket: str) -> bool:
@@ -758,7 +852,7 @@ def _cache_mutation(client: Any, bucket: str) -> Iterator[bool | None]:
     """
     if not _supports_conditional_cache_write(client, bucket):
         emit_stage("cache_gc", "deferred", reason="conditional_write_unsupported")
-        yield None  # Append-only cache publication is safe without GC.
+        yield None  # Callers defer optional cache: no safe bounded collector exists.
         return
     try:
         client.put_object(Bucket=bucket, Key=_CACHE_MUTATION_LOCK,
@@ -769,21 +863,27 @@ def _cache_mutation(client: Any, bucket: str) -> Iterator[bool | None]:
             yield False
             return
         raise
+    started = time.perf_counter()
     try:
         yield True
     finally:
         client.delete_object(Bucket=bucket, Key=_CACHE_MUTATION_LOCK)
+        emit_stage("cache_gc", "lock_released", duration_ms=int((time.perf_counter() - started) * 1000))
 
 
 def _publish_cache_blobs(
     client: Any, claim: dict[str, Any], *, index: int, cache_dir: Path,
 ) -> None:
+    # Hash and validate the bounded, immutable post-build output before taking
+    # the shared store lock. Only object-store mutation needs serialization.
+    entries = _inventory_cache_directory(cache_dir)
     with _cache_mutation(client, claim["cache_bucket"]) as acquired:
-        if acquired is not False:
-            _publish_cache_blobs_locked(client, claim, index=index, cache_dir=cache_dir,
-                                        collect=acquired is True)
+        if acquired is True:
+            _publish_cache_blobs_locked(client, claim, index=index, entries=entries)
         else:
-            emit_stage("cache_export", "deferred", reason="cache_mutation_busy", component_index=index)
+            emit_stage("cache_export", "deferred", reason=(
+                "cache_mutation_busy" if acquired is False else "conditional_write_unsupported"
+            ), component_index=index)
 
 
 def _publish_cache_blobs_locked(
@@ -791,10 +891,8 @@ def _publish_cache_blobs_locked(
     claim: dict[str, Any],
     *,
     index: int,
-    cache_dir: Path,
-    collect: bool = True,
+    entries: list[dict[str, Any]],
 ) -> None:
-    entries = _inventory_cache_directory(cache_dir)
     unique = {entry["sha256"]: entry for entry in entries}
     manifest = {
         "version": 1,
@@ -804,18 +902,27 @@ def _publish_cache_blobs_locked(
         ],
     }
     manifest_body = json.dumps(manifest, separators=(",", ":"), sort_keys=True).encode()
-    incoming = len(manifest_body)
-    for item in unique.values():
-        key = _v2_blob_key(item["sha256"])
-        if not _blob_exists(client, claim["cache_bucket"], key):
-            incoming += item["size"]
-    if collect:
-        _trim_cache_locked(client, claim["cache_bucket"], incoming)
+    missing: set[str] = set()
+
+    def missing_bytes() -> int:
+        missing.clear()
+        missing.update(sha for sha in unique if not _blob_exists(
+            client, claim["cache_bucket"], _v2_blob_key(sha),
+        ))
+        return len(manifest_body) + sum(int(unique[sha]["size"]) for sha in missing)
+
+    # Shared warm blobs do not create new storage debt. Recheck only after a
+    # sweep; ordinary publication reuses this missing set for its uploads.
+    incoming = missing_bytes()
+    if not _reserve_cache_publication(
+        client, claim["cache_bucket"], incoming, refresh_incoming=missing_bytes,
+    ):
+        return
     uploaded_bytes = 0
     reused_bytes = 0
-    for item in unique.values():
-        key = _v2_blob_key(item["sha256"])
-        if _blob_exists(client, claim["cache_bucket"], key):
+    for sha, item in unique.items():
+        key = _v2_blob_key(sha)
+        if sha not in missing:
             reused_bytes += item["size"]
             continue
         client.upload_file(str(item["local"]), claim["cache_bucket"], key)
@@ -1068,12 +1175,15 @@ def trim_cache(client: Any, bucket: str, incoming_bytes: int) -> None:
             _trim_cache_locked(client, bucket, incoming_bytes)
 
 
-def _trim_cache_locked(client: Any, bucket: str, incoming_bytes: int) -> None:
+def _trim_cache_locked(client: Any, bucket: str, incoming_bytes: int) -> int | None:
     with stage_span("cache_gc"), cache_request_counts(client, "cache_gc"):
-        _trim_cache_inventory(client, bucket, incoming_bytes)
+        remaining = _trim_cache_inventory(client, bucket, incoming_bytes)
+        if remaining is not None:
+            _write_cache_checkpoint(client, bucket, _cache_checkpoint(remaining))
+        return remaining
 
 
-def _trim_cache_inventory(client: Any, bucket: str, incoming_bytes: int) -> None:
+def _trim_cache_inventory(client: Any, bucket: str, incoming_bytes: int) -> int | None:
     roots: list[dict[str, Any]] = []
     blobs: list[dict[str, Any]] = []
     for page in client.get_paginator("list_objects_v2").paginate(
@@ -1094,9 +1204,9 @@ def _trim_cache_inventory(client: Any, bucket: str, incoming_bytes: int) -> None
                 referenced.setdefault(digest, set()).add(root["Key"])
     except (BotoCoreError, ClientError, BuildPreparationError, OSError):
         emit_stage("cache_gc", "deferred", reason="manifest_unreadable")
-        return
+        return None
     blobs_by_digest = {item["Key"].rsplit("/", 1)[-1]: item for item in blobs}
-    total = (
+    total: int = (
         sum(item["Size"] for item in roots)
         + sum(item["Size"] for item in blobs)
         + incoming_bytes
@@ -1141,6 +1251,7 @@ def _trim_cache_inventory(client: Any, bucket: str, incoming_bytes: int) -> None
         for item in (*roots, *blobs)
     ):
         emit_stage("cache_gc", "deferred", reason="grace_protected")
+    return total - incoming_bytes
 
 
 def _output_path(work: Path, relative: str, *, directory: bool = False) -> Path:
@@ -1317,15 +1428,17 @@ def publish(
                             cache_archive = Path(temporary) / "cache.tar"
                             pack_cache(cache_dir, cache_archive)
                             with _cache_mutation(cache, claim["cache_bucket"]) as acquired:
-                                if acquired is not False:
-                                    if acquired:
-                                        _trim_cache_locked(cache, claim["cache_bucket"], cache_archive.stat().st_size)
+                                if acquired is True and _reserve_cache_publication(
+                                    cache, claim["cache_bucket"], cache_archive.stat().st_size,
+                                ):
                                     cache.upload_file(
                                         str(cache_archive), claim["cache_bucket"],
                                         _cache_prefix(claim) + f"{index}.tar",
                                     )
-                                else:
-                                    emit_stage("cache_export", "deferred", reason="cache_mutation_busy", component_index=index)
+                                elif acquired is not True:
+                                    emit_stage("cache_export", "deferred", reason=(
+                                        "cache_mutation_busy" if acquired is False else "conditional_write_unsupported"
+                                    ), component_index=index)
     finally:
         if archive_client is not None:
             archive_client.close()

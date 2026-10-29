@@ -564,15 +564,6 @@ def compile_deferred_verifier_plan(
             "argv": verifier_argv(task_sandbox.readiness_probe.argv),
         }),
     })
-    # Without setup egress the runtime starts its proxy, and writes the egress
-    # log, only for task egress. A gateway-only task's verifier has neither.
-    outputs = [
-        item if item == TASK_EGRESS_OUTPUT
-        else item.model_copy(update={"required": item.relative_path == "verifier/output.json"})
-        for item in agent_plan.output_declarations
-        if item.relative_path in _VERIFIER_OWNED_OUTPUTS
-        or (item == TASK_EGRESS_OUTPUT and agent_plan.task_egress is not None)
-    ]
     requests = agent_plan.resource_requests
     if requests is not None:
         requests = (ExecutionResourceRequestsV1(
@@ -595,8 +586,15 @@ def compile_deferred_verifier_plan(
                                                            override=trial.baseline_network_policy_override)
         main_environment["LOOM_EFFECTIVE_NETWORK_POLICY_JSON"] = verifier_policy.model_dump_json()
     verifier_egress = hosted_http_egress(verifier_policy) if verifier_policy is not None else None
-    if independent and verifier_egress is not None and TASK_EGRESS_OUTPUT not in outputs:
-        outputs.append(TASK_EGRESS_OUTPUT)
+    # This pod has no setup phase. Only its resolved task-egress proxy writes
+    # the audit log; an independent verifier may differ from the agent.
+    outputs = [
+        item.model_copy(update={"required": item.relative_path == "verifier/output.json"})
+        for item in agent_plan.output_declarations
+        if item.relative_path in _VERIFIER_OWNED_OUTPUTS
+    ]
+    if verifier_egress is not None:
+        outputs.insert(0, TASK_EGRESS_OUTPUT)
     deferred = agent_plan.model_copy(update={
         "execution_role": "verifier",
         **({"execution_class_id": main_environment["LOOM_VERIFIER_EXECUTION_CLASS_ID"],
