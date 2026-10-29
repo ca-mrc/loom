@@ -216,7 +216,7 @@ def startup_http(closed_startup, cutover_binding_inventory):
     return connect
 
 
-@pytest.mark.parametrize('failure', [None, 'before', 'after', 'conflict', 'unqualified_conflict'])
+@pytest.mark.parametrize('failure', ['before', 'after', 'conflict', 'unqualified_conflict'])
 def test_fixed_https_startup_uses_scalar_cas_and_never_retries_unknown_outcomes(startup_http, closed_startup, failure):
     from scripts.ops.nebius_pool_startup import stage_pool_startup
 

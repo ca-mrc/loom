@@ -1312,16 +1312,11 @@ def test_runtime_network_scopes_database_and_gateway_without_control_or_build_ac
     assert dns['ports'] == [{'protocol': 'UDP', 'port': 53}, {'protocol': 'TCP', 'port': 53}]
     assert gateway == {'to': [{'namespaceSelector': {'matchLabels': {'kubernetes.io/metadata.name': 'loom-dev'}},
         'podSelector': {'matchLabels': {'app': 'loom-llm-gateway'}}}], 'ports': [{'protocol': 'TCP', 'port': 9100}]}
-
-
-
-@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
-@pytest.mark.parametrize('retained', [False], indirect=True)
-def test_runtime_network_refuses_changed_foundation_without_emitting_policy(completed_pool):
-    request = database_runtime(completed_pool)
     request.foundation.inputs.config['namespace'] = 'loom-nebius-staging'
     with pytest.raises(ValueError, match='development runtime network unqualified'):
         network_runtime(request)
+    with pytest.raises(ValueError, match='development build policy unqualified'):
+        build_policy(request)
 
 
 
@@ -1338,13 +1333,3 @@ def test_runtime_build_policy_is_bound_to_retained_namespace_without_psa_change(
         'matchLabels': {'kubernetes.io/metadata.name': 'loom-nebius-dev-execution-build'}}}
     assert policy['metadata']['labels']['loom.nebius/development-runtime-operation'] == str(request.operation_id)
     assert all('namespace' not in row['metadata'] for row in policies)
-
-
-
-@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
-@pytest.mark.parametrize('retained', [False], indirect=True)
-def test_runtime_build_policy_rejects_changed_retained_foundation(completed_pool):
-    request = database_runtime(completed_pool)
-    request.foundation.inputs.config['namespace'] = 'loom-nebius-staging'
-    with pytest.raises(ValueError, match='development build policy unqualified'):
-        build_policy(request)
