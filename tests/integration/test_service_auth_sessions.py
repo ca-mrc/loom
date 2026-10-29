@@ -747,6 +747,59 @@ async def test_slow_session_read_does_not_block_same_cookie_requests(auth_setup)
         assert held_response.status_code == 200
 
 
+async def test_interactive_read_timeout_is_opt_in_and_browser_only(auth_setup):
+    """Browser GETs get the optional statement timeout; bearer callers never do (#2687)."""
+    from prometheus_client import REGISTRY
+    from sqlalchemy import text
+
+    app, *_ = auth_setup
+
+    @app.get("/__test/statement-timeout")
+    async def statement_timeout(sc: SessionAndCtx) -> dict[str, str]:
+        session, _ctx = sc
+        return {"value": (await session.execute(text("SHOW statement_timeout"))).scalar_one()}
+
+    @app.get("/__test/slow-read")
+    async def slow_read(sc: SessionAndCtx) -> dict[str, bool]:
+        session, _ctx = sc
+        await session.execute(text("SELECT pg_sleep(2)"))
+        return {"ok": True}
+
+    def sample(name: str, labels: dict[str, str] | None = None) -> float:
+        return REGISTRY.get_sample_value(name, labels or {}) or 0.0
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://svc",
+    ) as ac:
+        await _login(ac)
+        auth_before = sample("loom_svc_auth_duration_sec_count", {"auth_kind": "session"})
+        checkout_before = sample("loom_svc_db_checkout_wait_sec_count")
+        assert (await ac.get("/__test/statement-timeout")).json() == {"value": "0"}
+        assert sample("loom_svc_auth_duration_sec_count", {"auth_kind": "session"}) == auth_before + 1
+        assert sample("loom_svc_db_checkout_wait_sec_count") == checkout_before + 1
+
+        app.state.settings.interactive_read_statement_timeout_ms = 200
+        try:
+            assert (await ac.get("/__test/statement-timeout")).json() == {"value": "200ms"}
+            timeouts_before = sample("loom_svc_interactive_read_timeouts_total")
+            slow = await ac.get("/__test/slow-read")
+            assert slow.status_code == 503, slow.text
+            assert slow.json() == {"detail": {"reason": "read timed out", "retryable": True}}
+            assert slow.headers["retry-after"] == "5"
+            assert sample("loom_svc_interactive_read_timeouts_total") == timeouts_before + 1
+            # The cancelled read must not poison the session for the next request.
+            assert (await ac.get("/api/v1/auth/me")).status_code == 200
+
+            ac.cookies.clear()
+            bearer = await ac.get(
+                "/__test/statement-timeout",
+                headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+            )
+            assert bearer.json() == {"value": "0"}
+        finally:
+            app.state.settings.interactive_read_statement_timeout_ms = 0
+
+
 async def test_retired_staging_exchange_and_existing_cookie_are_rejected(auth_setup, monkeypatch):
     app, *_ = auth_setup
     monkeypatch.setenv("LOOM_ENV", "staging")

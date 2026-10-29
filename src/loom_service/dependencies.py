@@ -30,12 +30,13 @@ encapsulate the business rules these deps wrap.
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, Header, HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import AuthContext, verify_bearer_token
@@ -45,7 +46,7 @@ from loom_service.auth_guards import (
     require_human_or_admin,
     require_team_or_admin,
 )
-from loom_service.metrics import AUTH_FAILURES_TOTAL
+from loom_service.metrics import AUTH_DURATION_SEC, AUTH_FAILURES_TOTAL, DB_CHECKOUT_WAIT_SEC
 from loom_service.session_auth import verify_csrf, verify_session_cookie
 
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -84,6 +85,25 @@ async def _reject_disabled_team(
         raise HTTPException(status_code=403, detail="team is disabled")
 
 
+async def _limit_interactive_read(
+    request: Request, session: AsyncSession, ctx: AuthContext,
+) -> None:
+    """Bound browser reads with an optional statement timeout (#2687).
+
+    Applies only to cookie-session GET/HEAD requests, so bearer callers such as
+    workers and task writeback are never cut short. `SET LOCAL` lasts until the
+    handler's first commit, which is enough for the read-only queries it guards.
+    """
+    settings = getattr(request.app.state, "settings", None)
+    timeout_ms = getattr(settings, "interactive_read_statement_timeout_ms", 0)
+    if (
+        timeout_ms > 0
+        and ctx.auth_kind == "session"
+        and request.method.upper() in {"GET", "HEAD"}
+    ):
+        await session.execute(text(f"SET LOCAL statement_timeout = {int(timeout_ms)}"))
+
+
 async def authed_session(
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
@@ -95,6 +115,11 @@ async def authed_session(
     the generator).
     """
     async with request.app.state.session_factory() as session:
+        started = time.perf_counter()
+        if _request_auth_kind(request, authorization) != "anonymous":
+            # Anonymous requests are rejected without touching the database.
+            await session.connection()
+            DB_CHECKOUT_WAIT_SEC.observe(time.perf_counter() - started)
         admin_verifier = getattr(
             request.app.state, "admin_secret_verifier", None,
         )
@@ -142,6 +167,10 @@ async def authed_session(
         # holds the user_sessions row lock, and a slow read must not queue
         # every other request from the same browser behind it (#2687).
         await session.commit()
+        AUTH_DURATION_SEC.labels(auth_kind=ctx.auth_kind).observe(
+            time.perf_counter() - started,
+        )
+        await _limit_interactive_read(request, session, ctx)
         yield session, ctx
 
 

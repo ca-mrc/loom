@@ -41,6 +41,10 @@ All metrics use the `loom_*` prefix and follow these cardinality rules:
 | Loom Service | `loom_svc_batch_runner_trials_dispatched_total` | Counter | — |
 | Loom Service | `loom_svc_tokens_issued_total` | Counter | `token_type` (team\|admin) |
 | Loom Service | `loom_svc_tokens_revoked_total` | Counter | — |
+| Loom Service | `loom_svc_auth_duration_sec` | Histogram | `auth_kind` (session\|bearer\|readonly_probe) |
+| Loom Service | `loom_svc_db_checkout_wait_sec` | Histogram | — |
+| Loom Service | `loom_svc_db_statement_sec` | Histogram | `verb` (select\|insert\|update\|delete\|other) |
+| Loom Service | `loom_svc_interactive_read_timeouts_total` | Counter | — |
 | Worker | `loom_worker_trials_inflight` | Gauge | — |
 | Worker | `loom_worker_trials_started_total` | Counter | `backend` |
 | Worker | `loom_worker_trials_completed_total` | Counter | `backend`, `result` |

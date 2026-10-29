@@ -46,6 +46,7 @@ class LoomServiceSettings(BaseSettings):
     environment_management_config_file: Path | None = None
     environment_management_github_token: SecretStr | None = None
     gateway_url: HttpUrl = cast(HttpUrl, "http://loom-llm-gateway:9100")
+    interactive_read_statement_timeout_ms: int = 0
     k8s_worker_enabled: bool = True
     log_level: LogLevel = "info"
     mainland_proxy_profile_dir: Path | None = Field(default=None, validation_alias="LOOM_MAINLAND_PROXY_PROFILE_DIR")
