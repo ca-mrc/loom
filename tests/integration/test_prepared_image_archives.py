@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import subprocess
+from pathlib import Path
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
+import boto3
 import pytest
+from botocore.config import Config
 from starlette.requests import Request
 
 from loom.task_image_archives import publish_image_archive
@@ -16,9 +21,71 @@ from loom_control_plane.task_image_archive_retention import (
     recover_archive_versions,
 )
 from tests.support.minio_tls import minio_tls  # noqa: F401
+from tests.unit.test_nebius_task_image_runtime import (
+    _eight_component_archive_claim,
+    _write_native_oci,
+    source_bundle,  # noqa: F401
+)
 from tests.unit.test_prepared_image_archives import archive_claim
 
 pytestmark = [pytest.mark.docker, pytest.mark.timeout(120)]
+
+
+def test_eight_component_publication_keeps_all_real_archive_versions_in_termination_transport(
+    minio_tls, source_bundle, tmp_path, monkeypatch,  # noqa: F811
+):
+    from loom.task_image_archives import validate_archive_receipt
+    from loom_execution_actuator import task_image_runtime as runtime
+    from loom_execution_actuator.image_publication_receipt import decode_publication_receipt
+    from loom_execution_actuator.task_image_controller import _publication_document
+    from tests.unit.test_nebius_task_image_controller import receipt_job
+
+    origin, credentials, _, admin, cert_file = minio_tls
+    claim = _eight_component_archive_claim(source_bundle)
+    bucket = claim["source_bucket"]
+    admin.create_bucket(Bucket=bucket)
+    admin.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
+    storage = boto3.client("s3", endpoint_url=origin, aws_access_key_id=credentials.access_key,
+        aws_secret_access_key=credentials.secret_key, region_name="us-east-1", verify=str(cert_file),
+        config=Config(signature_version="s3v4", proxies={}, retries={"max_attempts": 0}))
+    monkeypatch.setattr(runtime, "_client", lambda *_args: storage)
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    components = runtime.derive_task_image_build_components(claim["task_config"])
+    for index, component in enumerate(components):
+        _write_native_oci(work / component.oci_output_path, runtime_config={"User": "0:0", "WorkingDir": "/app",
+            "Env": ["HOME=/root", "PATH=/usr/bin", f"PUBLIC_COMPONENT={index}"]})
+    copies = []
+
+    def copy(argv, **_kwargs):
+        copies.append(argv)
+        Path(argv[argv.index("--digestfile") + 1]).write_text("sha256:" + format(len(copies), "064x"))
+        return subprocess.CompletedProcess(argv, 0)
+
+    # Versioned PUT/HEAD/checksums are real. The registry process boundary is
+    # stubbed; this test does not claim a live registry push or task execution.
+    monkeypatch.setattr(runtime.subprocess, "run", copy)
+    receipt_path = tmp_path / "termination-message"
+    try:
+        receipt = runtime.publish(claim, work, tmp_path / "secrets", receipt_path=receipt_path)
+        wire = receipt_path.read_text()
+        assert len(copies) == len(receipt["registry_images"]) == 8
+        assert len(receipt["image_archives"]) == 7 and len(receipt["image_runtime_metadata"]) == 1
+        assert len(json.dumps(receipt).encode()) > 4000 and len(wire.encode()) <= 4000
+        assert decode_publication_receipt(wire) == receipt
+        _, job = receipt_job(message=wire)
+        decoded = _publication_document(job, materialization_id=UUID(claim["id"]), lease_epoch=claim["lease_epoch"])
+        assert decoded == receipt
+        assert len(validate_archive_receipt(claim, decoded["registry_images"], decoded["image_archives"])) == 7
+        assert len(admin.list_object_versions(Bucket=bucket).get("Versions", [])) == 7
+        decoded["image_archives"]["task"]["object"]["object_key"] = "foreign/other.tar"
+        with pytest.raises(ValueError, match="native attempt"):
+            validate_archive_receipt(claim, decoded["registry_images"], decoded["image_archives"])
+    finally:
+        versions = admin.list_object_versions(Bucket=bucket)
+        for item in versions.get("Versions", []) + versions.get("DeleteMarkers", []):
+            admin.delete_object(Bucket=bucket, Key=item["Key"], VersionId=item["VersionId"])
+        admin.delete_bucket(Bucket=bucket)
 
 
 @pytest.mark.parametrize("metadata_case", ["native", "nebius-title"])

@@ -230,6 +230,43 @@ private verifier inputs; a native independent verifier consumes its authored
 artifact declarations. Oracle solution variables apply only to the solution
 process. Health probes honor the declared startup interval.
 
+Recognized native Harbor tasks keep their image's authored working directory,
+user, and business filesystem permissions. The controller does not copy the
+public source bundle into that working directory. Oracle alone receives the
+complete authored `solution/` tree at `/solution`, including helper modules,
+hidden files, and binary assets; model agents receive neither that tree nor
+private tests. Oracle cleanup empties the prepared directory without unlinking
+its root, so a nonroot image user can clean it while `/` remains root-owned.
+Custom and offline workspace staging retain their existing behavior.
+
+Native Harbor preparation revision `harbor-reference-directory-v1` creates and
+assigns only the fixed harness directories (`/solution`, `/tests`,
+`/logs/verifier`, `/loom/verifier`) to the authored image user. It does
+not recursively change business files or change `USER` or `WORKDIR`. Variable
+`USER` arguments use Docker's own ARG/ENV expansion via an unused build-only
+argument name, avoiding authored names and frozen build arguments. The shell
+reads its value as one quoted operand without `eval`; no runtime environment
+variable is added. This recipe
+participates in the existing materialization cache identity: new native requests
+build new rows instead of reusing legacy ready images without these directories.
+Existing rows, grants, and frozen build claims retain their old recipe and exact
+source binding. Ordinary custom and offline requests retain the empty revision.
+
+Schema migration 0181 adds that revision to the existing unique identity and
+key check, and freezes it with the source/config identity. Existing rows default
+to the empty revision without relabeling. Deployment uses the normal schema
+backup and guard workflow. Downgrade refuses while recipe-qualified rows exist;
+it never deletes their results to permit rollback. Older binaries are not
+qualified to consume new-recipe rows. Active frozen trials are not rebound or
+restarted by this change.
+
+The preparation field is loaded explicitly only by current native producers.
+Legacy pool readers and writers continue to operate on the audited retained
+schemas without selecting, inserting or implicitly returning that newer column.
+Catalog retention compares its optional value through the whole row, including
+aliased rows; missing historical fields mean the empty legacy revision. New
+native builds still require migration0181 and never fall back to an old recipe.
+
 The native reward bridge runs the original `tests/test.sh`, removes stale
 reward/output files, and accepts finite numeric scalar or JSON rewards,
 including zero and fractional scores. Like Harbor, `reward.json` takes precedence
@@ -240,6 +277,11 @@ success. Previously generated native wrappers retain exact version recognition
 and the private-input layout; the runtime-owned bridge uses the current reward
 reader without rewriting task assets. This bridge does not qualify the separate
 verifier's execution backend.
+
+Native image build observations retain the actual failed `prepare`, `build`,
+or `publish` phase's log in the existing `builder_log`, after Pod ownership and
+pool identity qualification, with the existing 100-line/16-KiB read and redaction
+limits; successful and in-progress builds retain their ordinary build-log view.
 
 ## Development evidence and remaining acceptance
 

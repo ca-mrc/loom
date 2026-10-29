@@ -46,7 +46,6 @@ from loom.trial.stale_running import effective_agent_timeout_sec
 from loom.trial.workspace import (
     materialize_workspace,
     platform_verification_workspace_policy,
-    refuse_planted_private_paths,
 )
 from loom.trial.workspace_snapshot import handoff_workspace_snapshot
 from loom.verifier_runtime import resolve_verifier_env_mode
@@ -213,7 +212,6 @@ async def _run_step_impl(
             if in_place:
                 if ctx.trial_config.agent_name == "oracle":
                     await remove_oracle_solution(ctx.driver, workdir)
-                await refuse_planted_private_paths(ctx.driver, workdir)
                 await materialize_workspace(
                     driver=ctx.driver,
                     task_dir=ctx.task_dir,

@@ -47,11 +47,16 @@ from loom.task_image_bundle_manifest import capture_task_image_bundle_manifest
 from loom.task_image_errors import TaskImagePreparationError, classify_preparation_failure
 from loom.task_image_materialization import task_bundle_content_manifest_digest
 from loom.task_image_metadata import TaskImageRuntimeMetadataV1
+from loom.task_image_recipe import frozen_preparation_revision
 from loom.trajectory.storage import (
     BUNDLE_FILE_METADATA_NAME,
     _parse_bundle_file_metadata,
     _validate_bundle_relative_path,
     bundle_file_metadata_sha256,
+)
+from loom_execution_actuator.image_publication_receipt import (
+    decode_publication_receipt,
+    encode_publication_receipt,
 )
 from loom_execution_actuator.task_image_oci import (
     NativeOCIArchiveError,
@@ -65,9 +70,15 @@ _derive_task_image_build_components = derive_task_image_build_components
 
 _FILE_LIMIT = 2000
 _BUNDLE_BYTES = 512 * 1024 * 1024
+# Logical bytes per component, independent of OCI publication and cache GC.
 _CACHE_BYTES = 1024 * 1024 * 1024
-_CACHE_TOTAL_BYTES = 4 * _CACHE_BYTES
+_CACHE_TOTAL_BYTES = 4 * 1024 * 1024 * 1024
 _CACHE_REUSE_BYTES = 256 * 1024 * 1024
+_CACHE_TAR_ENTRIES = 10000
+# Linux paths plus ordinary PAX time/identity records fit an 8 KiB extension.
+# The writer checks the same bound that the reader checks before allocation.
+_CACHE_TAR_EXTENDED_HEADER_BYTES = 8 * 1024
+_CACHE_TAR_HEADER_BYTES = _CACHE_TAR_ENTRIES * (tarfile.BLOCKSIZE + _CACHE_TAR_EXTENDED_HEADER_BYTES)
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _KEY = re.compile(r"[0-9a-f]{64}\Z")
 # Stable Job-log markers for stage timing (Phase 2). Logs only — no DB schema.
@@ -423,17 +434,69 @@ def download_bundle(claim: dict[str, Any], client: Any, directory: Path) -> None
         raise BuildPreparationError("task bundle file modes do not match its frozen revision")
 
 
+def _cache_tar_byte_limit() -> int:
+    # Logical payload excludes each main header, up to 511 payload-padding
+    # bytes, bounded PAX/GNU headers, two EOF blocks and record alignment.
+    return (_CACHE_BYTES + _CACHE_TAR_ENTRIES * (2 * tarfile.BLOCKSIZE - 1)
+            + _CACHE_TAR_HEADER_BYTES + 2 * tarfile.BLOCKSIZE + tarfile.RECORDSIZE)
+
+
+class _CacheTarInfo(tarfile.TarInfo):
+    """Keep stdlib tar parsing, but bound extension reads before allocation."""
+
+    def tobuf(self, format: Literal[0, 1, 2] | None = tarfile.DEFAULT_FORMAT,
+              encoding: str | None = tarfile.ENCODING,
+              errors: str = "surrogateescape") -> bytes:
+        header = super().tobuf(format, encoding, errors)
+        if len(header) > _CACHE_TAR_EXTENDED_HEADER_BYTES + 2 * tarfile.BLOCKSIZE:
+            raise BuildPreparationError("build cache tar header exceeds byte limit")
+        return header
+
+    def _proc_member(self, archive: Any) -> Any:
+        if self.size < 0 or self.type == tarfile.GNUTYPE_SPARSE:
+            raise BuildPreparationError("build cache contains unsupported content")
+        extended = self.type in (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE,
+                                 tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK)
+        if not extended:
+            return super()._proc_member(archive)  # type: ignore[misc]  # stdlib parser hook is not in typeshed
+        padded = (self.size + tarfile.BLOCKSIZE - 1) // tarfile.BLOCKSIZE * tarfile.BLOCKSIZE
+        headers = getattr(archive, "_cache_header_bytes", 0) + tarfile.BLOCKSIZE + padded
+        depth = getattr(archive, "_cache_header_depth", 0)
+        if self.size > _CACHE_TAR_EXTENDED_HEADER_BYTES or headers > _CACHE_TAR_HEADER_BYTES or depth >= 2:
+            raise BuildPreparationError("build cache tar header exceeds byte limit")
+        archive._cache_header_bytes = headers
+        archive._cache_header_depth = depth + 1
+        try:
+            member = super()._proc_member(archive)  # type: ignore[misc]
+        finally:
+            archive._cache_header_depth = depth
+        # Global headers may accumulate across members. Bound that retained
+        # dictionary as well as each individual extension read.
+        if sum(len(key.encode("utf-8", "surrogateescape")) + len(value.encode("utf-8", "surrogateescape"))
+               for key, value in archive.pax_headers.items()) > _CACHE_TAR_EXTENDED_HEADER_BYTES:
+            raise BuildPreparationError("build cache tar global header exceeds byte limit")
+        return member
+
+    def _proc_gnusparse_10(self, *_args: Any) -> None:
+        # Its sparse map is read from payload, outside the bounded PAX body.
+        # Ordinary pack_cache never emits sparse formats; it streams all bytes.
+        raise BuildPreparationError("build cache contains unsupported content")
+
+
 def unpack_cache(archive: Path, directory: Path) -> None:
     """Cache is untrusted data: reject links, devices and path traversal."""
     directory.mkdir(parents=True, exist_ok=False)
+    info = archive.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_size > _cache_tar_byte_limit():
+        raise BuildPreparationError("build cache tar exceeds transfer byte limit")
     total = 0
-    with tarfile.open(archive, "r:") as source:
+    with tarfile.open(archive, "r|", tarinfo=_CacheTarInfo) as source:
         for index, member in enumerate(source):
-            if index >= 10000 or member.size < 0:
+            if index >= _CACHE_TAR_ENTRIES or member.size < 0:
                 raise BuildPreparationError("build cache exceeds file limit")
             _validate_bundle_relative_path(member.name)
             total += member.size
-            if total > _CACHE_BYTES or not (member.isdir() or member.isfile()):
+            if total > _CACHE_BYTES or member.sparse is not None or not (member.isdir() or member.isfile()):
                 raise BuildPreparationError("build cache contains unsupported content")
             target = directory / member.name
             if member.isdir():
@@ -445,6 +508,9 @@ def unpack_cache(archive: Path, directory: Path) -> None:
                 with stream, target.open("xb") as output:
                     while chunk := stream.read(1024 * 1024):
                         output.write(chunk)
+            # Extraction uses this member directly, never name lookups. Do not
+            # retain every PAX dictionary while streaming thousands of entries.
+            source.members.clear()  # type: ignore[attr-defined]  # stdlib streaming member cache
 
 
 def _cache_prefix(claim: dict[str, Any]) -> str:
@@ -540,24 +606,34 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _inventory_cache_directory(directory: Path) -> list[dict[str, Any]]:
+def _cache_directory_files(directory: Path) -> list[tuple[Path, str, int]]:
+    """Validate the entire cache tree before an optional capacity deferral.
+
+    An oversized early file must not conceal a later link or special file.
+    This pass reads metadata only; content is hashed only for bounded exports.
+    """
     if not stat.S_ISDIR(directory.lstat().st_mode):
         raise BuildPreparationError("cache root must be a real directory")
-    entries: list[dict[str, Any]] = []
-    total = 0
-    files = 0
-    for path in sorted(directory.rglob("*")):
+    files: list[tuple[Path, str, int]] = []
+    for index, path in enumerate(sorted(directory.rglob("*"))):
+        if index >= 10000:
+            raise BuildPreparationError("build cache exceeds file limit")
         mode = path.lstat().st_mode
         if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
             raise BuildPreparationError("build cache contains unsupported content")
-        if path.is_dir():
-            continue
-        files += 1
-        if files > 10000:
-            raise BuildPreparationError("build cache exceeds file limit")
         relative = path.relative_to(directory).as_posix()
         _validate_bundle_relative_path(relative)
+        if stat.S_ISDIR(mode):
+            continue
         size = path.stat().st_size
+        files.append((path, relative, size))
+    return files
+
+
+def _inventory_cache_directory(directory: Path) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    total = 0
+    for path, relative, size in _cache_directory_files(directory):
         total += size
         if total > _CACHE_BYTES:
             raise BuildPreparationError("build cache exceeds byte limit")
@@ -773,7 +849,7 @@ def _try_import_legacy_tar(
             bucket=claim["cache_bucket"],
             key=f"task-build-cache/{key}/{index}.tar",
             destination=archive,
-            limit=_CACHE_BYTES,
+            limit=_cache_tar_byte_limit(),
         )
     except ClientError as error:
         if _object_absent(error):
@@ -914,8 +990,13 @@ def _install_terminus_runtime_tools(claim: dict[str, Any], context: Path) -> Non
         if component.name not in {"task", "verifier"}:
             continue
         dockerfile = context / component.dockerfile_path
+        environment = (claim["task_config"].get("environment", {}) if component.name == "task"
+                       else claim["task_config"].get("verifier", {}).get("environment") or {})
         try:
-            rewritten = append_terminus_runtime_tools(dockerfile.read_text())
+            rewritten = append_terminus_runtime_tools(
+                dockerfile.read_text(), prepare_harness_dirs=bool(frozen_preparation_revision(claim)),
+                build_arg_names=environment.get("docker_build_args", {}),
+            )
         except TaskImagePreparationError as exc:
             raise BuildPreparationError(str(exc), code=exc.code) from exc
         except (OSError, UnicodeError, ValueError) as exc:
@@ -950,10 +1031,10 @@ def pack_cache(directory: Path, archive: Path) -> None:
     if not stat.S_ISDIR(directory.lstat().st_mode):
         raise BuildPreparationError("cache root must be a real directory")
     total = 0
-    with tarfile.open(archive, "w:", dereference=True) as output:
+    with tarfile.open(archive, "w:", dereference=True, tarinfo=_CacheTarInfo) as output:
         for index, path in enumerate(sorted(directory.rglob("*"))):
             mode = path.lstat().st_mode
-            if index >= 10000 or not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+            if index >= _CACHE_TAR_ENTRIES or not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
                 raise BuildPreparationError("build cache contains unsupported content")
             if path.is_file():
                 total += path.stat().st_size
@@ -1119,8 +1200,8 @@ def publish(
                 skopeo_source = f"oci:{output}"
             else:
                 archive = _output_path(work, component.oci_output_path)
-                if archive.stat().st_size > 3 * _CACHE_BYTES:
-                    raise BuildPreparationError("build output is not a bounded regular OCI archive")
+                # The OCI validator owns the independent image-size bound,
+                # including when runtime metadata is read below.
                 if not requires_metadata:
                     validate_native_oci_archive(archive, architecture=architecture)
                 skopeo_source = f"oci-archive:{archive}"
@@ -1204,7 +1285,7 @@ def publish(
                             **metadata, "image_ref": images[component.name],
                         }).model_dump(mode="json")
                     receipt_path.write_text(
-                        json.dumps(
+                        _publication_message(
                             {
                                 "materialization_id": claim["id"],
                                 "lease_epoch": claim["lease_epoch"],
@@ -1220,6 +1301,14 @@ def publish(
                         cache, "cache_export", component_index=index,
                     ):
                         cache_dir = _output_path(work, f"cache-out/{index}", directory=True)
+                        cache_bytes = sum(size for _, _, size in _cache_directory_files(cache_dir))
+                        if cache_bytes > _CACHE_BYTES:
+                            emit_stage(
+                                "cache_export", "deferred", reason="byte_budget_exceeded",
+                                component_index=index, logical_bytes=cache_bytes,
+                                budget_bytes=_CACHE_BYTES,
+                            )
+                            continue
                         if transfer == "blobs":
                             _publish_cache_blobs(
                                 cache, claim, index=index, cache_dir=cache_dir
@@ -1250,11 +1339,14 @@ def publish(
         **({"image_archives": image_archives} if image_archives else {}),
         **({"image_runtime_metadata": runtime_metadata} if runtime_metadata else {}),
     }
-    if len(json.dumps(receipt).encode()) > 4000:
-        raise BuildPreparationError(
-            "publication receipt exceeds Kubernetes termination message limit"
-        )
     return receipt
+
+
+def _publication_message(receipt: dict[str, Any]) -> str:
+    try:
+        return encode_publication_receipt(receipt)
+    except ValueError as error:
+        raise BuildPreparationError(str(error)) from None
 
 
 def main() -> None:
@@ -1269,20 +1361,33 @@ def main() -> None:
             prepare(claim, work, secrets)
         else:
             receipt = publish(claim, work, secrets)
-            Path("/dev/termination-log").write_text(json.dumps(receipt))
+            Path("/dev/termination-log").write_text(_publication_message(receipt))
     except Exception as error:
         # SDK/tool exceptions can carry credentials, endpoints or task-controlled text.
         error_receipt: dict[str, Any] = {}
+        previous_message: str | None = None
+        failure = termination_failure_update(error)
         try:
-            parsed = json.loads(Path("/dev/termination-log").read_text())
+            previous_message = Path("/dev/termination-log").read_text()
+            parsed = decode_publication_receipt(previous_message)
         except (OSError, ValueError):
+            previous_message = None
             parsed = None
         if isinstance(parsed, dict):
             error_receipt = parsed
-        error_receipt.update(phase=args.phase, **termination_failure_update(error))
+        error_receipt.update(phase=args.phase, **failure)
         if args.phase == "prepare":
             error_receipt.update(classify_preparation_failure(error).receipt())
-        Path("/dev/termination-log").write_text(json.dumps(error_receipt))
+        try:
+            message = encode_publication_receipt(error_receipt)
+        except ValueError:
+            # Publication already failed. Preserve every last known image and
+            # archive rather than replace valid progress with a small error.
+            # Without valid progress, emit only the bounded plain diagnostic.
+            message = previous_message if previous_message is not None else json.dumps({
+                "phase": args.phase, "error": str(failure.get("error", ""))[:200],
+            })
+        Path("/dev/termination-log").write_text(message)
         raise SystemExit(1) from None
 
 

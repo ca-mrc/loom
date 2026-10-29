@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -646,11 +647,15 @@ def _terminus_package_install(
     )
 
 
-def append_terminus_runtime_tools(dockerfile: str) -> str:
+def append_terminus_runtime_tools(
+    dockerfile: str, *, prepare_harness_dirs: bool = False, build_arg_names: Collection[str] = (),
+) -> str:
     """Install the Harbor terminus package set onto an authored task Dockerfile.
 
     The appended ``RUN`` fails the image build when bash, tmux, or asciinema
     is still missing. Unsupported final bases fail before a build starts.
+    `build_arg_names` reserves the caller's frozen build arguments when an
+    internal build-only variable is needed to resolve an authored USER.
     """
     final_base, arch, alpine, instructions = _classify_terminus_base(dockerfile)
     suse = final_base == "opensuse/leap:15.5"
@@ -681,6 +686,28 @@ def append_terminus_runtime_tools(dockerfile: str) -> str:
         ),
         "",
     )
+    if prepare_harness_dirs:
+        # These are harness input/output roots, never the authored business tree.
+        # Keep the image USER (including numeric user:group) and WORKDIR intact.
+        roots = "/solution /tests /logs/verifier /loom/verifier"
+        owner = shlex.quote(last_user or "root")
+        if "$" in last_user:
+            # Docker expands USER and ARG defaults using the authored ARG/ENV
+            # scope. A quoted shell variable reads that resulting value without
+            # re-evaluating command substitutions or changing runtime ENV.
+            occupied = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", dockerfile)) | set(build_arg_names)
+            name = "LOOM_PREPARATION_OWNER"
+            suffix = 0
+            while name in occupied:
+                suffix += 1
+                name = f"LOOM_PREPARATION_OWNER_{suffix}"
+            prepared += f"ARG {name}={last_user}\n"
+            owner = f'"${name}"'
+        checks = " && ".join(f"test ! -L {path}" for path in ("/solution", "/tests", "/logs", "/logs/verifier", "/loom", "/loom/verifier"))
+        prepared += _run_instruction(
+            f"{checks} && mkdir -p {roots} && chown {owner} {roots} && chmod u+rwx {roots}",
+            custom_shell=custom_shell,
+        )
     if last_user and last_user not in {"root", "0"}:
         prepared += f"USER {last_user}\n"
     if suse:

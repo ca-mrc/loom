@@ -18,6 +18,10 @@ from loom.db.schema import TaskImageMaterialization, TaskImageMaterializationAtt
 
 NOW = datetime(2026, 9, 2, 14, 0, tzinfo=UTC)
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "historical"
+# json_populate_recordset supplies NULL rather than column defaults for fields
+# absent from a frozen record. These rows predate preparation recipes and must
+# retain the legacy recipe, without rewriting any captured field or fixture.
+LEGACY_COLUMN_DEFAULTS = {"task_image_materializations": {"preparation_revision": ""}}
 
 
 @pytest.fixture
@@ -34,6 +38,7 @@ async def restore_rows(session, fixture):
     await session.execute(text("SET LOCAL session_replication_role = replica"))
     for table, rows in data.items():
         assert table.replace("_", "").isalnum()
+        rows = [{**LEGACY_COLUMN_DEFAULTS.get(table, {}), **row} for row in rows]
         await session.execute(text(f'DELETE FROM "{table}"'))
         await session.execute(text(
             f'INSERT INTO "{table}" SELECT * FROM json_populate_recordset(NULL::"{table}", :rows)'
@@ -74,7 +79,15 @@ async def _retire(factory, attempt_id):
 
     async with factory() as session:
         attempt = await session.get(TaskImageMaterializationAttempt, attempt_id)
-        materialization = await session.get(TaskImageMaterialization, attempt.materialization_id)
+        # Sealed-owner handoff tests deliberately retain a pre-recipe schema.
+        # Read its real columns, then validate a transient legacy snapshot;
+        # never issue a current ORM query or rewrite the historical database.
+        values = (await session.execute(text(
+            "SELECT * FROM task_image_materializations WHERE id = :id"
+        ), {"id": attempt.materialization_id})).mappings().one()
+        materialization = TaskImageMaterialization(
+            **{**LEGACY_COLUMN_DEFAULTS["task_image_materializations"], **values}
+        )
         inventory = derive_attempt_repository_inventory(
             materialization=materialization, attempt=attempt, credentials=[],
             registry_origin="https://registry.example:5443",

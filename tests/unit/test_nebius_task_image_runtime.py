@@ -755,6 +755,63 @@ def test_cache_size_limits_apply_to_pack_and_unpack(tmp_path, monkeypatch) -> No
         runtime.unpack_cache(archive, tmp_path / "restored")
 
 
+def test_publisher_defers_oversized_optional_cache_and_keeps_the_image(
+    source_bundle, tmp_path, publisher, monkeypatch, capsys,
+) -> None:
+    claim, _ = source_bundle
+    cache, calls = publisher
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    archive = work / "oci/0000.tar"
+    _write_native_oci(archive)
+    # Stay above the archive check (3 * limit) while the cache tree is one byte over.
+    limit = archive.stat().st_size
+    monkeypatch.setattr(runtime, "_CACHE_BYTES", limit)
+    cache_dir = work / "cache-out/0"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "blob").write_bytes(b"x" * (limit + 1))
+    receipt = runtime.publish(claim, work, tmp_path / "secrets", receipt_path=tmp_path / "receipt.json")
+    assert receipt["registry_images"]["task"].endswith("b" * 64)
+    assert cache.uploads == [] and calls
+    assert '"reason":"byte_budget_exceeded"' in capsys.readouterr().out
+
+
+def test_publisher_still_exports_a_cache_at_the_byte_boundary(
+    source_bundle, tmp_path, publisher, monkeypatch,
+) -> None:
+    claim, _ = source_bundle
+    cache, _calls = publisher
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    archive = work / "oci/0000.tar"
+    _write_native_oci(archive)
+    limit = archive.stat().st_size
+    monkeypatch.setattr(runtime, "_CACHE_BYTES", limit)
+    cache_dir = work / "cache-out/0"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "blob").write_bytes(b"x" * limit)
+    runtime.publish(claim, work, tmp_path / "secrets", receipt_path=tmp_path / "receipt.json")
+    assert cache.uploads
+
+
+def test_publisher_rejects_invalid_cache_content_after_the_image_copy(
+    source_bundle, tmp_path, publisher,
+) -> None:
+    claim, _ = source_bundle
+    cache, _calls = publisher
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    _write_native_oci(work / "oci/0000.tar")
+    cache_dir = work / "cache-out/0"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "link").symlink_to(tmp_path / "secrets")
+    receipt_file = tmp_path / "receipt.json"
+    with pytest.raises(runtime.BuildPreparationError, match="unsupported content"):
+        runtime.publish(claim, work, tmp_path / "secrets", receipt_path=receipt_file)
+    assert cache.uploads == []
+    assert json.loads(receipt_file.read_text())["registry_images"]["task"].endswith("b" * 64)
+
+
 @pytest.mark.parametrize("path", ["oci", "oci/0000.tar", "cache-out", "cache-out/0"])
 def test_publisher_output_path_rejects_task_created_credential_symlinks(tmp_path, path) -> None:
     work, secrets = tmp_path / "work", tmp_path / "secrets"
@@ -901,6 +958,284 @@ def test_publisher_records_registry_digest_with_optional_cache(
     digest = manifest["files"][0]["sha256"]
     assert cache.objects[f"task-build-cache/v2/blobs/{digest}"] == b"cached layer"
     assert any(key.endswith(f"/blobs/{digest}") for _, key, _ in cache.uploads)
+
+
+def _eight_component_archive_claim(source_bundle):
+    from loom.models.task import TaskConfig
+    from loom.task_image_archives import archive_write_intents
+
+    claim, _ = source_bundle
+    claim["source_bucket"] = "b" * 49
+    claim["registry_repository"] = "registry.example/" + "r" * 39
+    services = ["main", "asset-ledger", "compliance-ledger", "document-vault", "returns-ledger", "warranty-inbox", "warranty-portal"]
+    claim["task_config"]["environment"].update(compose_files=["environment/docker-compose.yaml"], native_compose={
+        "source": "environment/docker-compose.yaml", "services": [{"name": name, "build": {
+            "context": "environment" if name == "main" else "environment/" + name,
+            "dockerfile": "environment/Dockerfile" if name == "main" else f"environment/{name}/Dockerfile",
+        }} for name in services],
+    })
+    claim["task_config"]["verifier"]["environment"] = {
+        "os": "linux", "cpu_arch": "x86_64", "user": "image",
+        "dockerfile": "tests/Dockerfile", "docker_build_context": "tests",
+    }
+    claim["task_config"] = TaskConfig.model_validate(claim["task_config"]).model_dump(mode="json")
+    claim["archive_write_intents"] = archive_write_intents(claim)
+    return claim
+
+
+def test_publisher_retains_all_eight_images_and_seven_archives_in_bounded_receipt(
+    source_bundle, tmp_path, publisher, monkeypatch,
+) -> None:
+    from loom.task_image_archives import validate_archive_receipt
+    from tests.unit.test_prepared_image_archives import VersionedStorage
+
+    claim = _eight_component_archive_claim(source_bundle)
+    _, copies = publisher
+    (tmp_path / "secrets/cache").rmdir()
+    components = runtime.derive_task_image_build_components(claim["task_config"])
+    assert len(components) == 8
+    storage = VersionedStorage()
+    storage.close = lambda: None
+    monkeypatch.setattr(runtime, "_client", lambda *_args: storage)
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    for component in components:
+        _write_native_oci(work / component.oci_output_path, runtime_config={"User": "0:0", "WorkingDir": "/app", "Env": ["HOME=/root", "PATH=/usr/bin"]})
+    receipt_path = tmp_path / "receipt.json"
+    receipt = runtime.publish(claim, work, tmp_path / "secrets", receipt_path=receipt_path)
+    from loom_execution_actuator.image_publication_receipt import decode_publication_receipt
+
+    assert len(copies) == len(receipt["registry_images"]) == 8
+    assert len(receipt["image_archives"]) == 7 and len(receipt["image_runtime_metadata"]) == 1
+    assert len(json.dumps(receipt).encode()) > 4000
+    assert len(receipt_path.read_bytes()) <= 4000
+    assert decode_publication_receipt(receipt_path.read_text()) == receipt
+    assert len(validate_archive_receipt(claim, receipt["registry_images"], receipt["image_archives"])) == 7
+
+
+def test_failure_keeps_complete_last_progress_when_added_diagnostic_cannot_fit(tmp_path, monkeypatch):
+    import sys
+
+    from loom_execution_actuator.image_publication_receipt import (
+        decode_publication_receipt,
+        encode_publication_receipt,
+    )
+
+    image = "registry.example/tasks@sha256:" + "a" * 64
+    progress = {"materialization_id": str(uuid4()), "lease_epoch": 3,
+        "registry_images": {"task": image}, "image_runtime_metadata": {"task": {
+            "image_ref": image, "user": "0:0", "uid": 0, "gid": 0, "home": "/root",
+            "workdir": "/app", "entrypoint": [], "environment": {"PUBLIC_DESCRIPTION": "x" * 3000},
+        }}, "image_archives": {"task": {"image_ref": image, "object": {
+            "bucket": "artifacts", "object_key": "task-image-archives/local/3/main.tar",
+            "version_id": "v" * 1024, "content_sha256": "b" * 64, "size_bytes": 10240,
+        }}}}
+    previous_message = encode_publication_receipt(progress)
+    assert "encoding" in json.loads(previous_message)
+    termination = tmp_path / "termination"
+    termination.write_text(previous_message)
+    monkeypatch.setattr(runtime, "Path", lambda value: termination if str(value) == "/dev/termination-log" else Path(value))
+    monkeypatch.setattr(runtime, "load_claim", lambda _: {})
+    monkeypatch.setattr(sys, "argv", ["image-runtime", "publish", "--claim", str(tmp_path / "claim.json")])
+
+    def publish_failed(*_args, **_kwargs):
+        raise runtime.BuildPreparationError("cache export failed")
+
+    def diagnostic_too_large(receipt):
+        if "error" in receipt:
+            raise ValueError("publication receipt exceeds Kubernetes termination message limit")
+        return encode_publication_receipt(receipt)
+
+    monkeypatch.setattr(runtime, "publish", publish_failed)
+    monkeypatch.setattr(runtime, "encode_publication_receipt", diagnostic_too_large)
+    with pytest.raises(SystemExit) as failed:
+        runtime.main()
+    assert failed.value.code == 1
+    assert termination.read_text() == previous_message
+    assert decode_publication_receipt(termination.read_text()) == progress
+
+
+@pytest.mark.parametrize("transfer", ["blobs", "tar"])
+@pytest.mark.parametrize("oversized", [False, True])
+def test_publisher_defers_only_over_budget_optional_cache(
+    source_bundle, tmp_path, publisher, monkeypatch, capsys, transfer, oversized,
+) -> None:
+    claim, _ = source_bundle
+    claim["cache_transfer"] = transfer
+    cache, calls = publisher
+    monkeypatch.setattr(runtime, "_CACHE_BYTES", 32768)
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    _write_native_oci(work / "oci/0000.tar")
+    directory = work / "cache-out/0"
+    directory.mkdir(parents=True)
+    (directory / "layer").write_bytes(b"x" * (32768 + oversized))
+    receipt_path = tmp_path / "receipt.json"
+    receipt = runtime.publish(claim, work, tmp_path / "secrets", receipt_path=receipt_path)
+    assert receipt == json.loads(receipt_path.read_text())
+    assert receipt["registry_images"] == {"task": "registry.example/tasks@sha256:" + "b" * 64}
+    assert len(calls) == 1 and cache.closed
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    deferred = [event for event in events if event.get("reason") == "byte_budget_exceeded"]
+    if oversized:
+        assert deferred == [{
+            "loom_task_image_stage": "cache_export", "event": "deferred",
+            "component_index": 0, "reason": "byte_budget_exceeded",
+            "logical_bytes": 32769, "budget_bytes": 32768,
+        }]
+        assert cache.objects == {} and cache.uploads == [] and cache.deletes == []
+    else:
+        assert deferred == [] and cache.uploads
+
+
+@pytest.mark.parametrize("transfer", ["blobs", "tar"])
+@pytest.mark.parametrize("kind", ["symlink", "fifo"])
+def test_over_budget_cache_does_not_hide_unsafe_later_entries(
+    source_bundle, tmp_path, publisher, monkeypatch, transfer, kind,
+) -> None:
+    claim, _ = source_bundle
+    claim["cache_transfer"] = transfer
+    cache, _ = publisher
+    monkeypatch.setattr(runtime, "_CACHE_BYTES", 32768)
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    _write_native_oci(work / "oci/0000.tar")
+    directory = work / "cache-out/0"
+    directory.mkdir(parents=True)
+    (directory / "a-oversized").write_bytes(b"x" * 32769)
+    if kind == "symlink":
+        (directory / "z-unsafe").symlink_to(tmp_path)
+    else:
+        os.mkfifo(directory / "z-unsafe")
+    with pytest.raises(runtime.BuildPreparationError, match="unsupported content"):
+        runtime.publish(claim, work, tmp_path / "secrets", receipt_path=tmp_path / "receipt.json")
+    assert cache.objects == {} and cache.uploads == []
+
+
+def test_bounded_cache_does_not_hide_storage_failure(source_bundle, tmp_path, publisher) -> None:
+    claim, _ = source_bundle
+    cache, _ = publisher
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    _write_native_oci(work / "oci/0000.tar")
+    directory = work / "cache-out/0"
+    directory.mkdir(parents=True)
+    (directory / "layer").write_bytes(b"valid bounded cache")
+
+    def denied(**_kwargs):
+        raise ClientError({"Error": {"Code": "AccessDenied"}}, "PutObject")
+
+    cache.put_object = denied
+    with pytest.raises(ClientError, match="AccessDenied"):
+        runtime.publish(claim, work, tmp_path / "secrets", receipt_path=tmp_path / "receipt.json")
+
+
+@pytest.mark.parametrize("transfer", ["blobs", "tar"])
+@pytest.mark.parametrize("kind", ["entry_limit", "invalid_empty_directory"])
+def test_over_budget_cache_preserves_directory_path_and_entry_limits(
+    source_bundle, tmp_path, publisher, monkeypatch, transfer, kind,
+) -> None:
+    claim, _ = source_bundle
+    claim["cache_transfer"] = transfer
+    cache, _ = publisher
+    monkeypatch.setattr(runtime, "_CACHE_BYTES", 32768)
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    _write_native_oci(work / "oci/0000.tar")
+    directory = work / "cache-out/0"
+    directory.mkdir(parents=True)
+    (directory / "a-oversized").write_bytes(b"x" * 32769)
+    if kind == "entry_limit":
+        for index in range(10000):
+            (directory / f"z-directory-{index:05d}").mkdir()
+    else:
+        (directory / "z-invalid\\directory").mkdir()
+    with pytest.raises((runtime.BuildPreparationError, ValueError)):
+        runtime.publish(claim, work, tmp_path / "secrets", receipt_path=tmp_path / "receipt.json")
+    assert cache.objects == {} and cache.uploads == []
+
+
+def test_over_budget_cache_does_not_hide_required_image_publish_failure(
+    source_bundle, tmp_path, publisher, monkeypatch,
+) -> None:
+    claim, _ = source_bundle
+    cache, _ = publisher
+    monkeypatch.setattr(runtime, "_CACHE_BYTES", 32768)
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    _write_native_oci(work / "oci/0000.tar")
+    directory = work / "cache-out/0"
+    directory.mkdir(parents=True)
+    (directory / "layer").write_bytes(b"x" * 32769)
+
+    def fail_copy(argv, **_kwargs):
+        raise subprocess.CalledProcessError(1, argv)
+
+    monkeypatch.setattr(runtime.subprocess, "run", fail_copy)
+    with pytest.raises(runtime.PublishCommandError) as raised:
+        runtime.publish(claim, work, tmp_path / "secrets", receipt_path=tmp_path / "receipt.json")
+    assert raised.value.exit_code == 1
+    assert cache.objects == {} and cache.uploads == []
+
+
+def test_deferred_cache_does_not_skip_later_required_components(
+    source_bundle, tmp_path, publisher, monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    claim, _ = source_bundle
+    cache, calls = publisher
+    claim["task_config"]["verifier"]["environment"] = {}
+    monkeypatch.setattr(runtime, "_CACHE_BYTES", 32768)
+    monkeypatch.setattr(runtime, "derive_task_image_build_components", lambda _config: (
+        SimpleNamespace(name="task", oci_output_path="oci/0000.tar"),
+        SimpleNamespace(name="verifier", oci_output_path="oci/0001.tar"),
+    ))
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    for index in range(2):
+        _write_native_oci(work / f"oci/{index:04d}.tar")
+        directory = work / f"cache-out/{index}"
+        directory.mkdir(parents=True)
+        (directory / "layer").write_bytes(b"x" * (32769 if index == 0 else 32))
+    receipt = runtime.publish(claim, work, tmp_path / "secrets", receipt_path=tmp_path / "receipt.json")
+    assert set(receipt["registry_images"]) == {"task", "verifier"}
+    assert len(calls) == 2
+    assert runtime._v2_manifest_key(claim["materialization_key"], 0) not in cache.objects
+    assert runtime._v2_manifest_key(claim["materialization_key"], 1) in cache.objects
+
+
+@pytest.mark.parametrize("cache_budget", [4, 4 * 1024**3])
+@pytest.mark.parametrize("oversized", [False, True])
+@pytest.mark.parametrize("runtime_metadata", [False, True])
+def test_publication_oci_budget_is_independent_of_cache_budget(
+    source_bundle, tmp_path, publisher, monkeypatch, cache_budget, oversized, runtime_metadata,
+) -> None:
+    claim, _ = source_bundle
+    cache, calls = publisher
+    monkeypatch.setattr(runtime, "_CACHE_BYTES", cache_budget)
+    if runtime_metadata:
+        claim["task_config"]["environment"]["user"] = "image"
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    archive = work / "oci/0000.tar"
+    _write_native_oci(archive, runtime_config={"Env": ["HOME=/root"], "WorkingDir": "/app"})
+    # Extend a real OCI archive sparsely: check the actual 3 GiB boundary
+    # without allocating its padding or mocking either owning validator.
+    with archive.open("r+b") as output:
+        output.truncate(3 * 1024**3 + oversized)
+    receipt_path = tmp_path / "receipt.json"
+    if oversized:
+        with pytest.raises(ValueError):
+            runtime.publish(claim, work, tmp_path / "secrets", receipt_path=receipt_path)
+        assert calls == [] and not receipt_path.exists()
+    else:
+        receipt = runtime.publish(claim, work, tmp_path / "secrets", receipt_path=receipt_path)
+        assert len(calls) == 1
+        assert receipt == json.loads(receipt_path.read_text())
+        assert set(receipt["registry_images"]) == {"task"}
+        assert ("image_runtime_metadata" in receipt) is runtime_metadata
+    assert cache.closed and not cache.uploads
 
 
 @pytest.mark.parametrize(

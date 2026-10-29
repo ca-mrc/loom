@@ -9,7 +9,9 @@ import pytest
 from kubernetes.client import ApiException
 
 from loom_execution_actuator.task_image_controller import (
+    _BUILDER_LOG_LIMIT,
     NativeBuildKubernetesApi,
+    _build_failure_message,
     _matches,
     _native_failure,
     _terminal_phase_failure,
@@ -74,6 +76,43 @@ def test_receipt_requires_owned_pod_successful_publisher_and_exact_identity():
     job["pods"][0]["status"]["containerStatuses"][0]["state"]["terminated"]["exitCode"] = 1
     with pytest.raises(ValueError, match="exit zero"):
         publication_receipt(job, materialization_id=image_id, lease_epoch=2)
+    job["pods"][0]["metadata"]["ownerReferences"][0]["uid"] = "foreign"
+    with pytest.raises(ValueError, match="owned Pod"):
+        publication_receipt(job, materialization_id=image_id, lease_epoch=2)
+
+
+def test_compact_receipt_preserves_existing_identity_owner_and_metadata_checks():
+    from loom.task_image_archives import PreparedImageArchiveV1
+    from loom_execution_actuator.image_publication_receipt import encode_publication_receipt
+
+    image_id, job = receipt_job()
+    terminated = job["pods"][0]["status"]["containerStatuses"][0]["state"]["terminated"]
+    document = json.loads(terminated["message"])
+    image = "registry.example/" + "r" * 39 + "@sha256:" + "a" * 64
+    names = ["task", *(f"compose:service{index}" for index in range(6)), "verifier"]
+    document["registry_images"] = dict.fromkeys(names, image)
+    document["image_runtime_metadata"] = {"task": {
+        "image_ref": image, "user": "0:0", "uid": 0, "gid": 0,
+        "home": "/root", "workdir": "/app", "entrypoint": [], "environment": {},
+    }}
+    document["image_archives"] = {name: PreparedImageArchiveV1.model_validate({
+        "image_ref": image, "object": {
+            "bucket": "b" * 49, "object_key": f"task-image-archives/{image_id}/2/{index}.tar",
+            "version_id": str(uuid4()), "content_sha256": "c" * 64, "size_bytes": 10240,
+        },
+    }).model_dump(mode="json") for index,name in enumerate(names[:-1])}
+    assert len(json.dumps(document).encode()) > 4000
+    terminated["message"] = encode_publication_receipt(document)
+    assert len(terminated["message"].encode()) <= 4000
+    assert publication_receipt(job, materialization_id=image_id, lease_epoch=2) == document["registry_images"]
+    with pytest.raises(ValueError, match="belong"):
+        publication_receipt(job, materialization_id=image_id, lease_epoch=3)
+    document["image_runtime_metadata"]["task"]["image_ref"] = image[:-1] + "b"
+    terminated["message"] = encode_publication_receipt(document)
+    with pytest.raises(ValueError, match="differs"):
+        publication_receipt(job, materialization_id=image_id, lease_epoch=2)
+    document["image_runtime_metadata"]["task"]["image_ref"] = image
+    terminated["message"] = encode_publication_receipt(document)
     job["pods"][0]["metadata"]["ownerReferences"][0]["uid"] = "foreign"
     with pytest.raises(ValueError, match="owned Pod"):
         publication_receipt(job, materialization_id=image_id, lease_epoch=2)
@@ -207,8 +246,21 @@ def test_observation_excludes_raw_messages_and_redacts_bounded_builder_log():
     encoded = json.dumps(result)
     assert "private receipt" not in encoded and "raw-secret" not in encoded
     assert "secretvalue" not in encoded and "othervalue" not in encoded
-    assert len(result["builder_log"]) <= 16384
+    assert 16384 < len(result["builder_log"]) <= _BUILDER_LOG_LIMIT
     assert result["phases"][0]["state"]["terminated"] == {"exitCode": 1, "reason": "Error"}
+
+
+def test_build_failure_message_keeps_the_dockerfile_error_ahead_of_the_wrapper():
+    wrapper = "rootlesskit: child exited: exit status 1\n" * 80
+    log = (
+        "error: failed to solve: process setup.sh did not complete successfully: exit code: 128\n"
+        + wrapper
+        + "password=secretvalue token=othervalue https://user:secret@registry.example/v2\n"
+    )
+    message = _build_failure_message(log)
+    assert message.index("failed to solve") < message.index("rootlesskit")
+    assert "secretvalue" not in message and "othervalue" not in message and "user:secret" not in message
+    assert len(message) > 2000
 
 
 def test_expected_job_accepts_api_defaults_and_equivalent_quantities_but_not_security_mutation():
@@ -339,10 +391,10 @@ async def test_running_build_log_is_read_only_when_explicitly_captured(monkeypat
     observed = await api.observe("builds", "build", capture_logs=True)
     assert len(calls) == 1
     assert calls[0][1] == {
-        "container": "build", "tail_lines": 100, "limit_bytes": 16384, "_request_timeout": 20,
+        "container": "build", "limit_bytes": _BUILDER_LOG_LIMIT, "_request_timeout": 20,
     }
     assert "private-token" not in observed["builder_log"]
-    assert len(observed["builder_log"]) <= 16384
+    assert 16384 < len(observed["builder_log"]) <= _BUILDER_LOG_LIMIT
 
 
 async def test_cleanup_waits_for_exact_job_and_orphan_pods_and_configmap_absence():
@@ -672,3 +724,41 @@ async def test_pool_build_cycle_records_selection_outcome_and_preserves_errors()
     with pytest.raises(LookupError):
         await failing.run_once()
     assert sample("loom_execution_actuator_task_image_build_admissions_total", outcome="error") == errors + 1
+
+
+@pytest.mark.parametrize("log_size", [20000, 300000])
+@pytest.mark.parametrize("failed_phase", ["prepare", "build", "publish", "unrelated"])
+@pytest.mark.parametrize("foreign_pod", [False, True])
+async def test_observe_captures_only_owned_failed_phase_logs(monkeypatch, failed_phase, foreign_pod, log_size):
+    api, clients = fake_api()
+    clients.job["status"] = {"failed": 1}
+    clients.pods[0]["status"] = {
+        "initContainerStatuses": [
+            {"name": phase, "state": {"terminated": {"exitCode": int(phase == failed_phase)}}}
+            for phase in ("prepare", "build")
+        ],
+        "containerStatuses": [
+            {"name": phase, "state": {"terminated": {"exitCode": int(phase == failed_phase)}}}
+            for phase in ("unrelated", "publish")
+        ],
+    }
+    if foreign_pod:
+        clients.pods[0]["metadata"]["ownerReferences"][0]["uid"] = "foreign-job"
+    calls = []
+
+    def read_log(name, namespace, **kwargs):
+        calls.append(kwargs)
+        assert (name, namespace) == ("pod", "builds")
+        return "phase failure token=must-not-retain password=private-value " + "x" * log_size
+
+    monkeypatch.setattr(clients, "read_namespaced_pod_log", read_log, raising=False)
+    observed = await api.observe("builds", "build")
+    if foreign_pod:
+        assert calls == [] and "builder_log" not in observed
+        return
+    assert calls == [{"container": failed_phase if failed_phase != "unrelated" else "build",
+                      "limit_bytes": 256 * 1024, "_request_timeout": 20}]
+    assert "must-not-retain" not in observed["builder_log"] and "private-value" not in observed["builder_log"]
+    if failed_phase in {"prepare", "publish"}:
+        assert observed["builder_log"].startswith(f"[{failed_phase}]\n")
+    assert "phase failure" in observed["builder_log"] and 16384 < len(observed["builder_log"]) <= 256 * 1024

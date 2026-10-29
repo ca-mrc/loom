@@ -162,6 +162,10 @@ The service image pins Alpine 3.23
 [`brotli-libs=1.2.1-r0`](https://pkgs.alpinelinux.org/package/v3.23/main/x86_64/brotli-libs)
 to fix the Brotli CRITICAL finding in its base image. Rebuilt images remain
 subject to the same scanner and report validation.
+The web runtime pins Alpine 3.21 `brotli-libs=1.1.1-r0`, the distribution's
+[fixed package for CVE-2026-111497](https://secdb.alpinelinux.org/v3.21/main.json).
+Updating a compiler does not replace inherited OS libraries; the final web
+image must pass the same scan and non-root SPA startup checks.
 The controlled policy downloads the vulnerability DB from the official
 `ghcr.io/aquasecurity/trivy-db:2` publisher, then
 `public.ecr.aws/aquasecurity/trivy-db:2`, avoiding the GCR pull-through layer.
@@ -625,6 +629,15 @@ explicit table inventory; they cannot administer users/roles, mint tokens, or
 write encrypted credentials. Service and CP retain application DML permissions;
 only the bootstrap/migration job uses the database superuser. Future schema
 changes must update narrower grants alongside their runtime consumers.
+
+Native Harbor preparation revision `0181` adds an immutable recipe identity to
+task-image materializations. Legacy rows retain the empty recipe; new native
+requests select the harness-directory recipe without relabeling frozen claims.
+Pool activation, manager observation and lease census explicitly qualify this
+schema alongside their retained revisions. The legacy manager default remains
+`0176`, and unknown revisions still reject. Apply the schema through the normal
+backup/guard rollout; older binaries are not qualified for new-recipe rows, and
+downgrade refuses while those rows remain.
 
 The actuator's database grants also cover the existing transaction locks and
 invoker-rights triggers used by its command/reconciliation path:
@@ -1221,6 +1234,27 @@ bucket:
 | `blobs` (default) | Content-addressed `task-build-cache/v2/{mat}/{index}/manifest.json` plus shared `task-build-cache/v2/blobs/{sha256}`. Prepare dual-reads legacy `…/{mat}/{index}.tar` on blob miss so mixed rollouts stay warm. Publish uploads only missing digests under the **current** materialization key. |
 | `tar` | Whole-archive path only (instant rollback to pre-blob behavior). |
 
+The component cache budget is 1 GiB of logical file bytes. It is independent
+of the OCI validator's 3 GiB image limit (archive bytes and logical contents,
+or directory contents) and the 4 GiB cache GC target below. Changing one budget
+must not implicitly change either of the others. The OCI validator also owns
+the image limit when publication reads runtime metadata.
+
+For the cache-sizing assessment and the conditions for a 2 GiB pilot, see
+[task-image cache sizing](../architecture/task-image-materialization.md#cache-budget-sizing).
+
+Legacy tar cache transfer distinguishes logical file bytes from transport
+bytes. The existing 1 GiB logical payload and 10,000-entry limits remain in
+effect. Download and unpack allow separately derived headroom for each tar
+header, file padding, bounded PAX/GNU extension records and EOF/record padding;
+an exact-limit payload can therefore round-trip through object storage.
+Extensions are capped at 8 KiB before the standard parser reads them, with
+bounded nesting, aggregate headers and retained global metadata. Sparse
+extensions, links, devices and escaping paths remain unsupported. File data is
+read in 1 MiB chunks and parsed member metadata is released as extraction
+advances. This tar headroom does not increase logical cache capacity, OCI
+archive limits, cache-GC targets or builder resource allocation.
+
 Trim/GC still runs in-process on publish, before the new cache upload. It reads
 every v2 manifest first. If any retained manifest cannot be fetched, read, or
 parsed, the sweep stops and deletes nothing; the Job log emits
@@ -1229,8 +1263,18 @@ it deletes blobs older than 7 days that no manifest names, then evicts the
 oldest past-grace manifests and legacy tars. A blob's bytes count once and are
 reclaimed only when its last manifest reference disappears. Roots and blobs
 newer than 7 days stay. If those protected objects leave the bucket over the
-4 GiB target, the log emits `reason=grace_protected` and the sweep stops. Cache
-errors never mark a materialization ready.
+4 GiB target, the log emits `reason=grace_protected` and the sweep stops.
+Each component's optional cache export has a 1 GiB logical-file-byte budget.
+When a cache tree contains only valid regular files and directories but exceeds
+that budget, publication defers its entire cache export before any cache write,
+with `cache_export` / `deferred` and `reason=byte_budget_exceeded`,
+`logical_bytes` and `budget_bytes`. Required registry images, archives and runtime
+metadata still have to publish successfully. This capacity deferral preserves
+the budget; it does not truncate a cache or increase image/build resource limits.
+The complete cache tree, including directory paths, is validated before that
+decision; its 10,000-entry limit matches the archive transport's bound in both
+transfer modes. Links, special files, invalid paths, excess entries and
+storage/SDK errors remain failures and never mark a materialization ready.
 
 Publishers and GC serialize cache mutations using a conditional S3 lock object
 at `task-build-cache/.mutation-lock`. Each mutation first probes the endpoint's
@@ -1362,6 +1406,11 @@ Skopeo's native digest handling. Registry and storage credentials are absent fro
 the Dockerfile container. Supported task and sidecar components use the same
 path, including declared build arguments and multi-stage targets.
 
+OCI runtime identity reads treat backslashes inside Linux layer filenames as
+literal characters, including systemd's escaped unit names. They do not alias
+`/etc/passwd` or `/etc/group`. Identity traversal, links and whiteouts remain
+checked; the outer OCI blob layout still rejects unsafe paths.
+
 `environment.build_timeout_sec` starts when each BuildKit build command starts;
 it does not include node provisioning, input preparation, scratch cleanup or
 registry publication. `active_deadline_seconds` remains the separate bounded
@@ -1372,6 +1421,23 @@ Build output streams to the container log, with build/cleanup boundary markers.
 The actuator retains a bounded, redacted tail before timeout/cancellation
 cleanup; ordinary polling does not repeatedly fetch logs. A valid completed
 publication is still accepted if its first reconciliation is after the deadline.
+
+Native image publication uses the existing Kubernetes termination message to
+return all registry references, issued immutable archive versions and required
+OCI metadata. Small receipts retain their existing plain JSON. If a complete
+receipt exceeds 4000 bytes, the publisher transports that same JSON losslessly
+as a versioned zlib/base64 envelope; this keeps the 4000-byte application budget
+inside Kubernetes' 4096-byte limit. The controller also accepts existing plain
+receipts. It rejects malformed, truncated, trailing or over-budget compressed
+data before applying the unchanged build identity, Pod ownership, image,
+metadata and archive-binding checks. Decoded data is capped at 128 KiB, covering
+the eight-component archive schema and existing metadata preview limit; the
+metadata preview itself keeps its existing 4000-byte budget. Compression changes
+only transport and does not create another store or grant publication authority.
+Small failure diagnostics remain plain JSON.
+If adding a failure diagnostic cannot fit, the failed publisher keeps its last
+valid progress message, preserving every known image/archive reference for the
+existing recovery path. Its nonzero exit still reports publication failure.
 
 The dedicated build namespace permits the rootless user-namespace helper's
 SETUID/SETGID and unconfined seccomp/AppArmor profiles. This exception does not

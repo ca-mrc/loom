@@ -1081,6 +1081,9 @@ class TaskImageMaterialization(Base):
     """Per-architecture prerequisite, optionally qualified by a strong manifest."""
 
     __tablename__ = "task_image_materializations"
+    # Retained pool schemas predate preparation_revision. Legacy ORM inserts
+    # must not request this newer server default through implicit RETURNING.
+    __mapper_args__ = {"eager_defaults": False}  # noqa: RUF012 -- SQLAlchemy mapper configuration
     __table_args__ = (
         ForeignKeyConstraint(
             ["ready_publication_operation_id", "id"],
@@ -1117,12 +1120,30 @@ class TaskImageMaterialization(Base):
             name="task_image_materializations_manifest_binding_check",
         ),
         CheckConstraint(
-            "bundle_content_manifest_sha256 = '' OR materialization_key = encode(sha256("
-            "convert_to('task-image-materialization-v2', 'UTF8') || decode('00', 'hex') || "
-            "convert_to(task_id, 'UTF8') || decode('00', 'hex') || "
-            "convert_to(task_checksum, 'UTF8') || decode('00', 'hex') || "
-            "convert_to(cpu_arch, 'UTF8') || decode('00', 'hex') || "
-            "convert_to(bundle_content_manifest_sha256, 'UTF8')), 'hex')",
+            """(preparation_revision = '' AND (bundle_content_manifest_sha256 = '' OR materialization_key = encode(sha256(convert_to('task-image-materialization-v2', 'UTF8') ||
+              decode('00', 'hex') ||
+              convert_to(task_id, 'UTF8') ||
+              decode('00', 'hex') ||
+              convert_to(task_checksum, 'UTF8') ||
+              decode('00', 'hex') ||
+              convert_to(cpu_arch, 'UTF8') ||
+              decode('00', 'hex') ||
+              convert_to(bundle_content_manifest_sha256, 'UTF8')), 'hex')))
+            OR (preparation_revision = 'harbor-reference-directory-v1'
+              AND COALESCE(task_config #>> '{upstream_conversion,importer}' = 'loom.harbor-native.v1', false)
+              AND materialization_key = encode(sha256(convert_to('task-image-preparation-v1', 'UTF8') ||
+              decode('00', 'hex') ||
+              convert_to(preparation_revision, 'UTF8') ||
+              decode('00', 'hex') ||
+              convert_to(CASE WHEN bundle_content_manifest_sha256 = '' THEN 'task-image-materialization-v1' ELSE 'task-image-materialization-v2' END, 'UTF8') ||
+              decode('00', 'hex') ||
+              convert_to(task_id, 'UTF8') ||
+              decode('00', 'hex') ||
+              convert_to(task_checksum, 'UTF8') ||
+              decode('00', 'hex') ||
+              convert_to(cpu_arch, 'UTF8') ||
+              CASE WHEN bundle_content_manifest_sha256 = '' THEN ''::bytea ELSE decode('00', 'hex') ||
+              convert_to(bundle_content_manifest_sha256, 'UTF8') END), 'hex'))""",
             name="task_image_materializations_manifest_key_check",
         ),
         CheckConstraint(
@@ -1146,6 +1167,7 @@ class TaskImageMaterialization(Base):
             "task_checksum",
             "cpu_arch",
             "bundle_content_manifest_sha256",
+            "preparation_revision",
             name="task_image_materializations_task_arch_uidx",
         ),
         Index(
@@ -1174,6 +1196,9 @@ class TaskImageMaterialization(Base):
     task_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
     bundle_content_manifest_sha256: Mapped[str] = mapped_column(
         String(64), nullable=False, server_default=text("''"), default="",
+    )
+    preparation_revision: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("''"), deferred=True,
     )
     cpu_arch: Mapped[str] = mapped_column(String(16), nullable=False)
     task_config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)

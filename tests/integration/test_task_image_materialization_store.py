@@ -479,3 +479,45 @@ async def test_retired_same_checksum_rebuild_relocates_collected_source(
         assert all(row.state == "queued" for row in requeued)
         assert all(row.task_source == task.source for row in requeued)
         assert all(row.task_source_provenance == task.source_provenance for row in requeued)
+
+
+async def test_native_recipe_creates_new_image_without_rebinding_ready_legacy_snapshot(materialization_session):
+    from sqlalchemy.orm import aliased
+
+    from loom.task_image_materialization import (
+        current_task_image_reference,
+        task_image_materialization_key,
+    )
+    from loom.task_image_recipe import NATIVE_HARBOR_PREPARATION
+
+    task_id = f"native-recipe/{uuid4()}"
+    values = _task_values(task_id=task_id, checksum="c" * 64)
+    values["config"]["upstream_conversion"] = {
+        "importer": "loom.harbor-native.v1", "original_config": "upstream-task.toml", "changes": [],
+    }
+    old_key = task_image_materialization_key(task_id=task_id, task_checksum="c" * 64, cpu_arch="x86_64")
+    old_id = uuid4()
+    async with materialization_session() as session, session.begin():
+        await session.execute(insert(Task).values(**values))
+        await session.execute(insert(TaskImageMaterialization).values(
+            id=old_id, task_id=task_id, task_checksum="c" * 64, cpu_arch="x86_64",
+            materialization_key=old_key, task_config=values["config"], task_source=values["source"],
+            task_source_provenance={}, state="ready", registry_images={"task": "registry.test/old@sha256:" + "d" * 64},
+        ))
+        task = await session.get(Task, task_id)
+        current, = await ensure_task_image_materializations(session, task_row=task)
+        assert current.id != old_id and current.state == "queued"
+        assert current.materialization_key == task_image_materialization_key(
+            task_id=task_id, task_checksum="c" * 64, cpu_arch="x86_64",
+            preparation_revision=NATIVE_HARBOR_PREPARATION,
+        )
+        assert current.task_config == values["config"] and current.task_source == values["source"]
+        old = await session.get(TaskImageMaterialization, old_id)
+        assert old.state == "ready" and old.materialization_key == old_key
+        assert old.registry_images == {"task": "registry.test/old@sha256:" + "d" * 64}
+        for model in (TaskImageMaterialization, aliased(TaskImageMaterialization)):
+            assert await session.scalar(select(model.id).where(current_task_image_reference(model))) == current.id
+        assert await session.scalar(select(Task.id).where(current_task_image_reference(current))) == task_id
+        assert await session.scalar(select(Task.id).where(current_task_image_reference(old))) is None
+        repeated, = await ensure_task_image_materializations(session, task_row=task)
+        assert repeated.id == current.id

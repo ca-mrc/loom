@@ -85,7 +85,7 @@ async def test_real_native_reader_binds_namespace_job_and_pod_before_returning_r
 
     def read_log(name, namespace, **kwargs):
         calls.append("log")
-        assert kwargs["limit_bytes"] == 16384 and kwargs["tail_lines"] == 100
+        assert kwargs["limit_bytes"] == 256 * 1024 and "tail_lines" not in kwargs
         return "compile output token=must-not-persist"
 
     api = NativeBuildKubernetesApi.__new__(NativeBuildKubernetesApi)
@@ -151,3 +151,43 @@ async def test_cancelled_native_read_finishes_before_its_client_closes(sdk_failu
             await task
         resource.close()
     assert not done and not closed_while_reading
+
+
+@pytest.mark.parametrize("log_size", [20000, 300000])
+@pytest.mark.parametrize("failed_phase", ["prepare", "build", "publish", "unrelated"])
+async def test_pool_reader_preserves_bounded_redacted_actual_failed_phase_log(failed_phase, log_size):
+    runtime, job, pod, namespace = fixture()
+    job["status"] = {"failed": 1}
+    pod["status"] = {
+        "initContainerStatuses": [
+            {"name": phase, "state": {"terminated": {"exitCode": int(phase == failed_phase)}}}
+            for phase in ("prepare", "build")
+        ],
+        "containerStatuses": [
+            {"name": phase, "state": {"terminated": {"exitCode": int(phase == failed_phase)}}}
+            for phase in ("unrelated", "publish")
+        ],
+    }
+    calls = []
+
+    def read_log(name, requested_namespace, **kwargs):
+        calls.append(kwargs)
+        assert (name, requested_namespace) == (pod["metadata"]["name"], runtime.namespace.name)
+        return "failure token=must-not-retain password=private-value " + "x" * log_size
+
+    api = NativeBuildKubernetesApi.__new__(NativeBuildKubernetesApi)
+    api._json = lambda value: copy.deepcopy(value)
+    api._batch = SimpleNamespace(read_namespaced_job=lambda *_args, **_kwargs: job)
+    api._core = SimpleNamespace(
+        read_namespace=lambda *_args, **_kwargs: namespace,
+        list_namespaced_pod=lambda *_args, **_kwargs: {"apiVersion": "v1", "kind": "PodList", "items": [pod]},
+        read_namespaced_pod=lambda *_args, **_kwargs: pod,
+        read_namespaced_pod_log=read_log,
+    )
+    result = await api.observe_pool(runtime)
+    assert calls == [{"container": failed_phase if failed_phase != "unrelated" else "build",
+                      "limit_bytes": 256 * 1024, "_request_timeout": 20}]
+    assert "must-not-retain" not in result["builder_log"] and "private-value" not in result["builder_log"]
+    if failed_phase in {"prepare", "publish"}:
+        assert result["builder_log"].startswith(f"[{failed_phase}]\n")
+    assert "failure" in result["builder_log"] and 16384 < len(result["builder_log"]) <= 256 * 1024

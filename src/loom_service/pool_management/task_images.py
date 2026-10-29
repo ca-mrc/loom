@@ -60,7 +60,8 @@ def prepare_pool_task_image(request: PoolTaskImagePrepareV1, *, participant: Poo
     config = replace(settings.job_config(), active_deadline_seconds=remaining)
     lease_epoch = request.build.expected_lease_epoch + 1
     configmap, job = render_task_image_job(materialization_id=request.key.local_work_id, lease_epoch=lease_epoch,
-        claim=claim, components=derive_task_image_build_components(claim["task_config"]), target=profile.target, config=config)
+        claim=claim, components=derive_task_image_build_components(claim["task_config"]), target=profile.target,
+        config=config, preserve_active_deadline=True)
     return bind_native_build(configmap=configmap, job=job, reservation_id=reservation_id,
         target=profile.target, namespace_uid=participant.build_namespace.uid, lease_epoch=lease_epoch,
         deadline_at=request.deadline_at, runtime_class_overhead=profile.runtime_class_overhead,
