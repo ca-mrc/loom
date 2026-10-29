@@ -77,7 +77,6 @@ def test_completed_release_is_the_next_receipt_selected_predecessor(
         return loader(reference=retained.reference, state_root=retained.state_dir.parent,
             anchor_dir=retained.anchor_dir)
 
-    baseline = successor
     record_path = retained.state_dir / 'completion/release.json'
     source = record_path.read_bytes()
     for status in ('prepared', 'release_intent'):
@@ -100,7 +99,7 @@ def test_completed_release_is_the_next_receipt_selected_predecessor(
         with pytest.raises(ValueError, match='completed participant'):
             load()
         private_state._atomic_json(path, json.loads(original))
-    assert load() == baseline
+    assert load() == successor
 
     # Prepare another real release using the receipt-derived starting point,
     # including the updated manager/catalog and the unchanged peer.

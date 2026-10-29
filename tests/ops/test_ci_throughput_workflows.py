@@ -1005,6 +1005,8 @@ def test_repository_checks_keeps_four_gate_contract_with_staged_execution() -> N
         "tests_packages", "runtime_payload", "nebius_iac", "go_checks",
         "integration", "integration_docker", "coverage_summary", "web_checks", "web_runtime",
     ), "true")
+    for selected, output in zip(REPOSITORY_SELECTED_RESULTS, outputs, strict=True):
+        assert step["env"][selected] == f"${{{{ needs.workflow-plan.outputs.{output} }}}}"
     outputs.update(gate_mode="full", docs_only="false")
     assert sources == set(gate["needs"])
     assert "always()" in gate["if"]

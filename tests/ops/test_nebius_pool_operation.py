@@ -174,7 +174,6 @@ def _completed_template_resume(operation, monkeypatch):
 def test_completed_template_resume_enters_fresh_role_qualification(operation, monkeypatch):
     from scripts.ops import nebius_pool_operation as target
     from scripts.ops import nebius_pool_role_restoration as roles
-    from scripts.ops.nebius_pool_operation import PoolOperationError
 
     state, runtime = _completed_template_resume(operation, monkeypatch)
 
@@ -188,7 +187,7 @@ def test_completed_template_resume_enters_fresh_role_qualification(operation, mo
         document = json.loads(original)
         document['unexpected'] = True
         path.write_text(json.dumps(document))
-        with pytest.raises(PoolOperationError) as error:
+        with pytest.raises(target.PoolOperationError) as error:
             state.run('rollback')
         assert error.value.stage == 'pool_template_restoration'
         assert not (state.parent.state_dir / 'role-restoration.json').exists()
