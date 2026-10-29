@@ -8253,6 +8253,13 @@ class LlmCall(Base):
     )
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
     rate_card_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    # #2687 (migration 0182): insert-time copies of the provider_extras cost
+    # and usage keys, so usage aggregates never parse the raw-log JSON. ''
+    # means the key was absent; NULL means a row written before 0182, which
+    # readers resolve from provider_extras instead.
+    cost_source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cost_confidence: Mapped[str | None] = mapped_column(Text, nullable=True)
+    usage_status: Mapped[str | None] = mapped_column(Text, nullable=True)
     captured_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,
