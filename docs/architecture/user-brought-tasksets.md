@@ -257,7 +257,10 @@ when `[task].name` is absent. The task directory supplies a missing id and
 name. Omitted `os` becomes `linux`. A missing verifier mode follows the files:
 `tests/Dockerfile` or `[verifier.environment]` is a separate verifier image,
 and neither is shared grading in the agent sandbox. A value the file actually
-sets is kept, including timeouts, network policy, and `environment_mode`.
+sets is kept, including timeouts, network policy, `environment_mode`, and a
+verifier script path. The native bridge is installed only when that path is
+still the default Harbor script; an authored `verifier/custom.sh` is not
+replaced.
 CPU, memory, and storage omitted from a verifier image are copied from the
 agent environment, because the independent verifier planner requires them.
 The materialized row records `upstream_conversion` so a separate verifier image

@@ -355,6 +355,20 @@ def _compatibility_issue_error(
     }
 
 
+def _uses_native_verifier_bridge(config: dict[str, Any]) -> bool:
+    """True when the projected verifier is still the default Harbor script."""
+    verifier = config.get("verifier")
+    if not isinstance(verifier, dict):
+        return False
+    args = verifier.get("args")
+    if not isinstance(args, dict):
+        return False
+    return (
+        verifier.get("name") == "script"
+        and args.get("script_path") == DEFAULT_VERIFIER_SCRIPT_PATH
+    )
+
+
 def _inherit_omitted_verifier_resources(config: dict[str, Any]) -> list[str]:
     """Copy agent CPU, memory, and storage onto a verifier image that omitted them.
 
@@ -503,20 +517,19 @@ def _materialize_bundle_upload(
                         raw_cfg = project_declared_terminal_bench_task(
                             raw_cfg, task_id=contextual_id,
                         )
-                        prepare_harbor_bundle(bundle_dir, raw_cfg)
-                        _stamp_terminal_bench_conversion(raw_cfg, bundle_dir)
-                        native_bridge = True
+                        # An authored script path or verifier name wins. The
+                        # bridge rewrites script_path, so install it only for
+                        # the default Harbor script, matching auto.
+                        if _uses_native_verifier_bridge(raw_cfg):
+                            prepare_harbor_bundle(bundle_dir, raw_cfg)
+                            _stamp_terminal_bench_conversion(raw_cfg, bundle_dir)
+                            native_bridge = True
                     elif declared_format != "loom":
                         harbor_source = is_terminal_bench_shape(raw_cfg)
                         raw_cfg = normalize_terminal_bench_task_toml(
                             raw_cfg, task_id=contextual_id,
                         )
-                        if (
-                            harbor_source
-                            and raw_cfg["verifier"].get("name") == "script"
-                            and raw_cfg["verifier"].get("args", {}).get("script_path")
-                            == DEFAULT_VERIFIER_SCRIPT_PATH
-                        ):
+                        if harbor_source and _uses_native_verifier_bridge(raw_cfg):
                             prepare_harbor_bundle(bundle_dir, raw_cfg)
                             native_bridge = True
                     task_config = normalize_steps(TaskConfig.model_validate(raw_cfg))

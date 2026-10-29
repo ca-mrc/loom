@@ -139,6 +139,24 @@ def test_terminal_bench_child_shape_materializes_and_hands_off_artifacts(tmp_pat
     assert validate_purpose_trial_config("trajectory_generation", {"skip_verifier": True}) is None
 
 
+def test_terminal_bench_preserves_an_authored_verifier_script(tmp_path):
+    authored = _TB2_TOML + b"""
+[verifier]
+name = "script"
+[verifier.args]
+script_path = "verifier/custom.sh"
+"""
+    files = _base_files(authored, verifier_dockerfile=False)
+    files["family/child/verifier/custom.sh"] = b"echo custom\n"
+    for task_toml_format in ("auto", "terminal-bench"):
+        result, store = _materialize(tmp_path, files, task_toml_format=task_toml_format)
+        assert result.status == "ready", result.error_summary
+        row = result.task_rows[0]
+        assert row.config["verifier"]["args"]["script_path"] == "verifier/custom.sh", task_toml_format
+        assert row.config.get("upstream_conversion") is None
+        assert not any(key.endswith("verifier/run.sh") for key in store.objects)
+
+
 def test_authored_task_identity_wins_over_the_directory(tmp_path):
     toml = _TB2_TOML.replace(
         b'[metadata]\n',
