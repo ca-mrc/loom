@@ -163,31 +163,31 @@ from tests.ops.test_nebius_development_pool_retained import system_kubectl as sy
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
-@pytest.mark.parametrize('ambient', ['protected', 'untrusted', 'missing-system-tool'])
 def test_runtime_probe_finds_system_kubectl_without_trusting_ambient_path(
-        completed_pool, publisher_cloud, monkeypatch, tmp_path, ambient, system_kubectl):
+        completed_pool, publisher_cloud, monkeypatch, tmp_path, system_kubectl):
     from scripts.ops import nebius_development_runtime_probes as module
 
     _, request = runtime_install_request(completed_pool, publisher_cloud)
     system, untrusted = system_kubectl
-    if ambient == 'missing-system-tool':
-        (system / 'kubectl').unlink()
-    monkeypatch.setenv('PATH', module.os.defpath if ambient == 'protected' else str(untrusted))
-    arguments = dict(request=request,
-        api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
-        ssl_context=ssl.create_default_context(
-            cadata=request.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt']),
-        token='operator-test')
-    if ambient == 'missing-system-tool':
-        with pytest.raises(ValueError, match='probe transport unavailable'):
-            with module.HTTPSDevelopmentRuntimeProbes(**arguments):
-                pass
-        return
-    with module.HTTPSDevelopmentRuntimeProbes(**arguments) as probes:
-        assert probes.prefix[0] == str(system / 'kubectl')
-        connection = Path(probes.prefix[probes.prefix.index('--kubeconfig') + 1])
-        assert connection.is_file() and connection.stat().st_mode & 0o077 == 0
-    assert not connection.exists()
+    for ambient in ('protected', 'untrusted', 'missing-system-tool'):
+        if ambient == 'missing-system-tool':
+            (system / 'kubectl').unlink()
+        monkeypatch.setenv('PATH', module.os.defpath if ambient == 'protected' else str(untrusted))
+        arguments = dict(request=request,
+            api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+            ssl_context=ssl.create_default_context(
+                cadata=request.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt']),
+            token='operator-test')
+        if ambient == 'missing-system-tool':
+            with pytest.raises(ValueError, match='probe transport unavailable'):
+                with module.HTTPSDevelopmentRuntimeProbes(**arguments):
+                    pass
+            continue
+        with module.HTTPSDevelopmentRuntimeProbes(**arguments) as probes:
+            assert probes.prefix[0] == str(system / 'kubectl')
+            connection = Path(probes.prefix[probes.prefix.index('--kubeconfig') + 1])
+            assert connection.is_file() and connection.stat().st_mode & 0o077 == 0
+        assert not connection.exists()
 
 
 
@@ -455,30 +455,30 @@ def test_runtime_https_fixed_phases_use_real_journal_and_never_emit_staging_or_w
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
-@pytest.mark.parametrize('damage', ['other-phase', 'foreign-namespace', 'write-verb', 'missing-marker'])
-def test_runtime_https_rejects_unbound_writes_before_transport(completed_pool, publisher_cloud, damage):
+def test_runtime_https_rejects_unbound_writes_before_transport(completed_pool, publisher_cloud):
     from scripts.ops.nebius_management_stage import _MARKER
 
     runtime, request = runtime_install_request(completed_pool, publisher_cloud)
     plan, calls = runtime.prepare_runtime_install(request), []
-    document = copy.deepcopy(next(row for row in plan.fixed['authority'].values() if row['kind'] == 'Role'))
-    if damage == 'other-phase':
-        document = copy.deepcopy(next(iter(plan.fixed['material'].values())))
-    elif damage == 'foreign-namespace':
-        document['metadata']['namespace'] = 'loom-staging'
-    elif damage == 'write-verb':
-        document['rules'][0]['verbs'].append('create')
-    if damage != 'missing-marker':
-        document['metadata'].setdefault('annotations', {})[_MARKER] = str(uuid4())
     with runtime_resources_api(request, 'authority', lambda *_: None) as api:
         api.client.close()
         def transport(message):
             calls.append(message)
             return httpx.Response(201, json=document)
         api.client = type(completed_pool[3].api.client)(base_url=api.api_server, transport=httpx.MockTransport(transport))
-        with pytest.raises(ValueError, match='outside fixed development runtime phase'):
-            api.create_resource(document)
-    assert not calls
+        for damage in ('other-phase', 'foreign-namespace', 'write-verb', 'missing-marker'):
+            document = copy.deepcopy(next(row for row in plan.fixed['authority'].values() if row['kind'] == 'Role'))
+            if damage == 'other-phase':
+                document = copy.deepcopy(next(iter(plan.fixed['material'].values())))
+            elif damage == 'foreign-namespace':
+                document['metadata']['namespace'] = 'loom-staging'
+            elif damage == 'write-verb':
+                document['rules'][0]['verbs'].append('create')
+            if damage != 'missing-marker':
+                document['metadata'].setdefault('annotations', {})[_MARKER] = str(uuid4())
+            with pytest.raises(ValueError, match='outside fixed development runtime phase'):
+                api.create_resource(document)
+            assert not calls
 
 
 
@@ -554,30 +554,30 @@ def test_runtime_workload_https_binds_uid_version_and_spec_before_patch(complete
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
-@pytest.mark.parametrize('damage', ['target', 'uid', 'spec', 'foreign-key'])
-def test_runtime_workload_https_refuses_unbound_transition_before_io(completed_pool, publisher_cloud, damage):
+def test_runtime_workload_https_refuses_unbound_transition_before_io(completed_pool, publisher_cloud):
     runtime, request = runtime_install_request(completed_pool, publisher_cloud)
     plan, calls = runtime.prepare_runtime_install(request), []
-    key = 'Deployment:loom-dev:loom-control-plane'
-    before, desired = copy.deepcopy(plan.originals[key]), copy.deepcopy(plan.stopped[key])
-    before['metadata']['resourceVersion'] = '71'
-    if damage == 'target':
-        desired['spec']['replicas'] = 1
-    elif damage == 'uid':
-        before['metadata']['uid'] = str(uuid4())
-    elif damage == 'spec':
-        before['spec']['replicas'] = 5
-    else:
-        key = 'Deployment:loom-staging:loom-control-plane'
     with runtime_workloads_api(request, lambda *_: None, lambda *_: True) as api:
         api.client.close()
         def transport(message):
             calls.append(message)
             return httpx.Response(200, json=before)
         api.client = type(completed_pool[3].api.client)(base_url=api.api_server, transport=httpx.MockTransport(transport))
-        with pytest.raises(ValueError, match='development runtime workload update unconfirmed'):
-            api.patch_workload(key, before, desired)
-    assert not calls
+        for damage in ('target', 'uid', 'spec', 'foreign-key'):
+            key = 'Deployment:loom-dev:loom-control-plane'
+            before, desired = copy.deepcopy(plan.originals[key]), copy.deepcopy(plan.stopped[key])
+            before['metadata']['resourceVersion'] = '71'
+            if damage == 'target':
+                desired['spec']['replicas'] = 1
+            elif damage == 'uid':
+                before['metadata']['uid'] = str(uuid4())
+            elif damage == 'spec':
+                before['spec']['replicas'] = 5
+            else:
+                key = 'Deployment:loom-staging:loom-control-plane'
+            with pytest.raises(ValueError, match='development runtime workload update unconfirmed'):
+                api.patch_workload(key, before, desired)
+            assert not calls
 
 
 
@@ -784,15 +784,15 @@ def test_runtime_database_delivery_keeps_old_data_identity_and_separates_credent
 
 
 
-@pytest.mark.parametrize('changes', [{'operation_id': UUID(int=0)},
-    {'actuator_password': 'too-short'}, {'batch_runner_token': 'wrong-kind-' + 'r' * 64}])
-def test_runtime_database_delivery_refuses_invalid_material(completed_pool, changes):
+def test_runtime_database_delivery_refuses_invalid_material(completed_pool):
     # This protects the pre-write boundary, not merely the eventual SQL failure.
     name = 'scripts.ops.nebius_development_runtime_setup'
     if importlib.util.find_spec(name) is None:
         pytest.fail('fixed development runtime database delivery is missing')
-    with pytest.raises(ValueError, match='development runtime database delivery unqualified'):
-        database_runtime(completed_pool, **changes)
+    for changes in ({'operation_id': UUID(int=0)}, {'actuator_password': 'too-short'},
+            {'batch_runner_token': 'wrong-kind-' + 'r' * 64}):
+        with pytest.raises(ValueError, match='development runtime database delivery unqualified'):
+            database_runtime(completed_pool, **changes)
 
 
 

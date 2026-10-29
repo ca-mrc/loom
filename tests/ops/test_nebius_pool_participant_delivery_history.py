@@ -30,6 +30,7 @@ def test_completed_release_is_the_next_receipt_selected_predecessor(
     import ssl
 
     import httpx
+    from scripts.ops import nebius_certificates as private_state
     from scripts.ops import nebius_pool_participant_completion as completion
     from scripts.ops import nebius_shared_pool_forward_census as census
     from scripts.ops.nebius_ingress_stage import _key, _uid
@@ -71,6 +72,35 @@ def test_completed_release_is_the_next_receipt_selected_predecessor(
     assert retained.state_dir / 'completion/release.json' in successor.history
     assert retained.state_dir / 'pool-refresh/dispatch.json' in successor.history
     assert retained.state_dir.parent / 'latest.json' not in successor.history
+
+    def load():
+        return loader(reference=retained.reference, state_root=retained.state_dir.parent,
+            anchor_dir=retained.anchor_dir)
+
+    baseline = successor
+    record_path = retained.state_dir / 'completion/release.json'
+    source = record_path.read_bytes()
+    for status in ('prepared', 'release_intent'):
+        record = json.loads(source)
+        record['status'] = status
+        private_state._atomic_json(record_path, record)
+        with pytest.raises(ValueError, match='completed participant'):
+            load()
+    private_state._atomic_json(record_path, json.loads(source))
+    for path in (record_path, retained.anchor_dir / (str(retained.reference.operation_id) + '-completion.json'),
+            retained.state_dir / 'pool-refresh/dispatch.json', retained.state_dir / 'inputs.json',
+            next(iter(retained.inputs.history))):
+        original = path.read_bytes()
+        path.unlink()
+        with pytest.raises(ValueError, match='completed participant'):
+            load()
+        assert not path.exists(), 'history loading must not recreate missing evidence'
+        private_state._write_private(path, original)
+        private_state._atomic_json(path, {'altered': True})
+        with pytest.raises(ValueError, match='completed participant'):
+            load()
+        private_state._atomic_json(path, json.loads(original))
+    assert load() == baseline
 
     # Prepare another real release using the receipt-derived starting point,
     # including the updated manager/catalog and the unchanged peer.
@@ -146,48 +176,6 @@ def test_completed_release_is_the_next_receipt_selected_predecessor(
     with pytest.raises(ValueError, match='predecessor'):
         original_loader(initial=operation_inputs['predecessor'], retained=following)
     assert not marker.exists(), 'recovery loading must not reconstruct a lost predecessor anchor'
-
-
-@pytest.mark.timeout(120)
-def test_completed_predecessor_rejects_pending_or_changed_history(
-        operation_inputs, connection, tmp_path, monkeypatch):
-    from scripts.ops import nebius_certificates as private_state
-    from scripts.ops import nebius_pool_participant_completion as completion
-
-    _exercise_release(
-        operation_inputs, connection, tmp_path, monkeypatch, recover=False, file_writes=True)
-    loader = getattr(completion, 'load_completed_participant_rollout', None)
-    assert callable(loader), 'a released flag alone is not completed predecessor evidence'
-    retained = connection[0].retained
-
-    def load():
-        return loader(reference=retained.reference, state_root=retained.state_dir.parent,
-            anchor_dir=retained.anchor_dir)
-
-    baseline = load()
-    record_path = retained.state_dir / 'completion/release.json'
-    source = record_path.read_bytes()
-    for status in ('prepared', 'release_intent'):
-        record = json.loads(source)
-        record['status'] = status
-        private_state._atomic_json(record_path, record)
-        with pytest.raises(ValueError, match='completed participant'):
-            load()
-    private_state._atomic_json(record_path, json.loads(source))
-    for path in (record_path, retained.anchor_dir / (str(retained.reference.operation_id) + '-completion.json'),
-            retained.state_dir / 'pool-refresh/dispatch.json', retained.state_dir / 'inputs.json',
-            next(iter(retained.inputs.history))):
-        original = path.read_bytes()
-        path.unlink()
-        with pytest.raises(ValueError, match='completed participant'):
-            load()
-        assert not path.exists(), 'history loading must not recreate missing evidence'
-        private_state._write_private(path, original)
-        private_state._atomic_json(path, {'altered': True})
-        with pytest.raises(ValueError, match='completed participant'):
-            load()
-        private_state._atomic_json(path, json.loads(original))
-    assert load() == baseline
 
 
 @pytest.mark.timeout(180)

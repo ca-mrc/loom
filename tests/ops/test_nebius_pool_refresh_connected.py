@@ -67,30 +67,6 @@ def pooled_refresh(private_cutover, connected_refresh):
 
 
 @pytest.mark.timeout(900)
-def test_connected_pool_refresh_completes_without_restoring_other_writers(pooled_refresh):
-    from scripts.ops.nebius_management_refresh_install import ManagementRefreshInstallError
-    from tests.ops.test_nebius_management_refresh_connected import run, writes
-
-    api, state, external, retained = pooled_refresh
-    external.failure = 'credentials'
-    with pytest.raises(ManagementRefreshInstallError):
-        run((api, state))
-    assert not writes(state)
-    external.failure = None
-    assert run((api, state))['status'] == 'management_refreshed'
-    mutations = writes(state)
-    assert len([row for row in mutations if row[0] == 'PATCH']) == 2
-    assert state.public_calls and state.storage_calls
-    assert {key: state.values[key] for key in retained} == retained
-    assert run((api, state))['status'] == 'management_refreshed'
-    assert writes(state) == mutations
-    external.failure = 'gateway_rights'
-    with pytest.raises(ManagementRefreshInstallError):
-        api.verify_public(state.request, state.directory)
-    assert writes(state) == mutations
-
-
-@pytest.mark.timeout(900)
 @pytest.mark.parametrize('boundary', ['create', 'retire', 'activate', 'activation_callback'])
 def test_connected_pool_refresh_rechecks_authority_at_real_write_barriers(pooled_refresh, monkeypatch, boundary):
     from scripts.ops.nebius_management_refresh_install import ManagementRefreshInstallError
@@ -208,7 +184,12 @@ def test_connected_pool_refresh_supersedes_failed_probe_without_resetting_pool_h
     from tests.ops.test_nebius_management_refresh_predecessor import checksum
     from tests.ops.test_nebius_management_refresh_supersession import rewrite_inputs
 
-    old_api, state, _, retained = pooled_refresh
+    old_api, state, external, retained = pooled_refresh
+    external.failure = 'credentials'
+    with pytest.raises(ManagementRefreshInstallError):
+        run((old_api, state))
+    assert not writes(state)
+    external.failure = None
     state.fail_probe = 'shared-probe'
     with pytest.raises(ManagementRefreshInstallError) as error:
         run((old_api, state))
@@ -231,9 +212,18 @@ def test_connected_pool_refresh_supersedes_failed_probe_without_resetting_pool_h
                 predecessor=selected.predecessor, superseded=selected.superseded, state_dir=state.directory,
                 api_server=old_api.api_server, ssl_context=old_api.ssl_context, token=old_api.token,
                 runtime_ca_pem=None, checks=old_api.checks, pool=verifier) as api:
+            previous_mutations = len(writes(state))
+            previous_public, previous_storage = len(state.public_calls), len(state.storage_calls)
             assert run((api, state))['status'] == 'management_refreshed'
             mutations = writes(state)
+            assert len([row for row in mutations[previous_mutations:] if row[0] == 'PATCH']) == 2
+            assert len(state.public_calls) > previous_public and len(state.storage_calls) > previous_storage
+            assert {key: state.values[key] for key in retained} == retained
             assert run((api, state))['status'] == 'management_refreshed'
+            assert writes(state) == mutations
+            external.failure = 'gateway_rights'
+            with pytest.raises(ManagementRefreshInstallError):
+                api.verify_public(state.request, state.directory)
             assert writes(state) == mutations
     assert state.manager['spec']['replicas'] == 1
     assert {path: path.read_bytes() for path in frozen} == frozen

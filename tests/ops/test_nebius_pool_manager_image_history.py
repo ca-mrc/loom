@@ -516,22 +516,12 @@ def test_manager_image_switch_recovers_each_local_persistence_boundary(image_rep
         assert api.calls == ["isolate", "stop", "template", "start"]
 
 
-def test_prepared_image_correction_blocks_activation_even_with_ready_old_runtime(image_repair_case):
-    from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
-
-    context, remote, state, anchor, _ = image_repair_case
-    persist(entry(image_repair_case))
-    remote.activation.ready = True
-    with pytest.raises(ValueError):
-        advance_pool_activation(request=context.request, api=remote.activation, state_dir=state, anchor_dir=anchor)
-    assert remote.activation.calls == [] and remote.activation.mode == "closed"
-
-
 def test_bound_image_operation_completes_original_pool_and_unbound_install_refuses(image_repair_case, monkeypatch):
     from types import SimpleNamespace
 
     from scripts.ops import nebius_pool_operation as target
     from scripts.ops.nebius_ingress_stage import _key
+    from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
     from scripts.ops.nebius_pool_completion import load_pool_completion
     from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1, load_completed_pool
     from scripts.ops.nebius_pool_startup import closed_startup_documents
@@ -544,6 +534,9 @@ def test_bound_image_operation_completes_original_pool_and_unbound_install_refus
     monkeypatch.setattr(target, "HTTPSPoolActivationAPI", lambda **kwargs: remote.activation)
     remote.activation.ready = True
     persist(entry(image_repair_case))
+    with pytest.raises(ValueError):
+        advance_pool_activation(request=context.request, api=remote.activation, state_dir=state, anchor_dir=anchor)
+    assert remote.activation.calls == [] and remote.activation.mode == "closed"
     with pytest.raises(target.PoolOperationError):
         target.run_pool_operation(parent=parent, tokens=context.tokens, action="install")
     assert remote.activation.calls == []
