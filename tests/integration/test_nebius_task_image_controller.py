@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, event, select
 
 from loom.db.schema import (
     ServiceExecutionClass,
@@ -773,3 +774,62 @@ async def test_node_loss_read_rechecks_build_progress_and_identity(controller_se
         assert row.failure_reason is None
     assert not kube.delete_calls
     assert not attempts[0].native_build.get("capacity_released_at")
+
+
+async def test_burst_admits_one_build_per_cycle_after_reconciling_every_running_build(controller_setup, monkeypatch):
+    """#2625: a burst ramps one claim per poll, behind a reconcile of all running builds.
+
+    Set LOOM_NATIVE_BUILD_BURST and LOOM_NATIVE_BUILD_BURST_KUBE_LATENCY_MS and
+    run with -s to print per-cycle timings for a larger, slower-API burst.
+    """
+    controller, sessions, team_id, kube = controller_setup
+    burst = int(os.environ.get("LOOM_NATIVE_BUILD_BURST", "6"))
+    latency = float(os.environ.get("LOOM_NATIVE_BUILD_BURST_KUBE_LATENCY_MS", "0")) / 1000
+    controller.settings = controller.settings.model_copy(update={"max_concurrent": None})
+    for _ in range(burst):
+        await seed_image(sessions, team_id)
+    observed = []
+
+    def delayed(original):
+        async def call(*args, **kwargs):
+            if original.__name__ == "observe":
+                observed.append(args[1])
+            await asyncio.sleep(latency)
+            return await original(*args, **kwargs)
+        return call
+
+    for name in ("inventory", "ensure", "observe"):
+        monkeypatch.setattr(kube, name, delayed(getattr(kube, name)))
+    locks = []
+
+    def count_lock(conn, cursor, statement, parameters, context, executemany):
+        if "execution-capacity-mutation" in statement:
+            locks.append(statement)
+
+    engine = sessions.kw["bind"].sync_engine
+    event.listen(engine, "before_cursor_execute", count_lock)
+    cycles = []
+    monkeypatch.setattr(MODULE + ".record_build_cycle", lambda controller, **cycle: cycles.append(cycle))
+    try:
+        per_cycle = []
+        for _ in range(burst + 1):
+            before = len(observed), len(locks)
+            await controller.run_once()
+            per_cycle.append((len(observed) - before[0], len(locks) - before[1]))
+    finally:
+        event.remove(engine, "before_cursor_execute", count_lock)
+    print("\ncycle outstanding outcome reconcile_s admission_s observes capacity_locks")
+    for index, (cycle, (observes, lock_count)) in enumerate(zip(cycles, per_cycle, strict=True)):
+        print(f"{index:5d} {cycle['outstanding']:11d} {cycle['outcome']:7s} {cycle['reconcile_seconds']:11.3f} "
+              f"{cycle['admission_seconds']:11.3f} {observes:8d} {lock_count:14d}")
+    assert [cycle["outcome"] for cycle in cycles] == ["claimed"] * burst + ["idle"]
+    assert [cycle["outstanding"] for cycle in cycles] == list(range(burst + 1))
+    assert len(kube.jobs) == burst
+    # Every running build costs one observation and a fixed number of global
+    # capacity-lock transactions per poll, before the poll's only admission.
+    assert [observes for observes, _ in per_cycle] == [outstanding + 1 for outstanding in range(burst)] + [burst]
+    lock_counts = [lock_count for _, lock_count in per_cycle]
+    per_build = lock_counts[1] - lock_counts[0]
+    assert per_build > 0
+    assert lock_counts[:burst] == [lock_counts[0] + per_build * outstanding for outstanding in range(burst)]
+    assert lock_counts[-1] == per_build * burst + 1  # the idle cycle's empty claim
