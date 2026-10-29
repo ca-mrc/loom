@@ -1259,6 +1259,11 @@ bucket:
 | `blobs` (default) | Content-addressed `task-build-cache/v2/{mat}/{index}/manifest.json` plus shared `task-build-cache/v2/blobs/{sha256}`. Prepare dual-reads legacy `…/{mat}/{index}.tar` on blob miss so mixed rollouts stay warm. Publish uploads only missing digests under the **current** materialization key. |
 | `tar` | Whole-archive path only (instant rollback to pre-blob behavior). |
 
+Cache publishers batch remote mark-and-sweep collection using a conservative
+checkpoint; ordinary publications do not scan retained manifests. See
+[task-image cache GC](task-image-cache-gc.md) for batch limits, mixed-version
+rollout/rollback, conditional-write requirements and failure recovery.
+
 The component cache budget is 1 GiB of logical file bytes. It is independent
 of the OCI validator's 3 GiB image limit (archive bytes and logical contents,
 or directory contents) and the 4 GiB cache GC target below. Changing one budget

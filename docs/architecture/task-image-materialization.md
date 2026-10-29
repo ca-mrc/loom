@@ -7,6 +7,16 @@ part of the separate local-development path.
 
 ## Identity and admission
 
+Published OCI environment defaults are task-owned data. After they are merged
+with authored overrides, execution compatibility uses `validate_task_environment`,
+including the combined entry count, value bounds and reserved platform/proxy
+names. Fixture names such as `PASSWORD` remain available to the private task
+sandbox. Setup, agent and verifier controllers keep the strict process contract:
+they receive resolved task metadata through the typed environment handoff,
+without adopting `PASSWORD` as a direct controller environment variable.
+Qualification follows an actual OCI publication through prepared-task admission,
+plan compilation, container rendering and native sandbox command execution.
+
 `loom.task_image_materialization` records content-addressed task inputs and
 architecture-specific materializations. Task registration and submission ensure
 required materializations exist. Frozen task configuration and bundle identity

@@ -1852,7 +1852,8 @@ def test_trim_does_not_discard_roots_when_grace_prevents_reclaim(capsys):
                 "LastModified": now-timedelta(days=1)} for key,value in objects.items()]
     cache = FakeS3(dict(objects), listing=listing)
     runtime.trim_cache(cache, "cache", 0)
-    assert cache.objects == objects
+    assert {key: body for key, body in cache.objects.items() if key != runtime._CACHE_GC_CHECKPOINT} == objects
+    assert json.loads(cache.objects[runtime._CACHE_GC_CHECKPOINT])["retained_bytes"] > runtime._CACHE_TOTAL_BYTES
     assert "grace_protected" in capsys.readouterr().out
 
 
