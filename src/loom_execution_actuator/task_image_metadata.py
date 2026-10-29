@@ -18,6 +18,7 @@ from typing import IO, Any, Literal, Protocol
 
 import zstandard
 
+from loom.runtime_environment import TASK_IMAGE_ENVIRONMENT_REJECTION
 from loom.task_image_metadata import TaskImageRuntimeMetadataV1
 from loom_execution_actuator import task_image_oci as oci
 
@@ -237,5 +238,30 @@ def read_task_image_runtime_metadata(
                     _layer_identity(stream, descriptor["mediaType"], state, budget)
             return _resolve(config, state)
     except (ValueError, TypeError, KeyError, OSError, EOFError, tarfile.TarError,
-            zstandard.ZstdError, zlib.error, RecursionError):
+            zstandard.ZstdError, zlib.error, RecursionError) as error:
+        safe = _safe_environment_rejection(error)
+        if safe is not None:
+            raise ValueError(safe) from None
         raise ValueError(_FAILURE) from None
+
+
+def _safe_environment_rejection(error: BaseException) -> str | None:
+    """Keep a reserved-name phrase. Drop every other validator detail and the value."""
+
+    errors = getattr(error, "errors", None)
+    if not callable(errors):
+        return None
+    try:
+        items = errors()
+    except Exception:
+        return None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        message = item.get("msg")
+        if not isinstance(message, str):
+            continue
+        message = message.removeprefix("Value error, ").strip()
+        if TASK_IMAGE_ENVIRONMENT_REJECTION.fullmatch(message):
+            return message
+    return None

@@ -23,11 +23,13 @@ from uuid import UUID
 from loom.agent.subprocess import SubprocessAgent
 from loom.agent.terminus2.runtime import LoomTerminus2Runtime
 from loom.driver.base import Driver
+from loom.driver.mainland_proxy import MainlandProxyGateway, MainlandProxySettings
 from loom.errors import AgentError
 from loom.models.result import TrialResult
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
 from loom.trajectory.storage import ObjectStore
+from loom.trial.phase_network import controlled_tool_policy_setter
 from loom.trial.trial import Trial, TrialContext
 from loom.verifier.factory import task_verifier_factory
 from loom_cli.agent_factory import build_agent_factory
@@ -56,6 +58,7 @@ class LocalRunner:
     local_providers: dict[str, LocalProvider] = field(default_factory=dict)
 
     trial_config: TrialConfig | None = None
+    mainland_proxy_factory: Callable[[], MainlandProxyGateway] | None = None
 
     async def run(self) -> TrialResult:
         # TrialConfig requires agent_name + agent_model. In CLI mode (no API
@@ -107,8 +110,32 @@ class LocalRunner:
             # factory the CLI used for the agent sandbox (#2418).
             verifier_driver_factory=self.driver_factory,
         )
-        trial = Trial(ctx=ctx, state_patch=None)
-        result = await trial.run()
+        tool_gateway: MainlandProxyGateway | None = None
+        try:
+            if cfg.mainland_proxy:
+                if driver.capabilities.backend != "docker" or not driver.capabilities.supports_custom_network:
+                    raise AgentError("mainland_proxy requires the Docker execution backend")
+                tool_gateway = (
+                    self.mainland_proxy_factory()
+                    if self.mainland_proxy_factory is not None
+                    else MainlandProxyGateway(
+                        self.trial_id, MainlandProxySettings.from_env(),
+                        output_dir=trial_dir / "mainland_proxy",
+                    )
+                )
+                await tool_gateway.start()
+                ctx.sandbox_network = tool_gateway.network_name
+                ctx.sandbox_environment_overrides = tool_gateway.environment
+                ctx.tool_network_profile = tool_gateway.metadata
+                ctx.tool_network_policy_setter = controlled_tool_policy_setter(
+                    tool_gateway.set_network_policy,
+                    tool_gateway.environment.get("HTTP_PROXY") or tool_gateway.environment["HTTPS_PROXY"],
+                )
+            trial = Trial(ctx=ctx, state_patch=None)
+            result = await trial.run()
+        finally:
+            if tool_gateway is not None:
+                await tool_gateway.stop()
         try:
             atif_bytes = await self.object_store.get_object(
                 bucket="trajectories",

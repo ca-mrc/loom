@@ -114,12 +114,14 @@ def execution_selection_readback(trial_config: Any, plan: Any | None) -> dict[st
         "verification": requested_verification(config),
         "isolation": config.get("isolation") or "auto",
     }
+    if "mainland_proxy" in config:
+        requested["mainland_proxy"] = config["mainland_proxy"]
     if plan is None:
         return {"requested": requested, "effective": None}
     verification, fresh_sandbox_grading = reported_verification(
         plan.verifier_execution, in_place_verifier=plan.in_place_verifier,
     )
-    return {
+    readback: dict[str, Any] = {
         "requested": requested,
         "effective": {
             "execution_class_id": plan.execution_class_id,
@@ -135,6 +137,14 @@ def execution_selection_readback(trial_config: Any, plan: Any | None) -> dict[st
             ),
         },
     }
+    mainland_profile = getattr(plan, "mainland_proxy_profile", None)
+    if mainland_profile is not None:
+        readback["effective"]["mainland_proxy"] = {
+            "enabled": True,
+            "provider_version": mainland_profile.provider_version,
+            "scope": "simulated mainland tool egress",
+        }
+    return readback
 
 
 def resolved_execution_selection(task: TaskConfig, trial: TrialConfig) -> dict[str, Any]:

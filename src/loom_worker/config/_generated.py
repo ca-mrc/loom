@@ -42,6 +42,9 @@ class WorkerSettings(BaseSettings):
     hostname: str | None = None
     idle_exit_after_seconds: float | None = None
     log_level: LogLevel = "info"
+    mainland_proxy_binary: str = Field(default="/mihomo", validation_alias="LOOM_MAINLAND_PROXY_BINARY")
+    mainland_proxy_image: str = Field(default="", validation_alias="LOOM_MAINLAND_PROXY_IMAGE")
+    mainland_proxy_profile_dir: Path | None = Field(default=None, validation_alias="LOOM_MAINLAND_PROXY_PROFILE_DIR")
     max_concurrent: int = 5
     metrics_port: int = 9090
     minio_access_key: SecretStr

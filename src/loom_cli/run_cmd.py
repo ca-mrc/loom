@@ -28,6 +28,7 @@ from loom.driver.docker import DockerDriver
 from loom.driver.fake import FakeDriver
 from loom.models.result import TrialResult, TrialState
 from loom.models.task import TaskConfig
+from loom.models.trial import MAINLAND_PROXY_AGENT_NAMES, TrialConfig
 from loom.models.types import ModelSpec
 from loom_cli.config import LocalProvider, load_config
 from loom_cli.local_object_store import LocalDiskObjectStore
@@ -55,6 +56,16 @@ async def _run_async(args: argparse.Namespace) -> int:
     """Top-level dispatcher. Single --model: today's behavior.
     Multiple --model: sequential or parallel based on the flag."""
     model_specs: list[str] = args.model or []
+    if getattr(args, "mainland_proxy", False):
+        if args.backend != "docker":
+            sys.stderr.write("error: --mainland-proxy requires --backend docker.\n")
+            return 2
+        if args.agent not in MAINLAND_PROXY_AGENT_NAMES:
+            sys.stderr.write(
+                "error: --mainland-proxy supports only terminus-2, oracle, "
+                "direct-completion or litellm.\n",
+            )
+            return 2
 
     if args.server_url or os.environ.get("LOOM_SERVER_URL"):
         sys.stderr.write(
@@ -265,6 +276,11 @@ async def _run_one_model(
                     openai_client=o_client,
                     google_client=g_client,
                     local_providers=cfg.local_providers,
+                    trial_config=(TrialConfig(
+                        agent_name=patched.agent.name,
+                        agent_model=patched.agent.model,
+                        mainland_proxy=True,
+                    ) if getattr(args, "mainland_proxy", False) else None),
                 )
                 try:
                     result = await runner.run()

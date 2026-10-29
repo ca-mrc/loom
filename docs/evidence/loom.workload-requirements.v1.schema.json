@@ -409,6 +409,11 @@
     "isolation_level": {
       "$ref": "#/$defs/IsolationLevel"
     },
+    "mainland_proxy": {
+      "default": false,
+      "title": "Mainland Proxy",
+      "type": "boolean"
+    },
     "memory_mib": {
       "anyOf": [
         {

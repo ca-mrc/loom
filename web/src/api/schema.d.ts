@@ -7992,6 +7992,7 @@ export interface components {
             attempt_count: number;
             /** Cpu Arch */
             cpu_arch: string;
+            diagnostic?: components["schemas"]["TrialDetailTaskEnvironmentPreparationItemDiagnostic"];
             /** Failure Reason */
             failure_reason: string | null;
             /** Message */
@@ -8009,6 +8010,17 @@ export interface components {
             resources_released: boolean | null;
             /** State */
             state: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** TrialDetailTaskEnvironmentPreparationItemDiagnostic */
+        TrialDetailTaskEnvironmentPreparationItemDiagnostic: {
+            /** Exit Code */
+            exit_code?: number;
+            /** Phase */
+            phase: "prepare" | "publish";
+            /** Summary */
+            summary: string;
         } & {
             [key: string]: unknown;
         };

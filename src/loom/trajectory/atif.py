@@ -127,6 +127,8 @@ def project_to_atif(
     for event in events:
         if isinstance(event, TrialStartEvent):
             trial_id = event.trial_id
+            if event.tool_network_profile is not None:
+                metadata_fields["tool_network_profile"] = event.tool_network_profile
         elif isinstance(event, StepStartEvent):
             _bucket(event.step_id)
         elif isinstance(event, LLMCallEvent):

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -114,6 +114,7 @@ class TrialResult(BaseModel):
     team_id: UUID
     agent: AgentInfo
     config: TrialConfig
+    tool_network_profile: dict[str, Any] | None = Field(default=None, exclude_if=lambda value: value is None)
     state: TrialState
     failure_reason: FailureReason | None = None
     failure_message: str | None = None

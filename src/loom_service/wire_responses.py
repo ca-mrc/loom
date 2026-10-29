@@ -328,6 +328,13 @@ class TrialDetailTaskEnvironmentPreparationItemPhasesItem(TypedDict):
 
 
 @with_config(ConfigDict(extra="allow"))
+class TrialDetailTaskEnvironmentPreparationItemDiagnostic(TypedDict):
+    phase: Literal["prepare"] | Literal["publish"]
+    summary: str
+    exit_code: NotRequired[int | float]
+
+
+@with_config(ConfigDict(extra="allow"))
 class TrialDetailTaskEnvironmentPreparationItem(TypedDict):
     observation_scope: Literal["current_materialization"]
     cpu_arch: str
@@ -335,6 +342,7 @@ class TrialDetailTaskEnvironmentPreparationItem(TypedDict):
     attempt_count: int | float
     failure_reason: str | None
     message: str | None
+    diagnostic: NotRequired[TrialDetailTaskEnvironmentPreparationItemDiagnostic]
     next_attempt_at: str | None
     phases: list[TrialDetailTaskEnvironmentPreparationItemPhasesItem]
     resources_released: bool | None

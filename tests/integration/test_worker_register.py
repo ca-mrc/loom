@@ -358,3 +358,31 @@ def test_register_rejects_arm_without_creating_worker(app, worker_token, postgre
     with engine.connect() as conn:
         assert conn.execute(text("SELECT count(*) FROM workers WHERE hostname='arm-rejected'")).scalar() == 0
     engine.dispose()
+
+
+@pytest.mark.parametrize("mainland_proxy", [None, False, True])
+def test_register_preserves_optional_mainland_capability(app, worker_token, postgres_url, mainland_proxy):
+    capability = dict(_VALID_CAP)
+    if mainland_proxy is not None:
+        capability["mainland_proxy"] = mainland_proxy
+    with TestClient(app) as client:
+        response = client.post(
+            "/workers/register",
+            headers={"Authorization": f"Bearer {worker_token}"},
+            json={"hostname": "mainland-worker", "version": "test", "capabilities": [capability]},
+        )
+        assert response.status_code == 200, response.text
+        worker_id = response.json()["worker_id"]
+    engine = create_engine(postgres_url)
+    try:
+        with engine.connect() as connection:
+            capabilities = connection.execute(
+                text("SELECT capabilities FROM workers WHERE id=:worker_id"),
+                {"worker_id": worker_id},
+            ).scalar_one()
+    finally:
+        engine.dispose()
+    if mainland_proxy is True:
+        assert capabilities[0]["mainland_proxy"] is True
+    else:
+        assert "mainland_proxy" not in capabilities[0]

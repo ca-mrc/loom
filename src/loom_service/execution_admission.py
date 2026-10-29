@@ -78,6 +78,39 @@ def reject_unsupported_hosted_backend(backend: str) -> None:
         )
 
 
+def reject_unsupported_mainland_proxy(
+    backend: str, trial_config: dict[str, Any], *, has_service_binding: bool = False,
+) -> None:
+    """Only the Docker and native Nebius execution paths implement this option."""
+    if (
+        trial_config.get("mainland_proxy") is True
+        and backend == NEBIUS_BACKEND
+        and has_service_binding
+    ):
+        reject_submission(
+            reason="mainland_proxy_bound_execution_unsupported",
+            status_code=400,
+            detail={
+                "reason": "mainland_proxy_bound_execution_unsupported",
+                "backend": backend,
+                "message": (
+                    "mainland_proxy requires automatic native execution; "
+                    "a static service_execution binding cannot apply the requested profile."
+                ),
+            },
+        )
+    if trial_config.get("mainland_proxy") is True and backend not in {"docker", NEBIUS_BACKEND}:
+        reject_submission(
+            reason="mainland_proxy_unsupported_backend",
+            status_code=400,
+            detail={
+                "reason": "mainland_proxy_unsupported_backend",
+                "backend": backend,
+                "message": "mainland_proxy requires Docker or native Nebius execution.",
+            },
+        )
+
+
 
 async def freeze_task_resource_requests(
     session: Any,
@@ -257,6 +290,15 @@ async def admit_execution_backend(
 ) -> ServiceExecutionRuntimeProfileV1 | None:
     """Require a native target, or a worker in explicit local development."""
     reject_unsupported_hosted_backend(backend)
+    reject_unsupported_mainland_proxy(backend, trial_config)
+    if "mainland_proxy" in trial_config:
+        try:
+            submission_trials(trial_config, combinations)
+        except ValidationError as exc:
+            reject_submission(
+                reason="invalid_mainland_proxy_config", status_code=400,
+                detail={"reason": "invalid_mainland_proxy_config", "message": str(exc)},
+            )
     selection_configs = [
         combo.model_dump(mode="json") if isinstance(combo, Combination) else combo
         for combo in combinations
@@ -309,6 +351,9 @@ async def admit_execution_backend(
             task_config = task_entry[0] if task_entry is not None else None
             provenance = task_entry[1] if task_entry is not None else {}
             binding = task_config.service_execution if task_config is not None else None
+            reject_unsupported_mainland_proxy(
+                backend, trial_config, has_service_binding=binding is not None,
+            )
             reasons: tuple[str, ...] = ()
             if binding is not None and automatic_only:
                 raise HTTPException(

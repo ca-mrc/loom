@@ -4,7 +4,7 @@ exactly."""
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from loom.models.types import (
     OS,
@@ -43,6 +43,7 @@ class Capabilities(BaseModel):
     # CapabilityError rather than silently degrading.
     supports_custom_network: bool = False
     terminus2_model_switch: bool = False
+    mainland_proxy: bool = Field(default=False, exclude_if=lambda value: not value)
 
 
 class RequiredCapabilities(BaseModel):
@@ -56,6 +57,8 @@ class RequiredCapabilities(BaseModel):
     gpu_vendor: GPUVendor
     network_policies: frozenset[NetworkPolicyKind]
     terminus2_model_switch: bool = False
+    # Preserve existing persisted capability JSON when the option is off.
+    mainland_proxy: bool = Field(default=False, exclude_if=lambda value: not value)
 
     def satisfied_by(self, caps: Capabilities) -> bool:
         """True iff `caps` offers everything this requires."""
@@ -66,4 +69,5 @@ class RequiredCapabilities(BaseModel):
             and self.gpu_vendor == caps.gpu_vendor
             and self.network_policies <= caps.network_policies
             and (not self.terminus2_model_switch or caps.terminus2_model_switch)
+            and (not self.mainland_proxy or caps.mainland_proxy)
         )

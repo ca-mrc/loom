@@ -819,6 +819,26 @@ default      = 536870912
 env_override = { worker = "LOOM_TASK_IMAGE_BUILD_MAX_BYTES" }
 description  = "Maximum byte size allowed in a task-bundle Dockerfile build context before the worker rejects the build."
 
+[service_config.mainland_proxy_image]
+used_by = ["worker"]
+python_type = "str"
+default = ""
+env_override = { worker = "LOOM_MAINLAND_PROXY_IMAGE" }
+description = "Preloaded mihomo image for opt-in mainland_proxy tool networking. Empty disables this worker capability."
+
+[service_config.mainland_proxy_profile_dir]
+used_by = ["control-plane", "loom-service", "worker"]
+python_type = "Path"
+env_override = { "control-plane" = "LOOM_MAINLAND_PROXY_PROFILE_DIR", "loom-service" = "LOOM_MAINLAND_PROXY_PROFILE_DIR", worker = "LOOM_MAINLAND_PROXY_PROFILE_DIR" }
+description = "Worker-local fixed GFWList and GreatFire snapshot directory for mainland_proxy trials."
+
+[service_config.mainland_proxy_binary]
+used_by = ["worker"]
+python_type = "str"
+default = "/mihomo"
+env_override = { worker = "LOOM_MAINLAND_PROXY_BINARY" }
+description = "mihomo executable path inside the preloaded gateway image."
+
 [service_config.sandbox_isolation]
 used_by     = ["worker"]
 python_type = "bool"
