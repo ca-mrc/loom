@@ -5,6 +5,7 @@ variable "target" {
     target_id                             = string
     cluster_scope_id                      = string
     project_id                            = string
+    system_node_count                     = optional(number, 1)
     subnet_id                             = string
     region                                = string
     kubernetes_version                    = string
@@ -28,6 +29,10 @@ variable "target" {
   validation {
     condition     = var.target.managed_identities == null ? can(regex("^serviceaccount-[a-zA-Z0-9_-]+$", var.target.node_registry_pull_service_account_id)) : var.target.node_registry_pull_service_account_id == null
     error_message = "Choose existing node_registry_pull_service_account_id OR managed_identities, never both."
+  }
+  validation {
+    condition     = var.target.system_node_count >= 1 && floor(var.target.system_node_count) == var.target.system_node_count
+    error_message = "Regional system_node_count must be a positive integer."
   }
   validation {
     condition = var.target.managed_identities == null ? true : (
@@ -117,7 +122,7 @@ resource "nebius_mk8s_v1_node_group" "regional" {
   labels           = local.labels
   version          = var.target.kubernetes_version
   auto_repair      = {}
-  fixed_node_count = var.target.suspended ? 0 : (each.key == "system" ? 1 : null)
+  fixed_node_count = var.target.suspended ? 0 : (each.key == "system" ? var.target.system_node_count : null)
   autoscaling      = var.target.suspended || each.key == "system" ? null : { min_node_count = 0, max_node_count = var.target.execution_max_nodes }
   strategy         = { drain_timeout = "20m", max_surge = { count = 0 }, max_unavailable = { count = 1 } }
   template = {

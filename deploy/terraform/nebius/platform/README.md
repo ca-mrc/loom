@@ -193,6 +193,17 @@ its prerequisite regional permissions/cost require separate owner review.
 The complete separate-cluster render/operator path is in
 `docs/runbooks/nebius-platform.md` from the repository root.
 
+`system_node_count` defaults to one and accepts any positive integer. An explicit
+value overrides the single-system-node default described below without changing
+the system preset, 80-GiB disk or execution-node isolation. The observed native
+Cilium addon in EU-west requires two eligible Ready nodes: its two operator
+replicas use required pod anti-affinity and host ports, and do not tolerate
+Loom execution taints. The reviewed west configuration therefore sets
+`system_node_count = 2`; do not rely on tainted min-zero execution nodes to meet
+that prerequisite. Check current addon requirements, stock, quota and cost in
+the destination region. When `suspended = true`, both node groups still use
+fixed zero regardless of the configured system count.
+
 Regional targets require an explicit `node_platform` from that region's native
 catalog. The EU-west example uses `cpu-d3` with4vcpu-16gb system and16vcpu-64gb
 execution presets; the original EU-north integration remains `cpu-e2`. Terraform
