@@ -317,12 +317,17 @@ measurement; the removed instrumentation and artifact work is deterministic.
 ## Test-only changes
 
 Python test edits run the changed modules and their known transitive consumers
-in their owning lanes. A known fixture or helper with statically discoverable
-consumers follows the same consumer closure, including JSON fixtures; it does
-not force unrelated Go, Terraform, browser, pool or image work. Unknown inputs,
-shared `conftest.py`/package initialization and unresolved consumers retain the
-conservative full fallback. Removing a standalone test does not request full
-regression; any remaining consumers still run.
+in their owning lanes. The existing Harbor plan golden and summarization probe
+have explicitly audited primary readers, then follow that same consumer closure.
+Other test data and helper files retain full validation: a filename match cannot
+prove the absence of dynamic directory/glob readers. Shared pytest setup,
+unresolved consumers and consumers outside the Python test closure also retain
+the complete baseline and specialist lanes.
+
+Removing a standalone test does not request full regression; any remaining
+consumers still run. Empty package and system-smoke selections are resolved in
+planning, before runners are allocated. Explicit smoke labels retain the full
+requested lane.
 
 Selector labels extend only the named lane: for example, `cluster-smoke`
 requests the full cluster suite while root and integration tests retain their
@@ -876,10 +881,14 @@ scope does not claim a fix or add retries for those defects.
 ## Keeping CI tests useful
 
 Keep executable selection, artifact, permission and failure-boundary tests.
-Avoid duplicating them with assertions about documentation wording, exact step
-names, helper layout or the complete SDK argument dictionary. Test independent
+Exercise the actual workflow's native-result bindings as well as gate logic:
+a successful unrelated job cannot stand in for the selected job's result.
+Avoid duplicating these checks with assertions about documentation wording,
+exact step names, helper layout or the complete SDK argument dictionary. Test independent
 branches and limits without multiplying unrelated parameters into Cartesian
 products; foreign-ownership refusal does not need every log size and phase.
+Keep meaningful interactions, such as a phase prefix fitting inside the same
+large-log truncation budget.
 
 Action references still use the verified SHA lock and its positive/negative
 validation. The former `ci-upgrade-policy.json` batch/rollback inventory and its

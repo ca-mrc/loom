@@ -461,10 +461,12 @@ def plan_validations(
 
     paths = tuple(dict.fromkeys(path.strip() for path in changed_paths if path.strip()))
     authority_paths = OWNERSHIP_AUTHORITY_PATHS
+    registration_validator_added = False
     if manifest_registration_only and COMPONENT_OWNERSHIP_PATH in paths:
         # Only registers files this change adds: the manifest tests validate the
         # registration and the new files select their own owners.
         if MANIFEST_VALIDATION_TEST not in paths:
+            registration_validator_added = True
             authority_paths = OWNERSHIP_AUTHORITY_PATHS - {MANIFEST_VALIDATION_TEST}
         paths = tuple(dict.fromkeys(
             MANIFEST_VALIDATION_TEST if path == COMPONENT_OWNERSHIP_PATH else path for path in paths))
@@ -626,13 +628,17 @@ def plan_validations(
     independent_tests: tuple[str, ...] | None = None
     if test_inputs:
         tracked = _tracked_paths(REPO_ROOT)
+        # The verified registration path injects its validator as work to run,
+        # not as an edited fixture whose consumers need retesting.
+        edited_inputs = tuple(path for path in test_inputs if not (
+            registration_validator_added and path == MANIFEST_VALIDATION_TEST))
         independent = narrow_test_only_changes(
-            tracked, changed_paths=test_inputs, tracked_paths=tracked, repo_root=REPO_ROOT,
-        )
+            tracked, changed_paths=edited_inputs, tracked_paths=tracked, repo_root=REPO_ROOT,
+        ) if edited_inputs else ()
         if independent != tracked:
-            independent_tests = independent
+            independent_tests = (*independent, MANIFEST_VALIDATION_TEST) if registration_validator_added else independent
         else:
-            for name in ("integration", "integration_docker", "cluster_smoke", "staging_smoke"):
+            for name in HEAVY_CHECKS:
                 select(name, "shared-or-unknown-test-input")
 
 
@@ -736,6 +742,7 @@ def plan_validations(
     force_baseline = (
         not paths or event_name in {"workflow_dispatch", "schedule"} or unowned_runtime
         or selected["coverage_summary"]
+        or bool(test_inputs and independent_tests is None)
         or any(path in PLANNER_PATHS | authority_paths
                or path == ".github/workflows/ci.yml"
                or _is_dependency_authority_path(path) for path in paths)
@@ -883,6 +890,8 @@ def main() -> int:
         ("integration", "integration", "integration_matrix"),
         ("integration-docker", "integration_docker", "integration_docker_matrix"),
         ("cluster-smoke", "cluster_smoke", "cluster_smoke_matrix"),
+        ("tests-packages", "tests_packages", None),
+        ("system-smoke", "staging_smoke", None),
     ):
         matrix = test_shard_matrix(
             _component_ownership_manifest(), tracked_paths=tracked_paths, lane=lane,
@@ -893,7 +902,8 @@ def main() -> int:
             diff_paths=effective_diff if lane in AFFECTED_ONLY_LANES else (),
             include_shared_pool=plan.shared_pool_simulations,
         ) if getattr(plan, selected_name) and plan.gate_mode == "full" else ()
-        outputs[matrix_name] = json.dumps(matrix, separators=(",", ":"))
+        if matrix_name is not None:
+            outputs[matrix_name] = json.dumps(matrix, separators=(",", ":"))
         # A compatibility-only edit has no tests in the daily Nebius scope.
         # Jobs and the final gate must agree on that deliberate empty selection.
         outputs[selected_name] = str(bool(matrix)).lower()
@@ -901,9 +911,11 @@ def main() -> int:
             plan,
             tests_root=bool(matrix) if selected_name == "tests_root" else plan.tests_root,
             nebius_pool=bool(matrix) if selected_name == "nebius_pool" else plan.nebius_pool,
+            tests_packages=bool(matrix) if selected_name == "tests_packages" else plan.tests_packages,
             integration=bool(matrix) if selected_name == "integration" else plan.integration,
             integration_docker=bool(matrix) if selected_name == "integration_docker" else plan.integration_docker,
             cluster_smoke=bool(matrix) if selected_name == "cluster_smoke" else plan.cluster_smoke,
+            staging_smoke=bool(matrix) if selected_name == "staging_smoke" else plan.staging_smoke,
         )
     with args.github_output.open("a", encoding="utf-8") as handle:
         for name, value in outputs.items():

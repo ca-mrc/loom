@@ -35,7 +35,8 @@ def test_unreferenced_test_edit_selects_only_that_test(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("change", ["src/loom/service.py", "tests/conftest.py", "tests/support/helper.py",
-                                   "database/migrations/new.py", "unknown/file.bin", "tests/unit/deleted.py", "docs/usage.md"])
+                                   "database/migrations/new.py", "unknown/file.bin", "tests/unit/deleted.py", "docs/usage.md",
+                                   "src/tool/tests/test_entry.py"])
 def test_shared_runtime_unknown_or_deleted_change_keeps_full_lane(tmp_path: Path, change: str) -> None:
     tracked = _repository(tmp_path)
     paths = (tracked[0], tracked[1])
@@ -53,6 +54,8 @@ def test_imported_test_fixture_keeps_full_lane(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("source", [
     'PIN = "tests/unit/test_alpha.py"\nassert PIN.endswith(".py")\n',
+    'def metadata():\n    path = "tests/unit/test_alpha.py"\n    assert path.endswith(".py")\n'
+    'def unrelated_loader():\n    path = "other.py"\n    runpy.run_path(path)\n',
     'PATHS = {"tests/unit/test_alpha.py"}\ndef selected(path): chosen = path in PATHS\n',
     '@pytest.mark.parametrize("path", ["tests/unit/test_alpha.py"])\ndef test_selection(path): pass\n',
     'paths = ("tests/unit/test_alpha.py",)\nselect_test_scope(manifest, paths, scope="nebius")\n',
@@ -75,6 +78,7 @@ def test_ci_metadata_path_literals_do_not_make_a_test_a_fixture(tmp_path: Path, 
     'SOURCE = "from tests.unit.test_alpha import fixture"\n',
     'import runpy\nrunpy.run_path("tests/unit/test_alpha.py")\n',
     'import runpy\nPATH = "tests/unit/test_alpha.py"\nrunpy.run_path(PATH)\n',
+    'def actual_loader():\n    path = "tests/unit/test_alpha.py"\n    runpy.run_path(path)\n',
     '@pytest.mark.parametrize("case", [runpy.run_path("tests/unit/test_alpha.py")])\ndef test_case(case): pass\n',
     'def fixture_path(): return "tests/unit/test_alpha.py"\nrunpy.run_path(fixture_path())\n',
     'def load_fixture(path="tests/unit/test_alpha.py"): return runpy.run_path(path)\nload_fixture()\n',
@@ -322,21 +326,6 @@ def test_shard_workflows_run_complete_disjoint_fail_fast_shards(
     assert len(set(predecessor_groups)) == 3
 
 
-@pytest.mark.parametrize("consumer", ["src/runtime.go", "web/reader.ts", "scripts/probe.sh"])
-def test_fixture_with_a_non_python_consumer_keeps_the_full_lane(tmp_path: Path, consumer: str) -> None:
-    tracked = _repository(tmp_path)
-    fixture = "tests/unit/fixtures/shared.json"
-    target = tmp_path / fixture
-    target.parent.mkdir(parents=True)
-    target.write_text('{}')
-    (tmp_path / tracked[0]).write_text(f'FIXTURE = "{fixture}"\n')
-    target = tmp_path / consumer
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(f'// loads {fixture}\n')
-    assert narrow_test_only_changes(tracked[:2], changed_paths=(fixture,),
-                                    tracked_paths=(*tracked, fixture, consumer), repo_root=tmp_path) == tracked[:2]
-
-
 def test_deleted_standalone_test_does_not_expand_an_independent_edit(tmp_path: Path) -> None:
     tracked = _repository(tmp_path)
     removed = tracked[1]
@@ -374,3 +363,53 @@ def test_label_full_lane_is_the_same_in_the_planner_and_real_cli() -> None:
             assert expected == (edited_module,)
         else:
             assert len(expected) > 1
+
+
+@pytest.mark.parametrize("fixture", ["tests/data/payload.json", "tests/support/unregistered_probe.py"])
+def test_unregistered_input_stays_full_even_with_an_explicit_python_reader(tmp_path: Path, fixture: str) -> None:
+    tracked = _repository(tmp_path)
+    target = tmp_path / fixture
+    target.parent.mkdir(parents=True)
+    target.write_text('{}')
+    (tmp_path / tracked[0]).write_text(f'VALUE = Path("{fixture}").read_text()\n')
+    # A directory reader need not mention the basename. One explicit reader is
+    # not proof that every consumer of an unregistered input has been found.
+    (tmp_path / tracked[1]).write_text('VALUE = next(Path("tests/data").glob("*.json")).read_text()\n')
+    assert narrow_test_only_changes(tracked[:2], changed_paths=(fixture,),
+                                    tracked_paths=(*tracked, fixture), repo_root=tmp_path) == tracked[:2]
+
+
+@pytest.mark.parametrize("indirect", [False, True])
+def test_non_python_consumers_of_any_closure_member_keep_the_full_lane(tmp_path: Path, indirect: bool) -> None:
+    tracked = _repository(tmp_path)
+    initial = "tests/unit/test_fixture_source.py"
+    (tmp_path / initial).write_text('VALUE = 1\n')
+    bridge = "tests/support/test_loader.py"
+    target = tmp_path / bridge
+    target.parent.mkdir(parents=True)
+    target.write_text('from tests.unit.test_fixture_source import VALUE\n')
+    consumer = bridge if indirect else initial
+    (tmp_path / tracked[0]).write_text(f'VALUE = runpy.run_path("{consumer}")\n')
+    foreign = "scripts/probe.sh"
+    target = tmp_path / foreign
+    target.parent.mkdir(parents=True)
+    target.write_text(f'python {consumer}\n')
+    assert narrow_test_only_changes(tracked[:2], changed_paths=(initial,),
+                                    tracked_paths=(*tracked, initial, bridge, foreign), repo_root=tmp_path) == tracked[:2]
+
+
+def test_audited_input_requires_its_complete_tracked_reader(tmp_path: Path) -> None:
+    from scripts.component_ownership import _AUDITED_TEST_INPUT_READERS
+
+    tracked = _repository(tmp_path)
+    fixture, reader = next(iter(_AUDITED_TEST_INPUT_READERS.items()))
+    target = tmp_path / fixture
+    target.parent.mkdir(parents=True)
+    target.write_text('{}')
+    assert narrow_test_only_changes(tracked[:2], changed_paths=(fixture,),
+                                    tracked_paths=(*tracked, fixture), repo_root=tmp_path) == tracked[:2]
+    target = tmp_path / reader
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text('')
+    assert narrow_test_only_changes(tracked[:2], changed_paths=(fixture,),
+                                    tracked_paths=(*tracked, fixture, reader), repo_root=tmp_path) == tracked[:2]

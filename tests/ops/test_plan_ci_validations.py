@@ -553,9 +553,9 @@ def test_planner_change_selects_every_heavy_gate() -> None:
 @pytest.mark.parametrize(
     "path",
     [
-        "tests/unit/test_metrics_enumeration.py",
-        "tests/loom_cli/test_config.py",
-        "tests/ops/test_release_runbook.py",
+        "tests/unit/test_selector_subject.py",
+        "tests/loom_cli/test_selector_cli.py",
+        "tests/ops/test_selector_ops.py",
     ],
 )
 def test_manifest_owned_root_tests_do_not_select_unrelated_heavy_lanes(path: str, independent_test_repo) -> None:
@@ -568,9 +568,9 @@ def test_manifest_owned_root_tests_do_not_select_unrelated_heavy_lanes(path: str
 
 
 def test_docs_plus_manifest_owned_root_test_keeps_only_the_root_test_lane(independent_test_repo) -> None:
-    independent_test_repo("tests/unit/test_metrics_enumeration.py")
+    independent_test_repo("tests/unit/test_selector_subject.py")
     plan = plan_validations(
-        changed_paths=["docs/user-guide.md", "tests/unit/test_metrics_enumeration.py"],
+        changed_paths=["docs/user-guide.md", "tests/unit/test_selector_subject.py"],
         labels=set(),
         event_name="pull_request",
     )
@@ -986,6 +986,16 @@ def test_existing_harness_fixture_keeps_its_real_consumer() -> None:
     assert not any((mixed.go_checks, mixed.nebius_iac, mixed.runtime_payload,
                     mixed.web_checks, mixed.web_runtime))
 
+    probe = plan_validations(changed_paths=["tests/support/terminus_summarization_probe.py"],
+                             labels=set(), event_name="pull_request")
+    assert probe.integration_docker
+    assert not any((probe.integration, probe.cluster_smoke, probe.staging_smoke,
+                    probe.go_checks, probe.web_runtime))
+    tracked = _tracked_paths(REPO_ROOT)
+    assert selected_test_paths(manifest, tracked_paths=tracked, lane="tests-root",
+                               repo_root=REPO_ROOT, changed_paths=probe.test_changes,
+                               test_scope="nebius") == ()
+
 
 @pytest.mark.parametrize("label,lane", [
     ("ci:images", None), ("ci:integration", "integration"),
@@ -993,7 +1003,7 @@ def test_existing_harness_fixture_keeps_its_real_consumer() -> None:
     ("cluster-smoke", "cluster-smoke"), ("staging-smoke", "system-smoke"),
 ])
 def test_extra_lane_label_preserves_unrelated_test_selection(label, lane, independent_test_repo):
-    path = "tests/unit/test_metrics_enumeration.py"
+    path = "tests/unit/test_selector_subject.py"
     independent_test_repo(path)
     plan = plan_validations(changed_paths=[path], labels={label}, event_name="pull_request")
     assert plan.test_changes == (path,)
@@ -1002,13 +1012,13 @@ def test_extra_lane_label_preserves_unrelated_test_selection(label, lane, indepe
     assert plan.tests_root and not plan.tests_packages
 
 
-def test_shared_helper_starts_every_proven_consumer_lane(tmp_path, monkeypatch) -> None:
+def test_unresolved_crosslanguage_test_input_keeps_the_full_baseline(tmp_path, monkeypatch) -> None:
     import scripts.plan_ci_validations as planner
 
-    helper = "tests/support/owned_probe.py"
+    helper = "tests/support/boundary_fixture.py"
     files = {"README.md": "test repository\n", helper: "VALUE = 1\n",
-             "tests/integration/test_probe.py": "from tests.support.owned_probe import VALUE\n",
-             "tests/cluster/test_probe_cluster.py": "from tests.support.owned_probe import VALUE\n"}
+             "tests/unit/test_boundary.py": "from tests.support.boundary_fixture import VALUE\n",
+             "cmd/tool/main_test.go": '// reads tests/support/boundary_fixture.py\n'}
     for name, source in files.items():
         target = tmp_path / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1016,5 +1026,6 @@ def test_shared_helper_starts_every_proven_consumer_lane(tmp_path, monkeypatch) 
     monkeypatch.setattr(planner, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(planner, "_tracked_paths", lambda _: tuple(files))
     plan = plan_validations(changed_paths=[helper], labels=set(), event_name="pull_request")
-    assert plan.integration and plan.cluster_smoke
-    assert not plan.integration_docker and not plan.staging_smoke and not plan.unowned_runtime
+    assert plan.go_checks and plan.tests_packages and plan.web_runtime
+    assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
+    assert plan.test_changes == ()

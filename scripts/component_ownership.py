@@ -1346,6 +1346,14 @@ _TEST_SELECTION_METADATA_FILES = frozenset({
 })
 
 
+# These non-test inputs have audited primary readers. Other data and helper
+# edits remain complete rather than guessing consumers from a filename.
+_AUDITED_TEST_INPUT_READERS = {
+    "tests/unit/fixtures/hosted_harness_plans.json": "tests/unit/test_hosted_harness_plan_parity.py",
+    "tests/support/terminus_summarization_probe.py": "tests/integration/test_terminus2_continuation_docker.py",
+}
+
+
 def _fixture_reference_source(source: str, *, path: str, changed_paths: set[str]) -> str:
     """Exclude only audited path metadata, never imports or executable snippets.
 
@@ -1468,7 +1476,15 @@ def _fixture_reference_source(source: str, *, path: str, changed_paths: set[str]
             if targets and not all(isinstance(target, ast.Name) for target in targets):
                 continue
             names = {target.id for target in targets if isinstance(target, ast.Name)}
-            consumers = (item for item in ast.walk(tree) if isinstance(item, ast.Name)
+            # Local variables belong to their enclosing function, including
+            # nested closures. Unrelated functions reusing "path" are not uses
+            # of this assignment. Module assignments still inspect every scope.
+            scope = next((parent for parent in ancestors(assigned) if isinstance(
+                parent, (ast.FunctionDef, ast.AsyncFunctionDef))), tree) if assigned is not None else tree
+            if any(isinstance(item, (ast.Global, ast.Nonlocal)) and names.intersection(item.names)
+                   for item in ast.walk(scope)):
+                continue
+            consumers = (item for item in ast.walk(scope) if isinstance(item, ast.Name)
                          and isinstance(item.ctx, ast.Load) and item.id in names)
             if any(not metadata_consumer(item) for item in consumers):
                 continue
@@ -1489,15 +1505,15 @@ def narrow_test_only_changes(
 ) -> tuple[str, ...]:
     """Select edited test modules and consumers of test helpers/data.
 
-    Shared pytest setup, runtime consumers and unreferenced data stay full.
-    Filename references include imports, dynamic loads and mounted probe files;
-    this intentionally avoids a general application dependency graph.
+    Only audited non-test inputs seed their declared primary readers. Other
+    helpers/data, shared pytest setup and runtime consumers remain complete.
+    Reuse the test-module closure rather than guessing arbitrary data loaders.
     """
     if not changed_paths:
         return paths
 
     def test_input(name: str) -> bool:
-        return name.startswith("tests/") or "/tests/" in name
+        return name.startswith("tests/") or (name.startswith("packages/") and "/tests/" in name)
 
     def test_module(name: str) -> bool:
         return Path(name).name.startswith("test_") and name.endswith(".py")
@@ -1507,52 +1523,54 @@ def narrow_test_only_changes(
            or (not (repo_root / name).is_file() and not test_module(name))
            for name in changed):
         return paths
-    fixtures = {name for name in changed if not test_module(name)}
+    non_tests = {name for name in changed if not test_module(name)}
+    if any(name not in _AUDITED_TEST_INPUT_READERS for name in non_tests):
+        return paths
+    readers = {_AUDITED_TEST_INPUT_READERS[name] for name in non_tests}
+    # Deleted standalone tests may disappear without requiring regression;
+    # audited data/helper bindings need both complete tracked endpoints.
+    if any(name not in tracked_paths or not (repo_root / name).is_file() for name in non_tests | readers):
+        return paths
+
+    def reference_name(name: str) -> str:
+        return Path(name).stem if name.endswith(".py") else Path(name).name
+
+    def references(names: set[str]) -> re.Pattern[str]:
+        return re.compile(r"\b(?:" + "|".join(
+            re.escape(reference_name(name)) for name in names) + r")\b")
+
+    source_suffixes = {".py", ".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+                       ".sh", ".bash", ".yml", ".yaml", ".toml", ".json"}
     try:
-        sources = {name: (repo_root / name).read_text(encoding="utf-8")
-                   for name in tracked_paths if name.endswith(".py")
-                   and (repo_root / name).is_file()}
+        texts = {name: (repo_root / name).read_text(encoding="utf-8")
+                 for name in tracked_paths if Path(name).suffix in source_suffixes
+                 and name not in {"config/component-ownership.toml", "scripts/component_ownership.py"}
+                 and (repo_root / name).is_file()}
     except (OSError, UnicodeError):
         return paths
-    if fixtures:
-        # A test data/helper filename may also be loaded by another runtime.
-        # Those consumers are outside this Python-only closure and keep full CI.
-        identifiers = re.compile(r"\b(?:" + "|".join(
-            re.escape(Path(name).stem) for name in fixtures) + r")\b")
-        source_suffixes = {".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
-                           ".sh", ".bash", ".yml", ".yaml", ".toml", ".json"}
-        try:
-            for name in tracked_paths:
-                if (name in changed or name == "config/component-ownership.toml"
-                        or Path(name).suffix not in source_suffixes or not (repo_root / name).is_file()):
-                    continue
-                if identifiers.search((repo_root / name).read_text(encoding="utf-8")):
-                    return paths
-        except (OSError, UnicodeError):
-            return paths
-    affected = set(changed)
-    referenced = {Path(fixture).stem for fixture in fixtures
-                  if any(name in changed and name != fixture
-                         and re.search(r"\b" + re.escape(Path(fixture).stem) + r"\b", source)
-                         for name, source in sources.items())}
+    if any(not references({name}).search(texts.get(_AUDITED_TEST_INPUT_READERS[name], ""))
+           for name in non_tests):
+        return paths
+    sources = {name: source for name, source in texts.items() if name.endswith(".py")}
+    foreign = {name: source for name, source in texts.items() if not name.endswith(".py")}
+    affected = changed | readers
     while True:
-        identifiers = re.compile(r"\b(?:" + "|".join(re.escape(Path(name).stem) for name in affected) + r")\b")
+        identifiers = references(affected)
+        # Inspect the entire closure: an added test module may be launched from
+        # Go/browser/shell work without mentioning the original changed input.
+        if any(name not in affected and identifiers.search(source) for name, source in foreign.items()):
+            return paths
         added = set()
         for name, source in sources.items():
             if name in affected or not identifiers.search(source):
                 continue
             source = _fixture_reference_source(source, path=name, changed_paths=affected)
-            references = set(identifiers.findall(source))
-            if not references:
+            if not identifiers.search(source):
                 continue
-            if (name in _TEST_SELECTION_METADATA_FILES or not test_input(name)
-                    or Path(name).name in {"conftest.py", "__init__.py"}):
+            if (name in _TEST_SELECTION_METADATA_FILES or not test_input(name) or not test_module(name)):
                 return paths
-            referenced.update(references)
             added.add(name)
         if not added:
-            if any(Path(name).stem not in referenced for name in fixtures):
-                return paths
             return tuple(path for path in paths if path in affected)
         affected.update(added)
 

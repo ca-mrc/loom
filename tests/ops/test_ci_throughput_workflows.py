@@ -1047,21 +1047,36 @@ def test_reusable_validation_workflows_keep_internal_result_enforcement() -> Non
             assert f'"${result_env}"' in gate_script
 
 
-def test_repository_gate_receives_declared_native_results() -> None:
-    # Execute result semantics above; here only verify that GitHub supplies the
-    # selected/result inputs and waits for the jobs those inputs reference.
-    import re
-
-    jobs = _workflow(".github/workflows/ci.yml")["jobs"]
-    gate = jobs["repository-checks"]
+def test_repository_gate_enforces_native_result_bindings() -> None:
+    # Resolve the real workflow env before running its gate. Direct env injection
+    # alone cannot catch a result wired to another successful dependency.
+    gate = _workflow(".github/workflows/ci.yml")["jobs"]["repository-checks"]
     step = next(step for step in gate["steps"] if step.get("name") == "Enforce selected validation results")
-    for selected, result in REPOSITORY_SELECTED_RESULTS.items():
-        assert selected in step["env"] and result in step["env"]
-    for value in step["env"].values():
-        reference = re.fullmatch(r"\$\{\{ needs\.([\w-]+)\.result \}\}", value)
-        if reference:
-            assert reference[1] in gate["needs"]
+    sources = {
+        "workflow-plan", "fast-feedback", "lint-and-static", "locked-environments",
+        "tests-root", "nebius-pool", "tests-packages", "runtime-payload", "nebius-iac",
+        "go-checks", "integration", "integration-docker", "fast-coverage",
+        "coverage-summary", "web-checks", "web-runtime",
+    }
+    outputs = dict.fromkeys((
+        "lint_and_static", "locked_environments", "tests_root", "nebius_pool",
+        "tests_packages", "runtime_payload", "nebius_iac", "go_checks",
+        "integration", "integration_docker", "coverage_summary", "web_checks", "web_runtime",
+    ), "true")
+    outputs.update(gate_mode="full", docs_only="false")
+    assert sources <= set(gate["needs"])
     assert "always()" in gate["if"]
+    for failed in (None, *sorted(sources)):
+        native = {
+            f"${{{{ needs.{job}.result }}}}": "failure" if job == failed else "success"
+            for job in gate["needs"]
+        }
+        native.update({f"${{{{ needs.workflow-plan.outputs.{key} }}}}": value
+                       for key, value in outputs.items()})
+        env = {key: native[value] for key, value in step["env"].items()}
+        result = subprocess.run(["bash"], input=step["run"], text=True, capture_output=True,
+                                env=env, check=False)
+        assert (result.returncode == 0) is (failed is None), (failed, result.stdout, result.stderr)
 
 
 @pytest.mark.parametrize("lane,output", [
@@ -1426,23 +1441,6 @@ def test_manual_coverage_request_selects_integration_through_workflow_planner(tm
     values = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert values["coverage_summary"] == values["integration"] == "true"
     assert values["docs_only"] == "false"
-
-
-@pytest.mark.parametrize("heavy_job", ["nebius-pool", "integration-docker", "runtime-payload", "web-runtime"])
-def test_heavy_jobs_wait_for_native_fast_feedback(heavy_job: str) -> None:
-    from tests.ops.test_ci_images_parallel_builds import _condition
-
-    job = _workflow(".github/workflows/ci.yml")["jobs"][heavy_job]
-    assert set(job["needs"]) == {"workflow-plan", "fast-feedback"}
-    values = {"needs.workflow-plan.result": "success", "needs.fast-feedback.result": "success"}
-    values.update({f"needs.workflow-plan.outputs.{name}": "true" for name in (
-        "nebius_pool", "integration_docker", "runtime_payload", "web_runtime",
-    )})
-    values["needs.workflow-plan.outputs.gate_mode"] = "full"
-    assert _condition(job["if"], values)
-    for result in ("failure", "cancelled", "skipped"):
-        values["needs.fast-feedback.result"] = result
-        assert not _condition(job["if"], values)
 
 
 @pytest.mark.parametrize("job_name", ["tests-root", "integration"])

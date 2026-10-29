@@ -831,8 +831,8 @@ async def test_pool_reconcile_pass_is_bounded_concurrently():
 # Exercise each phase, truncation and foreign ownership once. The old Cartesian
 # product repeated the same ownership early-return for every phase and size.
 @pytest.mark.parametrize("failed_phase,foreign_pod,log_size", [
-    ("prepare", False, 20000),
-    ("build", False, 300000),
+    ("prepare", False, 300000),  # The phase prefix must fit inside the stored-log bound.
+    ("build", False, 20000),
     ("publish", False, 20000),
     ("unrelated", False, 20000),
     ("build", True, 300000),

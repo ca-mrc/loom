@@ -16,8 +16,15 @@ def test_frontend_change_does_not_start_backend_baseline():
     assert outputs["web_checks"] == "true"
 
 
-def test_unrelated_label_preserves_test_selection():
-    p = "tests/ops/test_ci_hosted_execution.py"
+def test_unrelated_label_preserves_test_selection(tmp_path, monkeypatch):
+    import scripts.plan_ci_validations as planner
+
+    p = "tests/unit/test_unrelated_label_subject.py"
+    target = tmp_path / p
+    target.parent.mkdir(parents=True)
+    target.write_text("def test_subject(): pass\n")
+    monkeypatch.setattr(planner, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(planner, "_tracked_paths", lambda _: (p, "README.md"))
     assert json.loads(plan(p, ["bug"]).github_outputs()["test_changes"]) == [p]
 
 
@@ -251,7 +258,9 @@ def test_shard_manifests_execute_exactly_the_planned_selection(changes, lane, tm
                   include_shared_pool=True)
     planned = selected_test_paths(manifest, **common)
     fixture_edit = changes == ("tests/ops/nebius_participant_external_fixture.py",)
-    full_lane = (lane == "tests-root" and not fixture_edit) or changes == ("uv.lock",)
+    # Unregistered helpers are deliberately full; named operator sources still
+    # select their real consumers before sharding.
+    full_lane = fixture_edit or lane == "tests-root" or changes == ("uv.lock",)
     expected = tests if full_lane else (
         () if changes == ("scripts/ops/ci_reliability_metrics.py",) else tests[:2])
     assert set(planned) == set(expected)
@@ -487,3 +496,37 @@ def test_large_change_list_keeps_full_lanes_without_oversized_job_environment():
     assert select_affected_test_suites(
         manifest, paths, changed_paths=tuple(json.loads(outputs["test_changes"]))
     ) == paths
+
+
+def test_deleted_system_smoke_skips_empty_work_but_explicit_label_keeps_full_suite(tmp_path):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from scripts.component_ownership import _tracked_paths, load_manifest, selected_test_paths
+
+    root = Path(__file__).resolve().parents[2]
+    removed = "tests/system/" + "_".join(("test", "removed", "standalone", "smoke")) + ".py"
+    changes = tmp_path / "changes.txt"
+    changes.write_text(removed + "\n")
+    output = tmp_path / "outputs.txt"
+    manifest = load_manifest(root / "config/component-ownership.toml")
+    complete = selected_test_paths(manifest, tracked_paths=_tracked_paths(root), lane="system-smoke",
+                                   repo_root=root, test_scope="nebius")
+    assert complete
+    for labels, selected in (([], False), (["staging-smoke"], True)):
+        output.write_text("")
+        subprocess.run([
+            sys.executable, "scripts/plan_ci_validations.py", "--changed-files", str(changes),
+            "--labels-json", json.dumps(labels), "--event-name", "pull_request", "--test-scope", "nebius",
+            "--github-output", str(output),
+        ], cwd=root, capture_output=True, text=True, check=True)
+        values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        assert values["staging_smoke"] == str(selected).lower()
+        paths = subprocess.run([
+            sys.executable, "scripts/component_ownership.py", "test-paths", "--lane", "system-smoke",
+            "--test-scope", "nebius", "--changed-paths-json", values["test_changes"],
+        ], cwd=root, env={**os.environ, "FULL_TEST_LANES": values["full_test_lanes"]},
+            capture_output=True, text=True, check=True)
+        assert tuple(paths.stdout.splitlines()) == (complete if selected else ())
