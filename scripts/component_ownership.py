@@ -1479,14 +1479,20 @@ def _fixture_reference_source(source: str, *, path: str, changed_paths: set[str]
             # Local variables belong to their enclosing function, including
             # nested closures. Unrelated functions reusing "path" are not uses
             # of this assignment. Module assignments still inspect every scope.
-            scope = next((parent for parent in ancestors(assigned) if isinstance(
-                parent, (ast.FunctionDef, ast.AsyncFunctionDef))), tree) if assigned is not None else tree
-            if any(isinstance(item, (ast.Global, ast.Nonlocal)) and names.intersection(item.names)
-                   for item in ast.walk(scope)):
+            scope = next((parent for parent in ancestors(assigned if assigned is not None else node)
+                          if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))), tree)
+            # Class fields can be read through attributes; reflection can read
+            # locals without a Name load. Neither is proof of metadata-only use.
+            if isinstance(scope, ast.ClassDef) or any(
+                (isinstance(item, (ast.Global, ast.Nonlocal)) and names.intersection(item.names))
+                or (isinstance(item, ast.Call) and isinstance(item.func, ast.Name)
+                    and item.func.id in {"locals", "globals", "vars", "eval", "exec"})
+                for item in ast.walk(scope)
+            ):
                 continue
-            consumers = (item for item in ast.walk(scope) if isinstance(item, ast.Name)
-                         and isinstance(item.ctx, ast.Load) and item.id in names)
-            if any(not metadata_consumer(item) for item in consumers):
+            consumers = tuple(item for item in ast.walk(scope) if isinstance(item, ast.Name)
+                              and isinstance(item.ctx, ast.Load) and item.id in names)
+            if (names and not consumers) or any(not metadata_consumer(item) for item in consumers):
                 continue
             # Replace just this exact path token, preserving every other string,
             # import and identifier. Columns in the AST count UTF-8 bytes.
@@ -1497,6 +1503,14 @@ def _fixture_reference_source(source: str, *, path: str, changed_paths: set[str]
                 lines[index] = (line[:node.col_offset] + b" " * (node.end_col_offset - node.col_offset)
                                 + line[node.end_col_offset:]).decode("utf-8")
     return "".join(lines)
+
+
+def is_test_input_path(path: str) -> bool:
+    """Recognize Loom test roots without treating embedded runtime tests as CI."""
+    parts = PurePosixPath(path).parts
+    return path.startswith("tests/") or (
+        len(parts) >= 4 and parts[0] == "packages" and parts[2] == "tests"
+    )
 
 
 def narrow_test_only_changes(
@@ -1512,14 +1526,11 @@ def narrow_test_only_changes(
     if not changed_paths:
         return paths
 
-    def test_input(name: str) -> bool:
-        return name.startswith("tests/") or (name.startswith("packages/") and "/tests/" in name)
-
     def test_module(name: str) -> bool:
         return Path(name).name.startswith("test_") and name.endswith(".py")
 
     changed = set(changed_paths)
-    if any(not test_input(name) or Path(name).name in {"conftest.py", "__init__.py"}
+    if any(not is_test_input_path(name) or Path(name).name in {"conftest.py", "__init__.py"}
            or (not (repo_root / name).is_file() and not test_module(name))
            for name in changed):
         return paths
@@ -1544,7 +1555,12 @@ def narrow_test_only_changes(
     try:
         texts = {name: (repo_root / name).read_text(encoding="utf-8")
                  for name in tracked_paths if Path(name).suffix in source_suffixes
-                 and name not in {"config/component-ownership.toml", "scripts/component_ownership.py"}
+                 and name not in {
+                     "config/component-ownership.toml", "scripts/component_ownership.py",
+                     # Retirement-time path inventory; docs/historical/README.md
+                     # explicitly identifies it as a historical snapshot.
+                     "docs/historical/shared-cluster-reference-audit.json",
+                 }
                  and (repo_root / name).is_file()}
     except (OSError, UnicodeError):
         return paths
@@ -1567,7 +1583,7 @@ def narrow_test_only_changes(
             source = _fixture_reference_source(source, path=name, changed_paths=affected)
             if not identifiers.search(source):
                 continue
-            if (name in _TEST_SELECTION_METADATA_FILES or not test_input(name) or not test_module(name)):
+            if (name in _TEST_SELECTION_METADATA_FILES or not is_test_input_path(name) or not test_module(name)):
                 return paths
             added.add(name)
         if not added:

@@ -223,11 +223,37 @@ def test_explicit_regression_never_reduces_test_hint(event, labels):
     assert plan("docs/guide.md", event=event, labels=labels).test_changes == ()
 
 
-def test_frontend_contract_only_retains_codegen_and_full_ui_for_frontend_inputs():
-    assert plan("src/loom_service/routes/trials.py").web_checks
-    assert not plan("src/loom_service/routes/trials.py").web_runtime
-    assert plan("web/src/App.tsx").web_runtime
-    assert plan("uv.lock").web_runtime
+@pytest.mark.parametrize("changed,runtime", [
+    ("src/loom_service/routes/trials.py", False),
+    ("web/src/App.tsx", True),
+    ("uv.lock", True),
+])
+def test_frontend_contract_keeps_codegen_for_backend_api_changes(tmp_path, changed, runtime):
+    from tests.ops.test_ci_images_parallel_builds import _condition
+
+    selected = plan(changed)
+    assert selected.web_checks
+    assert selected.web_runtime is runtime
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    job = workflow["jobs"]["web-checks"]
+    context = {"needs.workflow-plan.result": "success"}
+    context.update({f"needs.workflow-plan.outputs.{key}": value
+                    for key, value in selected.github_outputs().items()})
+    assert _condition(job["if"], context)
+    step = next(step for step in job["steps"] if step.get("name") == "Verify generated API types")
+    assert _condition(step.get("if", "True"), context)
+    bindings = {f"${{{{ {key} }}}}": value for key, value in context.items()}
+    env = {key: bindings.get(value, value) for key, value in step.get("env", {}).items()}
+    npm = tmp_path / "npm"
+    npm.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$CODEGEN_CALL"\n')
+    npm.chmod(0o755)
+    recorded = tmp_path / "codegen-call"
+    run = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", step["run"]], cwd=tmp_path,
+                         capture_output=True, text=True,
+                         env={**os.environ, **env, "PATH": f"{tmp_path}:{os.environ['PATH']}",
+                              "CODEGEN_CALL": str(recorded)})
+    assert run.returncode == 0, run.stderr
+    assert recorded.read_text().splitlines() == ["run gen-api -- --check"]
 
 
 @pytest.mark.parametrize(

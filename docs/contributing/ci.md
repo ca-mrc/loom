@@ -317,12 +317,18 @@ measurement; the removed instrumentation and artifact work is deterministic.
 ## Test-only changes
 
 Python test edits run the changed modules and their known transitive consumers
-in their owning lanes. The existing Harbor plan golden and summarization probe
+in their owning lanes. The test roots are `tests/` and
+`packages/<package>/tests/`; an embedded `src/.../tests/` directory remains a
+runtime input. The existing Harbor plan golden and summarization probe
 have explicitly audited primary readers, then follow that same consumer closure.
 Other test data and helper files retain full validation: a filename match cannot
 prove the absence of dynamic directory/glob readers. Shared pytest setup,
 unresolved consumers and consumers outside the Python test closure also retain
 the complete baseline and specialist lanes.
+
+The retired shared-cluster JSON path inventory is historical metadata, not a
+runtime consumer. Unknown JSON inputs still retain full validation. Metadata
+references through class fields or reflection also retain conservative coverage.
 
 Removing a standalone test does not request full regression; any remaining
 consumers still run. Empty package and system-smoke selections are resolved in

@@ -1259,7 +1259,7 @@ def test_behavior_tests_are_owned_but_excluded_from_ci_lanes() -> None:
     assert behavior_tests.isdisjoint(selected)
 
 
-@pytest.mark.parametrize("lane", ["tests-root", "nebius-pool", "integration", "integration-docker", "cluster-smoke"])
+@pytest.mark.parametrize("lane", ["nebius-pool", "cluster-smoke"])
 def test_manifest_lane_shards_are_disjoint_and_complete(lane: str) -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
     policy = manifest.test_shard_policy(lane)

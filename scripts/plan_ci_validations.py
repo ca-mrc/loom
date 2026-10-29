@@ -16,6 +16,7 @@ if TYPE_CHECKING or __package__:
         AFFECTED_ONLY_LANES,
         Manifest,
         _tracked_paths,
+        is_test_input_path,
         load_manifest,
         narrow_test_only_changes,
         select_release_image_matrix,
@@ -26,6 +27,7 @@ else:
         AFFECTED_ONLY_LANES,
         Manifest,
         _tracked_paths,
+        is_test_input_path,
         load_manifest,
         narrow_test_only_changes,
         select_release_image_matrix,
@@ -622,7 +624,7 @@ def plan_validations(
     # jobs; retaining every file inside a skipped job would not provide coverage.
     # Inspect the test subset even in a mixed runtime/test diff.
     test_inputs = tuple(path for path in paths
-                        if (path.startswith("tests/") or (path.startswith("packages/") and "/tests/" in path))
+                        if is_test_input_path(path)
                         and not _is_documentation_path(path)
                         and not _component_ownership_manifest().ci_ignores_path(path))
     independent_tests: tuple[str, ...] | None = None

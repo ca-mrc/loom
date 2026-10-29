@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -164,18 +164,6 @@ def test_control_jobs_keep_hosted_fallback_and_use_the_same_optional_queue() -> 
             assert placement.endswith("|| 'ubuntu-latest' }}")
             assert "LOOM_CI_UNIFIED_RUNNERS" in placement
             assert "loom-ci-exec" in placement
-
-
-def test_coverage_artifacts_map_hosted_checkout_roots() -> None:
-    config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    paths = config["tool"]["coverage"]["paths"]
-
-    for path_group, source_root in (("source", "src"), ("packages", "packages")):
-        assert paths[path_group] == [
-            source_root,
-            f"/home/runner/work/*/*/{source_root}",
-            f"*/_work/*/*/{source_root}",
-        ]
 
 
 def test_source_workflows_share_native_run_identity() -> None:
@@ -1414,11 +1402,29 @@ def test_pytest_workflow_preserves_tests_and_failures_with_optional_integration_
         assert "env.COVERAGE_ENABLED == 'true'" in upload["if"]
 
 
-def test_manual_coverage_request_selects_integration_through_workflow_planner(tmp_path: Path) -> None:
+@pytest.mark.parametrize("manual_request", [None, "coverage_summary", "legacy_compatibility"])
+def test_manual_requests_select_their_integration_tiers_through_workflow_planner(
+    tmp_path: Path, manual_request: str | None,
+) -> None:
     workflow = _workflow(".github/workflows/ci.yml")
-    assert _workflow_on(workflow)["workflow_dispatch"]["inputs"]["coverage_summary"]["default"] is False
+    options = _workflow_on(workflow)["workflow_dispatch"]["inputs"]
+    native = {f"inputs.{key}": option["default"] for key, option in options.items()}
+    if manual_request is not None:
+        native[f"inputs.{manual_request}"] = True
+    native.update({"github.event_name": "workflow_dispatch", "github.ref": "refs/heads/dev",
+                   "github.base_ref": ""})
+
+    def resolve(expression):
+        source = re.sub(r"(?:inputs|github)\.[A-Za-z0-9_.]+",
+                        lambda match: repr(native[match[0]]), expression.strip()[3:-2])
+        return eval(source.replace("&&", " and ").replace("||", " or "), {"__builtins__": {}})
+
     step = next(s for s in workflow["jobs"]["workflow-plan"]["steps"] if s.get("id") == "plan")
-    assert step["env"]["DISPATCH_COVERAGE_SUMMARY"] == "${{ inputs.coverage_summary }}"
+    dispatch_env = {key: str(resolve(value)).lower() for key, value in step["env"].items()
+                    if key in {"DISPATCH_INTEGRATION", "DISPATCH_INTEGRATION_DOCKER",
+                               "DISPATCH_COVERAGE_SUMMARY"}}
+    test_scope = resolve(workflow["env"]["CI_TEST_SCOPE"])
+    assert test_scope == ("all" if manual_request == "legacy_compatibility" else "nebius")
     git = tmp_path / "git"
     real_git = shutil.which("git")
     assert real_git is not None
@@ -1434,13 +1440,14 @@ def test_manual_coverage_request_selects_integration_through_workflow_planner(tm
              "EVENT_NAME": "workflow_dispatch", "HEAD_SHA": "a" * 40,
              "PR_LABELS_JSON": "[]", "PR_ACTION": "", "PR_ACTION_LABEL": "",
              "PR_DRAFT": "false", "PR_BASE_CHANGED": "false",
-             "DISPATCH_INTEGRATION": "false", "DISPATCH_INTEGRATION_DOCKER": "false",
-             "DISPATCH_COVERAGE_SUMMARY": "true", "GITHUB_OUTPUT": str(output)},
+             **dispatch_env, "CI_TEST_SCOPE": test_scope, "GITHUB_OUTPUT": str(output)},
     )
     assert result.returncode == 0, result.stderr
     values = dict(line.split("=", 1) for line in output.read_text().splitlines())
-    assert values["coverage_summary"] == values["integration"] == "true"
-    assert values["docs_only"] == "false"
+    assert values["coverage_summary"] == str(manual_request == "coverage_summary").lower()
+    assert values["integration"] == str(manual_request is not None).lower()
+    assert values["integration_docker"] == str(manual_request == "legacy_compatibility").lower()
+    assert values["docs_only"] == str(manual_request is None).lower()
 
 
 @pytest.mark.parametrize("job_name", ["tests-root", "integration"])

@@ -37,7 +37,7 @@ def test_candidate_matrix_runs_only_amd64(
 
 
 @pytest.mark.parametrize("tree", ["src", "packages"])
-def test_coverage_combines_real_data_from_both_ephemeral_provider_roots(
+def test_coverage_combines_real_data_from_all_checkout_roots(
     tmp_path, monkeypatch, tree
 ):
     import shutil
@@ -52,7 +52,8 @@ def test_coverage_combines_real_data_from_both_ephemeral_provider_roots(
     fragments = tmp_path / "coverage"
     fragments.mkdir()
     for index, base in enumerate(
-        ["/opt/actions-runner/_work/loom/loom", "/tmp/loom-hosted-worker-example/_work/loom/loom"]
+        ["/home/runner/work/loom/loom", "/opt/actions-runner/_work/loom/loom",
+         "/tmp/loom-hosted-worker-example/_work/loom/loom"]
     ):
         data = coverage.CoverageData(basename=str(fragments / f".coverage.{index}"))
         data.add_lines({f"{base}/{tree}/sample.py": {1}})
