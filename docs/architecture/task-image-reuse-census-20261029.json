@@ -1,0 +1,153 @@
+{
+  "cohorts": {
+    "harbor70_existing_nebius_adapted_snapshot": {
+      "components_scanned": 70,
+      "context_bytes": 24925088,
+      "context_files": 333,
+      "context_tree": {
+        "duplicate_groups": 0,
+        "duplicate_occurrences": 0,
+        "largest_group": 1,
+        "unique": 70
+      },
+      "dockerfile_bytes": {
+        "duplicate_groups": 0,
+        "duplicate_occurrences": 0,
+        "largest_group": 1,
+        "unique": 70
+      },
+      "first_base_reference": {
+        "duplicate_groups": 5,
+        "duplicate_occurrences": 63,
+        "largest_group": 33,
+        "unique": 7
+      },
+      "input_risks": {
+        "all_bases_pinned": 0,
+        "dynamic_base": 0,
+        "remote_input_marker": 70,
+        "secret_input_marker": 0
+      },
+      "reuse_authorized": false,
+      "runtime_observations": {
+        "build_seconds_avoided": null,
+        "equivalent_inflight_requests": null,
+        "exact_ready_hits": null,
+        "layer_cache_hits": null,
+        "transferred_bytes_avoided": null,
+        "trials": null
+      },
+      "schema_version": "loom.task-image-reuse-census.v1",
+      "scope": "local_static_single_component",
+      "skipped": {},
+      "static_input_candidates": {
+        "duplicate_groups": 0,
+        "duplicate_occurrences": 0,
+        "largest_group": 1,
+        "unique": 70
+      },
+      "tasks_discovered": 70,
+      "tasks_scanned": 70
+    },
+    "rst50_original_local_snapshot": {
+      "components_scanned": 50,
+      "context_bytes": 275123,
+      "context_files": 104,
+      "context_tree": {
+        "duplicate_groups": 0,
+        "duplicate_occurrences": 0,
+        "largest_group": 1,
+        "unique": 50
+      },
+      "dockerfile_bytes": {
+        "duplicate_groups": 0,
+        "duplicate_occurrences": 0,
+        "largest_group": 1,
+        "unique": 50
+      },
+      "first_base_reference": {
+        "duplicate_groups": 5,
+        "duplicate_occurrences": 42,
+        "largest_group": 37,
+        "unique": 8
+      },
+      "input_risks": {
+        "all_bases_pinned": 0,
+        "dynamic_base": 0,
+        "remote_input_marker": 50,
+        "secret_input_marker": 0
+      },
+      "reuse_authorized": false,
+      "runtime_observations": {
+        "build_seconds_avoided": null,
+        "equivalent_inflight_requests": null,
+        "exact_ready_hits": null,
+        "layer_cache_hits": null,
+        "transferred_bytes_avoided": null,
+        "trials": null
+      },
+      "schema_version": "loom.task-image-reuse-census.v1",
+      "scope": "local_static_single_component",
+      "skipped": {},
+      "static_input_candidates": {
+        "duplicate_groups": 0,
+        "duplicate_occurrences": 0,
+        "largest_group": 1,
+        "unique": 50
+      },
+      "tasks_discovered": 50,
+      "tasks_scanned": 50
+    }
+  },
+  "collected_on": "2026-10-29",
+  "combined": {
+    "components_scanned": 120,
+    "context_bytes": 25200211,
+    "context_files": 437,
+    "context_tree": {
+      "duplicate_groups": 0,
+      "duplicate_occurrences": 0,
+      "largest_group": 1,
+      "unique": 120
+    },
+    "dockerfile_bytes": {
+      "duplicate_groups": 0,
+      "duplicate_occurrences": 0,
+      "largest_group": 1,
+      "unique": 120
+    },
+    "first_base_reference": {
+      "duplicate_groups": 10,
+      "duplicate_occurrences": 107,
+      "largest_group": 37,
+      "unique": 13
+    },
+    "input_risks": {
+      "all_bases_pinned": 0,
+      "dynamic_base": 0,
+      "remote_input_marker": 120,
+      "secret_input_marker": 0
+    },
+    "reuse_authorized": false,
+    "runtime_observations": {
+      "build_seconds_avoided": null,
+      "equivalent_inflight_requests": null,
+      "exact_ready_hits": null,
+      "layer_cache_hits": null,
+      "transferred_bytes_avoided": null,
+      "trials": null
+    },
+    "schema_version": "loom.task-image-reuse-census.v1",
+    "scope": "local_static_single_component",
+    "skipped": {},
+    "static_input_candidates": {
+      "duplicate_groups": 0,
+      "duplicate_occurrences": 0,
+      "largest_group": 1,
+      "unique": 120
+    },
+    "tasks_discovered": 120,
+    "tasks_scanned": 120
+  },
+  "source_baseline": "b3945dcdc78c20f66d37863adb6926e016afb69d"
+}
