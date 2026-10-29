@@ -260,13 +260,17 @@ and neither is shared grading in the agent sandbox. A value the file actually
 sets is kept, including timeouts, network policy, `environment_mode`, and a
 verifier script path. The native bridge is installed only when that path is
 still the default Harbor script; an authored `verifier/custom.sh` is not
-replaced.
+replaced. Bundle image selection (including `tests/Dockerfile`) and runtime
+defaults still apply to custom verifiers without generating the reward bridge.
 CPU, memory, and storage omitted from a verifier image are copied from the
 agent environment, because the independent verifier planner requires them.
-The materialized row records `upstream_conversion` so a separate verifier image
-receives declared artifacts instead of a copy of the whole agent workdir.
+For the default Harbor script, the materialized row records
+`upstream_conversion` so a separate verifier image receives declared artifacts
+instead of a copy of the whole agent workdir.
 `loom` validates each file as an authored Loom task and does not apply those
-defaults. Any other source type rejects the field.
+defaults. Any other source type rejects the field. Model serialization omits
+`auto`; reading it back preserves the same bundle default without adding a
+bundle-only field to non-bundle sources.
 
 JSONL sources use physical newlines between JSON objects. Escaped newlines
 inside string values are preserved, and a final newline is optional. Literal

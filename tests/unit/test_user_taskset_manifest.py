@@ -32,6 +32,34 @@ def test_accepts_each_source_type(source_type: str) -> None:
     assert manifest.source.type == source_type
 
 
+@pytest.mark.parametrize("source_type", ["hf", "git", "https", "jsonl-inline"])
+@pytest.mark.parametrize("mode", ["python", "json"])
+def test_non_bundle_manifest_round_trip_omits_bundle_dialect(source_type: str, mode: str) -> None:
+    manifest = UserTaskSetManifest.model_validate({
+        **_MINIMAL,
+        "source": {"type": source_type, "locator": "loc"},
+    })
+    dumped = manifest.model_dump(mode=mode, by_alias=True, exclude_none=True)
+    assert "task_toml_format" not in dumped["source"]
+    assert UserTaskSetManifest.model_validate(dumped) == manifest
+    assert UserTaskSetManifest.model_validate_json(manifest.model_dump_json(by_alias=True)) == manifest
+
+
+@pytest.mark.parametrize("task_toml_format", ["terminal-bench", "loom", "auto"])
+def test_bundle_manifest_round_trip_preserves_effective_dialect(task_toml_format: str) -> None:
+    manifest = UserTaskSetManifest.model_validate({
+        "apiVersion": "loom.taskset/v1",
+        "kind": "UserTaskSet",
+        "metadata": {"name": "bundle-tasks", "display_name": "Bundle Tasks"},
+        "source": {
+            "type": "bundle-upload", "locator": "bundle.tar.gz",
+            "task_toml_format": task_toml_format,
+        },
+    })
+    restored = UserTaskSetManifest.model_validate_json(manifest.model_dump_json(by_alias=True))
+    assert restored.source.task_toml_format == task_toml_format
+
+
 def test_trajectory_only_without_verifier() -> None:
     manifest = UserTaskSetManifest.model_validate(_MINIMAL)
     assert manifest.verifier is None

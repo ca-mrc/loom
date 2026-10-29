@@ -157,6 +157,32 @@ script_path = "verifier/custom.sh"
         assert not any(key.endswith("verifier/run.sh") for key in store.objects)
 
 
+def test_custom_separate_verifier_inherits_omitted_resources_without_a_bridge(tmp_path):
+    authored = _CHILD_TOML.replace(
+        b"[verifier.environment]",
+        b'[verifier.args]\nscript_path = "verifier/custom.sh"\n[verifier.environment]',
+    )
+    files = _base_files(authored, verifier_dockerfile=True)
+    files["family/child/verifier/custom.sh"] = b"echo custom\n"
+    del files["family/child/tests/test.sh"]
+    result, store = _materialize(tmp_path, files, task_toml_format="terminal-bench")
+    assert result.status == "ready", result.error_summary
+    task = TaskConfig.model_validate(result.task_rows[0].config)
+    assert task.verifier.args["script_path"] == "verifier/custom.sh"
+    assert str(task.verifier.environment.dockerfile) == "tests/Dockerfile"
+    assert str(task.verifier.environment.docker_build_context) == "tests"
+    assert task.verifier.environment.cpus == task.environment.cpus == 2
+    assert task.verifier.environment.memory_mb == task.environment.memory_mb == 4096
+    assert task.verifier.environment.storage_mb == task.environment.storage_mb == 10240
+    assert "verifier.environment: explicit_resources_required" not in independent_verifier_rejections(
+        task, TrialConfig(agent_name="oracle", agent_model=None), allow_image_preparation=True,
+    )
+    assert task.upstream_conversion is None
+    assert not any(key.endswith("verifier/run.sh") for key in store.objects)
+    prefix = result.task_rows[0].source.removeprefix("s3://artifacts/")
+    assert store.objects[prefix + "verifier/custom.sh"] == b"echo custom\n"
+
+
 def test_authored_task_identity_wins_over_the_directory(tmp_path):
     toml = _TB2_TOML.replace(
         b'[metadata]\n',

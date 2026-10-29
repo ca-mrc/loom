@@ -63,8 +63,11 @@ class TaskSetSource(BaseModel):
     revision: str | None = None
     subset: str | None = None
     split: str | None = None
-    # Bundle dialect. Omitted stored manifests stay ``auto`` and keep per-file detection.
-    task_toml_format: Literal["terminal-bench", "loom", "auto"] = "auto"
+    # Omit the default so non-bundle manifests can be serialized and revalidated.
+    # Bundle uploads still default to per-file detection when the field is absent.
+    task_toml_format: Literal["terminal-bench", "loom", "auto"] = Field(
+        default="auto", exclude_if=lambda value: value == "auto",
+    )
 
 
 class TaskSetVerifier(BaseModel):

@@ -391,7 +391,9 @@ def _inherit_omitted_verifier_resources(config: dict[str, Any]) -> list[str]:
     return inherited
 
 
-def _stamp_terminal_bench_conversion(config: dict[str, Any], bundle_dir: Path) -> None:
+def _stamp_terminal_bench_conversion(
+    config: dict[str, Any], bundle_dir: Path, inherited_resources: list[str],
+) -> None:
     """Mark an explicit Terminal-Bench row the same way catalog prepare does.
 
     ``native_independent_verifier_handoff`` reads this stamp. Without it a
@@ -402,7 +404,7 @@ def _stamp_terminal_bench_conversion(config: dict[str, Any], bundle_dir: Path) -
         "Harbor-native schema -> Loom TaskConfig v1",
         "task.id",
         "verifier.args.script_path",
-        *_inherit_omitted_verifier_resources(config),
+        *inherited_resources,
     ]
     if config.get("environment", {}).get("compose_files"):
         changes.append("environment.compose_files")
@@ -517,13 +519,15 @@ def _materialize_bundle_upload(
                         raw_cfg = project_declared_terminal_bench_task(
                             raw_cfg, task_id=contextual_id,
                         )
-                        # An authored script path or verifier name wins. The
-                        # bridge rewrites script_path, so install it only for
-                        # the default Harbor script, matching auto.
-                        if _uses_native_verifier_bridge(raw_cfg):
-                            prepare_harbor_bundle(bundle_dir, raw_cfg)
-                            _stamp_terminal_bench_conversion(raw_cfg, bundle_dir)
-                            native_bridge = True
+                        # Apply bundle defaults independently of bridge generation.
+                        # An authored script path or verifier name still wins.
+                        native_bridge = _uses_native_verifier_bridge(raw_cfg)
+                        prepare_harbor_bundle(
+                            bundle_dir, raw_cfg, install_verifier_bridge=native_bridge,
+                        )
+                        inherited_resources = _inherit_omitted_verifier_resources(raw_cfg)
+                        if native_bridge:
+                            _stamp_terminal_bench_conversion(raw_cfg, bundle_dir, inherited_resources)
                     elif declared_format != "loom":
                         harbor_source = is_terminal_bench_shape(raw_cfg)
                         raw_cfg = normalize_terminal_bench_task_toml(
