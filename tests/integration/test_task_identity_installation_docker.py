@@ -457,7 +457,7 @@ async def test_native_verifier_rejects_planted_report_paths_before_running_scrip
     sandboxes, tmp_path, monkeypatch, planted,
 ):
     from loom.errors import DriverError
-    from loom.service_execution_sandbox_task import ServiceExecutionTaskError, run_verifier
+    from loom.service_execution_sandbox_task import run_verifier
     from tests.unit.test_service_execution_terminus_plan import _inputs
 
     _, driver, _ = sandboxes
@@ -486,11 +486,26 @@ printf '{"rewards":{"passed":1}}' > "$LOOM_VERIFIER_OUTPUT"
     connection = ServiceSandboxDriver(tmp_path / "verifier/sandbox.sock",
                                       capabilities=driver.capabilities, network_policy=NoNetwork())
     monkeypatch.setattr("loom.service_execution_sandbox_task.sandbox_driver", lambda *_: connection)
-    expected = ServiceExecutionTaskError if planted == "tests-link" else DriverError
-    with pytest.raises(expected):
-        await run_verifier(controller, task, trial)
     inspection = ServiceSandboxDriver(tmp_path / "verifier/sandbox.sock",
                                       capabilities=driver.capabilities, network_policy=NoNetwork())
+    if planted == "tests-link":
+        # The business tests symlink is not the verifier input.
+        await run_verifier(controller, task, trial)
+        report = json.loads((controller / ".loom/verifier/output.json").read_bytes())
+        assert report["rewards"] == {"passed": 1}
+        await inspection.start()
+        try:
+            intact = await inspection.exec(
+                "test -s /tmp/verifier-entered && "
+                "test \"$(readlink /app/tests)\" = /tmp/protected && "
+                "test \"$(cat /tmp/protected/verifier/output.json)\" = protected",
+            )
+            assert intact.return_code == 0, intact.stderr
+        finally:
+            await inspection.stop()
+        return
+    with pytest.raises(DriverError):
+        await run_verifier(controller, task, trial)
     await inspection.start()
     try:
         intact = await inspection.exec(
