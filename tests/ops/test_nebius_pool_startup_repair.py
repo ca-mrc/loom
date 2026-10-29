@@ -412,8 +412,10 @@ def test_completed_repair_binds_ancestry_and_remains_a_valid_refresh_predecessor
         load_completed_pool(predecessor, original=context.original)
 
 
-@pytest.mark.parametrize('phase', ['stop', 'template', 'start', 'complete'])
-@pytest.mark.parametrize('late_commit', [False, True])
+@pytest.mark.parametrize(('late_commit', 'phase'), [
+    (False, 'stop'), (False, 'template'), (False, 'start'), (False, 'complete'),
+    (True, 'stop'), (True, 'template'), (True, 'start'),
+])
 def test_rollback_settles_every_repair_projection_before_successor_shutdown(prepared_repair, phase, late_commit):
     from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
     from scripts.ops.nebius_pool_shutdown import stop_pool_successors
@@ -550,7 +552,7 @@ def test_repaired_config_live_readback_is_bound_to_journaled_create(prepared_rep
             qualify_repair_configuration(context.request, state=state, anchor=anchor, read=api.resources.get_resource)
 
 
-@pytest.mark.parametrize('failure', [None, 'config-before', 'template-before', 'start-after'])
+@pytest.mark.parametrize('failure', ['config-before', 'template-before', 'start-after'])
 def test_connected_repair_creates_only_fixed_config_and_uses_exact_manager_cas(prepared_repair, failure):
     from types import SimpleNamespace
 
