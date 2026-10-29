@@ -793,3 +793,27 @@ async def test_changed_claim_cannot_inherit_an_old_waiting_priority(two_waiting_
         await locked.get(TaskImageMaterialization, image_id, with_for_update=True)
         await second.run_once()
     assert second_kube.ensure_calls == 1
+
+
+async def test_admission_pass_starts_one_build_per_node_until_its_io_feedback(native_build_setup, monkeypatch):
+    # #2701: batching leaves I/O pacing with the native capacity path. A node
+    # with an unobserved new start cannot take another in the same pass.
+    controller, sessions, kube, image_id, builder_trial_id, _, target, now = native_build_setup
+    controller.settings = controller.settings.model_copy(update={"cpu_millis": 1000})
+    async with sessions() as session:
+        team_id = (await session.get(Trial, builder_trial_id)).team_id
+    second_id, _ = await seed_image(sessions, team_id)
+    await _free(sessions, target, now)
+    cycles = []
+    monkeypatch.setattr("loom_execution_actuator.task_image_controller.record_build_cycle",
+                        lambda controller, **cycle: cycles.append(cycle))
+    await controller.run_once()
+    # A blocked, validated head becomes the target's wait rather than an error.
+    assert (cycles[-1]["claimed"], cycles[-1]["outcome"]) == (1, "idle")
+    assert kube.ensure_calls == 1
+    states = {image: (await rows(sessions, image))[0].state for image in (image_id, second_id)}
+    assert sorted(states.values()) == ["queued", "running"]
+    async with sessions() as session:
+        wait = await session.get(TaskImageCapacityWait, target.target_id)
+        assert wait is not None and states[wait.materialization_id] == "queued"
+        assert wait.reason == "execution_capacity_native_io_feedback_pending"

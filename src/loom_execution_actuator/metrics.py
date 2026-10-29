@@ -56,8 +56,13 @@ TASK_IMAGE_BUILD_OUTSTANDING = Gauge(
 )
 TASK_IMAGE_BUILD_ADMISSIONS_TOTAL = Counter(
     "loom_execution_actuator_task_image_build_admissions_total",
-    "Admission opportunities by controller and bounded outcome or blocked reason.",
+    "Admission passes by controller and the bounded outcome or blocked reason that ended them.",
     labelnames=("controller", "outcome"),
+)
+TASK_IMAGE_BUILD_CLAIMS_TOTAL = Counter(
+    "loom_execution_actuator_task_image_build_claims_total",
+    "Builds claimed by admission passes.",
+    labelnames=("controller",),
 )
 
 _LOG = logging.getLogger(__name__)
@@ -70,12 +75,13 @@ def blocked_outcome(reason: object) -> str:
 
 
 def record_build_cycle(controller: str, *, outstanding: int, reconcile_seconds: float,
-                       outcome: str, admission_seconds: float) -> None:
+                       outcome: str, admission_seconds: float, claimed: int = 0) -> None:
     TASK_IMAGE_BUILD_OUTSTANDING.labels(controller).set(outstanding)
     TASK_IMAGE_BUILD_CYCLE_SECONDS.labels(controller, "reconcile").observe(reconcile_seconds)
     TASK_IMAGE_BUILD_CYCLE_SECONDS.labels(controller, "admission").observe(admission_seconds)
     TASK_IMAGE_BUILD_ADMISSIONS_TOTAL.labels(controller, outcome).inc()
+    TASK_IMAGE_BUILD_CLAIMS_TOTAL.labels(controller).inc(claimed)
     # Idle cycles repeat every poll; keep logs to cycles that carry work.
-    if outstanding or outcome == "claimed":
-        _LOG.info("Native build cycle controller=%s outstanding=%d reconcile_s=%.3f admission=%s admission_s=%.3f",
-                  controller, outstanding, reconcile_seconds, outcome, admission_seconds)
+    if outstanding or claimed:
+        _LOG.info("Native build cycle controller=%s outstanding=%d reconcile_s=%.3f claimed=%d admission=%s "
+                  "admission_s=%.3f", controller, outstanding, reconcile_seconds, claimed, outcome, admission_seconds)
