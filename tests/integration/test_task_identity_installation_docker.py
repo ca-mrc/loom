@@ -98,7 +98,7 @@ print('authored caches preserved; verifier downloads uncached')
 
 
 @pytest.fixture(scope="module")
-def native_binary(tmp_path_factory):
+def native_binary(tmp_path_factory, request):
     directory = tmp_path_factory.mktemp("identity-runtime")
     repository = Path(__file__).resolve().parents[2]
     build = [
@@ -106,6 +106,9 @@ def native_binary(tmp_path_factory):
         "-v", f"{repository}:/src:ro", "-v", f"{directory}:/output", "-w", "/src",
         "-e", "GOCACHE=/tmp/go-cache", "-e", "GOMODCACHE=/output/modules", "-e", "CGO_ENABLED=0",
     ]
+    # A hosted-image regression can cross-build Linux/amd64 on an ARM host.
+    if architecture := getattr(request, "param", None):
+        build.extend(["-e", f"GOARCH={architecture}"])
     # Fetch checksum-locked dependencies before the deliberately offline build.
     # Task/verifier containers below retain their no-network boundary.
     subprocess.run([

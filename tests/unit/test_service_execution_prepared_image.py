@@ -116,3 +116,35 @@ def test_prepared_image_never_exempts_trusted_platform_images(missing):
     )})
     with pytest.raises(ImageAdmissionError):
         validate_execution_image_admission_bundle(bundle, required_image_refs=plan.published_image_refs())
+
+
+def test_published_fixture_password_reaches_only_rendered_task_environment():
+    from loom.execution_runtime_contract import ProcessPhaseV1
+    from loom.models.task import EnvironmentConfig
+    from loom.task_environment_handoff import RESOLVED_TASK_ENVIRONMENT
+    from tests.unit.test_resolved_task_environment_handoff import _prepared as resolved_inputs
+
+    task, trial, profile, grant = resolved_inputs()
+    plan = _compile(task, trial, profile, grant)
+    assert ExecutionRuntimePlanV1.model_validate_json(plan.model_dump_json()) == plan
+    lease = _lease()
+    lease.runtime_contract_json = plan.canonical_payload()
+    lease.runtime_contract_sha256 = canonical_digest(lease.runtime_contract_json)
+    resolved = resolve_prepared_task(task, grant)
+    lease.workload_requirements_json = workload_requirements_from_task(resolved, trial).model_dump(mode="json")
+    lease.workload_requirements_sha256 = canonical_digest(lease.workload_requirements_json)
+    pod = render_execution_job(lease, target=ExecutionTargetRuntime(
+        target_id=lease.target_id, namespace=lease.namespace_name,
+    ))["spec"]["template"]["spec"]
+    sandbox = next(c for c in pod["initContainers"] if c["name"] == "task-sandbox")
+    assert {v["name"]: v["value"] for v in sandbox["env"]}["PASSWORD"] == "diagnostic-fixture-value"
+    for container in (*pod["initContainers"], *pod["containers"]):
+        if container is not sandbox:
+            assert "PASSWORD" not in {v["name"] for v in container.get("env", [])}
+    # The trusted controller carries typed task metadata; PASSWORD is never
+    # a direct controller variable. Keep its own process contract strict.
+    received = EnvironmentConfig.model_validate_json(plan.main.environment[RESOLVED_TASK_ENVIRONMENT])
+    assert received.environment["PASSWORD"] == "diagnostic-fixture-value"
+    with pytest.raises(ValueError, match="forbidden name"):
+        ProcessPhaseV1(role="agent", argv=["true"], working_directory="/app",
+                       timeout_seconds=30, environment={"PASSWORD": "diagnostic-fixture-value"})
