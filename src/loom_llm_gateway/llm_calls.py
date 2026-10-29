@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -19,8 +20,25 @@ from loom.db.schema import (
     PipelineStageRun,
 )
 from loom.request_params import coerce_request_params, normalize_request_params
-from loom_llm_gateway.dialect import TokenUsage
+from loom_llm_gateway.dialect import USAGE_STATUS_KEY, TokenUsage
 from loom_llm_gateway.metrics import COST_USD_TOTAL, LLM_CALLS_TOTAL
+from loom_llm_gateway.rate_card import COST_META_CONFIDENCE_KEY, COST_META_SOURCE_KEY
+
+
+def _projected_text(value: Any) -> str:
+    # Mirrors `provider_extras ->> key`, with '' for an absent or null key.
+    if value is None:
+        return ""
+    return value if isinstance(value, str) else json.dumps(value)
+
+
+def usage_projection_columns(provider_extras: dict[str, Any]) -> dict[str, str]:
+    """Insert-time copies of the cost/usage keys that aggregates filter on (#2687)."""
+    return {
+        "cost_source": _projected_text(provider_extras.get(COST_META_SOURCE_KEY)),
+        "cost_confidence": _projected_text(provider_extras.get(COST_META_CONFIDENCE_KEY)),
+        "usage_status": _projected_text(provider_extras.get(USAGE_STATUS_KEY)),
+    }
 
 
 def _service_execution_binding(
@@ -169,6 +187,7 @@ async def record_call(
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             provider_extras=provider_extras,
+            **usage_projection_columns(provider_extras),
             request_params=audit_request_params,
             cost_usd=cost_usd,
             rate_card_hash=rate_card_hash,
@@ -302,6 +321,7 @@ async def record_failed_call(
             input_tokens=0,
             output_tokens=0,
             provider_extras=provider_extras,
+            **usage_projection_columns(provider_extras),
             request_params=audit_request_params,
             cost_usd=0,
             rate_card_hash="failed-upstream",

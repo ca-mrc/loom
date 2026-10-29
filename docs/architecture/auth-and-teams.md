@@ -149,6 +149,17 @@ business read therefore never holds the session row lock, so other requests from
 the same browser, including startup's `/auth/me`, authenticate independently
 (#2687).
 
+`loom_svc_auth_duration_sec`, `loom_svc_db_checkout_wait_sec` and
+`loom_svc_db_statement_sec` separate authentication (including the touch and
+its commit), connection-pool wait and SQL time from total request latency.
+`LOOM_SVC_INTERACTIVE_READ_STATEMENT_TIMEOUT_MS` (default `0`, disabled) sets a
+`statement_timeout` on browser-session GET/HEAD reads only; a cancelled read
+returns a retryable `503` with `Retry-After`. This response and its timeout
+counter apply only after that request has successfully installed the optional
+limit; other database cancellations retain their existing error behavior. Bearer callers, including workers
+and task writeback, are never limited. Choose a value from the observed
+statement-time baseline before enabling it.
+
 `GET /api/v1/auth/me` returns a stable CSRF proof without rotating the session's
 CSRF nonce, so an identity read in another tab cannot invalidate a pending write.
 The proof is HMAC-SHA256 keyed by the raw HttpOnly session cookie over

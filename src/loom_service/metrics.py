@@ -10,7 +10,12 @@ Naming: `loom_svc_*` prefix.
 
 from __future__ import annotations
 
+import time
+from typing import Any
+
 from prometheus_client import Counter, Histogram
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
 
 HTTP_REQUESTS_TOTAL = Counter(
     "loom_svc_http_requests_total",
@@ -96,3 +101,73 @@ TEAM_EMERGENCY_ACTIONS_TOTAL = Counter(
     # action: disable / enable / pause_submissions / resume_submissions
     labelnames=("action",),
 )
+
+
+# #2687: split request latency into its database phases, so a slow page can be
+# attributed to session-row lock waits, pool exhaustion, or slow SQL.
+_DB_PHASE_BUCKETS = (0.005, 0.025, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 180.0)
+
+AUTH_DURATION_SEC = Histogram(
+    "loom_svc_auth_duration_sec",
+    "Request authentication, including the session touch and its commit",
+    labelnames=("auth_kind",),
+    buckets=_DB_PHASE_BUCKETS,
+)
+
+DB_CHECKOUT_WAIT_SEC = Histogram(
+    "loom_svc_db_checkout_wait_sec",
+    "Wait for a pooled database connection at request start",
+    buckets=_DB_PHASE_BUCKETS,
+)
+
+DB_STATEMENT_SEC = Histogram(
+    "loom_svc_db_statement_sec",
+    "Database statement execution time, including lock waits",
+    # verb: select / insert / update / delete / other
+    labelnames=("verb",),
+    buckets=_DB_PHASE_BUCKETS,
+)
+
+INTERACTIVE_READ_TIMEOUTS_TOTAL = Counter(
+    "loom_svc_interactive_read_timeouts_total",
+    "Browser reads cancelled by the interactive statement timeout",
+)
+
+_STATEMENT_VERBS = frozenset({"select", "insert", "update", "delete"})
+
+
+def instrument_engine(engine: Any) -> None:
+    """Record per-statement execution time on an (async) SQLAlchemy engine."""
+    sync_engine = getattr(engine, "sync_engine", engine)
+    if not isinstance(sync_engine, Engine):
+        return
+
+    @event.listens_for(sync_engine, "before_cursor_execute")
+    def _start(
+        _conn: Any, _cursor: Any, _statement: str, _parameters: Any,
+        context: Any, _executemany: bool,
+    ) -> None:
+        context._loom_statement_start = time.perf_counter()
+
+    def _observe(context: Any, statement: str | None) -> None:
+        started = getattr(context, "_loom_statement_start", None)
+        if started is None:
+            return
+        del context._loom_statement_start
+        verb = statement.lstrip().split(None, 1)[0].lower() if statement and statement.strip() else ""
+        DB_STATEMENT_SEC.labels(verb=verb if verb in _STATEMENT_VERBS else "other").observe(
+            time.perf_counter() - started,
+        )
+
+    @event.listens_for(sync_engine, "after_cursor_execute")
+    def _finish(
+        _conn: Any, _cursor: Any, statement: str, _parameters: Any,
+        context: Any, _executemany: bool,
+    ) -> None:
+        _observe(context, statement)
+
+    @event.listens_for(sync_engine, "handle_error")
+    def _failed(context: Any) -> None:
+        # Failed/cancelled statements never emit after_cursor_execute. Keep
+        # their latency, with timing state scoped to this execution only.
+        _observe(context.execution_context, context.statement)

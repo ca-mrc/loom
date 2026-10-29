@@ -186,6 +186,14 @@ one call per unresolved hash and extracts only `_loom_price_basis`, never the
 full raw `provider_extras`. Batch detail resolves original and effective
 snapshots in one shared lookup (#2687).
 
+Since migration 0182 the Gateway also copies `_loom_cost_source`,
+`_loom_cost_confidence` and `_loom_usage_status` into the `llm_calls` columns
+`cost_source`, `cost_confidence` and `usage_status` at insert, using `''` for an
+absent key. Usage aggregates filter on those columns and fall back to
+`provider_extras` only for rows written before 0182 (NULL columns), so new calls
+are counted without reading the raw-log JSON. Existing rows are not backfilled;
+a chunked backfill is a follow-up.
+
 ### Legacy migration and rollback
 
 Migration 0159 adds nullable connection configuration and catalog storage without

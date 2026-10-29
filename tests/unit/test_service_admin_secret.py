@@ -68,6 +68,9 @@ class _ExplodingSession:
     async def commit(self) -> None:
         return None
 
+    async def connection(self) -> None:
+        return None
+
 
 class _SessionContext:
     async def __aenter__(self) -> _ExplodingSession:

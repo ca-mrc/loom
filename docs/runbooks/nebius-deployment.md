@@ -896,12 +896,13 @@ explicit completed development schema successor, the new active management
 database must still be exactly `0176`. Selecting that successor instead requires
 its exact upgraded manager revision from the protected publication. Participant
 readiness, guard/role handoff and recovery accept the audited `0175`, `0176`,
-`0177`, `0178`, `0179` and `0180` layouts; readiness reports the actual revision.
+`0177`, `0178`, `0179`, `0180`, `0181` and `0182` layouts; readiness reports the actual revision.
 The `0177` publication journal, `0178` catalog/lifecycle tables and `0180`
 live-trajectory preview table remain inaccessible to the actuator. An unknown revision, missing required journal or excessive role
 grants blocks qualification. No handoff command migrates a database or changes
 its version marker. Protected read-only lease census supports these participant
-layouts; `0180` adds separate live-trajectory preview storage without changing
+layouts; `0180` adds separate live-trajectory preview storage, `0181` extends image preparation identity and
+`0182` adds nullable `llm_calls` usage projection columns, without changing
 the fixed lease/command/trial read contract. A successful census is not handoff authority.
 
 The retained dev participant may remain on its qualified `0175` runtime: `0176`

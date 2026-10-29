@@ -15,9 +15,11 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import httpx
+import psycopg
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from prometheus_client import make_asgi_app
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -53,6 +55,8 @@ from loom_service.environment_management.runtime import EnvironmentRuntime
 from loom_service.metrics import (
     HTTP_REQUEST_LATENCY_SEC,
     HTTP_REQUESTS_TOTAL,
+    INTERACTIVE_READ_TIMEOUTS_TOTAL,
+    instrument_engine,
 )
 from loom_service.pipeline_control_bindings import SqlPipelineRecipeBindingResolver
 from loom_service.provider_secret_gc import run_loop as provider_secret_gc_run_loop
@@ -190,6 +194,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             settings.db_engine_url, connect_args=settings.db_engine_connect_args,
         )
         app.state._owned_service_engine = engine
+        instrument_engine(engine)
         await _assert_schema_startup(engine)
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -266,6 +271,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             connect_args=settings.db_engine_connect_args,
         )
         app.state._owned_service_engine = engine
+        instrument_engine(engine)
         await _assert_schema_startup(engine)
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         await retry_startup_dependency(
@@ -457,6 +463,24 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         return JSONResponse(status_code=exc.status_code, content={
             "detail": {"code": exc.code, **exc.details},
         }, headers={"Cache-Control": "no-store"})
+
+    @app.exception_handler(OperationalError)
+    async def _interactive_read_timeout(
+        request: Request, exc: OperationalError,
+    ) -> JSONResponse:
+        # Only requests that successfully applied the opt-in browser read
+        # policy receive its retry response. Other cancellations retain 500.
+        if not (
+            getattr(request.state, "interactive_read_timeout_applied", False)
+            and isinstance(exc.orig, psycopg.errors.QueryCanceled)
+        ):
+            raise exc
+        INTERACTIVE_READ_TIMEOUTS_TOTAL.inc()
+        return JSONResponse(
+            status_code=503,
+            content={"detail": {"reason": "read timed out", "retryable": True}},
+            headers={"Cache-Control": "no-store", "Retry-After": "5"},
+        )
 
     @app.exception_handler(StagingAdmissionError)
     async def _staging_admission_error(

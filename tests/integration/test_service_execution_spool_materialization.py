@@ -78,7 +78,7 @@ from tests.support.minio_images import prepare_test_image
 
 
 class _HistoricalLedgerSession(AsyncSession):
-    """Keep recovery reads on the ledger projection preceding schema 0176."""
+    """Keep recovery reads on the ledger projection preceding schemas 0176 and 0182."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -91,9 +91,13 @@ class _HistoricalLedgerSession(AsyncSession):
         whole = {item.get("entity") for item in state.statement.column_descriptions
                  if item.get("expr") is item.get("entity")}
         if LlmCall in whole:
-            # Recovery must not read or lazy-load later baseline attribution.
+            # Recovery must not read or lazy-load later baseline attribution
+            # (0176) or the usage projection (0182).
             state.statement = state.statement.options(
-                defer(LlmCall.baseline_session_id, raiseload=True))
+                defer(LlmCall.baseline_session_id, raiseload=True),
+                defer(LlmCall.cost_source, raiseload=True),
+                defer(LlmCall.cost_confidence, raiseload=True),
+                defer(LlmCall.usage_status, raiseload=True))
 
 
 class _HistoricalSnapshotSession(_HistoricalLedgerSession):

@@ -129,6 +129,11 @@
     "default": "'http://loom-llm-gateway:9100'",
     "required": false
   },
+  "interactive_read_statement_timeout_ms": {
+    "annotation": "<class 'int'>",
+    "default": "0",
+    "required": false
+  },
   "k8s_worker_enabled": {
     "annotation": "<class 'bool'>",
     "default": "True",

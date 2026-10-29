@@ -224,6 +224,11 @@ def test_conversion_preserves_history_and_reaches_dev(
                 # 0176 adds baseline attribution; historical calls retain their
                 # original subject and must not acquire a baseline session.
                 row["baseline_session_id"] = None
+                # 0182 adds insert-time usage projection columns; historical
+                # rows stay NULL and are read through the provider_extras fallback.
+                row["cost_source"] = None
+                row["cost_confidence"] = None
+                row["usage_status"] = None
             if revision not in {"0135", "0136"}:
                 for row in before["task_image_materialization_attempts"]:
                     row["native_build"] = None
