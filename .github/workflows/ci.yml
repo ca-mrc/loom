@@ -172,7 +172,8 @@ jobs:
           fetch-depth: 0
 
       # A draft payload can get a newer suite than the Ready run on the same
-      # head; filtering it would hide that run's required contexts.
+      # head, or be the only run when GitHub drops the Ready event; filtering
+      # it would hide or never publish the required contexts.
       - name: Recheck draft event against the live pull request
         id: stale
         if: steps.event.outputs.draft_payload == 'true'

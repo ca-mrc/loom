@@ -86,11 +86,20 @@ def test_waits_for_the_ready_run_to_become_listable() -> None:
     assert github.sleeps == [stale_draft.FULL_SUITE_INTERVAL_SECONDS] * 2
 
 
-def test_no_full_suite_on_the_head_stays_filtered_after_bounded_waiting() -> None:
+def test_ready_head_without_any_full_suite_runs_the_full_gate() -> None:
+    # PR #2677: push while Draft, Ready 2 s later; GitHub created only the
+    # Draft synchronize run and never a ready_for_review run.
     github = FakeGitHub(listings=[[_run("filtered", OWN_SUITE)]])
 
-    assert github.classify() == ("filtered", "no full suite on this head yet")
+    assert github.classify() == ("full", "live pull request is Ready on this head and has no full suite")
     assert len(github.sleeps) == stale_draft.FULL_SUITE_ATTEMPTS - 1
+
+
+def test_genuine_draft_without_a_full_suite_stays_filtered() -> None:
+    github = FakeGitHub(draft=True, listings=[[_run("filtered", OWN_SUITE)]])
+
+    assert github.classify() == ("filtered", "live pull request is draft")
+    assert github.sleeps == []
 
 
 def test_full_suites_for_other_heads_and_manual_runs_do_not_count() -> None:
@@ -98,7 +107,8 @@ def test_full_suites_for_other_heads_and_manual_runs_do_not_count() -> None:
         _run("full", OWN_SUITE - 1, head=NEWER_HEAD), _run("manual", OWN_SUITE - 2),
     ]])
 
-    assert github.classify()[0] == "filtered"
+    assert github.classify()[1] == "live pull request is Ready on this head and has no full suite"
+    assert len(github.sleeps) == stale_draft.FULL_SUITE_ATTEMPTS - 1
 
 
 @pytest.mark.parametrize(

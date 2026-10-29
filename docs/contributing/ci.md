@@ -92,14 +92,16 @@ the Ready run's four contexts, and re-running that older run does not restore
 them. `workflow-plan` therefore checks out every PR event, and
 `scripts/ci_stale_draft_event.py` reads the live PR and this head's CI runs
 with read-only `pull-requests`/`actions` tokens. A Draft payload runs the full
-gate only when the live PR is open, Ready, on the same head, and its newest
-`gate=full` run is older. It passes `stale_draft` to the image, cluster and
+gate only when the live PR is open, Ready, on the same head, and either its
+newest `gate=full` run is older or no `gate=full` run appears within about 30
+seconds. GitHub can drop the `ready_for_review` run entirely (#2677), leaving
+the Draft run as the head's only suite. It passes `stale_draft` to the image, cluster and
 staging workflows so they plan instead of filtering. A genuine Draft, a newer
-head, a newer full run, no full run within about 30 seconds, or an unreadable
-API keeps the event filtered. The upgraded run keeps its `gate=filtered` run
+head, a newer full run, or an unreadable API keeps the event filtered. The upgraded run keeps its `gate=filtered` run
 name and Draft concurrency slot. Candidate reuse therefore ignores it, and a
 later push does not cancel it. The older Ready run also completes, so each
-occurrence costs one extra full run (seven heads Oct 15–26).
+occurrence costs one extra full run (seven heads Oct 15–26); so does a
+dropped Ready run that GitHub delivers after the wait.
 
 The manifest retains ownership of both historical and Nebius tests. Daily dev CI
 selects Nebius and common contracts; historical compatibility is manual. PR image CI uses the same seven-image Nebius set as candidate publication,
