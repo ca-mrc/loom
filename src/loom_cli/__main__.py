@@ -155,6 +155,10 @@ def _build_parser() -> argparse.ArgumentParser:
                            "GPU spec (Modal only). Example: --gpu A10, "
                            "--gpu H100:2. Rejected for other backends."
                        ))
+    p_run.add_argument(
+        "--mainland-proxy", action=argparse.BooleanOptionalAction, default=False,
+        help="Use the configured simulated-mainland tool gateway (default off).",
+    )
     p_run.add_argument("--concurrency", type=int, default=1)
     p_run.add_argument("--output-dir", type=Path, default=Path("./runs"))
     p_run.add_argument("--json", dest="json_output", action="store_true",

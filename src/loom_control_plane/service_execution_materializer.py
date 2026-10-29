@@ -43,8 +43,9 @@ from loom.db.schema import (
     TrialEvent,
 )
 from loom.execution_runtime_contract import ExecutionRuntimeResultV1
-from loom.hosted_harness import TraceFormat, hosted_harness
+from loom.hosted_harness import TraceFormat, hosted_harness, is_workspace_harness
 from loom.llm_call_ledger import read_service_execution_llm_calls
+from loom.mainland_network_profile import MainlandNetworkProfileV1
 from loom.models.result import ExceptionInfo
 from loom.models.task import TaskConfig
 from loom.models.trajectory import (
@@ -376,6 +377,41 @@ def _legacy_verifier_reward_projection(runtime: ExecutionRuntimeResultV1) -> boo
     )
 
 
+def _mainland_proxy_metadata(
+    trial: TrialConfig, profile: MainlandNetworkProfileV1 | None, evidence: bytes | None,
+    *, trusted_evidence: bool = False,
+) -> dict[str, Any] | None:
+    if not trial.mainland_proxy:
+        return None
+    if profile is None:
+        raise MaterializationIntegrityError("mainland_proxy_profile_missing")
+    counts = {"gfw_suffixes": len(profile.gfw_suffixes), "gfw_hosts": len(profile.gfw_hosts),
+              "greatfire_hosts": len(profile.greatfire_hosts)}
+    state = "frozen_profile"
+    evidence_status = "missing" if not evidence else "untrusted"
+    # A response-only verifier runs in the controller filesystem. Its audit
+    # is diagnostic, not independent proof of what was loaded. Workspace
+    # harnesses qualify only when their frozen sidecars do not mount workspace.
+    trusted_evidence = trusted_evidence and is_workspace_harness(trial.agent_name)
+    for line in ((evidence or b"") if trusted_evidence else b"").splitlines():
+        try:
+            row = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            state, evidence_status = "frozen_profile", "invalid"
+            break
+        if not isinstance(row, dict) or row.get("outcome") != "mainland_proxy_loaded":
+            continue
+        if row.get("provider_version") != profile.provider_version or row.get("rule_counts") != counts:
+            state, evidence_status = "frozen_profile", "mismatch"
+            break
+        state, evidence_status = "loaded", "matched"
+    return {"enabled": True, "engine": "nebius-task-egress", "scope": "mainland-network-simulation",
+            "state": state, "evidence_status": evidence_status,
+            "provider_version": profile.provider_version, "rule_counts": counts,
+            "unknown_action": profile.unknown_action, "intermittent_action": profile.intermittent_action,
+            "sources": profile.sources}
+
+
 def build_canonical_events(
     *,
     trial_id: UUID,
@@ -387,6 +423,9 @@ def build_canonical_events(
     verifier_body: bytes | None,
     gateway_calls: list[dict[str, Any]] | None = None,
     exception_info: ExceptionInfo | None = None,
+    mainland_proxy_profile: MainlandNetworkProfileV1 | None = None,
+    task_egress_body: bytes | None = None,
+    task_egress_trusted: bool = False,
 ) -> tuple[TrajectoryEvent, ...]:
     """Validate the lossless source trace and project it to Loom event rows."""
 
@@ -428,6 +467,9 @@ def build_canonical_events(
             task_id=task_id,
             agent_name=trial_config.agent_name,
             agent_mode="out-of-box",
+            tool_network_profile=_mainland_proxy_metadata(
+                trial_config, mainland_proxy_profile, task_egress_body, trusted_evidence=task_egress_trusted,
+            ),
         ),
         StepStartEvent(
             emitted_at=emitted,
@@ -1137,6 +1179,7 @@ class ServiceExecutionMaterializer:
             )
             if file.relative_path in {
                 _RESULT_PATH,
+                "diagnostics/task-egress.jsonl",
                 _TRACE_PATH,
                 _USAGE_PATH,
                 _VERIFIER_PATH,
@@ -1216,6 +1259,15 @@ class ServiceExecutionMaterializer:
             gateway_calls = (await read_service_execution_llm_calls(
                 session, lease, generation=lease.output_generation,
             )) if _trace_format(trial.config.get("agent_name")) in {"terminus", "oracle", "codex"} else None
+            frozen_plan = getattr(lease, "runtime_contract_json", None) or {}
+            mainland_profile_raw = frozen_plan.get("mainland_proxy_profile")
+            frozen_sidecars = frozen_plan.get("sidecars", [])
+            task_egress_trusted = (
+                is_workspace_harness(trial.config.get("agent_name", ""))
+                and isinstance(frozen_sidecars, list)
+                and any(isinstance(item, dict) and item.get("private_sandbox") is True for item in frozen_sidecars)
+                and all(isinstance(item, dict) and (item.get("private_sandbox") is True or item.get("task_fixture") is True) for item in frozen_sidecars)
+            )
             trial_config_raw = trial.config
             trial_result_raw = trial.result
             trial_task_id = trial.task_id
@@ -1227,6 +1279,7 @@ class ServiceExecutionMaterializer:
         try:
             task_config = TaskConfig.model_validate(task_config_raw)
             trial_config = TrialConfig.model_validate(trial_config_raw)
+            mainland_profile = MainlandNetworkProfileV1.model_validate(mainland_profile_raw) if mainland_profile_raw is not None else None
         except ValidationError as exc:
             raise MaterializationIntegrityError("source_metadata_invalid", str(exc)) from exc
         # The task snapshot was bound through Trial.task_id above. Uploaded TaskSets
@@ -1301,6 +1354,9 @@ class ServiceExecutionMaterializer:
             verifier_body=derivation_inputs.get(_VERIFIER_PATH),
             gateway_calls=gateway_calls,
             exception_info=exception_info,
+            mainland_proxy_profile=mainland_profile,
+            task_egress_body=derivation_inputs.get("diagnostics/task-egress.jsonl"),
+            task_egress_trusted=task_egress_trusted,
         )
         ledger_format = _trace_format(trial_config.agent_name)
         if gateway_calls is not None and ledger_format in {"terminus", "codex"}:

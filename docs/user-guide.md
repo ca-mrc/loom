@@ -614,6 +614,15 @@ per-task reason table. `loom eval batch show` / `loom eval trial show` and the
 detail pages report the requested axes alongside the effective class and
 verification compiled into the frozen plan.
 
+### Simulated mainland tool networking
+
+Add `--mainland-proxy` to `loom run`, `loom eval run`, or `loom eval batch create`
+to apply the configured GFWList/GreatFire tool-network simulation. The API field
+is `trial_config.mainland_proxy`; the default is `false`, and
+`--no-mainland-proxy` explicitly keeps normal networking. This requires a
+configured worker/runtime and does not broaden a task's allowed network policy.
+See [setup, supported backends, and limitations](integrations/mainland-proxy.md).
+
 ### Cross-team submission (platform admins)
 
 `loom eval batch create` can omit `--name`; the service derives a concise

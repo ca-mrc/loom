@@ -30,6 +30,50 @@ def materialization(**changes):
     )
 
 
+def test_publish_diagnostic_is_projected_without_builder_text():
+    row = materialization(failure_reason="build_publish_failed")
+    attempt = SimpleNamespace(
+        materialization_id=row.id, lease_epoch=3,
+        native_build={
+            "builder_log": "unknown-credential-value private.registry/team",
+            "failure_message": "secret=do-not-return registry.private/team/image",
+            "configmap": {"data": {"claim.json": "secret"}},
+            "phases": [
+                {"name": "build", "state": {"terminated": {"exitCode": 0}},
+                 "platform_diagnostic": {"exit_code": 1, "summary": "dockerfile RUN leaked"}},
+                {"name": "publish", "state": {"terminated": {"exitCode": 1, "finishedAt": "2026-09-13T00:06:00Z"}},
+                 "platform_diagnostic": {
+                     "exit_code": 1, "summary": "writing blob: unauthorized",
+                     "registry_images": "registry.private/team/image", "argv": "skopeo --authfile /secret",
+                 }},
+            ],
+        },
+    )
+    result = preparation_response(row, attempt)
+    assert result["failure_reason"] == "build_publish_failed"
+    assert "Contact the platform operator" in result["message"]
+    assert result["diagnostic"] == {"phase": "publish", "exit_code": 1, "summary": "writing blob: unauthorized"}
+    rendered = str(result)
+    assert "unknown-credential-value" not in rendered and "do-not-return" not in rendered
+    assert "registry.private" not in rendered and "dockerfile RUN leaked" not in rendered
+    assert "/secret" not in rendered
+
+
+def test_build_failure_does_not_project_a_platform_diagnostic():
+    row = materialization(failure_reason="build_build_failed")
+    attempt = SimpleNamespace(
+        materialization_id=row.id, lease_epoch=3,
+        native_build={
+            "builder_log": "private build log",
+            "phases": [{"name": "build", "state": {"terminated": {"exitCode": 37}},
+                        "platform_diagnostic": {"exit_code": 37, "summary": "compile error"}}],
+        },
+    )
+    result = preparation_response(row, attempt)
+    assert "diagnostic" not in result
+    assert "private build log" not in str(result) and "compile error" not in str(result)
+
+
 def test_failed_build_reports_exit_code_without_arbitrary_builder_text():
     row = materialization()
     attempt = SimpleNamespace(

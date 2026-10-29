@@ -39,6 +39,23 @@ def test_trial_show_progress_and_unknown_timeline(stage, mock_server, capsys):
     assert "reward:           0" in out
 
 
+def test_trial_show_prints_publish_diagnostic(mock_server, capsys):
+    mock_server.canned[("GET", f"/api/v1/trials/{_TRIAL_ID}")] = httpx.Response(200, json={
+        "id": _TRIAL_ID, "state": "failed", "failure_reason": "task_image_build_failed",
+        "task_environment_preparation": [{
+            "failure_reason": "build_publish_failed",
+            "message": "Task image publication failed. Contact the platform operator to check registry availability.",
+            "diagnostic": {"phase": "publish", "exit_code": 1, "summary": "writing blob: unauthorized"},
+        }],
+    })
+    capsys.readouterr()
+    assert main(["eval", "trial", "show", _TRIAL_ID]) == 0
+    out = capsys.readouterr().out
+    assert "image_preparation: build_publish_failed" in out
+    assert "image_diagnostic:  publish exit 1: writing blob: unauthorized" in out
+    assert "Contact the platform operator" in out
+
+
 def _watch_transport(monkeypatch, handler):
     def client(cfg, *, timeout=30.0):
         return httpx.Client(base_url=cfg.server_url, transport=httpx.MockTransport(handler), timeout=timeout)
@@ -4211,3 +4228,110 @@ def test_trial_show_omits_malformed_provenance_values(mock_server, capsys):
     assert main(["eval", "trial", "show", _TRIAL_ID]) == 0
     out = capsys.readouterr().out
     assert "private" not in out and "secret" not in out
+
+
+@pytest.mark.parametrize(
+    "flag,expected", [(None, None), ("--mainland-proxy", True), ("--no-mainland-proxy", False)]
+)
+def test_batch_create_mainland_proxy_is_an_explicit_trial_option(mock_server, flag, expected):
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201,
+        json={
+            "batch_id": _BATCH_ID,
+            "expected_trial_count": 1,
+            "state": "submitted",
+            "combinations": [],
+        },
+    )
+    argv = [
+        "eval",
+        "batch",
+        "create",
+        "--purpose",
+        "evaluation",
+        "--agent",
+        "oracle",
+        "--benchmark",
+        "qa275-custom",
+    ]
+    if flag:
+        argv.append(flag)
+    assert main(argv) == 0
+    body = json.loads(mock_server.requests[-1].content)
+    if expected is None:
+        assert "mainland_proxy" not in body["trial_config"]
+    else:
+        assert body["trial_config"]["mainland_proxy"] is expected
+
+
+@pytest.mark.parametrize(
+    "flag,expected", [("--mainland-proxy", True), ("--no-mainland-proxy", False)]
+)
+def test_direct_eval_mainland_proxy_forwarding(mock_server, flag, expected):
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/trials")] = httpx.Response(
+        201, json={"id": _TRIAL_ID, "state": "queued"}
+    )
+    assert (
+        main(
+            [
+                "eval",
+                "run",
+                "--provider",
+                "openai-prod",
+                "--model",
+                "gpt-4o",
+                "--agent",
+                "litellm",
+                "--task",
+                "hello-world",
+                flag,
+            ]
+        )
+        == 0
+    )
+    assert json.loads(mock_server.requests[-1].content)["config"]["mainland_proxy"] is expected
+
+
+@pytest.mark.parametrize(
+    "flag,enabled", [("--mainland-proxy", True), ("--no-mainland-proxy", False)]
+)
+def test_execution_config_preserves_additional_mainland_proxy_flag(
+    mock_server, tmp_path, flag, enabled
+):
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201,
+        json={
+            "batch_id": _BATCH_ID,
+            "expected_trial_count": 1,
+            "state": "submitted",
+        },
+    )
+    config = _execution_config(
+        tmp_path,
+        harness={"name": "oracle"},
+        network_policy={"mode": "public-web"},
+        verification="separate",
+        isolation="container",
+    )
+    assert (
+        main(
+            [
+                "eval",
+                "batch",
+                "create",
+                "--purpose",
+                "evaluation",
+                "--benchmark",
+                "qa275-custom",
+                "--execution-config",
+                config,
+                flag,
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(mock_server.requests[-1].content)["trial_config"]
+    assert payload["mainland_proxy"] is enabled
+    assert payload["baseline_network_policy_override"] == {"kind": "public-web"}
+    assert payload["agent_name"] == "oracle"

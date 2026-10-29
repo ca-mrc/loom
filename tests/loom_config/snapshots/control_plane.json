@@ -89,6 +89,11 @@
     "default": "'info'",
     "required": false
   },
+  "mainland_proxy_profile_dir": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
   "metrics_port": {
     "annotation": "<class 'int'>",
     "default": "9090",
@@ -114,6 +119,11 @@
     "default": "PydanticUndefined",
     "required": true
   },
+  "service_execution_global_pool_json": {
+    "annotation": "str | None",
+    "default": "None",
+    "required": false
+  },
   "service_execution_materializer_claim_ttl_sec": {
     "annotation": "<class 'float'>",
     "default": "300.0",
@@ -132,11 +142,6 @@
   "service_execution_materializer_interval_sec": {
     "annotation": "<class 'float'>",
     "default": "2.0",
-    "required": false
-  },
-  "service_execution_global_pool_json": {
-    "annotation": "str | None",
-    "default": "None",
     "required": false
   },
   "service_execution_scheduler_enabled": {

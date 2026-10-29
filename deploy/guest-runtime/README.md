@@ -27,6 +27,24 @@ without executing package installation hooks. An unavailable pinned archive
 fails the build. Updating dependencies requires updating the lock and running
 the full payload verification and guest capability tests.
 
+The runtime build uses Go 1.26.10, static Docker 29.9.2 and Buildx 0.38.1 from
+the digest-pinned official Docker CLI image. These releases replace older Go
+stdlib versions rejected by the release scanner. The Go advisory for
+[CVE-2026-56857](https://pkg.go.dev/vuln/GO-2026-6604) describes Windows junction
+handling; the existing release scan still rejects the affected version matches
+in Linux binaries without exceptions. Updating the compiler and official tools
+retains that policy. The kernel, Ubuntu package set, guest paths, unprivileged
+verification and isolation requirements are unchanged.
+
+The service image also copies official Trivy 0.76.1 and kubectl 1.36.6 binaries
+to replace affected embedded Go libraries, keeping kubectl on the same minor
+release. Alpine 3.23 `brotli-libs=1.2.1-r0` fixes the additional Brotli
+CRITICAL finding in the service base image. This does not change the separately
+installed release scanner, its
+CRITICAL threshold, or the no-exceptions policy. The unchanged Trivy 0.74.0
+release scanner qualifies these patched binaries and the execution-runtime
+archive; guest runtime integration remains a separate requirement.
+
 For HTTP 500, 502, 503 or 504, a connection/TLS-handshake or response-body
 timeout, a connection reset (including a remote disconnect without a response),
 an unexpected TLS EOF, or an explicit incomplete-read error while reading the

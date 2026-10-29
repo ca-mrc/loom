@@ -811,6 +811,58 @@ def publisher(monkeypatch, tmp_path):
     return cache, calls
 
 
+def test_publisher_skopeo_failure_keeps_a_redacted_stderr_tail(source_bundle, tmp_path, publisher, monkeypatch):
+    claim, _ = source_bundle
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    _write_native_oci(work / "oci/0000.tar")
+
+    def run(argv, **kwargs):
+        authfile = argv[argv.index("--authfile") + 1]
+        stderr = kwargs["stderr"]
+        stderr.write(b"A" * 5000)
+        stderr.write(b"writing blob: unauthorized token=sekret ")
+        stderr.write(f"docker://{claim['registry_repository']}:tag denied".encode())
+        stderr.write(b"\n" + " ".join(argv).encode() + f"\n{authfile}\n".encode())
+        raise subprocess.CalledProcessError(1, argv)
+
+    monkeypatch.setattr(runtime.subprocess, "run", run)
+    with pytest.raises(runtime.PublishCommandError) as raised:
+        runtime.publish(claim, work, tmp_path / "secrets", receipt_path=tmp_path / "receipt.json")
+    message = str(raised.value)
+    assert "unauthorized" in message and raised.value.exit_code == 1 and len(message) <= 500
+    assert "sekret" not in message and claim["registry_repository"] not in message
+    assert str(tmp_path / "secrets" / "registry" / "config.json") not in message
+    assert "--authfile" not in message and " ".join(["skopeo", "--tmpdir"]) not in message
+    assert "docker://" not in message or "docker://[registry]" in message
+
+
+def test_publisher_skopeo_timeout_omits_the_command_line(source_bundle, tmp_path, publisher, monkeypatch):
+    claim, _ = source_bundle
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    _write_native_oci(work / "oci/0000.tar")
+
+    def run(argv, **_kwargs):
+        raise subprocess.TimeoutExpired(argv, runtime._SKOPEO_COPY_TIMEOUT_SECONDS)
+
+    monkeypatch.setattr(runtime.subprocess, "run", run)
+    with pytest.raises(runtime.PublishCommandError) as raised:
+        runtime.publish(claim, work, tmp_path / "secrets", receipt_path=tmp_path / "receipt.json")
+    assert str(raised.value) == "skopeo copy timed out after 300 seconds"
+    assert raised.value.exit_code is None
+    assert claim["registry_repository"] not in str(raised.value) and "--authfile" not in str(raised.value)
+
+
+def test_termination_receipt_does_not_stringify_process_errors():
+    error = subprocess.CalledProcessError(1, ["skopeo", "--authfile", "/secret/config.json", "copy"])
+    assert runtime.termination_failure_update(error) == {"error": "CalledProcessError"}
+    update = runtime.termination_failure_update(
+        runtime.PublishCommandError("writing blob: unauthorized", exit_code=1))
+    assert update == {"error": "writing blob: unauthorized", "exit_code": 1}
+    assert "/secret" not in json.dumps(runtime.termination_failure_update(error))
+
+
 @pytest.mark.parametrize("cache_enabled", [True, False])
 def test_publisher_records_registry_digest_with_optional_cache(
     source_bundle, tmp_path, publisher, cache_enabled
@@ -851,7 +903,10 @@ def test_publisher_records_registry_digest_with_optional_cache(
     assert any(key.endswith(f"/blobs/{digest}") for _, key, _ in cache.uploads)
 
 
-@pytest.mark.parametrize("failure", [None, "secret", "workdir", "private_workdir", "budget"])
+@pytest.mark.parametrize(
+    "failure",
+    [None, "fixture_secret", "workdir", "private_workdir", "budget", "reserved"],
+)
 def test_publisher_binds_final_oci_defaults_and_rejects_unusable_metadata_before_push(
     source_bundle, tmp_path, publisher, failure,
 ):
@@ -860,8 +915,10 @@ def test_publisher_binds_final_oci_defaults_and_rejects_unusable_metadata_before
     claim["task_config"]["environment"].update(user="image", image_entrypoint=True, image_workdir=True)
     config = {"User": "0:0", "WorkingDir": "/app/database", "Entrypoint": ["/entrypoint.sh"],
               "Env": ["HOME=/root", "PATH=/usr/bin"]}
-    if failure == "secret":
+    if failure == "fixture_secret":
         config["Env"].append("PROVIDER_API_KEY=private-value")
+    elif failure == "reserved":
+        config["Env"].append("KUBECONFIG=private-value")
     elif failure == "workdir":
         config["WorkingDir"] = "/"
     elif failure == "private_workdir":
@@ -872,7 +929,7 @@ def test_publisher_binds_final_oci_defaults_and_rejects_unusable_metadata_before
     (work / "oci").mkdir(parents=True)
     _write_native_oci(work / "oci/0000.tar", runtime_config=config)
     receipt_file = tmp_path / "receipt.json"
-    if failure:
+    if failure not in {None, "fixture_secret"}:
         with pytest.raises(ValueError) as rejected:
             runtime.publish(claim, work, tmp_path / "secrets", receipt_path=receipt_file)
         assert "private-value" not in str(rejected.value)
@@ -884,7 +941,10 @@ def test_publisher_binds_final_oci_defaults_and_rejects_unusable_metadata_before
     assert metadata["image_ref"] == receipt["registry_images"]["task"]
     assert (metadata["uid"], metadata["gid"], metadata["home"]) == (0, 0, "/root")
     assert metadata["workdir"] == "/app/database" and metadata["entrypoint"] == ["/entrypoint.sh"]
-    assert metadata["environment"] == {"HOME": "/root", "PATH": "/usr/bin"}
+    environment = {"HOME": "/root", "PATH": "/usr/bin"}
+    if failure == "fixture_secret":
+        environment["PROVIDER_API_KEY"] = "private-value"
+    assert metadata["environment"] == environment
 
 
 @pytest.mark.parametrize("linked_directory", ["oci", "cache-out"])

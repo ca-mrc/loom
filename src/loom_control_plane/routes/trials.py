@@ -53,6 +53,7 @@ from loom_control_plane.request_auth import RequestPrincipal
 from loom_control_plane.scheduler.requires_caps import derive_requires_caps
 from loom_control_plane.trial_cancellation import cancel_trial_under_authority
 from loom_service.auth_guards import require_human_or_admin, require_scope
+from loom_service.execution_admission import reject_unsupported_mainland_proxy
 from loom_service.session_auth import (
     verify_csrf,
     verify_session_cookie,
@@ -390,6 +391,10 @@ async def submit_trial(
             status_code=400,
             detail=f"invalid trial config: {exc}",
         ) from exc
+    reject_unsupported_mainland_proxy(
+        batch_backend, trial_config.model_dump(mode="json"),
+        has_service_binding=task_config.service_execution is not None,
+    )
     trial_config = apply_legacy_verifier_default(
         task_config,
         trial_config,
@@ -420,7 +425,7 @@ async def submit_trial(
         batch_backend != NEBIUS_BACKEND or task_config.service_execution is not None
     ):
         raise HTTPException(status_code=400, detail="agent_version requires automatic native Nebius execution")
-    requires_caps = derive_requires_caps(task_config)
+    requires_caps = derive_requires_caps(task_config, trial_config)
     requires_caps_json = requires_caps.model_dump(mode="json")
     requires_caps_json["backend"] = batch_backend
     if trial_config.multi_model is not None and trial_config.multi_model.enabled:

@@ -17,10 +17,13 @@ from loom.models.networking import (
     WebAllowlist,
 )
 from loom.models.task import TaskConfig
+from loom.models.trial import TrialConfig
 from loom.models.types import NetworkPolicyKind
 
 
-def derive_requires_caps(task: TaskConfig) -> RequiredCapabilities:
+def derive_requires_caps(
+    task: TaskConfig, trial: TrialConfig | None = None,
+) -> RequiredCapabilities:
     """Union all network policies the trial may need across its steps."""
     needed: set[NetworkPolicyKind] = set()
 
@@ -40,6 +43,7 @@ def derive_requires_caps(task: TaskConfig) -> RequiredCapabilities:
         cpu_arch=task.environment.cpu_arch,
         gpu_vendor=task.environment.gpu_vendor,
         network_policies=frozenset(needed),
+        mainland_proxy=trial.mainland_proxy if trial is not None else False,
     )
 
 

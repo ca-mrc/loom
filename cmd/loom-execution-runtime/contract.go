@@ -174,6 +174,7 @@ type nodeResourceAllocation struct {
 type plan struct {
 	NodeResourceAllocation *nodeResourceAllocation `json:"node_resource_allocation,omitempty"`
 	TaskEgress             *storedTaskEgress       `json:"task_egress,omitempty"`
+	MainlandProxyProfile   *mainlandProxyProfile   `json:"mainland_proxy_profile,omitempty"`
 	// Install sources reachable only while a setup phase runs (#2310).
 	SetupEgress *webAllowlist `json:"setup_egress,omitempty"`
 	// A cacheable harness install keyed by the Gateway (#2310).
@@ -312,6 +313,11 @@ func (p plan) validate() error {
 			return fmt.Errorf("a setup cache requires a setup phase")
 		}
 		if err := p.SetupCache.validate(); err != nil {
+			return err
+		}
+	}
+	if p.MainlandProxyProfile != nil {
+		if err := p.MainlandProxyProfile.validate(); err != nil {
 			return err
 		}
 	}

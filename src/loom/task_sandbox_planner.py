@@ -42,6 +42,7 @@ from loom.hosted_harness import (
     SANDBOX_CONTROLLER_MODULE,
     HostedHarnessSpec,
 )
+from loom.mainland_network_profile import MainlandNetworkProfileV1
 from loom.models.networking import (
     NetworkPolicy,
     WebAllowlist,
@@ -124,6 +125,7 @@ class TaskSandboxPlanRequest:
     effective_network_policy: NetworkPolicy
     # Resolved by the caller from the harness spec's controller binding.
     controller_image: str
+    mainland_proxy_profile: MainlandNetworkProfileV1 | None = None
     task_image_materialization_id: UUID | None = None
     resource_requests: ExecutionResourceRequestsV1 | None = None
     has_resolved_task_environment: bool = False
@@ -448,6 +450,7 @@ def compile_task_sandbox_plan(request: TaskSandboxPlanRequest) -> ExecutionRunti
     return ExecutionRuntimePlanV1(
         effective_network_policy=request.effective_network_policy,
         task_egress=hosted_http_egress(request.effective_network_policy),
+        mainland_proxy_profile=request.mainland_proxy_profile,
         candidate_sha=profile.candidate_sha, task_revision_sha256=request.task_revision_sha256,
         command_identity_sha256=request.command_identity,
         execution_class_id=(nebius_guest_execution_class(

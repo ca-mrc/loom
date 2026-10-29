@@ -53,6 +53,7 @@ from loom.hosted_harness import (
     hosted_harness,
     is_workspace_harness,
 )
+from loom.mainland_network_profile import load_mainland_network_profile
 from loom.models.networking import (
     UnsupportedNetworkPolicyOverrideError,
     hosted_http_egress,
@@ -196,6 +197,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     agent_image_version: AgentVersion | None = Field(default=None, exclude_if=lambda value: value is None)
     agent_runtime_bindings: tuple[AgentRuntimeBindingV1, ...] = ()
     supports_task_web_egress: bool = False
+    supports_mainland_proxy: bool = Field(default=False, exclude_if=lambda value: not value)
     supports_task_artifact_inputs: bool = Field(default=False, exclude_if=lambda value: not value)
     controller_resources: ControllerComputeResourcesV1 | None = None
     resource_allocation_policy: Literal["node-share-v1"] | None = None
@@ -269,6 +271,8 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
 
     @model_validator(mode="after")
     def consistent_execution_class(self) -> ServiceExecutionRuntimeProfileV1:
+        if self.supports_mainland_proxy and not self.supports_task_web_egress:
+            raise ValueError("mainland proxy readiness requires task web egress support")
         if self.guest_runtime is None and (
             self.guest_runtime_volume_mib is not None or self.guest_max_artifact_bytes is not None
             or self.supports_emulated_pkcs11 or self.supports_shared_guest or self.supports_native_compose
@@ -318,6 +322,7 @@ def build_nebius_runtime_profile(
     agent_image_version: str | None = None,
     controller_resources: ControllerComputeResourcesV1 | None = None,
     supports_task_web_egress: bool = False,
+    supports_mainland_proxy: bool = False,
     supports_task_artifact_inputs: bool = False,
     service_lifecycle_ready: bool = False,
     terminus2_multi_model_policies: frozenset[MixPolicy] = frozenset(),
@@ -351,6 +356,7 @@ def build_nebius_runtime_profile(
         agent_image_version=agent_image_version,
         controller_resources=controller_resources,
         supports_task_web_egress=supports_task_web_egress,
+        supports_mainland_proxy=supports_mainland_proxy,
         service_lifecycle_ready=service_lifecycle_ready,
         terminus2_multi_model_policies=terminus2_multi_model_policies,
         supports_task_artifact_inputs=supports_task_artifact_inputs,
@@ -776,6 +782,7 @@ def compile_service_execution_plan(
         raise ValueError("active runtime profile has no Terminus controller image")
     if profile_reasons:
         raise ValueError("task image is not provided by the active runtime profile: " + ",".join(profile_reasons))
+    mainland_profile = load_mainland_network_profile() if trial.mainland_proxy else None
     binding = service_execution_input_binding(source_provenance)
     assert binding is not None
     assert task.environment.cpus is not None
@@ -795,6 +802,7 @@ def compile_service_execution_plan(
             "model": trial.agent_model.model_dump(mode="json") if trial.agent_model else None,
             "request_params": trial.request_params,
             "effective_network_policy": effective_network_policy.model_dump(mode="json"),
+            **({"mainland_proxy_profile": mainland_profile.model_dump(mode="json")} if mainland_profile else {}),
             "instruction_file": str(step.instruction_file),
             "artifacts": step.artifacts,
             "required_artifacts": step.required_artifacts,
@@ -809,6 +817,7 @@ def compile_service_execution_plan(
             task_revision_sha256=task_revision_sha256, command_identity=command_identity,
             output_paths=tuple(output_paths), effective_network_policy=effective_network_policy,
             controller_image=selected_agent_image,
+            mainland_proxy_profile=mainland_profile,
             task_image_materialization_id=(
                 task_image_grant.materialization_id if task_image_grant else None
             ),
@@ -896,6 +905,7 @@ def compile_service_execution_plan(
     return ExecutionRuntimePlanV1(
         effective_network_policy=effective_network_policy,
         task_egress=hosted_http_egress(effective_network_policy),
+        mainland_proxy_profile=mainland_profile,
         candidate_sha=profile.candidate_sha,
         task_revision_sha256=task_revision_sha256,
         command_identity_sha256=command_identity,
@@ -1090,6 +1100,14 @@ def runtime_profile_rejections(
             reasons.append("shared_guest_runtime_unavailable")
     if hosted_http_egress(effective_network_policy) is not None and not profile.supports_task_web_egress:
         reasons.append("task_egress_runtime_unavailable")
+    if trial.mainland_proxy:
+        if not profile.supports_mainland_proxy or hosted_http_egress(effective_network_policy) is None:
+            reasons.append("mainland_proxy_runtime_unavailable")
+        else:
+            try:
+                load_mainland_network_profile()
+            except ValueError:
+                reasons.append("mainland_proxy_profile_unavailable")
     spec = hosted_harness(trial.agent_name)
     if trial.agent_name == "terminus-2" and (
         task.environment.skills_dir is not None or task.environment.mcp_servers

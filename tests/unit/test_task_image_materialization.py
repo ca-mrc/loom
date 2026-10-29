@@ -387,3 +387,30 @@ def test_explicit_identity_reuses_published_groups_only_for_the_image_uid():
     assert resolved("root") == ()
     assert resolved("agent") == ()
     assert resolved("agent", agent_uid=1001) == (100, 200)
+
+
+def test_authored_password_reaches_the_task_environment_only():
+    import os
+    from uuid import uuid4
+
+    value = "diagnostic-fixture-value"
+    task = _task_config(dockerfile="environment/Dockerfile")
+    task = task.model_copy(update={"environment": task.environment.model_copy(update={
+        "user": "image", "environment": {"KEPT": "task-value"},
+    })})
+    image = "registry.example/task@sha256:" + "a" * 64
+    payload = dict(
+        schema_version="loom.task-image-execution-grant.v1", materialization_id=uuid4(),
+        materialization_key="1" * 64, cpu_arch="x86_64", task_checksum="2" * 64,
+        task_config=task.model_dump(mode="json"), task_source=None, task_source_provenance={},
+        registry_images={"task": image}, image_runtime_metadata={"task": {
+            "image_ref": image, "user": "task", "uid": 1001, "gid": 1002, "home": "/home/task",
+            "workdir": "/app", "entrypoint": [],
+            "environment": {"PASSWORD": value, "IMAGE_DEFAULT": "present"},
+        }},
+    )
+    resolved = resolve_prepared_task(task, TaskImageExecutionGrantV1(**payload))
+    assert resolved.environment.environment["PASSWORD"] == value
+    assert resolved.environment.environment["KEPT"] == "task-value"
+    assert os.environ.get("PASSWORD") != value
+    assert value not in os.environ.get("PASSWORD", "")

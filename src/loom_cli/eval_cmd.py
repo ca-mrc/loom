@@ -490,6 +490,28 @@ def _print_trial_summary(item: dict[str, Any], *, timeline: bool = False) -> Non
         print(f"finished_at:     {format_local_datetime(item['finished_at'])}")
     if item.get("failure_reason"):
         print(f"failure_reason:   {item['failure_reason']}")
+    _print_task_environment_preparation(item.get("task_environment_preparation"))
+
+
+def _print_task_environment_preparation(preparation: Any) -> None:
+    if not isinstance(preparation, list):
+        return
+    for row in preparation:
+        if not isinstance(row, dict):
+            continue
+        if row.get("failure_reason"):
+            print(f"image_preparation: {row['failure_reason']}")
+        if row.get("message"):
+            print(f"image_message:     {row['message']}")
+        diagnostic = row.get("diagnostic")
+        if not isinstance(diagnostic, dict) or not isinstance(diagnostic.get("summary"), str):
+            continue
+        exit_code = diagnostic.get("exit_code")
+        prefix = (
+            f"{diagnostic.get('phase')} exit {exit_code}: " if exit_code is not None
+            else f"{diagnostic.get('phase')}: "
+        )
+        print(f"image_diagnostic:  {prefix}{diagnostic['summary']}")
 
 
 def _dump_json(data: Any) -> None:
@@ -668,6 +690,9 @@ def _run(args: argparse.Namespace) -> int:
                     agent_provider_override=args.agent_provider,
                 ),
             }
+            mainland_proxy = getattr(args, "mainland_proxy", None)
+            if mainland_proxy is not None:
+                trial_config["mainland_proxy"] = mainland_proxy
             payload: dict[str, Any] = {
                 "task_id": args.task,
                 "config": trial_config,
@@ -1012,6 +1037,9 @@ def _batch_create(args: argparse.Namespace) -> int:
             except ValueError as exc:
                 sys.stderr.write(f"error: {exc}\n")
                 return 2
+            mainland_proxy = getattr(args, "mainland_proxy", None)
+            if mainland_proxy is not None:
+                trial_config["mainland_proxy"] = mainland_proxy
             if network_policy_override is not None:
                 trial_config["baseline_network_policy_override"] = network_policy_override
             selection = getattr(args, "execution_config", None)
@@ -1896,6 +1924,10 @@ def dispatch(argv: list[str]) -> int:
             "custom → openai)."
         ),
     )
+    p_run.add_argument(
+        "--mainland-proxy", action=argparse.BooleanOptionalAction, default=None,
+        help="Use the configured simulated-mainland tool gateway (default off).",
+    )
     p_run.set_defaults(handler=_run)
 
     # --- batch ---
@@ -1977,6 +2009,10 @@ def dispatch(argv: list[str]) -> int:
             "file, which defaults to separate. Same values as "
             "execution-config verification."
         ),
+    )
+    p_bc.add_argument(
+        "--mainland-proxy", action=argparse.BooleanOptionalAction, default=None,
+        help="Use the configured simulated-mainland tool gateway (default off).",
     )
     p_bc.add_argument(
         "--network-policy",

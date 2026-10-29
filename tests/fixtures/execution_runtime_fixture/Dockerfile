@@ -1,4 +1,4 @@
-FROM golang:1.25.7-alpine@sha256:f6751d823c26342f9506c03797d2527668d095b0a15f1862cddb4d927a7a4ced AS build
+FROM golang:1.26.10-alpine@sha256:a2012b4a1d1f9f7e9f44e0d39b805a901e856b1dd80b4e6ee4338db547050308 AS build
 ARG TARGETARCH
 WORKDIR /src
 COPY tests/fixtures/execution_runtime_fixture/main.go ./main.go
