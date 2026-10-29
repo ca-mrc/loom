@@ -72,9 +72,6 @@ def test_0014_tags_defaults_to_empty_object(
         ).fetchone()
     assert row is not None
     assert row[0] == {}
-    # Cleanup so other tests don't see the row.
-    with at_0013.begin() as conn:
-        conn.execute(text("DELETE FROM tasks WHERE id='legacy-task'"))
 
 
 def test_0014_downgrade_restores_pre_0014_shape(
@@ -89,5 +86,3 @@ def test_0014_downgrade_restores_pre_0014_shape(
     bench_cols = {c["name"] for c in insp.get_columns("benchmarks")}
     assert "tags" not in task_cols
     assert "series" not in bench_cols
-    # Roll forward again so subsequent tests run at head.
-    command.upgrade(cfg, "head")

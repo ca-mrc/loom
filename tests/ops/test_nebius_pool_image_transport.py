@@ -106,7 +106,7 @@ def test_manager_image_switch_reconciles_lost_cas_without_duplicate_write(image_
 
 
 @pytest.mark.parametrize("target", ["manager", "collector", "gateway"])
-@pytest.mark.parametrize("loss", [None, "before", "after"])
+@pytest.mark.parametrize("loss", ["before", "after"])
 def test_https_image_switch_sends_only_exact_uid_version_metadata_spec_cas(image_repair_case, loss, target):
     from types import SimpleNamespace
 

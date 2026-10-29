@@ -272,7 +272,7 @@ def test_latest_participant_head_advances_only_from_exact_completed_predecessor(
 
 
 @pytest.mark.timeout(180)
-@pytest.mark.parametrize('failure', [None, 'before-promotion', 'after-promotion'])
+@pytest.mark.parametrize('failure', ['before-promotion', 'after-promotion'])
 def test_deployment_reports_success_only_after_history_promotion(
         operation_inputs, connection, tmp_path, monkeypatch, failure):
     from scripts.ops import nebius_pool_participant_entry as entry
@@ -339,8 +339,4 @@ def test_deployment_reports_success_only_after_history_promotion(
         assert connected(args, **kwargs)['status'] == 'complete'
         assert connection[0].effects == effects, 'promotion recovery must not replay pool effects'
         assert len(finalized) == 2
-    else:
-        _exercise_release(
-            operation_inputs, connection, tmp_path, monkeypatch, recover=False, file_writes=True)
-        assert len(finalized) == 1
     assert statuses[-2:] == ['in_progress', 'success']

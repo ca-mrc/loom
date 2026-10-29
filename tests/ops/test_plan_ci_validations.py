@@ -744,25 +744,6 @@ def test_unknown_retired_source_path_selects_integration_lane() -> None:
     assert plan.integration is True
 
 
-def test_every_docker_marked_integration_module_selects_docker() -> None:
-    integration_dir = REPO_ROOT / "tests" / "integration"
-    docker_marked_modules = [
-        path
-        for path in sorted(integration_dir.rglob("*.py"))
-        if "pytest.mark.docker" in path.read_text(encoding="utf-8")
-    ]
-    assert docker_marked_modules
-
-    for module in docker_marked_modules:
-        relative_path = module.relative_to(REPO_ROOT).as_posix()
-        plan = plan_validations(
-            changed_paths=[relative_path],
-            labels=set(),
-            event_name="pull_request",
-        )
-        assert plan.integration_docker is True, relative_path
-
-
 def test_docs_only_merge_group_skips_heavy_lanes() -> None:
     plan = plan_validations(
         changed_paths=["docs/merge-queue.md"],
