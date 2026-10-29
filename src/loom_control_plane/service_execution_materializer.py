@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import logging
+import tarfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -24,6 +26,12 @@ from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.agent.terminus2.mapper import Terminus2TrajectoryMapper
+from loom.agent.terminus2.native_artifacts import (
+    HARBOR_SUBAGENT_ARCHIVE,
+    HARBOR_SUBAGENT_ISSUES,
+    MAX_SUBAGENT_FILES,
+    is_harbor_subagent_name,
+)
 from loom.codex_atif import clean_trajectory as clean_codex_trajectory
 from loom.codex_atif import harbor_trajectory as harbor_codex_trajectory
 from loom.data_lifecycle_registry import (
@@ -117,6 +125,7 @@ _USAGE_PATH = "accounting/usage.json"
 _VERIFIER_PATH = "verifier/output.json"
 # Codex's session log (`hosted_harness.CODEX`), the source of its ATIF steps.
 _CODEX_SESSION_PATH = "artifacts/codex/session.jsonl"
+_HARBOR_SUBAGENT_ARCHIVE_PATH = "artifacts/harbor/" + HARBOR_SUBAGENT_ARCHIVE
 _RESULT_PATH = "result.json"
 _EXCEPTION_PATHS = {"diagnostics/agent-exception.json", "diagnostics/verifier-exception.json"}
 _MAX_DERIVATION_BYTES = 256 * 1024 * 1024
@@ -1184,6 +1193,7 @@ class ServiceExecutionMaterializer:
                 _USAGE_PATH,
                 _VERIFIER_PATH,
                 _CODEX_SESSION_PATH,
+                _HARBOR_SUBAGENT_ARCHIVE_PATH,
                 *_EXCEPTION_PATHS,
             }:
                 derivation_inputs[file.relative_path] = await self._read_exact(
@@ -1208,6 +1218,61 @@ class ServiceExecutionMaterializer:
                 )
             )
         return materialized, source_evidence, derivation_inputs
+
+    async def _materialize_harbor_subagents(
+        self, archive_body: bytes | None, *, destination_prefix: str,
+    ) -> list[MaterializedFile]:
+        """Publish archived native JSON beside its referring Harbor trajectory.
+
+        The immutable runtime inventory retains the single declared archive.
+        These members use the existing canonical file inventory and download
+        surface, just like the derived Gateway accounting documents.
+        """
+        if archive_body is None:
+            return []  # Older producers and runs without summarization.
+        if len(archive_body) > _MAX_DERIVATION_BYTES:
+            raise MaterializationIntegrityError("harbor_subagent_archive_too_large")
+        members: dict[str, bytes] = {}
+        total = 0
+        child_count = 0
+        try:
+            with tarfile.open(fileobj=io.BytesIO(archive_body), mode="r:") as archive:
+                for member in archive:
+                    name = member.name
+                    if (
+                        not member.isfile()
+                        or name in members
+                        or (name != HARBOR_SUBAGENT_ISSUES and not is_harbor_subagent_name(name))
+                    ):
+                        raise MaterializationIntegrityError("harbor_subagent_archive_invalid")
+                    child_count += name != HARBOR_SUBAGENT_ISSUES
+                    if child_count > MAX_SUBAGENT_FILES:
+                        raise MaterializationIntegrityError("harbor_subagent_archive_too_many_files")
+                    total += member.size
+                    if member.size < 0 or total > _MAX_DERIVATION_BYTES:
+                        raise MaterializationIntegrityError("harbor_subagent_archive_too_large")
+                    source = archive.extractfile(member)
+                    if source is None:
+                        raise MaterializationIntegrityError("harbor_subagent_archive_invalid")
+                    body = source.read(member.size + 1)
+                    if len(body) != member.size or not isinstance(json.loads(body), dict):
+                        raise MaterializationIntegrityError("harbor_subagent_archive_invalid")
+                    members[name] = body
+        except (tarfile.TarError, UnicodeError, ValueError, OverflowError) as exc:
+            raise MaterializationIntegrityError("harbor_subagent_archive_invalid") from exc
+
+        materialized = []
+        for name, body in sorted(members.items()):
+            path = "artifacts/harbor/" + name
+            key = destination_prefix + "files/" + path
+            receipt = await self._canonical_store.put_object_with_metadata(
+                bucket=self._artifacts_bucket, key=key, body=body,
+            )
+            materialized.append(MaterializedFile(
+                relative_path=path, media_type="application/json", size_bytes=len(body),
+                sha256=_digest(body), key=key, version_id=receipt.version_id,
+            ))
+        return materialized
 
     async def _load_and_materialize(self, claim: MaterializationClaim) -> MaterializationResult:
         async with self._session_factory() as session:
@@ -1359,6 +1424,11 @@ class ServiceExecutionMaterializer:
             task_egress_trusted=task_egress_trusted,
         )
         ledger_format = _trace_format(trial_config.agent_name)
+        if ledger_format == "terminus":
+            materialized.extend(await self._materialize_harbor_subagents(
+                derivation_inputs.get(_HARBOR_SUBAGENT_ARCHIVE_PATH),
+                destination_prefix=destination_prefix,
+            ))
         if gateway_calls is not None and ledger_format in {"terminus", "codex"}:
             # Preserve the immutable runtime projection as source evidence. The
             # canonical accounting is independently derived from the DB ledger.

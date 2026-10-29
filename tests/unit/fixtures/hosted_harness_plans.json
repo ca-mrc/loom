@@ -1079,6 +1079,12 @@
         "source_path": ".loom/agent/harbor/recording.cast"
       },
       {
+        "kind": "agent_native",
+        "relative_path": "artifacts/harbor/subagent-trajectories.tar",
+        "required": false,
+        "source_path": ".loom/agent/harbor/subagent-trajectories.tar"
+      },
+      {
         "kind": "task_artifact",
         "relative_path": "artifacts/workspace.tar",
         "required": true,
@@ -1369,6 +1375,12 @@
         "source_path": ".loom/agent/harbor/recording.cast"
       },
       {
+        "kind": "agent_native",
+        "relative_path": "artifacts/harbor/subagent-trajectories.tar",
+        "required": false,
+        "source_path": ".loom/agent/harbor/subagent-trajectories.tar"
+      },
+      {
         "kind": "task_artifact",
         "relative_path": "artifacts/workspace.tar",
         "required": true,
@@ -1561,6 +1573,12 @@
         "relative_path": "artifacts/harbor/recording.cast",
         "required": false,
         "source_path": ".loom/agent/harbor/recording.cast"
+      },
+      {
+        "kind": "agent_native",
+        "relative_path": "artifacts/harbor/subagent-trajectories.tar",
+        "required": false,
+        "source_path": ".loom/agent/harbor/subagent-trajectories.tar"
       },
       {
         "kind": "task_artifact",

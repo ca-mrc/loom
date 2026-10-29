@@ -20,6 +20,7 @@ from uuid import UUID
 
 import httpx
 
+from loom.agent.terminus2.native_artifacts import HARBOR_ARTIFACT_NAMES
 from loom.agent.terminus2.runtime import LoomTerminus2Runtime
 from loom.attempt_deadline import AttemptDeadline
 from loom.driver.base import Driver
@@ -34,7 +35,7 @@ if TYPE_CHECKING:
 _PROXY_TOKEN = "loom_workload_proxy"
 _LEDGER_MAX_BYTES = 16 * 1024 * 1024
 _CONTROL_MAX_BYTES = 64 * 1024
-_NATIVE_ARTIFACTS = frozenset({"trajectory.json", "recording.cast"})
+_NATIVE_ARTIFACTS = frozenset(HARBOR_ARTIFACT_NAMES)
 TASK_IMAGE_TOOLS_REQUIRED = "task image must preinstall bash, tmux and asciinema"
 
 

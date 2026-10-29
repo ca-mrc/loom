@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import copy
 import importlib.metadata
+import io
 import json
+import tarfile
 import unittest
 from pathlib import PurePosixPath
 from types import SimpleNamespace
@@ -176,6 +178,7 @@ class HarborSummarizationTests(unittest.IsolatedAsyncioTestCase):
             except Exception as exc:
                 failure = exc
         raw = driver.filesystem.get(PurePosixPath("/workspace/.loom/agent/trajectory.json"))
+        self.exported_artifacts = dict(driver.filesystem)
         native = json.loads(raw) if raw else None
         return llm, session, events, native, failure
 
@@ -191,6 +194,16 @@ class HarborSummarizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(compactions), 1)
         refs = compactions[0]["observation"]["results"][0]["subagent_trajectory_ref"]
         self.assertEqual(len(refs), 3)
+        archive = self.exported_artifacts.get(
+            PurePosixPath("/workspace/.loom/agent/subagent-trajectories.tar"))
+        self.assertIsNotNone(archive, "summary children must survive runtime log cleanup")
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as bundle:
+            self.assertEqual(set(bundle.getnames()), {ref["trajectory_path"] for ref in refs})
+            for ref in refs:
+                child = json.load(bundle.extractfile(ref["trajectory_path"]))
+                self.assertEqual(child["session_id"], ref["session_id"])
+                self.assertTrue(child["steps"])
+                self.assertNotIn("api_key", child.get("agent", {}).get("extra", {}).get("llm_kwargs", {}))
         native_agents = [step for step in native["steps"] if step["source"] == "agent"]
         self.assertEqual(len(native_agents), 2)
         turns = [event for event in events.events if event.kind == EventKind.TERMINUS2_TURN]
