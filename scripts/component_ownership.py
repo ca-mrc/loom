@@ -7,7 +7,6 @@ import argparse
 import ast
 import hashlib
 import json
-import os
 import re
 import subprocess
 import sys
@@ -1346,14 +1345,6 @@ _TEST_SELECTION_METADATA_FILES = frozenset({
 })
 
 
-# These non-test inputs have audited primary readers. Other data and helper
-# edits remain complete rather than guessing consumers from a filename.
-_AUDITED_TEST_INPUT_READERS = {
-    "tests/unit/fixtures/hosted_harness_plans.json": "tests/unit/test_hosted_harness_plan_parity.py",
-    "tests/support/terminus_summarization_probe.py": "tests/integration/test_terminus2_continuation_docker.py",
-}
-
-
 def _fixture_reference_source(source: str, *, path: str, changed_paths: set[str]) -> str:
     """Exclude only audited path metadata, never imports or executable snippets.
 
@@ -1476,23 +1467,9 @@ def _fixture_reference_source(source: str, *, path: str, changed_paths: set[str]
             if targets and not all(isinstance(target, ast.Name) for target in targets):
                 continue
             names = {target.id for target in targets if isinstance(target, ast.Name)}
-            # Local variables belong to their enclosing function, including
-            # nested closures. Unrelated functions reusing "path" are not uses
-            # of this assignment. Module assignments still inspect every scope.
-            scope = next((parent for parent in ancestors(assigned if assigned is not None else node)
-                          if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))), tree)
-            # Class fields can be read through attributes; reflection can read
-            # locals without a Name load. Neither is proof of metadata-only use.
-            if isinstance(scope, ast.ClassDef) or any(
-                (isinstance(item, (ast.Global, ast.Nonlocal)) and names.intersection(item.names))
-                or (isinstance(item, ast.Call) and isinstance(item.func, ast.Name)
-                    and item.func.id in {"locals", "globals", "vars", "eval", "exec"})
-                for item in ast.walk(scope)
-            ):
-                continue
-            consumers = tuple(item for item in ast.walk(scope) if isinstance(item, ast.Name)
-                              and isinstance(item.ctx, ast.Load) and item.id in names)
-            if (names and not consumers) or any(not metadata_consumer(item) for item in consumers):
+            consumers = (item for item in ast.walk(tree) if isinstance(item, ast.Name)
+                         and isinstance(item.ctx, ast.Load) and item.id in names)
+            if any(not metadata_consumer(item) for item in consumers):
                 continue
             # Replace just this exact path token, preserving every other string,
             # import and identifier. Columns in the AST count UTF-8 bytes.
@@ -1505,85 +1482,48 @@ def _fixture_reference_source(source: str, *, path: str, changed_paths: set[str]
     return "".join(lines)
 
 
-def is_test_input_path(path: str) -> bool:
-    """Recognize Loom test roots without treating embedded runtime tests as CI."""
-    parts = PurePosixPath(path).parts
-    return path.startswith("tests/") or (
-        len(parts) >= 4 and parts[0] == "packages" and parts[2] == "tests"
-    )
-
-
 def narrow_test_only_changes(
     paths: tuple[str, ...], *, changed_paths: tuple[str, ...],
     tracked_paths: tuple[str, ...], repo_root: Path,
 ) -> tuple[str, ...]:
-    """Select edited test modules and consumers of test helpers/data.
+    """Narrow independent test edits; runtime/shared/unknown changes stay full.
 
-    Only audited non-test inputs seed their declared primary readers. Other
-    helpers/data, shared pytest setup and runtime consumers remain complete.
-    Reuse the test-module closure rather than guessing arbitrary data loaders.
+    Test modules are also used as fixture libraries. Any reference to an edited
+    module name outside the edit set retains the complete lane, including string
+    imports. This deliberately avoids inventing a general dependency graph.
+    An empty diff is the manual/full-regression path.
     """
     if not changed_paths:
         return paths
-
-    def test_module(name: str) -> bool:
-        return Path(name).name.startswith("test_") and name.endswith(".py")
-
     changed = set(changed_paths)
-    if any(not is_test_input_path(name) or Path(name).name in {"conftest.py", "__init__.py"}
-           or (not (repo_root / name).is_file() and not test_module(name))
-           for name in changed):
+    tracked = set(tracked_paths)
+    if any(
+        name not in tracked or not (name.startswith("tests/") or "/tests/" in name)
+        or not Path(name).name.startswith("test_") or not name.endswith(".py")
+        or name.startswith("tests/support/") or not (repo_root / name).is_file()
+        for name in changed
+    ):
         return paths
-    non_tests = {name for name in changed if not test_module(name)}
-    if any(name not in _AUDITED_TEST_INPUT_READERS for name in non_tests):
-        return paths
-    readers = {_AUDITED_TEST_INPUT_READERS[name] for name in non_tests}
-    # Deleted standalone tests may disappear without requiring regression;
-    # audited data/helper bindings need both complete tracked endpoints.
-    if any(name not in tracked_paths or not (repo_root / name).is_file() for name in non_tests | readers):
-        return paths
-
-    def reference_name(name: str) -> str:
-        return Path(name).stem if name.endswith(".py") else Path(name).name
-
-    def references(names: set[str]) -> re.Pattern[str]:
-        return re.compile(r"\b(?:" + "|".join(
-            re.escape(reference_name(name)) for name in names) + r")\b")
-
-    source_suffixes = {".py", ".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
-                       ".sh", ".bash", ".yml", ".yaml", ".toml", ".json"}
     try:
-        texts = {name: (repo_root / name).read_text(encoding="utf-8")
-                 for name in tracked_paths if Path(name).suffix in source_suffixes
-                 and name not in {
-                     "config/component-ownership.toml", "scripts/component_ownership.py",
-                     # Retirement-time path inventory; docs/historical/README.md
-                     # explicitly identifies it as a historical snapshot.
-                     "docs/historical/shared-cluster-reference-audit.json",
-                 }
-                 and (repo_root / name).is_file()}
+        sources = {name: (repo_root / name).read_text(encoding="utf-8")
+                   for name in tracked_paths if name.endswith(".py") and name not in changed}
     except (OSError, UnicodeError):
         return paths
-    if any(not references({name}).search(texts.get(_AUDITED_TEST_INPUT_READERS[name], ""))
-           for name in non_tests):
-        return paths
-    sources = {name: source for name, source in texts.items() if name.endswith(".py")}
-    foreign = {name: source for name, source in texts.items() if not name.endswith(".py")}
-    affected = changed | readers
+    affected = set(changed)
     while True:
-        identifiers = references(affected)
-        # Inspect the entire closure: an added test module may be launched from
-        # Go/browser/shell work without mentioning the original changed input.
-        if any(name not in affected and identifiers.search(source) for name, source in foreign.items()):
-            return paths
+        identifiers = re.compile(r"\b(?:" + "|".join(re.escape(Path(name).stem) for name in affected) + r")\b")
         added = set()
         for name, source in sources.items():
             if name in affected or not identifiers.search(source):
                 continue
-            source = _fixture_reference_source(source, path=name, changed_paths=affected)
-            if not identifiers.search(source):
+            if not identifiers.search(_fixture_reference_source(source, path=name, changed_paths=affected)):
                 continue
-            if (name in _TEST_SELECTION_METADATA_FILES or not is_test_input_path(name) or not test_module(name)):
+            # Runtime/metadata/unknown consumers still require a complete lane.
+            # Known test-module consumers can expand transitively without also
+            # running every unrelated test module in that same lane.
+            if (name in _TEST_SELECTION_METADATA_FILES
+                    or not (name.startswith("tests/") or "/tests/" in name)
+                    or not Path(name).name.startswith("test_")):
                 return paths
             added.add(name)
         if not added:
@@ -2091,8 +2031,6 @@ def _parser() -> argparse.ArgumentParser:
                             help="Include unlaunched shared-pool simulations for manual qualification.")
     test_paths.add_argument("--changed-paths-json", default="[]",
                             help="Narrow independent test-only edits; [] retains the default lane selection.")
-    test_paths.add_argument("--full-test-lanes-json", default=os.environ.get("FULL_TEST_LANES") or "[]",
-                            help="Explicit label-selected lanes to exercise in full.")
     test_paths.add_argument("--diff-paths-json", default="[]",
                             help="A PR's actual diff; gates affected_only suites when changed paths are [].")
     test_paths.add_argument("--shard-index", type=int, default=0)
@@ -2217,14 +2155,7 @@ def main(argv: list[str] | None = None) -> int:
             changes = json.loads(args.changed_paths_json)
             if not isinstance(changes, list) or not all(isinstance(path, str) for path in changes):
                 raise ManifestError("changed paths must be a JSON string array")
-            full_lanes = json.loads(args.full_test_lanes_json)
-            if not isinstance(full_lanes, list) or any(
-                not isinstance(lane, str) or lane not in manifest.ci_lanes for lane in full_lanes
-            ):
-                raise ManifestError("full test lanes must be declared CI lanes")
             changed_paths = tuple(_safe_path(path, context="changed path") for path in changes)
-            if args.lane in full_lanes:
-                changed_paths = ()
             diff = json.loads(args.diff_paths_json)
             if not isinstance(diff, list) or not all(isinstance(path, str) for path in diff):
                 raise ManifestError("diff paths must be a JSON string array")

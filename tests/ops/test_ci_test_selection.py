@@ -35,8 +35,7 @@ def test_unreferenced_test_edit_selects_only_that_test(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("change", ["src/loom/service.py", "tests/conftest.py", "tests/support/helper.py",
-                                   "database/migrations/new.py", "unknown/file.bin", "tests/unit/deleted.py", "docs/usage.md",
-                                   "src/tool/tests/test_entry.py"])
+                                   "database/migrations/new.py", "unknown/file.bin", "tests/unit/deleted.py", "docs/usage.md"])
 def test_shared_runtime_unknown_or_deleted_change_keeps_full_lane(tmp_path: Path, change: str) -> None:
     tracked = _repository(tmp_path)
     paths = (tracked[0], tracked[1])
@@ -44,12 +43,16 @@ def test_shared_runtime_unknown_or_deleted_change_keeps_full_lane(tmp_path: Path
                                     tracked_paths=tracked, repo_root=tmp_path) == paths
 
 
+def test_imported_test_fixture_keeps_full_lane(tmp_path: Path) -> None:
+    tracked = _repository(tmp_path)
+    (tmp_path / tracked[1]).write_text("from tests.unit.test_alpha import fixture\n")
+    paths = (tracked[0], tracked[1])
+    assert narrow_test_only_changes(paths, changed_paths=(tracked[0],),
+                                    tracked_paths=tracked, repo_root=tmp_path) == paths
+
+
 @pytest.mark.parametrize("source", [
     'PIN = "tests/unit/test_alpha.py"\nassert PIN.endswith(".py")\n',
-    'def metadata():\n    path = "tests/unit/test_alpha.py"\n    assert path.endswith(".py")\n'
-    'def unrelated_loader():\n    path = "other.py"\n    runpy.run_path(path)\n',
-    'def metadata():\n    assert "tests/unit/test_alpha.py".endswith(".py")\n'
-    'def unrelated_expression():\n    return eval("1")\n',
     'PATHS = {"tests/unit/test_alpha.py"}\ndef selected(path): chosen = path in PATHS\n',
     '@pytest.mark.parametrize("path", ["tests/unit/test_alpha.py"])\ndef test_selection(path): pass\n',
     'paths = ("tests/unit/test_alpha.py",)\nselect_test_scope(manifest, paths, scope="nebius")\n',
@@ -72,7 +75,6 @@ def test_ci_metadata_path_literals_do_not_make_a_test_a_fixture(tmp_path: Path, 
     'SOURCE = "from tests.unit.test_alpha import fixture"\n',
     'import runpy\nrunpy.run_path("tests/unit/test_alpha.py")\n',
     'import runpy\nPATH = "tests/unit/test_alpha.py"\nrunpy.run_path(PATH)\n',
-    'def actual_loader():\n    path = "tests/unit/test_alpha.py"\n    runpy.run_path(path)\n',
     '@pytest.mark.parametrize("case", [runpy.run_path("tests/unit/test_alpha.py")])\ndef test_case(case): pass\n',
     'def fixture_path(): return "tests/unit/test_alpha.py"\nrunpy.run_path(fixture_path())\n',
     'def load_fixture(path="tests/unit/test_alpha.py"): return runpy.run_path(path)\nload_fixture()\n',
@@ -82,10 +84,6 @@ def test_ci_metadata_path_literals_do_not_make_a_test_a_fixture(tmp_path: Path, 
     'fixture["path"] = "tests/unit/test_alpha.py"\nrunpy.run_path(fixture["path"])\n',
     'assert all(runpy.run_path(path) for path in ["tests/unit/test_alpha.py"])\n',
     'paths = {"tests/unit/test_alpha.py"}\nassert all(runpy.run_path(path) for path in paths)\n',
-    'class Loader:\n    path = "tests/unit/test_alpha.py"\n    assert path.endswith(".py")\n'
-    '    def load(self): return runpy.run_path(self.path)\nLoader().load()\n',
-    'def load():\n    path = "tests/unit/test_alpha.py"\n    assert path.endswith(".py")\n'
-    '    runpy.run_path(locals()["path"])\nload()\n',
 ])
 def test_ci_metadata_still_preserves_real_or_dynamic_fixture_dependencies(
     tmp_path: Path, source: str,
@@ -212,6 +210,7 @@ def test_no_diff_is_explicit_full_regression(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("event,labels", [("workflow_dispatch", set()),
+                                         ("pull_request", {"ci:integration"}),
                                          ("pull_request", {"ci:coverage-summary"})])
 def test_explicit_full_requests_do_not_export_a_reduced_test_diff(event: str, labels: set[str]) -> None:
     plan = plan_validations(changed_paths=["tests/unit/test_alpha.py"],
@@ -318,145 +317,3 @@ def test_shard_workflows_run_complete_disjoint_fail_fast_shards(
         assert "-x" in arguments or "--maxfail=1" in arguments
         paths = tuple(arg for arg in arguments if arg.startswith("tests/"))
         assert paths == shards[row["shard_index"]]
-
-
-def test_deleted_standalone_test_does_not_expand_an_independent_edit(tmp_path: Path) -> None:
-    tracked = _repository(tmp_path)
-    removed = tracked[1]
-    (tmp_path / removed).unlink()
-    assert narrow_test_only_changes((tracked[0],), changed_paths=(tracked[0], removed),
-                                    tracked_paths=(tracked[0], tracked[2]), repo_root=tmp_path) == (tracked[0],)
-
-
-def test_label_full_lane_is_the_same_in_the_planner_and_real_cli() -> None:
-    from scripts.component_ownership import (
-        _tracked_paths,
-        load_manifest,
-        selected_test_paths,
-        test_shard_matrix,
-    )
-
-    root = Path(__file__).resolve().parents[2]
-    edited_module = "tests/unit/test_rate_card_lookup.py"
-    plan = plan_validations(changed_paths=[edited_module], labels={"ci:integration"}, event_name="pull_request")
-    manifest = load_manifest(root / "config/component-ownership.toml")
-    common = dict(manifest=manifest, tracked_paths=_tracked_paths(root), repo_root=root, test_scope="nebius")
-    lane = "tests-root"
-    changes = () if lane in plan.full_test_lanes else plan.test_changes
-    expected = selected_test_paths(lane=lane, changed_paths=changes, **common)
-    matrix = test_shard_matrix(lane=lane, changed_paths=changes, **common)
-    assert matrix
-    result = subprocess.run(
-        [sys.executable, "scripts/component_ownership.py", "test-paths", "--lane", lane,
-         "--test-scope", "nebius", "--changed-paths-json", json.dumps(plan.test_changes)],
-        cwd=root, env={**os.environ, "FULL_TEST_LANES": json.dumps(plan.full_test_lanes)},
-        text=True, capture_output=True, check=True,
-    )
-    assert tuple(result.stdout.splitlines()) == expected
-    assert expected == (edited_module,)
-
-
-@pytest.mark.parametrize("fixture", ["tests/data/payload.json", "tests/support/unregistered_probe.py"])
-def test_unregistered_input_stays_full_even_with_an_explicit_python_reader(tmp_path: Path, fixture: str) -> None:
-    tracked = _repository(tmp_path)
-    target = tmp_path / fixture
-    target.parent.mkdir(parents=True)
-    target.write_text('{}')
-    (tmp_path / tracked[0]).write_text(f'VALUE = Path("{fixture}").read_text()\n')
-    # A directory reader need not mention the basename. One explicit reader is
-    # not proof that every consumer of an unregistered input has been found.
-    (tmp_path / tracked[1]).write_text('VALUE = next(Path("tests/data").glob("*.json")).read_text()\n')
-    assert narrow_test_only_changes(tracked[:2], changed_paths=(fixture,),
-                                    tracked_paths=(*tracked, fixture), repo_root=tmp_path) == tracked[:2]
-
-
-@pytest.mark.parametrize("indirect", [False, True])
-def test_non_python_consumers_of_any_closure_member_keep_the_full_lane(tmp_path: Path, indirect: bool) -> None:
-    tracked = _repository(tmp_path)
-    initial = "tests/unit/test_fixture_source.py"
-    (tmp_path / initial).write_text('VALUE = 1\n')
-    bridge = "tests/support/test_loader.py"
-    target = tmp_path / bridge
-    target.parent.mkdir(parents=True)
-    target.write_text('from tests.unit.test_fixture_source import VALUE\n')
-    consumer = bridge if indirect else initial
-    (tmp_path / tracked[0]).write_text(f'VALUE = runpy.run_path("{consumer}")\n')
-    foreign = "scripts/probe.sh"
-    target = tmp_path / foreign
-    target.parent.mkdir(parents=True)
-    target.write_text(f'python {consumer}\n')
-    assert narrow_test_only_changes(tracked[:2], changed_paths=(initial,),
-                                    tracked_paths=(*tracked, initial, bridge, foreign), repo_root=tmp_path) == tracked[:2]
-
-
-def test_audited_input_requires_its_complete_tracked_reader(tmp_path: Path) -> None:
-    from scripts.component_ownership import _AUDITED_TEST_INPUT_READERS
-
-    tracked = _repository(tmp_path)
-    fixture, reader = next(iter(_AUDITED_TEST_INPUT_READERS.items()))
-    target = tmp_path / fixture
-    target.parent.mkdir(parents=True)
-    target.write_text('{}')
-    assert narrow_test_only_changes(tracked[:2], changed_paths=(fixture,),
-                                    tracked_paths=(*tracked, fixture), repo_root=tmp_path) == tracked[:2]
-    target = tmp_path / reader
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text('')
-    assert narrow_test_only_changes(tracked[:2], changed_paths=(fixture,),
-                                    tracked_paths=(*tracked, fixture, reader), repo_root=tmp_path) == tracked[:2]
-
-
-def test_package_runtime_test_directory_keeps_real_cli_baselines(tmp_path: Path) -> None:
-    root = Path(__file__).resolve().parents[2]
-    edited = "packages/loom-benchmarks/src/loom_benchmarks/tests/" + "test_" + "runtime_entry.py"
-    changed = tmp_path / "changed.txt"
-    changed.write_text(edited + "\n")
-    output = tmp_path / "output.txt"
-    result = subprocess.run(
-        [sys.executable, "scripts/plan_ci_validations.py", "--changed-files", str(changed),
-         "--event-name", "pull_request", "--github-output", str(output)],
-        cwd=root, text=True, capture_output=True, check=True,
-    )
-    plan = json.loads(result.stdout)
-    outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
-    assert plan["tests_root"] and plan["tests_packages"]
-    assert outputs["tests_root"] == outputs["tests_packages"] == "true"
-    assert json.loads(outputs["tests_root_matrix"])
-    # Exercise the job's real selector too: a runtime input must retain actual
-    # runnable modules rather than merely keeping the planner boolean true.
-    for lane in ("tests-root", "tests-packages"):
-        selection = subprocess.run(
-            [sys.executable, "scripts/component_ownership.py", "test-paths", "--lane", lane,
-             "--changed-paths-json", outputs["test_changes"]],
-            cwd=root, text=True, capture_output=True, check=True,
-        )
-        assert selection.stdout.splitlines()
-
-
-def test_real_package_test_still_narrows_to_its_own_cli_entrypoint() -> None:
-    root = Path(__file__).resolve().parents[2]
-    edited = "packages/loom-benchmarks/tests/" + "test_" + "mbpp_adapter.py"
-    plan = plan_validations(changed_paths=[edited], labels=set(), event_name="pull_request")
-    assert plan.tests_packages and not plan.tests_root
-    result = subprocess.run(
-        [sys.executable, "scripts/component_ownership.py", "test-paths", "--lane", "tests-packages",
-         "--changed-paths-json", json.dumps(plan.test_changes)],
-        cwd=root, text=True, capture_output=True, check=True,
-    )
-    assert result.stdout.splitlines() == [edited]
-
-
-@pytest.mark.parametrize("reference, historical", [
-    ("docs/historical/shared-cluster-reference-audit.json", True),
-    ("config/runtime-test-inputs.json", False),
-])
-def test_only_audited_historical_snapshot_is_ignored_as_a_test_consumer(
-    tmp_path: Path, reference: str, historical: bool,
-) -> None:
-    tracked = _repository(tmp_path)
-    target = tmp_path / reference
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps({"path": tracked[0]}))
-    selected = narrow_test_only_changes(tracked[:2], changed_paths=(tracked[0],),
-                                        tracked_paths=(*tracked, reference), repo_root=tmp_path)
-    assert selected == ((tracked[0],) if historical else tracked[:2])

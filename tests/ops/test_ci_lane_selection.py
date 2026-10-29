@@ -16,15 +16,8 @@ def test_frontend_change_does_not_start_backend_baseline():
     assert outputs["web_checks"] == "true"
 
 
-def test_unrelated_label_preserves_test_selection(tmp_path, monkeypatch):
-    import scripts.plan_ci_validations as planner
-
-    p = "tests/unit/test_unrelated_label_subject.py"
-    target = tmp_path / p
-    target.parent.mkdir(parents=True)
-    target.write_text("def test_subject(): pass\n")
-    monkeypatch.setattr(planner, "REPO_ROOT", tmp_path)
-    monkeypatch.setattr(planner, "_tracked_paths", lambda _: (p, "README.md"))
+def test_unrelated_label_preserves_test_selection():
+    p = "tests/ops/test_ci_hosted_execution.py"
     assert json.loads(plan(p, ["bug"]).github_outputs()["test_changes"]) == [p]
 
 
@@ -173,7 +166,7 @@ def test_forced_full_regression_runs_shared_pool_only_for_an_affecting_diff(diff
     ("pull_request", (), True),
     ("merge_group", (), True),
     ("pull_request", ("bug",), True),
-    ("pull_request", ("ci:integration",), True),
+    ("pull_request", ("ci:integration",), False),
     ("push", (), False),
     ("schedule", (), False),
     ("workflow_dispatch", (), False),
@@ -257,10 +250,8 @@ def test_shard_manifests_execute_exactly_the_planned_selection(changes, lane, tm
     common = dict(tracked_paths=tuple(files), lane=lane, repo_root=tmp_path, changed_paths=changes,
                   include_shared_pool=True)
     planned = selected_test_paths(manifest, **common)
-    fixture_edit = changes == ("tests/ops/nebius_participant_external_fixture.py",)
-    # Unregistered helpers are deliberately full; named operator sources still
-    # select their real consumers before sharding.
-    full_lane = fixture_edit or lane == "tests-root" or changes == ("uv.lock",)
+    full_lane = lane == "tests-root" or changes in (
+        ("uv.lock",), ("tests/ops/nebius_participant_external_fixture.py",))
     expected = tests if full_lane else (
         () if changes == ("scripts/ops/ci_reliability_metrics.py",) else tests[:2])
     assert set(planned) == set(expected)
@@ -498,35 +489,24 @@ def test_large_change_list_keeps_full_lanes_without_oversized_job_environment():
     ) == paths
 
 
-def test_deleted_system_smoke_skips_empty_work_but_explicit_label_keeps_full_suite(tmp_path):
-    import os
-    import subprocess
-    import sys
+def test_installed_wheel_smoke_imports_only_retained_modules():
+    import ast
+    from importlib.util import find_spec
     from pathlib import Path
 
-    from scripts.component_ownership import _tracked_paths, load_manifest, selected_test_paths
+    import yaml
 
     root = Path(__file__).resolve().parents[2]
-    removed = "tests/system/" + "_".join(("test", "removed", "standalone", "smoke")) + ".py"
-    changes = tmp_path / "changes.txt"
-    changes.write_text(removed + "\n")
-    output = tmp_path / "outputs.txt"
-    manifest = load_manifest(root / "config/component-ownership.toml")
-    complete = selected_test_paths(manifest, tracked_paths=_tracked_paths(root), lane="system-smoke",
-                                   repo_root=root, test_scope="nebius")
-    assert complete
-    for labels, selected in (([], False), (["staging-smoke"], True)):
-        output.write_text("")
-        subprocess.run([
-            sys.executable, "scripts/plan_ci_validations.py", "--changed-files", str(changes),
-            "--labels-json", json.dumps(labels), "--event-name", "pull_request", "--test-scope", "nebius",
-            "--github-output", str(output),
-        ], cwd=root, capture_output=True, text=True, check=True)
-        values = dict(line.split("=", 1) for line in output.read_text().splitlines())
-        assert values["staging_smoke"] == str(selected).lower()
-        paths = subprocess.run([
-            sys.executable, "scripts/component_ownership.py", "test-paths", "--lane", "system-smoke",
-            "--test-scope", "nebius", "--changed-paths-json", values["test_changes"],
-        ], cwd=root, env={**os.environ, "FULL_TEST_LANES": values["full_test_lanes"]},
-            capture_output=True, text=True, check=True)
-        assert tuple(paths.stdout.splitlines()) == (complete if selected else ())
+    workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
+    step = next(item for item in workflow["jobs"]["tests-root"]["steps"]
+                if item.get("name") == "Build and exercise non-editable runtime wheel")
+    source = step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    imports = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            imports.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imports.append(node.module)
+    for module in imports:
+        if module.startswith(("loom.", "loom_")):
+            assert find_spec(module) is not None, module

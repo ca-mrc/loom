@@ -152,7 +152,6 @@ jobs:
       test_changes: ${{ steps.plan.outputs.test_changes || '[]' }}
       test_diff: ${{ steps.plan.outputs.test_diff || '[]' }}
       shared_pool_simulations: ${{ steps.plan.outputs.shared_pool_simulations || 'false' }}
-      full_test_lanes: ${{ steps.plan.outputs.full_test_lanes || '[]' }}
       tests_root_matrix: ${{ steps.plan.outputs.tests_root_matrix || '[]' }}
       nebius_pool_matrix: ${{ steps.plan.outputs.nebius_pool_matrix || '[]' }}
       integration_matrix: ${{ steps.plan.outputs.integration_matrix || '[]' }}
@@ -294,22 +293,6 @@ jobs:
             --base-sha "${BASE_SHA:-}" \
             --github-output "$GITHUB_OUTPUT"
 
-      - name: Check current strict PR base before validation fan-out
-        if: >-
-          github.event_name == 'pull_request' && steps.plan.outputs.gate_mode == 'full' &&
-          (steps.plan.outputs.nebius_pool == 'true' ||
-           steps.plan.outputs.integration_docker == 'true' ||
-           steps.plan.outputs.runtime_payload == 'true' ||
-           steps.plan.outputs.web_runtime == 'true' ||
-           steps.plan.outputs.images == 'true' ||
-           steps.plan.outputs.cluster_smoke == 'true' ||
-           steps.plan.outputs.staging_smoke == 'true')
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: python3 scripts/ci_fast_feedback.py check-base
-
       - name: Docs-only fast path
         if: steps.plan.outputs.docs_only == 'true'
         run: echo "Only docs/repo metadata changed; heavy checks skipped."
@@ -425,29 +408,6 @@ jobs:
       - name: Verify GitHub Action SHA lock
         run: uv run --no-sync python scripts/check_ci_action_pins.py
 
-      - name: Build and exercise non-editable runtime wheel
-        if: needs.workflow-plan.outputs.runtime_payload == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          wheel_dir="${RUNNER_TEMP}/loom-wheel"
-          rm -rf "${wheel_dir}"
-          uv build --wheel --out-dir "${wheel_dir}"
-          wheels=("${wheel_dir}"/loom-*.whl)
-          if [[ ${#wheels[@]} -ne 1 || ! -f "${wheels[0]}" ]]; then
-            echo "expected exactly one Loom wheel" >&2
-            exit 1
-          fi
-          uv pip install \
-            --python .venv/bin/python \
-            --reinstall \
-            --no-deps \
-            "${wheels[0]}"
-          cd "${RUNNER_TEMP}"
-          "${GITHUB_WORKSPACE}/.venv/bin/python" -I -B \
-            "${GITHUB_WORKSPACE}/scripts/verify_installed_wheel.py" \
-            --repo-root "${GITHUB_WORKSPACE}" --test-scope "${CI_TEST_SCOPE:-all}"
-
   # Native dependencies reserve runner slots for quick checks first. Unselected
   # prerequisites may skip; a selected skip/failure/cancellation blocks fan-out.
   tests-root:
@@ -455,7 +415,7 @@ jobs:
     runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     needs: [workflow-plan, lint-and-static, locked-environments, tests-packages, go-checks, nebius-iac]
     # Shards project ~7 minutes of pytest without coverage; leave room for
-    # coverage, setup and cleanup.
+    # coverage, setup, wheel verification and cleanup.
     timeout-minutes: 50
     if: >-
       !cancelled() &&
@@ -480,7 +440,6 @@ jobs:
       COVERAGE_FILE: .coverage.root-${{ matrix.shard }}
       COVERAGE_ENABLED: ${{ needs.workflow-plan.outputs.coverage_summary }}
       TEST_CHANGED_PATHS: ${{ needs.workflow-plan.outputs.test_changes }}
-      FULL_TEST_LANES: ${{ needs.workflow-plan.outputs.full_test_lanes }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -545,6 +504,93 @@ jobs:
             -x --durations=25 \
             "${coverage_args[@]}"
 
+      - name: Build and exercise non-editable runtime wheel
+        if: matrix.shard_index == 0 && needs.workflow-plan.outputs.runtime_payload == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel_dir="${RUNNER_TEMP}/loom-wheel"
+          rm -rf "${wheel_dir}"
+          uv build --wheel --out-dir "${wheel_dir}"
+          wheels=("${wheel_dir}"/loom-*.whl)
+          if [[ ${#wheels[@]} -ne 1 || ! -f "${wheels[0]}" ]]; then
+            echo "expected exactly one Loom wheel" >&2
+            exit 1
+          fi
+          uv pip install \
+            --python .venv/bin/python \
+            --reinstall \
+            --no-deps \
+            "${wheels[0]}"
+          cd "${RUNNER_TEMP}"
+          "${GITHUB_WORKSPACE}/.venv/bin/python" -I -B - <<'PY'
+          from __future__ import annotations
+
+          import os
+          from importlib import resources
+          from pathlib import Path
+
+          import loom_cli
+          import loom.nebius_platform_render
+          import loom_execution_actuator.task_image_controller
+
+          repo_root = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          for module in (loom_cli, loom.nebius_platform_render,
+                         loom_execution_actuator.task_image_controller):
+              module_path = Path(module.__file__).resolve()
+              assert not module_path.is_relative_to(repo_root / "src"), module_path
+          runtime_assets = {
+              Path("config/loom-schema.toml"): ("loom-schema.toml",),
+              Path("deploy/grafana/dashboards/operator-overview.json"): (
+                  "grafana",
+                  "operator-overview.json",
+              ),
+              Path("deploy/grafana/dashboards/control-plane.json"): (
+                  "grafana",
+                  "control-plane.json",
+              ),
+              Path("deploy/grafana/dashboards/llm-gateway.json"): (
+                  "grafana",
+                  "llm-gateway.json",
+              ),
+              Path("deploy/grafana/dashboards/loom-service.json"): (
+                  "grafana",
+                  "loom-service.json",
+              ),
+              Path("deploy/grafana/dashboards/worker.json"): (
+                  "grafana",
+                  "worker.json",
+              ),
+              Path("deploy/envoy/egress-proxy.yaml"): (
+                  "envoy",
+                  "egress-proxy.yaml",
+              ),
+          }
+          if os.environ.get("CI_TEST_SCOPE", "all") != "all":
+              runtime_assets = {Path("config/loom-schema.toml"): ("loom-schema.toml",)}
+          package_root = resources.files("loom_cli.data")
+          for source_path, resource_parts in runtime_assets.items():
+              assert package_root.joinpath(*resource_parts).read_bytes() == (
+                  repo_root / source_path
+              ).read_bytes()
+          if os.environ.get("CI_TEST_SCOPE", "all") == "all":
+              assert (
+                  resources.files("loom_cli.templates.k8s")
+                  .joinpath("_env.j2")
+                  .read_text(encoding="utf-8")
+                  .strip()
+              )
+              from loom_cli.migration_readiness import inspect_migration_plan
+
+              assert callable(inspect_migration_plan)
+              from loom_cli.cluster_cmd import render_manifests
+              from loom_cli.cluster_config import ClusterConfig
+
+              rendered = render_manifests(ClusterConfig())
+              assert "kind: ConfigMap" in rendered
+              assert "name: loom-grafana-dashboards" in rendered
+          PY
+
       - name: Upload root coverage data
         if: always() && env.COVERAGE_ENABLED == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -580,6 +626,21 @@ jobs:
         run: python3 scripts/ci_fast_feedback.py enforce
       - name: Exercise installed candidate GitHub CLI on colored raw logs
         run: python3 scripts/check_github_cli_logs.py
+      - name: Check current strict PR base before heavy validation
+        if: >-
+          github.event_name == 'pull_request' &&
+          (needs.workflow-plan.outputs.nebius_pool == 'true' ||
+           needs.workflow-plan.outputs.integration_docker == 'true' ||
+           needs.workflow-plan.outputs.runtime_payload == 'true' ||
+           needs.workflow-plan.outputs.web_runtime == 'true' ||
+           needs.workflow-plan.outputs.images == 'true' ||
+           needs.workflow-plan.outputs.cluster_smoke == 'true' ||
+           needs.workflow-plan.outputs.staging_smoke == 'true')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/ci_fast_feedback.py check-base
 
   # Calls wait in GitHub's dependency graph; no runner polls another workflow.
   images-validation:
@@ -711,7 +772,6 @@ jobs:
         include: ${{ fromJSON(needs.workflow-plan.outputs.nebius_pool_matrix) }}
     env:
       TEST_CHANGED_PATHS: ${{ needs.workflow-plan.outputs.test_changes }}
-      FULL_TEST_LANES: ${{ needs.workflow-plan.outputs.full_test_lanes }}
       # Job-level, so candidate reuse reads it from the checkout step's log.
       TEST_DIFF_PATHS: ${{ needs.workflow-plan.outputs.test_diff }}
       SHARED_POOL_SIMULATIONS: ${{ needs.workflow-plan.outputs.shared_pool_simulations }}
@@ -787,7 +847,6 @@ jobs:
     env:
       COVERAGE_ENABLED: ${{ needs.workflow-plan.outputs.coverage_summary }}
       TEST_CHANGED_PATHS: ${{ needs.workflow-plan.outputs.test_changes }}
-      FULL_TEST_LANES: ${{ needs.workflow-plan.outputs.full_test_lanes }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -1257,7 +1316,6 @@ jobs:
       COVERAGE_FILE: .coverage.integration-${{ matrix.shard }}
       COVERAGE_ENABLED: ${{ needs.workflow-plan.outputs.coverage_summary }}
       TEST_CHANGED_PATHS: ${{ needs.workflow-plan.outputs.test_changes }}
-      FULL_TEST_LANES: ${{ needs.workflow-plan.outputs.full_test_lanes }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -1380,7 +1438,6 @@ jobs:
         include: ${{ fromJSON(needs.workflow-plan.outputs.integration_docker_matrix) }}
     env:
       TEST_CHANGED_PATHS: ${{ needs.workflow-plan.outputs.test_changes }}
-      FULL_TEST_LANES: ${{ needs.workflow-plan.outputs.full_test_lanes }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 

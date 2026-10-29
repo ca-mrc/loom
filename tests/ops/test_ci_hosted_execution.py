@@ -37,7 +37,7 @@ def test_candidate_matrix_runs_only_amd64(
 
 
 @pytest.mark.parametrize("tree", ["src", "packages"])
-def test_coverage_combines_real_data_from_all_checkout_roots(
+def test_coverage_combines_real_data_from_both_ephemeral_provider_roots(
     tmp_path, monkeypatch, tree
 ):
     import shutil

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -990,7 +989,7 @@ def test_reusable_validation_workflows_keep_internal_result_enforcement() -> Non
             assert f'"${result_env}"' in gate_script
 
 
-def test_repository_gate_enforces_native_result_bindings() -> None:
+def test_repository_checks_keeps_four_gate_contract_with_staged_execution() -> None:
     # Resolve the real workflow env before running its gate. Direct env injection
     # alone cannot catch a result wired to another successful dependency.
     gate = _workflow(".github/workflows/ci.yml")["jobs"]["repository-checks"]
@@ -1007,7 +1006,7 @@ def test_repository_gate_enforces_native_result_bindings() -> None:
         "integration", "integration_docker", "coverage_summary", "web_checks", "web_runtime",
     ), "true")
     outputs.update(gate_mode="full", docs_only="false")
-    assert sources <= set(gate["needs"])
+    assert sources == set(gate["needs"])
     assert "always()" in gate["if"]
     for failed in (None, *sorted(sources)):
         native = {
@@ -1349,29 +1348,11 @@ def test_pytest_workflow_preserves_tests_and_failures_with_optional_integration_
         assert "env.COVERAGE_ENABLED == 'true'" in upload["if"]
 
 
-@pytest.mark.parametrize("manual_request", [None, "coverage_summary", "legacy_compatibility"])
-def test_manual_requests_select_their_integration_tiers_through_workflow_planner(
-    tmp_path: Path, manual_request: str | None,
-) -> None:
+def test_manual_coverage_request_selects_integration_through_workflow_planner(tmp_path: Path) -> None:
     workflow = _workflow(".github/workflows/ci.yml")
-    options = _workflow_on(workflow)["workflow_dispatch"]["inputs"]
-    native = {f"inputs.{key}": option["default"] for key, option in options.items()}
-    if manual_request is not None:
-        native[f"inputs.{manual_request}"] = True
-    native.update({"github.event_name": "workflow_dispatch", "github.ref": "refs/heads/dev",
-                   "github.base_ref": ""})
-
-    def resolve(expression):
-        source = re.sub(r"(?:inputs|github)\.[A-Za-z0-9_.]+",
-                        lambda match: repr(native[match[0]]), expression.strip()[3:-2])
-        return eval(source.replace("&&", " and ").replace("||", " or "), {"__builtins__": {}})
-
+    assert _workflow_on(workflow)["workflow_dispatch"]["inputs"]["coverage_summary"]["default"] is False
     step = next(s for s in workflow["jobs"]["workflow-plan"]["steps"] if s.get("id") == "plan")
-    dispatch_env = {key: str(resolve(value)).lower() for key, value in step["env"].items()
-                    if key in {"DISPATCH_INTEGRATION", "DISPATCH_INTEGRATION_DOCKER",
-                               "DISPATCH_COVERAGE_SUMMARY"}}
-    test_scope = resolve(workflow["env"]["CI_TEST_SCOPE"])
-    assert test_scope == ("all" if manual_request == "legacy_compatibility" else "nebius")
+    assert step["env"]["DISPATCH_COVERAGE_SUMMARY"] == "${{ inputs.coverage_summary }}"
     git = tmp_path / "git"
     real_git = shutil.which("git")
     assert real_git is not None
@@ -1387,14 +1368,13 @@ def test_manual_requests_select_their_integration_tiers_through_workflow_planner
              "EVENT_NAME": "workflow_dispatch", "HEAD_SHA": "a" * 40,
              "PR_LABELS_JSON": "[]", "PR_ACTION": "", "PR_ACTION_LABEL": "",
              "PR_DRAFT": "false", "PR_BASE_CHANGED": "false",
-             **dispatch_env, "CI_TEST_SCOPE": test_scope, "GITHUB_OUTPUT": str(output)},
+             "DISPATCH_INTEGRATION": "false", "DISPATCH_INTEGRATION_DOCKER": "false",
+             "DISPATCH_COVERAGE_SUMMARY": "true", "GITHUB_OUTPUT": str(output)},
     )
     assert result.returncode == 0, result.stderr
     values = dict(line.split("=", 1) for line in output.read_text().splitlines())
-    assert values["coverage_summary"] == str(manual_request == "coverage_summary").lower()
-    assert values["integration"] == str(manual_request is not None).lower()
-    assert values["integration_docker"] == str(manual_request == "legacy_compatibility").lower()
-    assert values["docs_only"] == str(manual_request is None).lower()
+    assert values["coverage_summary"] == values["integration"] == "true"
+    assert values["docs_only"] == "false"
 
 
 @pytest.mark.parametrize("job_name", ["tests-root", "integration"])

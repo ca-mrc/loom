@@ -553,9 +553,9 @@ def test_planner_change_selects_every_heavy_gate() -> None:
 @pytest.mark.parametrize(
     "path",
     [
-        "tests/unit/test_selector_subject.py",
-        "tests/loom_cli/test_selector_cli.py",
-        "tests/ops/test_selector_ops.py",
+        "tests/unit/test_metrics_enumeration.py",
+        "tests/loom_cli/test_config.py",
+        "tests/ops/test_release_runbook.py",
     ],
 )
 def test_manifest_owned_root_tests_do_not_select_unrelated_heavy_lanes(path: str, independent_test_repo) -> None:
@@ -568,9 +568,9 @@ def test_manifest_owned_root_tests_do_not_select_unrelated_heavy_lanes(path: str
 
 
 def test_docs_plus_manifest_owned_root_test_keeps_only_the_root_test_lane(independent_test_repo) -> None:
-    independent_test_repo("tests/unit/test_selector_subject.py")
+    independent_test_repo("tests/unit/test_metrics_enumeration.py")
     plan = plan_validations(
-        changed_paths=["docs/user-guide.md", "tests/unit/test_selector_subject.py"],
+        changed_paths=["docs/user-guide.md", "tests/unit/test_metrics_enumeration.py"],
         labels=set(),
         event_name="pull_request",
     )
@@ -941,72 +941,3 @@ def test_workflow_plan_passes_the_change_base_for_registration_checks() -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
     step = next(s for s in workflow["jobs"]["workflow-plan"]["steps"] if s.get("id") == "plan")
     assert '--base-sha "${BASE_SHA:-}"' in step["run"]
-
-
-def test_existing_harness_fixture_keeps_its_real_consumer() -> None:
-    from scripts.component_ownership import _tracked_paths, load_manifest, selected_test_paths
-
-    fixture = "tests/unit/fixtures/hosted_harness_plans.json"
-    plan = plan_validations(changed_paths=[fixture], labels=set(), event_name="pull_request")
-    assert not plan.unowned_runtime
-    assert not plan.selected_heavy_checks()
-    assert not any((plan.go_checks, plan.nebius_iac, plan.web_runtime, plan.runtime_payload))
-    manifest = load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    selected = selected_test_paths(manifest, tracked_paths=_tracked_paths(REPO_ROOT),
-                                   lane="tests-root", repo_root=REPO_ROOT,
-                                   changed_paths=plan.test_changes, test_scope="nebius")
-    assert selected == ("tests/unit/test_hosted_harness_plan_parity.py",
-                        "tests/unit/test_task_sandbox_planner.py")
-    mixed = plan_validations(changed_paths=[
-        "src/loom/agent/terminus2/runtime.py", fixture, *selected,
-        "tests/support/terminus_summarization_probe.py",
-    ], labels=set(), event_name="pull_request")
-    assert not mixed.unowned_runtime
-    assert mixed.integration and mixed.integration_docker and mixed.images
-    assert not mixed.cluster_smoke and not mixed.staging_smoke
-    assert not any((mixed.go_checks, mixed.nebius_iac, mixed.runtime_payload,
-                    mixed.web_checks, mixed.web_runtime))
-
-    probe = plan_validations(changed_paths=["tests/support/terminus_summarization_probe.py"],
-                             labels=set(), event_name="pull_request")
-    assert probe.integration_docker
-    assert not any((probe.integration, probe.cluster_smoke, probe.staging_smoke,
-                    probe.go_checks, probe.web_runtime))
-    tracked = _tracked_paths(REPO_ROOT)
-    assert selected_test_paths(manifest, tracked_paths=tracked, lane="tests-root",
-                               repo_root=REPO_ROOT, changed_paths=probe.test_changes,
-                               test_scope="nebius") == ()
-
-
-@pytest.mark.parametrize("label,lane", [
-    ("ci:images", None), ("ci:integration", "integration"),
-    ("ci:integration-docker", "integration-docker"),
-    ("cluster-smoke", "cluster-smoke"), ("staging-smoke", "system-smoke"),
-])
-def test_extra_lane_label_preserves_unrelated_test_selection(label, lane, independent_test_repo):
-    path = "tests/unit/test_selector_subject.py"
-    independent_test_repo(path)
-    plan = plan_validations(changed_paths=[path], labels={label}, event_name="pull_request")
-    assert plan.test_changes == (path,)
-    assert plan.test_diff == (path,)
-    assert plan.full_test_lanes == ((lane,) if lane else ())
-    assert plan.tests_root and not plan.tests_packages
-
-
-def test_unresolved_crosslanguage_test_input_keeps_the_full_baseline(tmp_path, monkeypatch) -> None:
-    import scripts.plan_ci_validations as planner
-
-    helper = "tests/support/boundary_fixture.py"
-    files = {"README.md": "test repository\n", helper: "VALUE = 1\n",
-             "tests/unit/test_boundary.py": "from tests.support.boundary_fixture import VALUE\n",
-             "cmd/tool/main_test.go": '// reads tests/support/boundary_fixture.py\n'}
-    for name, source in files.items():
-        target = tmp_path / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(source)
-    monkeypatch.setattr(planner, "REPO_ROOT", tmp_path)
-    monkeypatch.setattr(planner, "_tracked_paths", lambda _: tuple(files))
-    plan = plan_validations(changed_paths=[helper], labels=set(), event_name="pull_request")
-    assert plan.go_checks and plan.tests_packages and plan.web_runtime
-    assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
-    assert plan.test_changes == ()

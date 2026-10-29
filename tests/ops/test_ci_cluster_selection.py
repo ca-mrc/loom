@@ -121,11 +121,8 @@ def test_explicit_or_shared_cluster_inputs_keep_full_matrix(tmp_path, cluster_in
     changes = ("tests/conftest.py",) if shared else (independent,)
     plan = _plan(tmp_path, changes=changes, event=event, labels=labels)
     assert len(json.loads(plan["cluster_smoke_matrix"])) == manifest.test_shard_policy("cluster-smoke").shard_count
-    if event == "workflow_dispatch":
+    if labels or event == "workflow_dispatch":
         assert json.loads(plan["test_changes"]) == []
-    elif labels:
-        assert json.loads(plan["test_changes"]) == list(changes)
-        assert json.loads(plan["full_test_lanes"]) == ["cluster-smoke"]
 
 
 def test_build_report_retains_target_after_shared_image_builds(tmp_path):

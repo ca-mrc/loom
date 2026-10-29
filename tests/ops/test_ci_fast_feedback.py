@@ -67,6 +67,7 @@ def test_feedback_owns_mandatory_cli_probe_in_candidate_planners_hosted_environm
     commands = [step.get("run") for step in job["steps"]]
     probe = next(step for step in job["steps"] if step.get("run") == "python3 scripts/check_github_cli_logs.py")
     assert commands.index("python3 scripts/ci_fast_feedback.py enforce") < job["steps"].index(probe)
+    assert job["steps"].index(probe) < commands.index("python3 scripts/ci_fast_feedback.py check-base")
     assert not probe.get("if") and not probe.get("continue-on-error")
     assert "env" not in probe  # The probe needs no real GitHub token.
 
@@ -116,33 +117,35 @@ def test_reusable_nodes_allow_skipped_outer_ancestors_but_require_their_own_depe
             assert not _condition(condition, {**values, f"needs.{dependency}.result": result})
 
 
-@pytest.mark.parametrize(("event", "selector", "gate", "expected"), [
-    ("pull_request", "runtime_payload", "full", True),
-    ("pull_request", "images", "full", True),
-    ("pull_request", None, "full", False),
-    ("pull_request", "images", "filtered", False),
-    ("merge_group", "images", "full", False),
-    ("workflow_dispatch", "images", "full", False),
-    ("schedule", "images", "full", False),
-    ("push", "images", "full", False),
+@pytest.mark.parametrize("event,selector", [
+    ("pull_request", None), ("pull_request", "nebius_pool"),
+    ("pull_request", "integration_docker"), ("pull_request", "runtime_payload"),
+    ("pull_request", "web_runtime"), ("pull_request", "images"),
+    ("pull_request", "cluster_smoke"), ("pull_request", "staging_smoke"),
+    ("merge_group", "images"), ("workflow_dispatch", "images"),
+    ("schedule", "images"), ("push", "images"),
 ])
-def test_base_preflight_stops_obsolete_pr_before_validation_fanout(event, selector, gate, expected):
-    jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
-    steps = jobs["workflow-plan"]["steps"]
-    step = next(item for item in steps if item.get("run") == "python3 scripts/ci_fast_feedback.py check-base")
-    assert steps.index(step) > next(index for index, item in enumerate(steps) if item.get("id") == "plan")
-    assert not any("check-base" in item.get("run", "") for item in jobs["fast-feedback"]["steps"])
+def test_base_preflight_runs_only_after_quick_success_for_pr_heavy_work(event, selector):
+    job = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["fast-feedback"]
+    step = next(step for step in job["steps"] if step.get("run") == "python3 scripts/ci_fast_feedback.py check-base")
+    assert job["steps"].index(step) > next(
+        index for index, item in enumerate(job["steps"])
+        if item.get("run") == "python3 scripts/ci_fast_feedback.py enforce"
+    )
     assert not step.get("continue-on-error")
-    values = {f"steps.plan.outputs.{name}": "false" for name in (
+    values = {f"needs.workflow-plan.outputs.{name}": "false" for name in (
         "nebius_pool", "integration_docker", "runtime_payload", "web_runtime", "images", "cluster_smoke", "staging_smoke",
     )}
-    values.update({"github.event_name": event, "steps.plan.outputs.gate_mode": gate})
+    values["github.event_name"] = event
     if selector:
-        values[f"steps.plan.outputs.{selector}"] = "true"
-    expression = step["if"].replace("steps.plan.outputs.", "needs.plan.outputs.")
-    values = {key.replace("steps.plan.outputs.", "needs.plan.outputs."): value for key, value in values.items()}
-    assert _condition(expression, values) is expected
-    assert not _condition(expression, {**values, "needs.plan.result": "failure"})
+        values[f"needs.workflow-plan.outputs.{selector}"] = "true"
+    assert _condition(step["if"], values) is (event == "pull_request" and selector is not None)
+    assert not _condition(step["if"], {**values, "needs.quick.result": "failure"})
+    assert step["env"] == {
+        "GH_TOKEN": "${{ github.token }}",
+        "PR_BASE_REF": "${{ github.event.pull_request.base.ref }}",
+        "PR_BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+    }
 
 
 @pytest.mark.parametrize(("event", "label", "dependent"), [

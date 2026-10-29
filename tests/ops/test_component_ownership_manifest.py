@@ -597,7 +597,7 @@ def test_marker_free_ascii_syntax_errors_are_still_rejected(source: str) -> None
         ("pytestmark = pytest.other.docker\n", False),
     ],
 )
-def test_docker_marker_detection_uses_python_semantics(source: str, expected: bool) -> None:
+def test_possible_docker_marker_sources_retain_exact_ast_inspection(source: str, expected: bool) -> None:
     assert component_ownership._uses_pytest_docker_marker(source) is expected
 
 

@@ -113,11 +113,8 @@ PR checks do not receive its credentials. CI does not deploy the live platform.
 ## Early feedback and heavy-job ordering
 
 Inside `CI`, selected lint/type/codegen, locked-environment, package, Go and
-Terraform checks run first. The static-check job also builds and installs the
-runtime wheel when selected, before root tests and the non-Docker integration
-tier start. Its asset check reports the missing or mismatched resource path.
-Selected root tests and the non-Docker integration tier follow those checks.
-Frontend API/type/lint/unit checks also contribute to
+Terraform checks run first. Selected root tests and the non-Docker integration
+tier follow those checks. Frontend API/type/lint/unit checks also contribute to
 `fast-feedback`, an internal aggregation job, not a required merge context.
 It rejects every selected failure, cancellation or unexpected skip. Unselected
 lanes may skip. Existing changed-path selection, test manifests and coverage
@@ -126,15 +123,13 @@ Ordinary documentation-only PRs skip feedback when no dependent work is selected
 Additive image/cluster/staging labels and manual baseline requests still run
 feedback before their selected dependents, even when only documents changed.
 
-For PRs selecting heavy work, planning performs a bounded base-freshness
-preflight before allocating validation runners. It reads the active branch rules
+For PRs selecting heavy work, successful quick checks are followed by a bounded
+base-freshness preflight inside `fast-feedback`. It reads the active branch rules
 and, only under strict status checks without a native merge queue, compares the
-event's base SHA with the current base ref. An already-advanced base fails
-before static, test or heavy fan-out. Native queue admission skips this
-comparison because GitHub regenerates merge groups. This uses read-only
-metadata requests with 20-second timeouts and adds no
-gate or permission. It uses the standard-library HTTP client, so planning does
-not install or require a GitHub CLI. It does not lock the base or
+event's base SHA with the current base ref. An already-advanced base fails before
+heavy fan-out. Native queue admission skips this comparison because GitHub
+regenerates merge groups. This uses at most two read-only metadata requests with
+20-second timeouts and adds no gate or permission. It does not lock the base or
 cancel work if the base advances after the preflight.
 
 Pool, Docker integration, runtime payload and frontend production/browser work
@@ -316,37 +311,21 @@ measurement; the removed instrumentation and artifact work is deterministic.
 
 ## Test-only changes
 
-Python test edits run the changed modules and their known transitive consumers
-in their owning lanes. The test roots are `tests/` and
-`packages/<package>/tests/`; an embedded `src/.../tests/` directory remains a
-runtime input. The existing Harbor plan golden and summarization probe
-have explicitly audited primary readers, then follow that same consumer closure.
-Other test data and helper files retain full validation: a filename match cannot
-prove the absence of dynamic directory/glob readers. Shared pytest setup,
-unresolved consumers and consumers outside the Python test closure also retain
-the complete baseline and specialist lanes.
-
-The retired shared-cluster JSON path inventory is historical metadata, not a
-runtime consumer. Unknown JSON inputs still retain full validation. Metadata
-references through class fields or reflection also retain conservative coverage.
-
-Removing a standalone test does not request full regression; any remaining
-consumers still run. Empty package and system-smoke selections are resolved in
-planning, before runners are allocated. Explicit smoke labels retain the full
-requested lane.
-
-Selector labels extend only the named lane: for example, `cluster-smoke`
-requests the full cluster suite while root and integration tests retain their
-path-derived scope. Labels never remove path-selected work. Coverage-summary,
-manual/scheduled regression and shared validation authority still request full
-coverage within the active scope. Ordinary labels such as `bug` leave selection
-unchanged. Unlaunched shared-pool simulations remain explicitly manual.
-
-Sharding happens before filtering, so ownership and paired-fixture ordering stay
-stable. The planner emits only nonempty root/pool/integration/Docker/cluster
-shards before runners are allocated. Each runner writes its selected-path
-manifest before dependency or fixture setup; selection errors fail the job.
-Empty selections do not invoke pytest.
+An edit consisting only of Python test modules runs those files and their known
+transitive test-module consumers in their owning lanes. Imports and string
+references retain consumer coverage; runtime, shared-helper and unknown consumers
+retain the complete lane. Exact path literals in the
+audited CI metadata tests do not make a test a shared fixture. Shared or deleted
+test inputs select their possible consumer jobs as well as retaining all files
+inside those jobs, including when mixed with source changes. Runtime,
+migration, configuration, fixture, deleted-file and unknown changes stay full
+unless a suite explicitly declares an audited unaffected component.
+CI selector labels and manual runs request full regression within the active scope; ordinary labels such
+as `bug` do not change test selection. Sharding happens before filtering,
+so ownership and paired-fixture ordering remain stable. The planner emits only
+nonempty root/pool/integration/Docker/cluster shards before runners are allocated. Each
+runner writes its selected-path manifest before dependency or fixture setup;
+selector errors fail the job. Empty selections do not invoke pytest.
 
 ## Component selection across CI
 
@@ -368,9 +347,9 @@ Dependency Graph has no repository YAML.
 | Unknown or shared authority | Complete applicable regression, with a full file-selection hint. |
 
 All selected source results still feed the same four app-bound required gates.
-Nightly/manual and coverage-summary requests preserve full coverage within
-the default suite scope. Lane selector labels expand their own lane, and the
-unlaunched shared simulations require their own explicit manual input below. Global
+Nightly/manual and explicit full requests preserve stronger coverage within
+the default suite scope; the unlaunched shared simulations require their own
+explicit manual input below. Global
 Python type checks, frontend coverage populations and broad Docker COPY inputs
 are real dependencies; ownership globs cannot make those inputs disappear.
 Selection failures propagate before pytest or toolchain execution. The audit's
@@ -883,22 +862,3 @@ This validates retained disposable fixtures and does not publish or deploy. Know
 PostgreSQL/k3s fixture failures recorded in #2008 remain unresolved compatibility
 issues. The owner closed that investigation as not planned; changing daily CI
 scope does not claim a fix or add retries for those defects.
-
-## Keeping CI tests useful
-
-Keep executable selection, artifact, permission and failure-boundary tests.
-Exercise the actual workflow's native-result bindings as well as gate logic:
-a successful unrelated job cannot stand in for the selected job's result.
-Avoid duplicating these checks with assertions about documentation wording,
-exact step names, helper layout or the complete SDK argument dictionary. Test independent
-branches and limits without multiplying unrelated parameters into Cartesian
-products; foreign-ownership refusal does not need every log size and phase.
-Keep meaningful interactions, such as a phase prefix fitting inside the same
-large-log truncation budget.
-
-Action references still use the verified SHA lock and its positive/negative
-validation. The former `ci-upgrade-policy.json` batch/rollback inventory and its
-checker are retired: a handwritten list of commands and previous pins did not
-verify that compatibility checks ran, and duplicated the actual source checks.
-Action updates use the same selected validation and four protected gate results
-as other reviewed CI changes.
