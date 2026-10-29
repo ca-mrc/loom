@@ -230,16 +230,25 @@ class TerminalArchiveMaterializer(ServiceExecutionMaterializer):
 
 
 def archive_sessions(engine: AsyncEngine, *, legacy_baseline: bool) -> async_sessionmaker[AsyncSession]:
-    """0175 lacks only the unrelated 0176 baseline linkage used by new runs."""
+    """Recovery reads 0175/0176 databases, which predate later llm_calls columns.
+
+    0175 lacks the unrelated 0176 baseline linkage used by new runs, and both
+    lack the 0182 usage projection (#2687); recovery never reads either.
+    """
+    later_columns: list[Any] = [LlmCall.cost_source, LlmCall.cost_confidence, LlmCall.usage_status]
+    if legacy_baseline:
+        later_columns.append(LlmCall.baseline_session_id)
+
     class ArchiveSession(AsyncSession):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
-            if legacy_baseline:
-                @event.listens_for(self.sync_session, "do_orm_execute")
-                def projected_calls(state: ORMExecuteState) -> None:
-                    if (state.is_select and isinstance(state.statement, Select)
-                            and any(row.get("expr") is LlmCall for row in state.statement.column_descriptions)):
-                        state.statement = state.statement.options(defer(LlmCall.baseline_session_id, raiseload=True))
+
+            @event.listens_for(self.sync_session, "do_orm_execute")
+            def projected_calls(state: ORMExecuteState) -> None:
+                if (state.is_select and isinstance(state.statement, Select)
+                        and any(row.get("expr") is LlmCall for row in state.statement.column_descriptions)):
+                    state.statement = state.statement.options(
+                        *(defer(column, raiseload=True) for column in later_columns))
     return async_sessionmaker(engine, class_=ArchiveSession, expire_on_commit=False)
 
 

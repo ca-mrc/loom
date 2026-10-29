@@ -862,8 +862,17 @@ def summarize_llm_evidence_for_trials(
     }
 
 
+def _projected_extra(column: Any, key: str) -> Any:
+    """Insert-time projection, or provider_extras for rows written before 0182.
+
+    COALESCE stops at the first non-null argument, so projected rows never
+    detoast the raw-log JSON (#2687). A projected absent key is ''.
+    """
+    return func.coalesce(column, LlmCall.provider_extras.op("->>")(key), "")
+
+
 def usage_status_filter(status: str) -> Any:
-    return LlmCall.provider_extras.op("->>")(USAGE_STATUS_KEY) == status
+    return _projected_extra(LlmCall.usage_status, USAGE_STATUS_KEY) == status
 
 
 def cost_meta_filter(key: str, value: str) -> Any:
@@ -872,9 +881,13 @@ def cost_meta_filter(key: str, value: str) -> Any:
         COST_META_SOURCE_KEY: "unpriced",
         COST_META_CONFIDENCE_KEY: "unavailable",
     }[key]
+    column = {
+        COST_META_SOURCE_KEY: LlmCall.cost_source,
+        COST_META_CONFIDENCE_KEY: LlmCall.cost_confidence,
+    }[key]
     effective = case(
         (LlmCall.rate_card_hash == "local-server-no-card", local_value),
-        else_=func.coalesce(LlmCall.provider_extras.op("->>")(key), ""),
+        else_=_projected_extra(column, key),
     )
     return effective == value
 

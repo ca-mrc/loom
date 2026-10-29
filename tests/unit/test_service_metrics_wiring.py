@@ -54,6 +54,10 @@ def test_service_metric_objects_registered() -> None:
         "loom_svc_team_emergency_actions",
         "loom_svc_tokens_issued",
         "loom_svc_tokens_revoked",
+        "loom_svc_auth_duration_sec",
+        "loom_svc_db_checkout_wait_sec",
+        "loom_svc_db_statement_sec",
+        "loom_svc_interactive_read_timeouts",
     }
     for stem in expected:
         assert stem in names or f"{stem}_total" in names or any(
@@ -88,3 +92,48 @@ def test_http_middleware_records_one_observation_per_request() -> None:
 
     assert REGISTRY.get_sample_value(request_name, request_labels) == before_requests + 1
     assert REGISTRY.get_sample_value(latency_name, latency_labels) == before_latency + 1
+
+
+def test_instrument_engine_records_statement_time_by_verb() -> None:
+    from sqlalchemy import create_engine, text
+
+    from loom_service.metrics import instrument_engine
+
+    def count(verb: str) -> float:
+        return REGISTRY.get_sample_value("loom_svc_db_statement_sec_count", {"verb": verb}) or 0.0
+
+    engine = create_engine("sqlite://")
+    instrument_engine(engine)
+    before = {verb: count(verb) for verb in ("select", "other")}
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+        conn.execute(text("CREATE TABLE t (x INTEGER)"))
+    engine.dispose()
+    assert count("select") == before["select"] + 1
+    assert count("other") == before["other"] + 1
+
+
+def test_instrument_engine_records_failed_statements_and_recovers() -> None:
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.exc import OperationalError
+
+    from loom_service.metrics import instrument_engine
+
+    def count() -> float:
+        return REGISTRY.get_sample_value(
+            "loom_svc_db_statement_sec_count", {"verb": "select"},
+        ) or 0.0
+
+    engine = create_engine("sqlite://")
+    instrument_engine(engine)
+    before = count()
+    try:
+        with engine.connect() as conn:
+            with pytest.raises(OperationalError, match="no such table"):
+                conn.execute(text("SELECT * FROM missing_table"))
+            # Failed statements (including timeouts) must contribute their latency.
+            assert count() == before + 1
+            conn.execute(text("SELECT 1"))
+            assert count() == before + 2
+    finally:
+        engine.dispose()

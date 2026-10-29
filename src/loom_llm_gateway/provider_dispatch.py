@@ -30,6 +30,7 @@ from loom.db.schema import (
 from loom.request_params import coerce_request_params, normalize_request_params
 from loom_llm_gateway.dialect import TokenUsage
 from loom_llm_gateway.execution_attempt_dispatch import authorize_execution_attempt_dispatch
+from loom_llm_gateway.llm_calls import usage_projection_columns
 
 logger = logging.getLogger(__name__)
 _ACCOUNTING_LOCK_ATTEMPTS = 3
@@ -584,6 +585,7 @@ async def _settle_locked_dispatch(
             input_tokens=usage.input_tokens if outcome == "succeeded" else 0,
             output_tokens=usage.output_tokens if outcome == "succeeded" else 0,
             provider_extras=provider_extras,
+            **usage_projection_columns(provider_extras),
             request_params=(
                 normalize_request_params({})
                 if not request_params

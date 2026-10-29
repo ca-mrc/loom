@@ -747,6 +747,125 @@ async def test_slow_session_read_does_not_block_same_cookie_requests(auth_setup)
         assert held_response.status_code == 200
 
 
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+async def test_interactive_read_timeout_is_opt_in_and_browser_only(auth_setup, method):
+    """Browser GETs get the optional statement timeout; bearer callers never do (#2687)."""
+    from prometheus_client import REGISTRY
+    from sqlalchemy import text
+
+    app, *_ = auth_setup
+
+    from loom_service.metrics import instrument_engine
+
+    instrument_engine(app.state.session_factory.kw["bind"])
+
+    @app.get("/__test/statement-timeout")
+    async def statement_timeout(sc: SessionAndCtx) -> dict[str, str]:
+        session, _ctx = sc
+        return {"value": (await session.execute(text("SHOW statement_timeout"))).scalar_one()}
+
+    @app.api_route("/__test/slow-read", methods=["GET", "HEAD"])
+    async def slow_read(sc: SessionAndCtx) -> dict[str, bool]:
+        session, _ctx = sc
+        await session.execute(text("SELECT pg_sleep(2)"))
+        return {"ok": True}
+
+    def sample(name: str, labels: dict[str, str] | None = None) -> float:
+        return REGISTRY.get_sample_value(name, labels or {}) or 0.0
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://svc",
+    ) as ac:
+        await _login(ac)
+        auth_before = sample("loom_svc_auth_duration_sec_count", {"auth_kind": "session"})
+        checkout_before = sample("loom_svc_db_checkout_wait_sec_count")
+        assert (await ac.get("/__test/statement-timeout")).json() == {"value": "0"}
+        assert sample("loom_svc_auth_duration_sec_count", {"auth_kind": "session"}) == auth_before + 1
+        assert sample("loom_svc_db_checkout_wait_sec_count") == checkout_before + 1
+
+        app.state.settings.interactive_read_statement_timeout_ms = 200
+        try:
+            assert (await ac.get("/__test/statement-timeout")).json() == {"value": "200ms"}
+            timeouts_before = sample("loom_svc_interactive_read_timeouts_total")
+            sql_before = sample("loom_svc_db_statement_sec_sum", {"verb": "select"})
+            slow = await ac.request(method, "/__test/slow-read")
+            assert slow.status_code == 503, slow.text
+            if method == "GET":
+                assert slow.json() == {"detail": {"reason": "read timed out", "retryable": True}}
+            else:
+                assert slow.content == b""
+            assert slow.headers["retry-after"] == "5"
+            assert sample("loom_svc_interactive_read_timeouts_total") == timeouts_before + 1
+            # Include the cancelled SQL in the phase latency, not only successes.
+            assert sample("loom_svc_db_statement_sec_sum", {"verb": "select"}) >= sql_before + 0.1
+            # The cancelled read must not poison the session for the next request.
+            assert (await ac.get("/api/v1/auth/me")).status_code == 200
+
+            ac.cookies.clear()
+            bearer = await ac.get(
+                "/__test/statement-timeout",
+                headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+            )
+            assert bearer.json() == {"value": "0"}
+        finally:
+            app.state.settings.interactive_read_statement_timeout_ms = 0
+
+
+@pytest.mark.parametrize(("auth_kind", "method", "timeout_ms"), [
+    ("session", "GET", 0),
+    ("session", "HEAD", 0),
+    ("session", "POST", 200),
+    ("bearer", "GET", 200),
+    ("bearer", "HEAD", 200),
+    ("bearer", "POST", 200),
+    ("anonymous", "GET", 200),
+])
+async def test_unrelated_query_cancellation_keeps_server_error(
+    auth_setup, auth_kind, method, timeout_ms,
+):
+    """Other database deadlines must not become interactive retry responses."""
+    from prometheus_client import REGISTRY
+    from sqlalchemy import text
+
+    app, *_ = auth_setup
+    app.state.settings.interactive_read_statement_timeout_ms = timeout_ms
+
+    async def cancel(session):
+        # A separate SQL deadline, independent of the interactive read policy.
+        await session.execute(text("SET LOCAL statement_timeout = 20"))
+        await session.execute(text("SELECT pg_sleep(1)"))
+        return {"ok": True}
+
+    if auth_kind == "anonymous":
+        @app.get("/__test/cancel")
+        async def cancel_without_auth():
+            async with app.state.session_factory() as session:
+                return await cancel(session)
+    else:
+        @app.api_route("/__test/cancel", methods=[method])
+        async def cancel_with_auth(sc: SessionAndCtx):
+            session, _ctx = sc
+            return await cancel(session)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://svc",
+    ) as ac:
+        headers = {}
+        if auth_kind == "session":
+            body, _ = await _login(ac)
+            headers["X-Loom-CSRF"] = str(body["csrf_token"])
+        elif auth_kind == "bearer":
+            headers["Authorization"] = f"Bearer {RAW_ADMIN_TOKEN}"
+        before = REGISTRY.get_sample_value("loom_svc_interactive_read_timeouts_total")
+        response = await ac.request(method, "/__test/cancel", headers=headers)
+        assert response.status_code == 500, response.text
+        assert "retry-after" not in response.headers
+        assert REGISTRY.get_sample_value("loom_svc_interactive_read_timeouts_total") == before
+        if auth_kind == "session":
+            assert (await ac.get("/api/v1/auth/me")).status_code == 200
+
+
 async def test_retired_staging_exchange_and_existing_cookie_are_rejected(auth_setup, monkeypatch):
     app, *_ = auth_setup
     monkeypatch.setenv("LOOM_ENV", "staging")

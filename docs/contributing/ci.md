@@ -206,6 +206,13 @@ It accepts GitHub-hosted Linux runners or disposable self-hosted Linux guests
 with the root-owned ephemeral-runner marker. It refuses unmarked hosts,
 non-Linux runners, and remote-Docker execution.
 
+After the local disposable-runner check, cluster-contract jobs load
+`br_netfilter` and require its bridge sysctl before creating the K3s container.
+This lets kube-router initialize on a fresh guest; missing modules fail the
+preparation step rather than waiting for policy enforcement that cannot start.
+K3s still owns its namespace sysctl setup, and policy assertions and deadlines
+remain unchanged.
+
 The shared disposable K3s fixture preloads its pinned system images through
 the host Docker daemon: pause, CoreDNS, local-path provisioner and its busybox
 volume helper, and metrics-server. It saves a reusable archive and mounts that

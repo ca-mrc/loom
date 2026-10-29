@@ -217,6 +217,16 @@ jobs:
       - name: Configure credential-free Docker Hub mirror
         run: python3 scripts/configure_ci_registry_mirror.py
 
+      - name: Prepare bridge netfilter for disposable Kubernetes
+        # The preceding mirror setup verifies a disposable Linux guest and its
+        # local Docker daemon. Load before creating k3s's network namespace:
+        # kube-router cannot start if its bridge sysctl is absent at startup.
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo -n modprobe br_netfilter
+          test -e /proc/sys/net/bridge/bridge-nf-call-iptables
+
       - name: Select nonempty cluster manifest
         id: manifest
         shell: bash

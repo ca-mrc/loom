@@ -587,6 +587,12 @@ python_type = "int"
 default     = 604800
 description = "Browser-session lifetime in seconds. The default is 7 days."
 
+[service_config.interactive_read_statement_timeout_ms]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 0
+description = "Statement timeout in milliseconds for browser-session GET/HEAD reads; 0 disables it. A cancelled read returns a retryable 503. Never applies to bearer-token callers such as task writeback."
+
 [service_config.auth_login_challenge_ttl_sec]
 used_by     = ["loom-service"]
 python_type = "int"
