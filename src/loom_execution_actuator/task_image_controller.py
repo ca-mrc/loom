@@ -66,7 +66,7 @@ _LIVE = ("claimed", "running")
 _LOG = logging.getLogger(__name__)
 # One admission pass may start several fitting builds; each still reserves
 # capacity in its own transaction before its Job is created.
-ADMISSIONS_PER_PASS = 16
+ADMISSIONS_PER_PASS = 32
 # Per-attempt reconciles hold up to two DB connections each (guard + work).
 RECONCILE_CONCURRENCY = 4
 # Admission first lets the pass's cleanup free capacity, but one slow
