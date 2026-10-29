@@ -6,6 +6,7 @@ neither a terminal result nor those replies frees the charged reservation.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import datetime, timedelta
@@ -32,6 +33,8 @@ from loom_execution_actuator.pool_native_observation import qualify_native_obser
 from loom_execution_actuator.pool_origins import preferred_task_image_origin
 from loom_execution_actuator.pool_outbox import PoolHandoffError, _clock, _snapshot, _source_matches
 from loom_execution_actuator.task_image_controller import (
+    ADMISSIONS_PER_PASS,
+    RECONCILE_CONCURRENCY,
     fail_native_build,
     record_native_build_result,
 )
@@ -50,11 +53,15 @@ class PoolNativeBuildApi(Protocol):
 
 class PoolNativeBuildController:
     def __init__(self, *, driver: PoolBuildDriver, kubernetes: PoolNativeBuildApi,
-                 selector: PoolBuildSelector | None = None) -> None:
+                 selector: PoolBuildSelector | None = None, admissions_per_pass: int = ADMISSIONS_PER_PASS,
+                 reconcile_concurrency: int = RECONCILE_CONCURRENCY) -> None:
         if selector is not None and selector.outbox is not driver.outbox:
             raise PoolHandoffError
+        if admissions_per_pass < 1 or reconcile_concurrency < 1:
+            raise ValueError("global build passes need at least one slot")
         self.driver, self.kubernetes = driver, kubernetes
         self.selector = selector
+        self.admissions_per_pass, self.reconcile_concurrency = admissions_per_pass, reconcile_concurrency
 
     def _current_attempt(self, saved: NebiusPoolBuildOutbox, row: TaskImageMaterialization,
                          attempt: TaskImageMaterializationAttempt, *, now: datetime) -> bool:
@@ -233,22 +240,38 @@ class PoolNativeBuildController:
 
     async def run_once(self) -> None:
         started, outstanding = time.monotonic(), 0
-        first_error: Exception | None = None
-        async for pending in self.driver.outbox.iter_pending():
-            outstanding += 1
+        errors: list[Exception] = []
+        slots = asyncio.Semaphore(self.reconcile_concurrency)
+
+        async def reconcile(key: PoolRequestKeyV1) -> None:
             try:
-                await self._reconcile(pending.request.key)
+                await self._reconcile(key)
             except Exception as error:
-                if first_error is None:
-                    first_error = error
+                errors.append(error)
                 _LOG.warning("Global native build deferred materialization=%s error=%s",
-                    pending.request.key.local_work_id, type(error).__name__)
-        reconciled, outcome = time.monotonic(), "no_selector"
+                    key.local_work_id, type(error).__name__)
+            finally:
+                slots.release()
+
+        # Keyset pages stay bounded; each key's outbox transaction takes its own
+        # selection lock, so different keys may advance concurrently.
+        async with asyncio.TaskGroup() as group:
+            async for pending in self.driver.outbox.iter_pending():
+                outstanding += 1
+                # Read further pages only as slots free up.
+                await slots.acquire()
+                group.create_task(reconcile(pending.request.key))
+        first_error = errors[0] if errors else None
+        reconciled, outcome, claimed = time.monotonic(), "no_selector", 0
         if self.selector is not None:
+            outcome = "batch_full"
             try:
-                selected = await self.selector.select_next()
-                outcome = "idle" if selected is None else "claimed"
-                if selected is not None:
+                while claimed < self.admissions_per_pass:
+                    selected = await self.selector.select_next()
+                    if selected is None:
+                        outcome = "idle"
+                        break
+                    claimed += 1
                     await self._reconcile(selected.request.key)
             except Exception as error:
                 outcome = "error"
@@ -256,6 +279,6 @@ class PoolNativeBuildController:
                     first_error = error
                 _LOG.warning("Global native build selection deferred error=%s", type(error).__name__)
         record_build_cycle("pool", outstanding=outstanding, reconcile_seconds=reconciled - started,
-                           outcome=outcome, admission_seconds=time.monotonic() - reconciled)
+                           outcome=outcome, admission_seconds=time.monotonic() - reconciled, claimed=claimed)
         if first_error is not None:
             raise first_error

@@ -17,6 +17,7 @@ from uuid import UUID
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.pool import QueuePool
 
 from loom.db.schema import (
     ServiceExecutionTarget,
@@ -63,6 +64,24 @@ _MANAGER = "loom-task-image-builder"
 _SELECTOR = "app.kubernetes.io/managed-by=" + _MANAGER
 _LIVE = ("claimed", "running")
 _LOG = logging.getLogger(__name__)
+# One admission pass may start several fitting builds; each still reserves
+# capacity in its own transaction before its Job is created.
+ADMISSIONS_PER_PASS = 32
+# Per-attempt reconciles hold up to two DB connections each (guard + work).
+RECONCILE_CONCURRENCY = 4
+# Admission first lets the pass's cleanup free capacity, but one slow
+# unrelated observation may delay new starts by at most this long.
+ADMISSION_GRACE_SECONDS = 2.0
+# The command, full-reconcile and watch loops share the actuator's engine.
+_OTHER_LOOP_CONNECTIONS = 3
+
+
+def _pool_capacity(sessions: async_sessionmaker[AsyncSession]) -> int | None:
+    bind = getattr(sessions, "kw", {}).get("bind")
+    pool = getattr(bind, "pool", None)
+    if not isinstance(pool, QueuePool) or pool._max_overflow < 0:
+        return None
+    return pool.size() + pool._max_overflow
 
 
 class NativeBuildApi(Protocol):
@@ -594,8 +613,21 @@ def _native_failure(native: dict[str, Any]) -> tuple[str, str, bool] | None:
 
 class NativeTaskImageController:
     def __init__(self, *, sessions: async_sessionmaker[AsyncSession], kubernetes: NativeBuildApi,
-                 target: ExecutionTargetRuntime, settings: NativeTaskImageSettings) -> None:
+                 target: ExecutionTargetRuntime, settings: NativeTaskImageSettings,
+                 admissions_per_pass: int = ADMISSIONS_PER_PASS,
+                 reconcile_concurrency: int = RECONCILE_CONCURRENCY,
+                 admission_grace_seconds: float = ADMISSION_GRACE_SECONDS) -> None:
+        if admissions_per_pass < 1 or reconcile_concurrency < 1 or admission_grace_seconds < 0:
+            raise ValueError("native build passes need at least one slot")
+        # Every reconcile, and the admitting claim, may hold its guard
+        # connection while it waits for a second one. If guards can take every
+        # free connection, the pass starves the pool instead of progressing.
+        capacity = _pool_capacity(sessions)
+        if capacity is not None and reconcile_concurrency + 2 > capacity - _OTHER_LOOP_CONNECTIONS:
+            raise ValueError(f"reconcile concurrency {reconcile_concurrency} could exhaust a {capacity}-connection DB pool")
         self.sessions, self.kubernetes, self.settings = sessions, kubernetes, settings
+        self.admissions_per_pass, self.reconcile_concurrency = admissions_per_pass, reconcile_concurrency
+        self.admission_grace_seconds = admission_grace_seconds
         self.target = replace(target, namespace=settings.namespace, runtime_class_name=None)
         self.builder_id = "nebius:" + target.target_id
 
@@ -606,44 +638,83 @@ class NativeTaskImageController:
         ))).all())
 
     async def run_once(self) -> None:
-        started = time.monotonic()
         # Database scans recover missing Jobs, stale epochs and ambiguous creates.
         async with self.sessions() as session:
             attempt_ids = [attempt.id for attempt in await self._outstanding(session)]
-        unexpected = False
-        for attempt_id in attempt_ids:
-            try:
-                await self._reconcile(attempt_id)
-            except ExecutionProvisioningBlockedError:
-                pass  # Waiting for quota or a fresh observation is normal health.
-            except Exception as error:
-                unexpected = True
-                _LOG.warning("Native build reconcile deferred attempt=%s error=%s", attempt_id, type(error).__name__)
-        reconciled, outcome = time.monotonic(), "error"
-        try:
-            if unexpected:
-                raise RuntimeError("Native build reconciliation failed; inspect bounded actuator diagnostics")
-            outcome = await self._admit()
-        finally:
-            record_build_cycle("native", outstanding=len(attempt_ids), reconcile_seconds=reconciled - started,
-                               outcome=outcome, admission_seconds=time.monotonic() - reconciled)
+        timings = {"reconcile": 0.0, "admission": 0.0}
 
-    async def _admit(self) -> str:
+        async def reconcile() -> bool:
+            started = time.monotonic()
+            try:
+                return await self._reconcile_all(attempt_ids)
+            finally:
+                timings["reconcile"] = time.monotonic() - started
+
+        async def admit() -> tuple[str, int]:
+            started = time.monotonic()
+            try:
+                return await self._admit()
+            finally:
+                timings["admission"] = time.monotonic() - started
+
+        # Admission does not wait behind a slow or failing unrelated build past
+        # the grace. Per-attempt advisory locks already serialize any overlap,
+        # as they do across replicas.
+        reconciling = asyncio.create_task(reconcile())
+        try:
+            await asyncio.wait({reconciling}, timeout=self.admission_grace_seconds)
+            admitted: tuple[str, int] | BaseException
+            try:
+                admitted = await admit()
+            except Exception as error:
+                admitted = error
+            unexpected = (await asyncio.gather(reconciling, return_exceptions=True))[0]
+        finally:
+            reconciling.cancel()
+        outcome, claimed = admitted if isinstance(admitted, tuple) else ("error", 0)
+        record_build_cycle("native", outstanding=len(attempt_ids), reconcile_seconds=timings["reconcile"],
+                           outcome=outcome, admission_seconds=timings["admission"], claimed=claimed)
+        for result in (unexpected, admitted):
+            if isinstance(result, BaseException):
+                raise result
+        if unexpected:
+            raise RuntimeError("Native build reconciliation failed; inspect bounded actuator diagnostics")
+
+    async def _reconcile_all(self, attempt_ids: list[UUID]) -> bool:
+        slots = asyncio.Semaphore(self.reconcile_concurrency)
+
+        async def reconcile(attempt_id: UUID) -> bool:
+            async with slots:
+                try:
+                    await self._reconcile(attempt_id)
+                except ExecutionProvisioningBlockedError:
+                    pass  # Waiting for quota or a fresh observation is normal health.
+                except Exception as error:
+                    _LOG.warning("Native build reconcile deferred attempt=%s error=%s", attempt_id, type(error).__name__)
+                    return True
+            return False
+
+        return any(await asyncio.gather(*(reconcile(attempt_id) for attempt_id in attempt_ids)))
+
+    async def _admit(self) -> tuple[str, int]:
         jobs = await self.kubernetes.inventory(self.settings.namespace)
-        if self.settings.max_concurrent is not None and len(jobs) >= self.settings.max_concurrent:
-            return "capped"
-        try:
-            claimed_attempt_id = await self._claim()
-        except ExecutionProvisioningBlockedError as error:
-            # The entire claim/reservation transaction was rolled back.
-            return blocked_outcome(error.reason)
-        if claimed_attempt_id is None:
-            return "idle"
-        try:
-            await self._reconcile(claimed_attempt_id)
-        except ExecutionProvisioningBlockedError:
-            pass
-        return "claimed"
+        claimed = 0
+        while claimed < self.admissions_per_pass:
+            if self.settings.max_concurrent is not None and len(jobs) + claimed >= self.settings.max_concurrent:
+                return "capped", claimed
+            try:
+                claimed_attempt_id = await self._claim()
+            except ExecutionProvisioningBlockedError as error:
+                # The entire claim/reservation transaction was rolled back.
+                return blocked_outcome(error.reason), claimed
+            if claimed_attempt_id is None:
+                return "idle", claimed
+            claimed += 1
+            try:
+                await self._reconcile(claimed_attempt_id)
+            except ExecutionProvisioningBlockedError:
+                pass
+        return "batch_full", claimed
 
     async def _claim(self) -> UUID | None:
         async with self.sessions() as session, session.begin():

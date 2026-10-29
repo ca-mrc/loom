@@ -1199,6 +1199,46 @@ configuration; omission leaves native building disabled:
 }
 ```
 
+Each build loop pass has three steps:
+1. Reconcile outstanding builds, at most four at a time.
+2. Run one admission pass, which claims up to 32 queued builds (`ADMISSIONS_PER_PASS`).
+3. Sleep for `poll_seconds`.
+
+The admission pass waits up to two seconds for that pass's reconciliation, so
+cleanup can free capacity first. It never waits longer, so one slow unrelated
+build observation cannot hold back new starts. Every claim still reserves
+capacity in its own transaction before its Job is created. Capacity, quota, I/O
+pressure and `max_concurrent` stop the pass at the first refusal. The global-pool
+controller reconciles its outbox with the same bound and selects up to 32
+requests per pass for management to prepare.
+
+The pass size and concurrency are source constants. They are deliberately not
+platform settings, so builder configuration and the frozen pool contracts stay
+unchanged.
+
+The batch of 32 trades cleanup latency for admission throughput. In local
+replays with simulated Kubernetes latency, it admitted a queue 22–35% faster
+than 16, while mean cancellation-to-delete time rose by about 1.5s, because
+cleanup waits behind the longer pass. 64 was faster again, but the cleanup cost
+was much larger.
+
+Each reconcile can hold a guard connection while it waits for a second one. The
+native controller therefore refuses to start if its reconciles plus the
+admitting claim could take every connection left over by the other actuator
+loops (`concurrency + 2 > pool_size + max_overflow - 3`). That is a strict
+progress limit, not a sizing target. The default of 4 is a conservative
+allowance of `2 × concurrency` peak connections, which leaves headroom for
+admission and the other loops on SQLAlchemy's default pool (`pool_size=5`,
+`max_overflow=10`).
+
+The `Native build cycle` log line and the
+`loom_execution_actuator_task_image_build_*` metrics record:
+- outstanding builds;
+- reconcile and admission seconds;
+- builds claimed per pass;
+- the outcome that ended the pass (`idle`, `capped`, `batch_full`, `error`,
+  `no_selector`, or the blocked reason).
+
 `snapshotter` selects the BuildKit OCI worker snapshotter (`overlayfs` or
 `native`). It defaults to `native` so unchanged Dockerfiles can hardlink files
 from earlier layers. Rootless OverlayFS copy-up can change inode identity during
