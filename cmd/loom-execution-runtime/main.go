@@ -115,7 +115,7 @@ func main() {
 				break
 			}
 		}
-		policy := phasedEgressPolicy{broker: broker, setup: p.SetupEgress}
+		policy := phasedEgressPolicy{broker: broker, setup: p.SetupEgress, mainland: p.MainlandProxyProfile}
 		if p.TaskEgress != nil {
 			policy.task = p.TaskEgress.taskEgressPolicy
 		}

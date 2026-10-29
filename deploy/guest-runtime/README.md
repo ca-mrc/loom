@@ -38,7 +38,9 @@ verification and isolation requirements are unchanged.
 
 The service image also copies official Trivy 0.76.1 and kubectl 1.36.6 binaries
 to replace affected embedded Go libraries, keeping kubectl on the same minor
-release. This does not change the separately installed release scanner, its
+release. Alpine 3.23 `brotli-libs=1.2.1-r0` fixes the additional Brotli
+CRITICAL finding in the service base image. This does not change the separately
+installed release scanner, its
 CRITICAL threshold, or the no-exceptions policy. The unchanged Trivy 0.74.0
 release scanner qualifies these patched binaries and the execution-runtime
 archive; guest runtime integration remains a separate requirement.

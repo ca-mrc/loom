@@ -139,6 +139,11 @@
     "default": "'info'",
     "required": false
   },
+  "mainland_proxy_profile_dir": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
   "managed_environment_config_file": {
     "annotation": "pathlib.Path | None",
     "default": "None",

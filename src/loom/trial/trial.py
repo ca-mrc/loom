@@ -7,7 +7,7 @@ import hashlib
 import logging
 import traceback
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -113,6 +113,11 @@ class TrialContext:
     # endpoints on Linux Docker, where `host.docker.internal` is not
     # present unless the container is started with host-gateway mapping.
     sandbox_extra_hosts: tuple[tuple[str, str], ...] = ()
+    # Worker-owned overrides win over task proxy settings for an opted-in
+    # controlled tool network. They are also applied to separate verifiers.
+    sandbox_environment_overrides: dict[str, str] = field(default_factory=dict)
+    tool_network_profile: dict[str, Any] | None = None
+    tool_network_policy_setter: Callable[[Driver, NetworkPolicy], Awaitable[None]] | None = None
     # Profile-task provenance can require private verifier assets to remain
     # outside the normal agent workspace.  Such tasks must receive a fresh
     # verifier-only driver; a delayed upload to the agent driver is unsafe
@@ -132,6 +137,22 @@ class TrialContext:
     container_pids: int = 0
     container_cgroup_parent: str | None = None
     runtime_identity_labels: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def sandbox_environment(self) -> tuple[tuple[str, str], ...]:
+        overrides = dict(self.sandbox_environment_overrides)
+        if self.trial_config.mainland_proxy and overrides:
+            local_names = {"localhost", "127.0.0.1"}
+            for sidecar in self.task_config.environment.sidecars:
+                local_names.add(sidecar.name)
+                if sidecar.hostname:
+                    local_names.add(sidecar.hostname)
+            no_proxy = ",".join(sorted(local_names))
+            overrides.update({"NO_PROXY": no_proxy, "no_proxy": no_proxy, "npm_config_noproxy": no_proxy})
+        return tuple(sorted({
+            **self.task_config.environment.environment,
+            **overrides,
+        }.items()))
 
     @property
     def task_id(self) -> str:
@@ -184,6 +205,7 @@ class Trial:
                 model=self.ctx.agent.model,
             ),
             config=self.ctx.trial_config,
+            tool_network_profile=self.ctx.tool_network_profile,
             state=TrialState.RUNNING,
             started_at=datetime.now(UTC),
         )
@@ -232,6 +254,11 @@ class Trial:
                         self.ctx.agent.continue_until_timeout = self.ctx.task_config.agent.continue_until_timeout
                     elif self.ctx.task_config.agent.continue_until_timeout:
                         raise AgentContinuationError("continue_until_timeout requires the Terminus-2 runtime")
+                    if self.ctx.trial_config.mainland_proxy and (
+                        not self.ctx.sandbox_network or self.ctx.tool_network_policy_setter is None
+                        or not self.ctx.tool_network_profile
+                    ):
+                        raise DriverError("mainland_proxy has no configured controlled tool gateway")
                     # Bug 1 fix: driver.start() + TrialStartEvent must land
                     # inside the broad-Exception catch so ENV_START_FAILURE
                     # (DriverError) becomes a classified TrialResult instead
@@ -241,11 +268,7 @@ class Trial:
                             force_build=self.ctx.trial_config.force_build,
                             network=self.ctx.sandbox_network,
                             volumes=self.ctx.sandbox_volumes,
-                            environment=tuple(
-                                sorted(
-                                    self.ctx.task_config.environment.environment.items(),
-                                )
-                            ),
+                            environment=self.ctx.sandbox_environment,
                             extra_hosts=_merge_extra_hosts(
                                 self.ctx.task_config.environment.extra_hosts,
                                 self.ctx.sandbox_extra_hosts,
@@ -275,6 +298,9 @@ class Trial:
                         )
                     )
                     driver_started = True
+                    if self.ctx.tool_network_policy_setter is not None:
+                        await self.ctx.tool_network_policy_setter(self.ctx.driver, baseline)
+                        result.tool_network_profile = self.ctx.tool_network_profile
                     # #188 / Phase B: attach the per-node singleton
                     # to this trial's bridge AFTER container creation.
                     # Failure to attach is a hard error — the sandbox
@@ -291,6 +317,7 @@ class Trial:
                             task_id=self.ctx.task_id,
                             agent_name=self.ctx.agent.name,
                             agent_mode=self.ctx.agent.mode,
+                            tool_network_profile=self.ctx.tool_network_profile,
                         )
                     )
                     # #186: upload the materialized task bundle into the

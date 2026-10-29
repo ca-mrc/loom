@@ -19,6 +19,7 @@ from uuid import UUID
 from loom.agent.base import AgentRuntime
 from loom.agent.gateway_client import LLMGatewayClient
 from loom.driver.base import Driver
+from loom.driver.mainland_proxy import MainlandProxyGateway, MainlandProxySettings
 from loom.models.result import FailureReason, TrialResult, TrialState
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
@@ -27,6 +28,7 @@ from loom.terminal_result_semantics import aggregate_reward_scalar
 from loom.trajectory.cp_event_sink import CpEventSink
 from loom.trajectory.object_identity import TrajectoryObjectIdentity
 from loom.trajectory.storage import ObjectStore
+from loom.trial.phase_network import controlled_tool_policy_setter
 from loom.trial.trial import Trial, TrialContext
 from loom.trial.workspace import WorkspaceStagingPolicy
 from loom.verifier.base import Verifier
@@ -143,6 +145,7 @@ class LocalTrialRunner:
     # Trusted image consumers supply an online, bounded, one-use authority call.
     # None preserves the existing non-V2 runner. It is not an offline grant.
     start_authorization: Callable[[], Awaitable[bool]] | None = None
+    mainland_proxy_factory: Callable[[], MainlandProxyGateway] | None = None
 
     def __post_init__(self) -> None:
         self._active_agent: AgentRuntime | None = None
@@ -182,8 +185,22 @@ class LocalTrialRunner:
         sandbox_bridge: SandboxBridge | None = None
         sidecar_runtime: TaskSidecarRuntime | None = None
         jwt_rotator: JWTRotator | None = None
+        tool_gateway: MainlandProxyGateway | None = None
         try:
             driver = self.driver_factory()
+            if self.trial_config.mainland_proxy:
+                if driver.capabilities.backend != "docker" or not driver.capabilities.supports_custom_network:
+                    raise DriverError("mainland_proxy requires the Docker execution backend")
+                tool_gateway = (
+                    self.mainland_proxy_factory()
+                    if self.mainland_proxy_factory is not None
+                    else MainlandProxyGateway(
+                        self.trial_id, MainlandProxySettings.from_env(),
+                        output_dir=self.local_trajectory_root / str(self.trial_id)
+                        / f"attempt-{self.attempt_count or 0}" / "mainland_proxy",
+                    )
+                )
+                await tool_gateway.start()
 
             # #188 / Phase B: per-trial sandbox bridge + singleton attach.
             # Only when BOTH allocator AND singleton are provided (the
@@ -192,7 +209,7 @@ class LocalTrialRunner:
             # the driver can't honor a custom network, raise rather than
             # silently start the trial without isolation.
             on_driver_started_cb: Callable[[], Awaitable[None]] | None = None
-            if self.sandbox_allocator is not None and self.sandbox_singleton is not None:
+            if tool_gateway is None and self.sandbox_allocator is not None and self.sandbox_singleton is not None:
                 if not driver.capabilities.supports_custom_network:
                     raise RuntimeError(
                         "sandbox isolation enabled but driver "
@@ -315,7 +332,16 @@ class LocalTrialRunner:
                 trajectory_bucket=self.trajectory_bucket,
                 artifacts_bucket=self.artifacts_bucket,
                 llm_calls_fetcher=self.llm_calls_fetcher,
-                sandbox_network=(sandbox_bridge.name if sandbox_bridge is not None else None),
+                sandbox_network=(
+                    tool_gateway.network_name if tool_gateway is not None
+                    else sandbox_bridge.name if sandbox_bridge is not None else None
+                ),
+                sandbox_environment_overrides=(tool_gateway.environment if tool_gateway is not None else {}),
+                tool_network_profile=(tool_gateway.metadata if tool_gateway is not None else None),
+                tool_network_policy_setter=(controlled_tool_policy_setter(
+                    tool_gateway.set_network_policy,
+                    tool_gateway.environment.get("HTTP_PROXY") or tool_gateway.environment["HTTPS_PROXY"],
+                ) if tool_gateway is not None else None),
                 on_driver_started=on_driver_started_cb,
                 sandbox_volumes=sandbox_volumes,
                 sandbox_extra_hosts=self.sandbox_extra_hosts,
@@ -402,7 +428,7 @@ class LocalTrialRunner:
             try:
                 if sidecar_runtime is not None:
                     ctx.sandbox_network = await sidecar_runtime.start(
-                        network_name=(sandbox_bridge.name if sandbox_bridge is not None else None),
+                        network_name=ctx.sandbox_network,
                     )
                 result = await trial.run()
                 if result.state in _TERMINAL_TRIAL_STATES:
@@ -448,6 +474,11 @@ class LocalTrialRunner:
                         "task_sidecar_teardown_failed trial=%s",
                         self.trial_id,
                     )
+            if tool_gateway is not None:
+                try:
+                    await tool_gateway.stop()
+                except Exception:
+                    logger.exception("mainland_proxy_teardown_failed trial=%s", self.trial_id)
             # Phase D: stop the rotator BEFORE bridge teardown so the
             # rotation task isn't competing with the bind-mount source
             # dir going away.

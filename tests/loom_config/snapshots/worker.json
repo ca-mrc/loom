@@ -109,6 +109,21 @@
     "default": "'info'",
     "required": false
   },
+  "mainland_proxy_binary": {
+    "annotation": "<class 'str'>",
+    "default": "'/mihomo'",
+    "required": false
+  },
+  "mainland_proxy_image": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "mainland_proxy_profile_dir": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
   "max_concurrent": {
     "annotation": "<class 'int'>",
     "default": "5",

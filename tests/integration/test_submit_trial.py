@@ -1045,3 +1045,59 @@ def test_historical_arm_idempotent_submission_remains_readable(
             assert session.scalar(select(func.count()).select_from(TaskImageMaterialization)) == 0
     finally:
         engine.dispose()
+
+
+
+def test_direct_trial_rejects_mainland_proxy_for_static_binding(app, seed_team, postgres_url):
+    from tests.integration.test_service_batches_crud import _service_execution_task_config
+
+    team_id, raw = seed_team
+    batch_id = uuid4()
+    engine = create_engine(postgres_url)
+    sessions = sessionmaker(engine)
+    try:
+        with sessions() as session, session.begin():
+            session.execute(
+                update(Task)
+                .where(Task.id == "hello")
+                .values(
+                    config=_service_execution_task_config("hello"),
+                )
+            )
+            session.execute(
+                insert(Batch).values(
+                    id=batch_id,
+                    team_id=team_id,
+                    name=f"bound-mainland-{batch_id}",
+                    task_filter={},
+                    trial_config={},
+                    backend="nebius",
+                    state="submitted",
+                    expected_trial_count=1,
+                    created_by_token_prefix="test",
+                )
+            )
+        with TestClient(app) as client:
+            response = client.post(
+                "/trials",
+                headers={"Authorization": f"Bearer {raw}"},
+                json={
+                    "task_id": "hello",
+                    "batch_id": str(batch_id),
+                    "config": {"agent_name": "oracle", "agent_model": None, "mainland_proxy": True},
+                },
+            )
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"]["reason"] == "mainland_proxy_bound_execution_unsupported"
+        with sessions() as session:
+            assert (
+                session.scalar(
+                    select(func.count()).select_from(Trial).where(Trial.batch_id == batch_id)
+                )
+                == 0
+            )
+    finally:
+        with sessions() as session, session.begin():
+            session.execute(delete(Trial).where(Trial.batch_id == batch_id))
+            session.execute(delete(Batch).where(Batch.id == batch_id))
+        engine.dispose()

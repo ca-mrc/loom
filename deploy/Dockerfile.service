@@ -13,7 +13,7 @@ FROM python:3.11-alpine3.23@sha256:c8d52af7e2645b587d464082ab29ff4ddc9fc514f353b
 # Retry each package-index request up to 10 times with a 60-second timeout so
 # transient index latency does not abort the image build.
 ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
-RUN apk add --no-cache skopeo
+RUN apk add --no-cache skopeo brotli-libs=1.2.1-r0
 COPY --from=build-deadline /out/loom-build-deadline /usr/local/bin/loom-build-deadline
 COPY --from=trivy /usr/local/bin/trivy /usr/local/bin/trivy
 COPY --from=kubectl /bin/kubectl /usr/local/bin/kubectl

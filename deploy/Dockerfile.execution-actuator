@@ -9,7 +9,7 @@ COPY deploy/execution-actuator-requirements.txt ./deploy/execution-actuator-requ
 RUN pip install --no-cache-dir --requirement deploy/execution-actuator-requirements.txt
 COPY src/loom/__init__.py src/loom/dockerfile_instructions.py src/loom/nebius_terminus_image.py \
     src/loom/execution_contract.py src/loom/execution_architecture.py \
-    src/loom/execution_image_admission.py src/loom/execution_runtime_contract.py \
+    src/loom/execution_image_admission.py src/loom/execution_runtime_contract.py src/loom/mainland_network_profile.py \
     src/loom/execution_diagnosis_store.py src/loom/execution_failure_diagnosis.py \
     src/loom/data_lifecycle.py src/loom/data_lifecycle_registry.py src/loom/data_lifecycle_capacity.py \
     src/loom/data_lifecycle_capacity_sql.py src/loom/data_lifecycle_gc.py src/loom/staging_mutation_epoch.py \

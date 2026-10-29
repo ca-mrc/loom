@@ -38,6 +38,7 @@ class ControlPlaneSettings(BaseSettings):
     family_state_download_timeout_sec: float = 120.0
     llm_gateway_url: HttpUrl = cast(HttpUrl, "http://loom-llm-gateway:9100")
     log_level: LogLevel = "info"
+    mainland_proxy_profile_dir: Path | None = Field(default=None, validation_alias="LOOM_MAINLAND_PROXY_PROFILE_DIR")
     metrics_port: int = 9090
     minio_access_key: SecretStr
     minio_endpoint: str = "http://loom-minio:9000"

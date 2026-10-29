@@ -344,6 +344,7 @@ class WorkloadRequirementsV1(_StrictContract):
     network_access: NetworkAccess
     effective_network_policy: NetworkPolicy | None = None
     task_egress: TaskHttpEgress | None = None
+    mainland_proxy: bool = Field(default=False, exclude_if=lambda value: not value)
     image_materialization: ImageMaterialization
     image_ref: str | None
     sidecar_count: int = Field(ge=0)
@@ -656,6 +657,7 @@ def workload_requirements_from_task(
         network_access=network_access,
         effective_network_policy=effective_policy,
         task_egress=hosted_http_egress(effective_policy),
+        mainland_proxy=trial.mainland_proxy if trial is not None else False,
         image_materialization=materialization,
         image_ref=image_ref,
         sidecar_count=len(env.sidecars),
