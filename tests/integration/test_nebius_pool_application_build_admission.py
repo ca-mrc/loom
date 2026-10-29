@@ -25,7 +25,15 @@ from tests.integration.test_nebius_environment_management import (
 )
 from tests.integration.test_nebius_pool_build_admission import mixed_setup, prepare_build
 from tests.integration.test_nebius_pool_control import action, operate
-from tests.integration.test_nebius_pool_registry import machine, prepare, publish_placement
+from tests.integration.test_nebius_pool_registry import (
+    BUILD_POOL_CPU_WITH_ONE_BUILD_FREE,
+    BUILD_POOL_NODE_CPU,
+    BUILD_POOL_NODE_MEMORY,
+    BUILD_POOL_NODE_STORAGE,
+    machine,
+    prepare,
+    publish_placement,
+)
 from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 
@@ -105,12 +113,14 @@ async def test_concurrent_owner_and_task_builds_share_cap_without_reserving_idle
 @pytest.mark.parametrize("higher_class", ["production", "staging", "development"])
 async def test_personal_build_yields_to_higher_classes_then_uses_free_capacity(environment_registry, build_inputs, higher_class):
     factory, principals, apps, profiles, observer, executions, _, _ = await setup_application_pool(
-        environment_registry, build_inputs, occupied_cpu=3000, environment_classes=("development", higher_class))
+        environment_registry, build_inputs, occupied_cpu=BUILD_POOL_NODE_CPU,
+        environment_classes=("development", higher_class))
     assert (await prepare_application(factory, principals[0], apps[0], profiles)).phase == "waiting"
     assert (await prepare(factory, principals[1], executions[1], profiles)).phase == "waiting"
     await publish_placement(factory, observer, CapacityPlacement.model_validate(placement_fixture(
-        target_id="pool-test", node_cpu=3000, node_memory=8192, node_storage=32768,
-        requested_cpu=1500, quota_nodes=1)))
+        target_id="pool-test", node_cpu=BUILD_POOL_NODE_CPU, node_memory=BUILD_POOL_NODE_MEMORY,
+        node_storage=BUILD_POOL_NODE_STORAGE, requested_cpu=BUILD_POOL_CPU_WITH_ONE_BUILD_FREE,
+        quota_nodes=1)))
     assert (await prepare_application(factory, principals[0], apps[0], profiles)).phase == "waiting"
     granted = await prepare(factory, principals[1], executions[1], profiles)
     assert granted.phase == "reserved"

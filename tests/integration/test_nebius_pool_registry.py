@@ -59,13 +59,24 @@ async def machine(sessions, pool_id, participant_id=None, *, role=None, workload
         return await resolve_pool_machine(session, "Bearer " + raw)
 
 
+# Image builds reserve 4 vCPU and 32 GiB. This node fits two of them. Execution
+# fixtures keep the 3 vCPU node, which fits two 1.5 vCPU trials and nothing else.
+BUILD_POOL_NODE_CPU = 12_000
+BUILD_POOL_NODE_MEMORY = 8_192
+BUILD_POOL_NODE_STORAGE = 65_536
+# Occupied CPU that leaves one build's 4 vCPU free, not a build plus a trial.
+BUILD_POOL_CPU_WITH_ONE_BUILD_FREE = 8_000
+
+
 async def setup(sessions, *, occupied_cpu=0, max_nodes=1, group_id="pool-test",
                 parent_id=None, quota_nodes=None, environment_classes=("development", "development"),
                 pinned=True, memory_quota=True, data_environment_id=None, cluster_id="cluster-1", namespace_uids=None,
                 installation_id=None,
-                workload_kinds=("trial", "verifier", "task_image_build")):
+                workload_kinds=("trial", "verifier", "task_image_build"),
+                node_cpu=3000, node_memory=8192, node_storage=32768):
     placement = CapacityPlacement.model_validate(placement_fixture(
-        target_id=group_id, parent_id=parent_id, node_cpu=3000, node_memory=8192, node_storage=32768,
+        target_id=group_id, parent_id=parent_id, node_cpu=node_cpu, node_memory=node_memory,
+        node_storage=node_storage,
         requested_cpu=occupied_cpu, quota_nodes=quota_nodes or max_nodes, used_nodes=1,
     ))
     placement = placement.model_copy(update={"node_group": placement.node_group.model_copy(update={"max_nodes": max_nodes})})
