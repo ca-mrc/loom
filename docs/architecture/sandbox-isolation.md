@@ -85,9 +85,13 @@ execution compiler. The complete effective policy is frozen into workload
 requirements, command identity, the immutable runtime plan, and the trusted
 phase environment. Private sandbox controllers consume that frozen value; they
 do not re-read the task default. Shared verification therefore uses the same
-policy as the agent, and a deferred verifier plan inherits its parent policy
-without resolving it again. Batch admission checks every selected task and
-reports all incompatible task IDs before creating trials.
+policy as the agent. A deferred verifier using the same task environment
+inherits that policy; an independent verifier resolves its own environment's
+baseline and the trial override. Its plan requires the egress audit log only
+when its own task-egress proxy runs, since deferred verification has no harness
+setup phase. Active proxies retain their required audit output. Batch admission
+checks every selected task and reports all incompatible task IDs before creating
+trials.
 
 CLI example:
 
