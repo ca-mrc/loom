@@ -187,10 +187,14 @@ def demand_id(row: NebiusPoolRequest) -> str:
     return f"reservation:{row.request_id}:1"
 
 
-def require_fit(capacities: dict[UUID, PoolCapacity], *, candidate: NebiusPoolRequest,
-                active: list[NebiusPoolRequest], protected_waits: list[NebiusPoolRequest],
-                recent_grants: dict[UUID, int]) -> None:
-    """Protect fitting earlier waits without acquiring their resources or writes."""
+def require_policy_fit(capacities: dict[UUID, PoolCapacity], *, candidate: NebiusPoolRequest,
+                       active: list[NebiusPoolRequest], protected_waits: list[NebiusPoolRequest],
+                       recent_grants: dict[UUID, int]) -> None:
+    """Cheap necessary count/health bounds, monotone as protected demand grows.
+
+    This does not infer physical fit from totals or replace placement/quota
+    checks. In particular best-fit packing is not assumed to be monotone.
+    """
     current = capacities[candidate.pool_id]
     build_kinds = {"task_image_build", "application_image_build"}
     if candidate.workload_kind in build_kinds:
@@ -198,16 +202,6 @@ def require_fit(capacities: dict[UUID, PoolCapacity], *, candidate: NebiusPoolRe
                      for row in (*active, *protected_waits))
         if current.policy.build_concurrency_limit is not None and builds + 1 > current.policy.build_concurrency_limit:
             raise PlacementUnavailableError("pool_build_concurrency_exceeded")
-    rows = [*active, *protected_waits, candidate]
-    projected = {key: plan_placement(value.placement,
-        ((demand_id(row), resources(row)) for row in rows if row.pool_id == key), sample=value.sample)
-        for key, value in capacities.items()}
-    plan = projected[candidate.pool_id]
-    if current.placement.node_group.node_count + plan.additional_nodes > current.placement.node_group.max_nodes:
-        raise PlacementUnavailableError("pool_max_nodes_exceeded")
-    if plan.cold_nodes and (current.provider.provider_capacity_state != "available"
-                           or current.provider.autoscaler_state not in {"ready", "scaling"}):
-        raise PlacementUnavailableError("pool_scale_capacity_unavailable")
     virtual = sum(row.pool_id == candidate.pool_id for row in protected_waits) + 1
     if recent_grants.get(candidate.pool_id, 0) + virtual > current.policy.max_create_per_minute:
         raise PlacementUnavailableError("pool_create_rate_exceeded")
@@ -222,6 +216,25 @@ def require_fit(capacities: dict[UUID, PoolCapacity], *, candidate: NebiusPoolRe
     ):
         if amount > 0 and amount >= limit:
             raise PlacementUnavailableError(reason)
+
+
+def require_fit(capacities: dict[UUID, PoolCapacity], *, candidate: NebiusPoolRequest,
+                active: list[NebiusPoolRequest], protected_waits: list[NebiusPoolRequest],
+                recent_grants: dict[UUID, int]) -> None:
+    """Protect fitting earlier waits without acquiring their resources or writes."""
+    require_policy_fit(capacities, candidate=candidate, active=active,
+                       protected_waits=protected_waits, recent_grants=recent_grants)
+    current = capacities[candidate.pool_id]
+    rows = [*active, *protected_waits, candidate]
+    projected = {key: plan_placement(value.placement,
+        ((demand_id(row), resources(row)) for row in rows if row.pool_id == key), sample=value.sample)
+        for key, value in capacities.items()}
+    plan = projected[candidate.pool_id]
+    if current.placement.node_group.node_count + plan.additional_nodes > current.placement.node_group.max_nodes:
+        raise PlacementUnavailableError("pool_max_nodes_exceeded")
+    if plan.cold_nodes and (current.provider.provider_capacity_state != "available"
+                           or current.provider.autoscaler_state not in {"ready", "scaling"}):
+        raise PlacementUnavailableError("pool_scale_capacity_unavailable")
     require_provider_quota_headroom(current.placement, additional_nodes=plan.additional_nodes,
         peers=((value.placement, projected[key].additional_nodes)
                for key, value in capacities.items() if key != candidate.pool_id))

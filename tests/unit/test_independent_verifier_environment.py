@@ -4,6 +4,14 @@ from uuid import uuid4
 
 import pytest
 
+from loom.models.networking import (
+    GatewayOnly,
+    NoNetwork,
+    Public,
+    PublicWeb,
+    WebAllowlist,
+    WebDestination,
+)
 from loom.models.task import EnvironmentConfig
 from loom.task_image_build_plan import derive_task_image_build_components
 from loom.task_image_materialization import (
@@ -76,15 +84,30 @@ def test_independent_verifier_rejects_missing_image_metadata():
         resolve_prepared_task(task, grant)
 
 
-def _independent_plan(workdir='/grading'):
+def _independent_plan(workdir='/grading', *, agent_policy=None, verifier_policy=None, harness='terminus-2'):
     from loom.hosted_harness import hosted_harness
     from loom.service_execution_materialization import service_execution_input_binding
     from loom.task_sandbox_planner import TaskSandboxPlanRequest, compile_task_sandbox_plan
     task, trial, profile = independent_inputs()
+    if harness == 'oracle':
+        from loom.models.trial import TrialConfig
+        trial = TrialConfig(agent_name='oracle', agent_model=None)
+    if agent_policy is not None:
+        task = task.model_copy(update={'environment': task.environment.model_copy(update={
+            'baseline_network_policy': agent_policy,
+        })})
+    if verifier_policy is not None:
+        task = task.model_copy(update={'verifier': task.verifier.model_copy(update={
+            'environment': task.verifier.environment.model_copy(update={
+                'baseline_network_policy': verifier_policy,
+            }),
+        })})
+    if agent_policy is not None or verifier_policy is not None:
+        profile = profile.model_copy(update={'supports_task_web_egress': True})
     grant = verifier_grant(task, profile, workdir)
     prepared = resolve_prepared_task(task, grant)
     plan = compile_task_sandbox_plan(TaskSandboxPlanRequest(
-        spec=hosted_harness('terminus-2'), task=prepared, trial=trial, profile=profile,
+        spec=hosted_harness(harness), task=prepared, trial=trial, profile=profile,
         binding=service_execution_input_binding(_provenance()), task_revision_sha256=_REVISION,
         command_identity='sha256:'+'4'*64, output_paths=('answer.txt',),
         effective_network_policy=prepared.environment.baseline_network_policy,
@@ -92,6 +115,33 @@ def _independent_plan(workdir='/grading'):
         has_resolved_task_environment=True,
     ))
     return task, prepared, trial, plan
+
+
+@pytest.mark.parametrize('harness', ['terminus-2', 'oracle'])
+@pytest.mark.parametrize('agent_policy', [NoNetwork(), PublicWeb()], ids=lambda p: p.kind)
+@pytest.mark.parametrize('verifier_policy', [
+    NoNetwork(), GatewayOnly(), Public(), PublicWeb(),
+    WebAllowlist(destinations=(WebDestination(host='example.com', protocol='https'),)),
+], ids=lambda p: p.kind)
+def test_independent_verifier_requires_egress_diagnostic_only_when_its_proxy_runs(
+    agent_policy, verifier_policy, harness,
+):
+    from loom.execution_runtime_contract import TASK_EGRESS_OUTPUT, RuntimeHandoffInputV1
+    from loom.task_sandbox_planner import compile_deferred_verifier_plan
+    task, _, _, plan = _independent_plan(
+        agent_policy=agent_policy, verifier_policy=verifier_policy, harness=harness,
+    )
+    original = plan.model_dump_json()
+    deferred = compile_deferred_verifier_plan(
+        plan, task, verifier_timeout_seconds=150,
+        handoff_input=RuntimeHandoffInputV1(
+            manifest_sha256='sha256:'+'a'*64, file_count=1, total_bytes=1,
+        ),
+    )
+    assert deferred.effective_network_policy == verifier_policy
+    proxy_runs = deferred.task_egress is not None or deferred.setup_egress is not None
+    assert (TASK_EGRESS_OUTPUT in deferred.output_declarations) == proxy_runs
+    assert plan.model_dump_json() == original
 
 
 @pytest.mark.parametrize('workdir', ['/grading', '/', '/tests', '/opt/verifier'])

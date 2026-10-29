@@ -65,6 +65,7 @@ from loom.models.types import AgentVersion
 from loom.mutable_paths import validate_task_workdir
 from loom.pipeline.keys import canonical_digest
 from loom.prebuilt_task_images import resolve_prebuilt_task_image, validate_prebuilt_image_pins
+from loom.runtime_environment import validate_task_environment
 from loom.sandbox_identity import (
     concrete_sandbox_user,
     guest_shared_identity_compatible,
@@ -631,7 +632,7 @@ def automatic_service_execution_rejections(
         reasons.extend(terminus_task_metadata_rejections(env.mcp_servers))
     if controller:
         try:
-            ProcessPhaseV1._environment_is_nonsecret(env.environment)
+            validate_task_environment(env.environment)
         except ValueError:
             reasons.append("task_environment_invalid")
     if any(sidecar.fixture for sidecar in env.sidecars):
