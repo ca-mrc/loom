@@ -4,7 +4,14 @@ from uuid import uuid4
 
 import pytest
 
-from loom.models.networking import GatewayOnly, NoNetwork, Public, PublicWeb, WebAllowlist, WebDestination
+from loom.models.networking import (
+    GatewayOnly,
+    NoNetwork,
+    Public,
+    PublicWeb,
+    WebAllowlist,
+    WebDestination,
+)
 from loom.models.task import EnvironmentConfig
 from loom.task_image_build_plan import derive_task_image_build_components
 from loom.task_image_materialization import (
