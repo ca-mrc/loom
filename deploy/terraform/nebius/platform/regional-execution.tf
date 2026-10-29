@@ -20,6 +20,8 @@ variable "regional_execution_targets" {
     execution_max_nodes = optional(number, 100)
     node_platform       = string
     system_preset       = optional(string, "4vcpu-16gb")
+    execution_preset    = optional(string, "16vcpu-64gb")
+    execution_disk_gib  = optional(number, 80)
   }))
   default = {}
 }

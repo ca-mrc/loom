@@ -37,6 +37,13 @@ run "execution_only" {
 }
 # Observed native Cilium Operator tolerations in eu-west1, 2026-09-10.
 # It cannot register CRDs if every node has Loom's custom NoSchedule taint.
+run "default_execution_disk" {
+  command = plan
+  assert {
+    condition     = alltrue([for node in nebius_mk8s_v1_node_group.regional : node.template.boot_disk.type == "NETWORK_SSD" && node.template.boot_disk.size_gibibytes == 80])
+    error_message = "Omitted sizing must retain both existing 80 GiB NETWORK_SSD templates."
+  }
+}
 run "native_addon_scheduling" {
   command = plan
   assert {
@@ -60,6 +67,75 @@ run "native_addon_scheduling" {
     )
     error_message = "Unblock addons on the existing single system node without increasing its shape or weakening execution-node taints and selector labels."
   }
+}
+run "explicit_execution_shape" {
+  command = plan
+  variables {
+    target = merge(var.target, {
+      execution_preset    = "32vcpu-128gb"
+      execution_disk_gib  = 300
+      execution_max_nodes = 6
+    })
+  }
+  assert {
+    condition = (
+      nebius_mk8s_v1_node_group.regional["execution"].template.resources.preset == "32vcpu-128gb" &&
+      nebius_mk8s_v1_node_group.regional["execution"].template.boot_disk.size_gibibytes == 300 &&
+      nebius_mk8s_v1_node_group.regional["execution"].template.boot_disk.type == "NETWORK_SSD" &&
+      nebius_mk8s_v1_node_group.regional["execution"].fixed_node_count == null &&
+      nebius_mk8s_v1_node_group.regional["execution"].autoscaling.min_node_count == 0 &&
+      nebius_mk8s_v1_node_group.regional["execution"].autoscaling.max_node_count == 6
+    )
+    error_message = "An explicit execution shape must reach its existing node template with the chosen min-zero ceiling."
+  }
+  assert {
+    condition = (
+      nebius_mk8s_v1_node_group.regional["system"].template.resources.preset == "4vcpu-16gb" &&
+      nebius_mk8s_v1_node_group.regional["system"].template.boot_disk.size_gibibytes == 80 &&
+      nebius_mk8s_v1_node_group.regional["system"].fixed_node_count == 1 &&
+      nebius_mk8s_v1_node_group.regional["system"].autoscaling == null
+    )
+    error_message = "Execution sizing must preserve the fixed single system node and its default 80 GiB disk."
+  }
+}
+run "suspended_explicit_execution_shape" {
+  command = plan
+  variables {
+    target = merge(var.target, {
+      execution_preset    = "32vcpu-128gb"
+      execution_disk_gib  = 300
+      execution_max_nodes = 6
+      suspended           = true
+    })
+  }
+  assert {
+    condition = (
+      alltrue([for node in nebius_mk8s_v1_node_group.regional : node.fixed_node_count == 0 && node.autoscaling == null]) &&
+      nebius_mk8s_v1_node_group.regional["execution"].template.resources.preset == "32vcpu-128gb" &&
+      nebius_mk8s_v1_node_group.regional["execution"].template.boot_disk.size_gibibytes == 300
+    )
+    error_message = "Suspension must preserve the requested template while stopping both groups and disabling autoscaling."
+  }
+}
+run "reject_invalid_execution_preset" {
+  command = plan
+  variables { target = merge(var.target, { execution_preset = "gpu-h200" }) }
+  expect_failures = [var.target]
+}
+run "reject_zero_cpu_execution_preset" {
+  command = plan
+  variables { target = merge(var.target, { execution_preset = "0vcpu-128gb" }) }
+  expect_failures = [var.target]
+}
+run "reject_small_execution_disk" {
+  command = plan
+  variables { target = merge(var.target, { execution_disk_gib = 79 }) }
+  expect_failures = [var.target]
+}
+run "reject_fractional_execution_disk" {
+  command = plan
+  variables { target = merge(var.target, { execution_disk_gib = 300.5 }) }
+  expect_failures = [var.target]
 }
 run "lower_limit" {
   command = plan
@@ -183,4 +259,20 @@ run "reject_mixed_identity_modes" {
     })
   }
   expect_failures = [var.target]
+}
+
+run "execution_zero_node_template_matches_native_selectors" {
+  command = plan
+  assert {
+    condition = (
+      nebius_mk8s_v1_node_group.regional["execution"].template.metadata.labels["loom.nebius/node-os"] == "linux" &&
+      nebius_mk8s_v1_node_group.regional["execution"].template.metadata.labels["loom.nebius/node-arch"] == "amd64" &&
+      nebius_mk8s_v1_node_group.regional["execution"].template.metadata.labels["loom.nebius/node-role"] == "integration-execution" &&
+      nebius_mk8s_v1_node_group.regional["execution"].template.metadata.labels["loom.nebius/platform"] == "integration" &&
+      nebius_mk8s_v1_node_group.regional["execution"].template.metadata.labels["loom.nebius/cluster-scope-id"] == var.target.cluster_scope_id &&
+      !contains(keys(nebius_mk8s_v1_node_group.regional["system"].template.metadata.labels), "loom.nebius/node-os") &&
+      !contains(keys(nebius_mk8s_v1_node_group.regional["system"].template.metadata.labels), "loom.nebius/node-arch")
+    )
+    error_message = "Min-zero execution templates must advertise provider-supported Linux/amd64 selectors while preserving isolation labels and the system template."
+  }
 }

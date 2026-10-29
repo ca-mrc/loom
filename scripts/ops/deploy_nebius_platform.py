@@ -330,7 +330,7 @@ class Kubectl:
         if local_executable is not None and (not local_executable.is_absolute()
                 or local_executable != local_executable.resolve() or not local_executable.is_file()
                 or not os.access(local_executable, os.X_OK)
-                or not kubeconfig.is_absolute() or kubeconfig != kubeconfig.resolve() or context is not None):
+                or not kubeconfig.is_absolute() or kubeconfig != kubeconfig.resolve()):
             raise DeploymentError('protected local Kubernetes connection differs')
         self.kubeconfig = kubeconfig
         self.context = context
@@ -525,6 +525,99 @@ def install_task_identity_policy(
         if time.monotonic() >= deadline:
             raise DeploymentError("task identity admission policy did not reject the negative probe")
         time.sleep(0.2)
+
+
+def install_regional_task_identity_policy(
+    kube: Kubectl, config: dict[str, Any], regional_render_dir: Path,
+    target_id: str, snapshot_root: Path,
+) -> None:
+    """Qualify a reviewed remote policy before applying its namespace mode.
+
+    The caller owns the existing rollout guard, remote-cluster binding and idle
+    target. This reuses the ordinary type-check and positive/negative dry-run
+    probes; it does not activate routing or apply the regional workload file.
+    """
+    validate_environment(config)
+    targets = [row for row in config.get("regional_execution_targets", [])
+               if row["target_id"] == target_id]
+    if len(targets) != 1 or targets[0].get("task_identity_policy") is None:
+        raise DeploymentError("regional identity policy requires one explicitly configured target")
+    target = targets[0]
+    documents = list(yaml.safe_load_all((regional_render_dir / (target_id + ".yaml")).read_text()))
+    policies = [doc for doc in documents if doc["kind"] in {
+        "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding",
+    }]
+    expected = identity_policy_documents(target["execution_namespace"], target_id)
+    if policies != expected:
+        raise DeploymentError("regional identity policy differs from the target-bound contract")
+    namespaces = [doc for doc in documents if doc["kind"] == "Namespace"]
+    if (len(namespaces) != 1 or namespaces[0]["metadata"]["name"] != target["execution_namespace"]
+            or namespaces[0]["metadata"].get("labels", {}).get("pod-security.kubernetes.io/enforce") != "baseline"):
+        raise DeploymentError("regional execution namespace differs from its explicit identity policy")
+    snapshot_root.mkdir(parents=True, exist_ok=True)
+    (snapshot_root / "00-task-identity-policy.yaml").write_text(yaml.safe_dump_all(policies))
+    install_task_identity_policy(kube, target, snapshot_root)
+
+
+def preflight_regional_rollout(
+    kube: Kubectl, config: dict[str, Any], render_dir: Path | None,
+) -> dict[str, tuple[Kubectl, list[dict[str, Any]]]]:
+    """Select only configured remote APIs using the existing operator identity."""
+    targets = config.get("regional_execution_targets", [])
+    if not targets:
+        return {}
+    if render_dir is None:
+        raise DeploymentError("regional rollout requires its reviewed regional render directory")
+    view = json.loads(kube.run("config", "view", "-o", "json"))
+    clusters = {row["name"]: row["cluster"] for row in view.get("clusters", [])}
+    result = {}
+    resources = {
+        "Namespace": "namespaces", "ServiceAccount": "serviceaccounts", "Role": "roles.rbac.authorization.k8s.io",
+        "RoleBinding": "rolebindings.rbac.authorization.k8s.io", "ClusterRole": "clusterroles.rbac.authorization.k8s.io",
+        "ClusterRoleBinding": "clusterrolebindings.rbac.authorization.k8s.io", "ResourceQuota": "resourcequotas",
+        "NetworkPolicy": "networkpolicies.networking.k8s.io",
+        "ValidatingAdmissionPolicy": "validatingadmissionpolicies.admissionregistration.k8s.io",
+        "ValidatingAdmissionPolicyBinding": "validatingadmissionpolicybindings.admissionregistration.k8s.io",
+    }
+    cluster_kinds = {"Namespace", "ClusterRole", "ClusterRoleBinding", "ValidatingAdmissionPolicy",
+                     "ValidatingAdmissionPolicyBinding"}
+    for target in targets:
+        contexts = [row["name"] for row in view.get("contexts", [])
+                    if clusters.get(row["context"].get("cluster"), {}).get("server") == target["kubernetes_api_server"]]
+        if len(contexts) != 1:
+            raise DeploymentError("configured regional API requires one matching operator kubeconfig context")
+        remote = Kubectl(kube.kubeconfig, context=contexts[0], local_executable=kube.local_executable)
+        verify_cluster_identity(remote, target, target["cluster_id"])
+        documents = list(yaml.safe_load_all((render_dir / (target["target_id"] + ".yaml")).read_text()))
+        expected_policies = (identity_policy_documents(target["execution_namespace"], target["target_id"])
+                             if target.get("task_identity_policy") is not None else [])
+        policies = [row for row in documents if row["kind"] in {"ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"}]
+        if policies != expected_policies:
+            raise DeploymentError("regional identity policy differs from the target-bound contract")
+        for row in documents:
+            kind, metadata = row["kind"], row["metadata"]
+            if (kind not in resources
+                    or (kind == "Namespace" and metadata["name"] != target["execution_namespace"])
+                    or (kind not in cluster_kinds and metadata.get("namespace") != target["execution_namespace"])):
+                raise DeploymentError("regional render escapes its configured execution scope")
+            if kind in {"ClusterRole", "ClusterRoleBinding"} and metadata["name"] not in {
+                target["execution_namespace"] + "-collector", target["execution_namespace"] + "-actuator-usage",
+                target["target_id"] + "-gateway-tokenreview",
+            }:
+                raise DeploymentError("regional cluster role differs from its configured target")
+        for kind in sorted({row["kind"] for row in documents}):
+            for verb in ("get", "create", "patch"):
+                command = ["auth", "can-i", verb, resources[kind]]
+                if kind not in cluster_kinds:
+                    command.extend(["-n", target["execution_namespace"]])
+                try:
+                    allowed = remote.run(*command) == "yes"
+                except DeploymentError:
+                    allowed = False
+                if not allowed:
+                    raise DeploymentError("regional operator lacks required namespace or admission-policy permission")
+        result[target["target_id"]] = remote, documents
+    return result
 
 
 def job_complete(job: dict[str, Any]) -> bool:
@@ -1156,6 +1249,13 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
                         participant_finalize()
                     evidence['status'] = 'complete'
                     return evidence
+        regional_inputs = preflight_regional_rollout(kube, config, getattr(args, "regional_render_dir", None))
+        regional_snapshot = snapshot_root / "regional"
+        if regional_inputs:
+            regional_snapshot.mkdir()
+            for target_id, (_remote, documents) in regional_inputs.items():
+                (regional_snapshot / (target_id + ".yaml")).write_text(yaml.safe_dump_all(documents))
+            evidence["regional_targets"] = sorted(regional_inputs)
         evidence["preflight"] = state
         retire_target = getattr(args, "retire_target", None)
         current = kube.get("configmap", "loom-platform-config", config["namespace"])
@@ -1280,6 +1380,16 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
                 return evidence
             if readiness != 'ready':
                 raise DeploymentError('shared pool refresh outcome unconfirmed')
+        for target in config.get("regional_execution_targets", []):
+            target_id = target["target_id"]
+            remote, _documents = regional_inputs[target_id]
+            before_write()
+            phase("install-and-verify-regional-policy-" + target_id)
+            if target.get("task_identity_policy") is not None:
+                install_regional_task_identity_policy(remote, config, regional_snapshot, target_id,
+                                                     snapshot_root / target_id)
+            phase("apply-regional-execution-" + target_id)
+            remote.run("apply", "-f", str(regional_snapshot / (target_id + ".yaml")))
         if config.get("task_identity_policy") is not None:
             before_write()
             phase("install-and-verify-task-identity-policy")
@@ -1406,6 +1516,8 @@ def main() -> int:
     for name in ("render-dir", "kubeconfig", "evidence-dir"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--expected-cluster-id", required=True)
+    parser.add_argument("--regional-render-dir", type=Path,
+                        help="Reviewed remote manifests for the configured regional targets")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--retry-failed-jobs", action="store_true")
     parser.add_argument("--retire-target", help="exact installed primary ID replaced by the reviewed render")
