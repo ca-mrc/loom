@@ -14,6 +14,7 @@ from tests.integration.test_nebius_pool_build_outbox import counts, local_setup,
 from tests.integration.test_nebius_pool_build_runtime import Reader
 from tests.integration.test_nebius_pool_observation_registry import sessions as sessions
 from tests.integration.test_nebius_pool_participant_http import client, setup
+from tests.integration.test_nebius_pool_registry import BUILD_POOL_NODE_CPU
 
 
 def selector(journal):
@@ -84,7 +85,7 @@ async def test_closed_intake_cannot_persist_selection_or_consume_attempt(session
     assert not await journal.pending() and await counts(sessions, request.key.local_work_id) == (0, 0, 0)
 
 
-@pytest.mark.parametrize("occupied_cpu", [0, 3000])
+@pytest.mark.parametrize("occupied_cpu", [0, BUILD_POOL_NODE_CPU])
 async def test_real_queue_drives_management_activation_without_direct_job_writer(sessions, tmp_path, occupied_cpu):
     from loom_execution_actuator.pool_build_driver import PoolBuildDriver
     from loom_execution_actuator.pool_build_runtime import PoolNativeBuildController
