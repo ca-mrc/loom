@@ -294,6 +294,7 @@ TERMINUS_2 = HostedHarnessSpec(
     native_outputs=(
         NativeOutput("agent/harbor/trajectory.json", "artifacts/harbor/trajectory.json", "agent_native", True),
         NativeOutput("agent/harbor/recording.cast", "artifacts/harbor/recording.cast", "agent_native", False),
+        NativeOutput("agent/harbor/subagent-trajectories.tar", "artifacts/harbor/subagent-trajectories.tar", "agent_native", False),
     ),
     # The only harness with this historical projection; keep it that way.
     task_declared_separate_verifier=True,

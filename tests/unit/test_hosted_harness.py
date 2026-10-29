@@ -66,6 +66,7 @@ def test_harness_only_features_are_declared_not_inferred() -> None:
     assert ORACLE.stages_solution and ORACLE.model == "forbidden" and not ORACLE.native_outputs
     assert [item.relative_path for item in TERMINUS_2.native_outputs] == [
         "artifacts/harbor/trajectory.json", "artifacts/harbor/recording.cast",
+        "artifacts/harbor/subagent-trajectories.tar",
     ]
 
 

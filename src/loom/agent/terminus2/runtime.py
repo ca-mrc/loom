@@ -29,6 +29,7 @@ from loom.agent.terminus2.model_switch import (
     redact_agent_llm_kwargs,
     seed_fingerprint,
 )
+from loom.agent.terminus2.native_artifacts import HARBOR_ARTIFACT_NAMES, prepare_subagent_archive
 from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA, LOOM_BRIDGE_REVISION
 from loom.agent.terminus2.task_metadata import harbor_mcp_documents
 from loom.attempt_deadline import AttemptDeadline, AttemptDeadlineExceededError
@@ -113,7 +114,7 @@ def _harbor_model_name(model: ModelSpec) -> str:
     return f"openai/{model.name}"
 
 
-_HARBOR_ARTIFACT_NAMES = ("trajectory.json", "recording.cast")
+_HARBOR_ARTIFACT_NAMES = HARBOR_ARTIFACT_NAMES
 _HARBOR_TMUX_SESSION = "terminus-2"
 _TMUX_SESSION_LOST_MID_DISPATCH = "Terminus2 tmux session/server lost mid-dispatch."
 _TMUX_SOFT_RECOVER_NOTICE = (
@@ -432,6 +433,24 @@ def _scrub_harbor_trajectory_llm_kwargs(path: Path) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def _sanitize_harbor_artifact(
+    path: Path, direct_provider: DirectProviderConnection | None,
+) -> None:
+    if path.suffix == ".json":
+        _scrub_harbor_trajectory_llm_kwargs(path)
+    body = path.read_bytes()
+    if direct_provider is not None:
+        text = body.decode("utf-8")
+        cleaned = direct_provider.redact_text(text)
+        if cleaned != text:
+            path.write_text(cleaned, encoding="utf-8")
+            body = cleaned.encode()
+    if b"loom_step_" in body:
+        raise AgentError(
+            f"refusing to publish Harbor artifact {path.name}: step credential material is present",
+        )
+
+
 def _assert_harbor_artifacts_have_no_step_secrets(
     logs_root: Path, direct_provider: DirectProviderConnection | None = None,
 ) -> None:
@@ -442,24 +461,14 @@ def _assert_harbor_artifacts_have_no_step_secrets(
     sources that contain that string, which previously false-failed publish
     after long exploratory runs (e.g. greenlinestanport).
     """
-    trajectory_path = logs_root / "trajectory.json"
-    if trajectory_path.is_file():
-        _scrub_harbor_trajectory_llm_kwargs(trajectory_path)
-    for name in _HARBOR_ARTIFACT_NAMES:
+    for name in ("trajectory.json", "recording.cast"):
         path = logs_root / name
-        if not path.is_file():
-            continue
-        body = path.read_bytes()
-        if direct_provider is not None:
-            text = body.decode("utf-8")
-            cleaned = direct_provider.redact_text(text)
-            if cleaned != text:
-                path.write_text(cleaned, encoding="utf-8")
-                body = cleaned.encode()
-        if b"loom_step_" in body:
-            raise AgentError(
-                f"refusing to publish Harbor artifact {name}: step credential material is present",
-            )
+        if path.is_file():
+            _sanitize_harbor_artifact(path, direct_provider)
+    prepare_subagent_archive(
+        logs_root,
+        sanitize_trajectory=lambda path: _sanitize_harbor_artifact(path, direct_provider),
+    )
 
 
 class _RouterEventSink:

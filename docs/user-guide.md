@@ -1372,6 +1372,14 @@ context-length recovery remains enabled. An empty conversation first receives
 the complete initial protocol prompt before it can be summarized. Eligible
 summaries and handoffs use Harbor's native implementation.
 
+When summarization runs, its native summary, questions, and answers trajectories
+are retained alongside `artifacts/harbor/trajectory.json`. Each referenced child
+JSON is listed in the trial artifacts and uses the normal authenticated download
+endpoint. The original files also travel in `subagent-trajectories.tar`; the
+downloaded trial bundle preserves their relative paths. Missing or invalid child
+files are reported in `subagent-trajectories-errors.json` instead of being
+silently replaced or changing the task's evaluation reward.
+
 `agent_timeout_sec` replaces the agent-phase timeout for each attempt. Queueing,
 image preparation, verification, and finalization are outside this allowance;
 process termination/cleanup can take additional time. It is not a wall-clock

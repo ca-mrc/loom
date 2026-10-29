@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -229,7 +230,7 @@ async def test_hosted_terminus_rejects_an_unseeded_beta_plan(tmp_path: Path) -> 
         )
 
 
-def _patch_harbor(monkeypatch: Any) -> None:
+def _patch_harbor(monkeypatch: Any, *, summarize: bool = False) -> None:
     class Harbor:
         def __init__(self, logs_dir: Path, **kwargs: Any) -> None:
             self.path = logs_dir
@@ -253,6 +254,25 @@ def _patch_harbor(monkeypatch: Any) -> None:
                 ],
             }))
             (self.path / "recording.cast").write_text('{"version":2}\n')
+            if summarize:
+                refs = []
+                for suffix in ("summary", "questions", "answers"):
+                    name = f"trajectory.summarization-1-{suffix}.json"
+                    session_id = f"fixture-{suffix}"
+                    refs.append({"trajectory_path": name, "session_id": session_id})
+                    (self.path / name).write_text(json.dumps({
+                        "schema_version": "ATIF-v1.8", "session_id": session_id,
+                        "agent": {"extra": {"llm_kwargs": {"api_key": "loom_workload_proxy"}}},
+                        "steps": [{"step_id": 1, "source": "user", "message": suffix}],
+                    }))
+                path = self.path / "trajectory.json"
+                native = json.loads(path.read_text())
+                native["steps"].append({
+                    "step_id": 3, "source": "system", "message": "Summary handoff",
+                    "extra": {"context_management": {"type": "compaction", "boundary": "replace"}},
+                    "observation": {"results": [{"subagent_trajectory_ref": refs}]},
+                })
+                path.write_text(json.dumps(native))
 
     class Paths:
         def mkdir(self) -> None:
@@ -263,13 +283,27 @@ def _patch_harbor(monkeypatch: Any) -> None:
     monkeypatch.setattr("loom.agent.terminus2.runtime.LoomHarborEnvironment.create", lambda **_: object())
 
 
+def _assert_retained_summary_children(workspace: Path) -> None:
+    native = json.loads((workspace / "harbor/trajectory.json").read_text())
+    refs = native["steps"][-1]["observation"]["results"][0]["subagent_trajectory_ref"]
+    with tarfile.open(workspace / "harbor/subagent-trajectories.tar", "r:") as archive:
+        assert set(archive.getnames()) == {ref["trajectory_path"] for ref in refs}
+        for ref in refs:
+            source = archive.extractfile(ref["trajectory_path"])
+            assert source is not None
+            child = json.load(source)
+            assert child["session_id"] == ref["session_id"]
+            assert child["steps"]
+            assert "api_key" not in child["agent"]["extra"].get("llm_kwargs", {})
+
+
 @pytest.mark.asyncio
 async def test_timeout_retains_native_files_without_post_deadline_ledger_or_upload(
     tmp_path, monkeypatch,
 ):
     from loom.agent.terminus2 import runtime as module
 
-    _patch_harbor(monkeypatch)
+    _patch_harbor(monkeypatch, summarize=True)
     harbor, context = module._import_terminus2()
     loop = asyncio.get_running_loop()
     clock = loop.time
@@ -302,6 +336,7 @@ async def test_timeout_retains_native_files_without_post_deadline_ledger_or_uplo
     assert (tmp_path / "harbor/trajectory.json").is_file()
     assert "api_key" not in (tmp_path / "harbor/trajectory.json").read_text()
     assert (tmp_path / "harbor/recording.cast").is_file()
+    _assert_retained_summary_children(tmp_path)
     assert driver.filesystem == {}
 
 
@@ -309,7 +344,7 @@ async def test_timeout_retains_native_files_without_post_deadline_ledger_or_uplo
 async def test_real_runtime_bridge_preserves_typed_turns_and_private_native_artifacts(
     tmp_path: Path, monkeypatch: Any,
 ) -> None:
-    _patch_harbor(monkeypatch)
+    _patch_harbor(monkeypatch, summarize=True)
     task, trial = _config()
     trial_id, team_id = uuid4(), uuid4()
     ledger = [{"id": str(uuid4()), "trial_id": str(trial_id), "step_id": "agent",
@@ -340,6 +375,7 @@ async def test_real_runtime_bridge_preserves_typed_turns_and_private_native_arti
     native = (tmp_path / "harbor/trajectory.json").read_text()
     assert '"api_key"' not in native
     assert (tmp_path / "harbor/recording.cast").is_file()
+    _assert_retained_summary_children(tmp_path)
     assert driver.filesystem == {}  # Native artifacts never enter the untrusted sidecar.
     assert not any("apt-get" in command or "apk add" in command for command in commands)
 
