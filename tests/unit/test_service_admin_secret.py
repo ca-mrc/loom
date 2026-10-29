@@ -65,6 +65,9 @@ class _ExplodingSession:
     async def execute(self, *_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("singleton admin auth should not query DB")
 
+    async def commit(self) -> None:
+        return None
+
 
 class _SessionContext:
     async def __aenter__(self) -> _ExplodingSession:

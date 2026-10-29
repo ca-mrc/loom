@@ -180,6 +180,12 @@ Changes apply to later calls only. Usage projections show unknown prices as
 known subtotals with unpriced-call counts. These are estimates, not invoices.
 Hard monetary budgets continue to require a usable estimate.
 
+Trial and Batch reads resolve `price_snapshots` from the calls of the Trials
+being read. A provider-price hash is the digest of its basis, so the read takes
+one call per unresolved hash and extracts only `_loom_price_basis`, never the
+full raw `provider_extras`. Batch detail resolves original and effective
+snapshots in one shared lookup (#2687).
+
 ### Legacy migration and rollback
 
 Migration 0159 adds nullable connection configuration and catalog storage without
