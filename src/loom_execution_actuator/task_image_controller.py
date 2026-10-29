@@ -17,6 +17,7 @@ from uuid import UUID
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.pool import QueuePool
 
 from loom.db.schema import (
     ServiceExecutionTarget,
@@ -71,6 +72,16 @@ RECONCILE_CONCURRENCY = 4
 # Admission first lets the pass's cleanup free capacity, but one slow
 # unrelated observation may delay new starts by at most this long.
 ADMISSION_GRACE_SECONDS = 2.0
+# The command, full-reconcile and watch loops share the actuator's engine.
+_OTHER_LOOP_CONNECTIONS = 3
+
+
+def _pool_capacity(sessions: async_sessionmaker[AsyncSession]) -> int | None:
+    bind = getattr(sessions, "kw", {}).get("bind")
+    pool = getattr(bind, "pool", None)
+    if not isinstance(pool, QueuePool) or pool._max_overflow < 0:
+        return None
+    return pool.size() + pool._max_overflow
 
 
 class NativeBuildApi(Protocol):
@@ -608,6 +619,12 @@ class NativeTaskImageController:
                  admission_grace_seconds: float = ADMISSION_GRACE_SECONDS) -> None:
         if admissions_per_pass < 1 or reconcile_concurrency < 1 or admission_grace_seconds < 0:
             raise ValueError("native build passes need at least one slot")
+        # Every reconcile, and the admitting claim, may hold its guard
+        # connection while it waits for a second one. If guards can take every
+        # free connection, the pass starves the pool instead of progressing.
+        capacity = _pool_capacity(sessions)
+        if capacity is not None and reconcile_concurrency + 2 > capacity - _OTHER_LOOP_CONNECTIONS:
+            raise ValueError(f"reconcile concurrency {reconcile_concurrency} could exhaust a {capacity}-connection DB pool")
         self.sessions, self.kubernetes, self.settings = sessions, kubernetes, settings
         self.admissions_per_pass, self.reconcile_concurrency = admissions_per_pass, reconcile_concurrency
         self.admission_grace_seconds = admission_grace_seconds

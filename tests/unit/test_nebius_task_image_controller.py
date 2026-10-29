@@ -601,6 +601,34 @@ class _Sessions:
         return False
 
 
+@pytest.mark.parametrize(("pool_size", "max_overflow", "highest"), [(5, 10, 10), (5, 4, 4), (2, 0, None)])
+def test_reconcile_concurrency_leaves_every_guard_a_second_connection(pool_size, max_overflow, highest):
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from loom_execution_actuator.renderer import ExecutionTargetRuntime
+    from loom_execution_actuator.task_image_controller import (
+        RECONCILE_CONCURRENCY,
+        NativeTaskImageController,
+    )
+
+    sessions = async_sessionmaker(create_async_engine("postgresql+psycopg://loom@localhost/loom",
+                                                      pool_size=pool_size, max_overflow=max_overflow))
+
+    def build(concurrency):
+        return NativeTaskImageController(sessions=sessions, kubernetes=object(),
+            target=ExecutionTargetRuntime(target_id="nebius-a", namespace="executions"),
+            settings=_builder_settings(), reconcile_concurrency=concurrency)
+
+    for concurrency in range(1, 13):
+        if highest is not None and concurrency <= highest:
+            assert build(concurrency).reconcile_concurrency == concurrency
+        else:
+            with pytest.raises(ValueError, match="could exhaust"):
+                build(concurrency)
+    if (pool_size, max_overflow) == (5, 10):  # SQLAlchemy's default, as the actuator uses it
+        assert RECONCILE_CONCURRENCY <= highest
+
+
 def _native_controller(monkeypatch, *, outstanding, claims, reconcile_error=None, max_concurrent=None, jobs=0,
                        admissions_per_pass=16):
     from loom_execution_actuator.task_image_controller import NativeTaskImageController
