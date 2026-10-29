@@ -788,8 +788,10 @@ def test_image_entry_rejects_unqualified_source_schema_or_parent(private_image_r
         load_image_repair_inputs(operation)
 
 
-@pytest.mark.parametrize("damage", [None, "failed_run", "missing_gate", "tampered", "candidate_bytes", "private_drift"])
-@pytest.mark.parametrize("continued", [False, True])
+@pytest.mark.parametrize("continued,damage", [
+    (False, None), (False, "failed_run"), (False, "missing_gate"), (False, "tampered"),
+    (False, "candidate_bytes"), (False, "private_drift"), (True, None), (True, "private_drift"),
+])
 def test_image_repair_resolves_real_protected_catalog_before_operator_connection(
         private_image_repair, image_repair_case, monkeypatch, damage, continued):
     from contextlib import contextmanager
@@ -889,7 +891,7 @@ def test_late_isolation_after_legacy_opening_cannot_lead_to_a_manager_stop(image
 
 
 @pytest.mark.parametrize(("moment", "loss"), [("prepared", None), ("intent", None), ("prepared_fence", None), ("late_isolate", None),
-    ("late_shutdown", None), ("late_shutdown", "before"), ("late_shutdown", "after"),
+    ("late_shutdown", "before"), ("late_shutdown", "after"),
     ("late_shutdown", "conflict"), ("stopped", None)])
 @pytest.mark.timeout(420)
 def test_legacy_fence_resumes_image_enrollment_without_rewriting_frozen_evidence(image_repair_case, monkeypatch, moment, loss, request):

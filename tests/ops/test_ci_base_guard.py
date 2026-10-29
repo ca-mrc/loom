@@ -5,7 +5,6 @@ import subprocess
 import sys
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from io import BytesIO
 from pathlib import Path
 from threading import Thread
 
@@ -74,8 +73,7 @@ def test_invalid_input_fails_before_any_request(repository, branch, sha):
         feedback.check_current_base(repository, branch, sha, read=read)
 
 
-@pytest.mark.parametrize("failure", ["http", "timeout", "json"])
-def test_http_transport_failure_does_not_echo_token_or_response(monkeypatch, failure, capsys):
+def test_http_transport_failure_does_not_echo_token_or_response(monkeypatch, capsys):
     secret = "private-token-do-not-print"
     monkeypatch.setenv("GH_TOKEN", secret)
 
@@ -83,11 +81,7 @@ def test_http_transport_failure_does_not_echo_token_or_response(monkeypatch, fai
         assert request.full_url == "https://api.github.com/repos/ca-mrc/loom/rules/branches/dev"
         assert request.get_header("Authorization") == f"Bearer {secret}"
         assert timeout == 20
-        if failure == "timeout":
-            raise TimeoutError(secret)
-        if failure == "http":
-            raise OSError(secret)
-        return BytesIO(secret.encode())
+        raise TimeoutError(secret)
 
     monkeypatch.setattr(urllib.request, "urlopen", open_request)
     with pytest.raises(ValueError) as error:

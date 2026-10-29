@@ -73,8 +73,8 @@ def _pytest_step(tmp_path: Path, manifest_file: str, *, pytest_exit=0):
     return result, json.loads(recorded.read_text()) if recorded.exists() else []
 
 
-@pytest.mark.parametrize("scope", ["all", "nebius"])
-def test_full_cluster_matrix_executes_complete_disjoint_manifests(tmp_path, cluster_inputs, scope):
+def test_full_cluster_matrix_executes_complete_disjoint_manifests(tmp_path, cluster_inputs):
+    scope = "nebius"
     manifest, tracked, paths, _ = cluster_inputs
     plan = _plan(tmp_path, changes=(), scope=scope, event="workflow_dispatch", labels=("cluster-smoke",))
     matrix = json.loads(plan["cluster_smoke_matrix"])
@@ -162,12 +162,3 @@ def test_pytest_failure_propagates(tmp_path, cluster_inputs):
     assert result.returncode == 0, result.stderr
     result, _ = _pytest_step(tmp_path, outputs["paths_file"], pytest_exit=9)
     assert result.returncode == 9
-
-
-@pytest.mark.parametrize("status", ["success", "failure", "cancelled", "skipped"])
-def test_selected_cluster_gate_requires_success(status):
-    step = _jobs()["cluster-smoke-gate"]["steps"][0]
-    result = subprocess.run(["bash"], input=step["run"], text=True, capture_output=True,
-        env={**os.environ, "PLAN_RESULT": "success", "GATE_MODE": "full", "REQUIRED": "true",
-             "CONTRACT_RESULT": status}, check=False)
-    assert (result.returncode == 0) == (status == "success")

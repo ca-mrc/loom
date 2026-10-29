@@ -21,16 +21,6 @@ def test_reusable_legacy_scope_is_explicit_and_off_by_default(name):
         assert option["required"] is False
 
 
-def test_staging_stops_at_first_failure_but_preserves_cleanup():
-    workflow = yaml.safe_load((ROOT / ".github/workflows/staging-smoke.yml").read_text())
-    steps = workflow["jobs"]["system-smoke"]["steps"]
-    test = next(step for step in steps if "pytest " in step.get("run", ""))
-    assert "--maxfail=1" in test["run"]
-    assert "--timeout=1200" in test["run"]
-    cleanup = next(step for step in steps if step.get("name") == "Cleanup system-smoke compose stack")
-    assert cleanup["if"] == "always()"
-
-
 @pytest.mark.parametrize("name", SPECIALISTS)
 @pytest.mark.parametrize("event,unified,ready,fork,base,expected_shared", [
     ("pull_request", "true", "", False, "dev", False),

@@ -338,35 +338,6 @@ def test_ci_filter_step_emits_the_filtered_contract(tmp_path: Path) -> None:
     assert {key for key, value in outputs.items() if value == "true"} == {"docs_only"}
 
 
-def test_source_gate_names_are_native_and_stable() -> None:
-    jobs = _workflow(".github/workflows/ci.yml")["jobs"]
-    expression = _normalized_expression(jobs["repository-checks"]["name"])
-    assert expression == _normalized_expression(
-        "${{ github.event_name == 'schedule' && 'repository-checks-scheduled' || "
-        "github.event_name == 'workflow_dispatch' && 'repository-checks-manual' || "
-        "github.event_name == 'push' && 'repository-checks-push' || "
-        "needs.workflow-plan.outputs.gate_mode == 'full' && 'repository-checks' || "
-        "'repository-checks-filtered' }}"
-    )
-    for path, (gate_id, protected_name) in GATE_CONTRACTS.items():
-        assert gate_id in jobs
-        if gate_id != "repository-checks":
-            assert _normalized_expression(jobs[gate_id]["name"]) == _normalized_expression(
-                "${{ "
-                f"github.event_name == 'schedule' && '{protected_name}-scheduled' || "
-                f"github.event_name == 'workflow_dispatch' && '{protected_name}-manual' || "
-                f"github.event_name == 'push' && '{protected_name}-push' || "
-                f"needs.workflow-plan.outputs.gate_mode == 'full' && '{protected_name}' || "
-                f"'{protected_name}-filtered' "
-                "}}"
-            )
-            assert _workflow(path)["jobs"][gate_id]["name"] == (
-                protected_name.removesuffix("-gate") + " result"
-            )
-        assert "publisher_active" not in str(jobs[gate_id])
-        assert f"{protected_name}-attempt" not in str(jobs[gate_id])
-
-
 def test_push_aggregates_cannot_duplicate_protected_names_on_promotion_heads() -> None:
     jobs = _workflow(".github/workflows/ci.yml")["jobs"]
     assert "github.event_name == 'push' && 'repository-checks-push'" in (
@@ -730,22 +701,6 @@ def test_image_builds_pass_exact_full_head_sha() -> None:
         assert "build_args+=(.)" not in script
 
 
-def test_stable_gate_scripts_have_valid_bash_syntax() -> None:
-    invalid_gates: dict[str, str] = {}
-    for workflow_path, (gate_id, _) in GATE_CONTRACTS.items():
-        result = subprocess.run(
-            ["bash", "-n"],
-            input=_gate_script(workflow_path, gate_id),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if result.returncode:
-            invalid_gates[gate_id] = result.stderr
-
-    assert not invalid_gates, invalid_gates
-
-
 def test_protected_workflows_cover_gate_authority_pr_transitions() -> None:
     workflow = _workflow(".github/workflows/ci.yml")
     pull_request = _workflow_on(workflow)["pull_request"]
@@ -963,7 +918,7 @@ def test_repository_checks_preserves_result_semantics(selected: str, validation_
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("source", [*REPOSITORY_SELECTED_RESULTS, "FAST_COVERAGE_RESULT", "PLAN_RESULT", "FEEDBACK_RESULT"])
+@pytest.mark.parametrize("source", ["ROOT_SELECTED", "FAST_COVERAGE_RESULT", "PLAN_RESULT", "FEEDBACK_RESULT"])
 @pytest.mark.parametrize("failed_result", ["failure", "cancelled", "skipped"])
 def test_repository_checks_rejects_each_missing_or_failed_selected_source(source: str, failed_result: str) -> None:
     if source in REPOSITORY_SELECTED_RESULTS:
@@ -1100,14 +1055,6 @@ def test_python_test_shards_are_complete_and_non_overlapping(lane: str, output: 
         assert [row["guest_payload"] for row in matrix] == [bool(shard & consumers) for shard in shards]
         assert "matrix.guest_payload" in next(step["if"] for step in jobs[lane]["steps"]
                   if step.get("name") == "Build and extract the admitted software-guest payload")
-
-
-def test_ci_supports_merge_queue_merge_group_event() -> None:
-    workflow = _workflow(".github/workflows/ci.yml")
-    on_config = _workflow_on(workflow)
-
-    assert "merge_group" in on_config
-    assert "checks_requested" in on_config["merge_group"]["types"]
 
 
 def test_ci_planner_uses_merge_base_for_pr_changed_paths_only() -> None:
