@@ -5,6 +5,7 @@ variable "target" {
     target_id                             = string
     cluster_scope_id                      = string
     project_id                            = string
+    system_node_count                     = optional(number, 1)
     subnet_id                             = string
     region                                = string
     kubernetes_version                    = string
@@ -22,10 +23,16 @@ variable "target" {
     execution_max_nodes = optional(number, 100)
     node_platform       = string
     system_preset       = optional(string, "4vcpu-16gb")
+    execution_preset    = optional(string, "16vcpu-64gb")
+    execution_disk_gib  = optional(number, 80)
   })
   validation {
     condition     = var.target.managed_identities == null ? can(regex("^serviceaccount-[a-zA-Z0-9_-]+$", var.target.node_registry_pull_service_account_id)) : var.target.node_registry_pull_service_account_id == null
     error_message = "Choose existing node_registry_pull_service_account_id OR managed_identities, never both."
+  }
+  validation {
+    condition     = var.target.system_node_count >= 1 && floor(var.target.system_node_count) == var.target.system_node_count
+    error_message = "Regional system_node_count must be a positive integer."
   }
   validation {
     condition = var.target.managed_identities == null ? true : (
@@ -45,9 +52,12 @@ variable "target" {
       alltrue([for cidr in var.target.public_control_plane_cidrs : can(cidrnetmask(cidr))]) &&
       var.target.execution_max_nodes >= 1 && var.target.execution_max_nodes <= 100 &&
       floor(var.target.execution_max_nodes) == var.target.execution_max_nodes &&
-      contains(["4vcpu-16gb", "8vcpu-32gb"], var.target.system_preset)
+      contains(["4vcpu-16gb", "8vcpu-32gb"], var.target.system_preset) &&
+      can(regex("^[1-9][0-9]*vcpu-[1-9][0-9]*gb$", var.target.execution_preset)) &&
+      var.target.execution_disk_gib >= 80 &&
+      floor(var.target.execution_disk_gib) == var.target.execution_disk_gib
     )
-    error_message = "Regional execution needs EU placement, an explicit CPU platform, valid optional API CIDRs, network and integer node ceiling 1..100."
+    error_message = "Regional execution needs EU placement, an explicit CPU platform, valid optional API CIDRs, network, integer node ceiling 1..100, a CPU execution preset in <vCPU>vcpu-<GiB>gb format, and an integer execution disk of at least 80 GiB."
   }
 }
 locals {
@@ -64,8 +74,8 @@ locals {
   }
   node_pull_identity = var.target.managed_identities == null ? var.target.node_registry_pull_service_account_id : nebius_iam_v1_service_account.regional["node-pull"].id
   nodes = {
-    system    = { preset = var.target.system_preset }
-    execution = { preset = "16vcpu-64gb" }
+    system    = { preset = var.target.system_preset, disk_gib = 80 }
+    execution = { preset = var.target.execution_preset, disk_gib = var.target.execution_disk_gib }
   }
 }
 # Reuse the reviewed viewer-only groups. No new group, access permit, project
@@ -112,24 +122,31 @@ resource "nebius_mk8s_v1_node_group" "regional" {
   labels           = local.labels
   version          = var.target.kubernetes_version
   auto_repair      = {}
-  fixed_node_count = var.target.suspended ? 0 : (each.key == "system" ? 1 : null)
+  fixed_node_count = var.target.suspended ? 0 : (each.key == "system" ? var.target.system_node_count : null)
   autoscaling      = var.target.suspended || each.key == "system" ? null : { min_node_count = 0, max_node_count = var.target.execution_max_nodes }
   strategy         = { drain_timeout = "20m", max_surge = { count = 0 }, max_unavailable = { count = 1 } }
   template = {
     service_account_id = local.node_pull_identity
     max_pods           = 64
-    metadata = { labels = {
-      "loom.nebius/node-role"        = each.key == "execution" ? "integration-execution" : "system"
-      "loom.nebius/platform"         = "integration"
-      "loom.nebius/cluster-scope-id" = var.target.cluster_scope_id
-    } }
+    metadata = {
+      # The min-zero template must match the native execution Pod selectors
+      # before kubelet can add its own standard OS/architecture labels.
+      labels = merge({
+        "loom.nebius/node-role"        = each.key == "execution" ? "integration-execution" : "system"
+        "loom.nebius/platform"         = "integration"
+        "loom.nebius/cluster-scope-id" = var.target.cluster_scope_id
+        }, each.key == "execution" ? {
+        "loom.nebius/node-os"   = "linux"
+        "loom.nebius/node-arch" = "amd64"
+      } : {})
+    }
     # Native addons must be schedulable before Cilium can initialize the cluster.
     # Keep workload isolation on execution nodes, not the dedicated system node.
     taints = each.key == "execution" ? [
       { key = "loom.nebius/platform", value = "integration", effect = "NO_SCHEDULE" },
       { key = "loom.nebius/execution", value = "true", effect = "NO_SCHEDULE" }
     ] : []
-    boot_disk          = { type = "NETWORK_SSD", size_gibibytes = 80 }
+    boot_disk          = { type = "NETWORK_SSD", size_gibibytes = each.value.disk_gib }
     network_interfaces = [{ subnet_id = var.target.subnet_id }]
     resources          = { platform = var.target.node_platform, preset = each.value.preset }
     reservation_policy = { policy = "FORBID" }

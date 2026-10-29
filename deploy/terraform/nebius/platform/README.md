@@ -193,12 +193,54 @@ its prerequisite regional permissions/cost require separate owner review.
 The complete separate-cluster render/operator path is in
 `docs/runbooks/nebius-platform.md` from the repository root.
 
+`system_node_count` defaults to one and accepts any positive integer. An explicit
+value overrides the single-system-node default described below without changing
+the system preset, 80-GiB disk or execution-node isolation. The observed native
+Cilium addon in EU-west requires two eligible Ready nodes: its two operator
+replicas use required pod anti-affinity and host ports, and do not tolerate
+Loom execution taints. The reviewed west configuration therefore sets
+`system_node_count = 2`; do not rely on tainted min-zero execution nodes to meet
+that prerequisite. Check current addon requirements, stock, quota and cost in
+the destination region. When `suspended = true`, both node groups still use
+fixed zero regardless of the configured system count.
+
 Regional targets require an explicit `node_platform` from that region's native
 catalog. The EU-west example uses `cpu-d3` with4vcpu-16gb system and16vcpu-64gb
 execution presets; the original EU-north integration remains `cpu-e2`. Terraform
 validates CPU-only intent but cannot prove native inventory or Kubernetes
 version compatibility. Confirm those through the read-only native catalog
 before reviewing an activation plan, and use the matching regional price SKU.
+
+Regional entries may override `execution_preset` (default `16vcpu-64gb`) and
+`execution_disk_gib` (default 80 GiB, `NETWORK_SSD`). The preset must use the
+CPU `<vCPU>vcpu-<GiB>gb` form; the disk must be an integer of at least 80 GiB.
+These syntax checks do not qualify regional platform/preset compatibility,
+provider disk limits, quota, supply or Kubernetes scheduling fit. Verify those
+against the destination catalog and saved plan. For a reviewed 32-vCPU/128-GiB
+execution node with a 300-GiB boot disk and a six-node ceiling, preserve the full
+regional map and set:
+
+```json
+"execution_preset": "32vcpu-128gb",
+"execution_disk_gib": 300,
+"execution_max_nodes": 6
+```
+
+Regional execution templates also declare `loom.nebius/node-os=linux` and
+`loom.nebius/node-arch=amd64`, matching the native Pod selectors at zero nodes.
+The system group's labels are unaffected. Confirm the native preset uses the
+configured Linux/x86_64 architecture; the labels do not emulate another CPU.
+
+The selected fields update the existing execution node-group template only.
+The system group retains its own preset, 80-GiB disk and fixed count of one;
+execution autoscaling remains min-zero with the selected operator ceiling.
+`suspended` behavior is unchanged: while suspended, both groups remain at
+fixed zero with autoscaling disabled and retain their requested templates.
+Align the regional environment's per-node capacity policy and price with the
+new physical shape. After a reviewed apply replaces the affected nodes, obtain
+a fresh compatible Ready-node/DaemonSet allocatable sample before treating
+that shape as usable workload capacity. Use the same existing platform state
+and saved-plan procedure; an application rollout does not apply Terraform.
 
 Set `suspended = true` in a regional target to keep both node groups at fixed
 zero nodes with autoscaling disabled. The cluster, node-group identities, IAM
