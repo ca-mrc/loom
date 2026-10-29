@@ -199,7 +199,8 @@ registry image, archives, runtime metadata, and receipt still succeed. Invalid
 cache content still fails publish. Import and unpack keep rejecting a stored
 cache over that limit.
 
-The attempt stores the build container's redacted tail, at most 256 KiB. A
+The attempt stores the failed prepare, build, or publish container's redacted
+tail, at most 256 KiB. Prepare and publish logs include a phase prefix. A
 build failure message starts with the BuildKit error lines from that tail. The
 public trial response still uses the canned build-failure sentence and does
 not include the builder log.

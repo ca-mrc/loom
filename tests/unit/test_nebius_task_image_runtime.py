@@ -773,7 +773,7 @@ def test_publisher_defers_oversized_optional_cache_and_keeps_the_image(
     receipt = runtime.publish(claim, work, tmp_path / "secrets", receipt_path=tmp_path / "receipt.json")
     assert receipt["registry_images"]["task"].endswith("b" * 64)
     assert cache.uploads == [] and calls
-    assert '"reason":"cache_capacity"' in capsys.readouterr().out
+    assert '"reason":"byte_budget_exceeded"' in capsys.readouterr().out
 
 
 def test_publisher_still_exports_a_cache_at_the_byte_boundary(
@@ -1172,8 +1172,9 @@ def test_over_budget_cache_does_not_hide_required_image_publish_failure(
         raise subprocess.CalledProcessError(1, argv)
 
     monkeypatch.setattr(runtime.subprocess, "run", fail_copy)
-    with pytest.raises(subprocess.CalledProcessError):
+    with pytest.raises(runtime.PublishCommandError) as raised:
         runtime.publish(claim, work, tmp_path / "secrets", receipt_path=tmp_path / "receipt.json")
+    assert raised.value.exit_code == 1
     assert cache.objects == {} and cache.uploads == []
 
 

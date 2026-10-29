@@ -726,9 +726,10 @@ async def test_pool_build_cycle_records_selection_outcome_and_preserves_errors()
     assert sample("loom_execution_actuator_task_image_build_admissions_total", outcome="error") == errors + 1
 
 
+@pytest.mark.parametrize("log_size", [20000, 300000])
 @pytest.mark.parametrize("failed_phase", ["prepare", "build", "publish", "unrelated"])
 @pytest.mark.parametrize("foreign_pod", [False, True])
-async def test_observe_captures_only_owned_failed_phase_logs(monkeypatch, failed_phase, foreign_pod):
+async def test_observe_captures_only_owned_failed_phase_logs(monkeypatch, failed_phase, foreign_pod, log_size):
     api, clients = fake_api()
     clients.job["status"] = {"failed": 1}
     clients.pods[0]["status"] = {
@@ -748,7 +749,7 @@ async def test_observe_captures_only_owned_failed_phase_logs(monkeypatch, failed
     def read_log(name, namespace, **kwargs):
         calls.append(kwargs)
         assert (name, namespace) == ("pod", "builds")
-        return "phase failure token=must-not-retain password=private-value " + "x" * 20000
+        return "phase failure token=must-not-retain password=private-value " + "x" * log_size
 
     monkeypatch.setattr(clients, "read_namespaced_pod_log", read_log, raising=False)
     observed = await api.observe("builds", "build")
@@ -756,6 +757,8 @@ async def test_observe_captures_only_owned_failed_phase_logs(monkeypatch, failed
         assert calls == [] and "builder_log" not in observed
         return
     assert calls == [{"container": failed_phase if failed_phase != "unrelated" else "build",
-                      "tail_lines": 100, "limit_bytes": 16384, "_request_timeout": 20}]
+                      "limit_bytes": 256 * 1024, "_request_timeout": 20}]
     assert "must-not-retain" not in observed["builder_log"] and "private-value" not in observed["builder_log"]
-    assert "phase failure" in observed["builder_log"] and len(observed["builder_log"]) <= 16384
+    if failed_phase in {"prepare", "publish"}:
+        assert observed["builder_log"].startswith(f"[{failed_phase}]\n")
+    assert "phase failure" in observed["builder_log"] and 16384 < len(observed["builder_log"]) <= 256 * 1024

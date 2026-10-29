@@ -153,8 +153,9 @@ async def test_cancelled_native_read_finishes_before_its_client_closes(sdk_failu
     assert not done and not closed_while_reading
 
 
+@pytest.mark.parametrize("log_size", [20000, 300000])
 @pytest.mark.parametrize("failed_phase", ["prepare", "build", "publish", "unrelated"])
-async def test_pool_reader_preserves_bounded_redacted_actual_failed_phase_log(failed_phase):
+async def test_pool_reader_preserves_bounded_redacted_actual_failed_phase_log(failed_phase, log_size):
     runtime, job, pod, namespace = fixture()
     job["status"] = {"failed": 1}
     pod["status"] = {
@@ -172,7 +173,7 @@ async def test_pool_reader_preserves_bounded_redacted_actual_failed_phase_log(fa
     def read_log(name, requested_namespace, **kwargs):
         calls.append(kwargs)
         assert (name, requested_namespace) == (pod["metadata"]["name"], runtime.namespace.name)
-        return "failure token=must-not-retain password=private-value " + "x" * 20000
+        return "failure token=must-not-retain password=private-value " + "x" * log_size
 
     api = NativeBuildKubernetesApi.__new__(NativeBuildKubernetesApi)
     api._json = lambda value: copy.deepcopy(value)
@@ -185,6 +186,8 @@ async def test_pool_reader_preserves_bounded_redacted_actual_failed_phase_log(fa
     )
     result = await api.observe_pool(runtime)
     assert calls == [{"container": failed_phase if failed_phase != "unrelated" else "build",
-                      "tail_lines": 100, "limit_bytes": 16384, "_request_timeout": 20}]
+                      "limit_bytes": 256 * 1024, "_request_timeout": 20}]
     assert "must-not-retain" not in result["builder_log"] and "private-value" not in result["builder_log"]
-    assert "failure" in result["builder_log"] and len(result["builder_log"]) <= 16384
+    if failed_phase in {"prepare", "publish"}:
+        assert result["builder_log"].startswith(f"[{failed_phase}]\n")
+    assert "failure" in result["builder_log"] and 16384 < len(result["builder_log"]) <= 256 * 1024
