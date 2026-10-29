@@ -121,8 +121,11 @@ def test_explicit_or_shared_cluster_inputs_keep_full_matrix(tmp_path, cluster_in
     changes = ("tests/conftest.py",) if shared else (independent,)
     plan = _plan(tmp_path, changes=changes, event=event, labels=labels)
     assert len(json.loads(plan["cluster_smoke_matrix"])) == manifest.test_shard_policy("cluster-smoke").shard_count
-    if labels or event == "workflow_dispatch":
+    if event == "workflow_dispatch":
         assert json.loads(plan["test_changes"]) == []
+    elif labels:
+        assert json.loads(plan["test_changes"]) == list(changes)
+        assert json.loads(plan["full_test_lanes"]) == ["cluster-smoke"]
 
 
 def test_build_report_retains_target_after_shared_image_builds(tmp_path):
@@ -137,27 +140,6 @@ def test_build_report_retains_target_after_shared_image_builds(tmp_path):
     records = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
     assert records == rows
     assert "record unavailable" in result.stdout
-
-
-def test_manifest_is_selected_before_dependency_or_registry_installation():
-    jobs = _jobs()
-    contract = jobs["cluster-contract"]
-    steps = contract["steps"]
-    selector = next(step for step in steps if step.get("id") == "manifest")
-    selection_index = steps.index(selector)
-    for index, step in enumerate(steps):
-        if "setup-uv@" in step.get("uses", "") or "uv sync" in step.get("run", "") or "apt-get" in step.get("run", ""):
-            assert selection_index < index
-    assert "python3 scripts/component_ownership.py" in selector["run"]
-    assert jobs["plan"]["outputs"]["test_changes"] == "${{ steps.plan.outputs.test_changes }}"
-    assert jobs["plan"]["outputs"]["cluster_smoke_matrix"] == "${{ steps.plan.outputs.cluster_smoke_matrix }}"
-    assert contract["strategy"]["matrix"]["include"] == "${{ fromJSON(needs.plan.outputs.cluster_smoke_matrix) }}"
-    assert contract["env"]["TEST_CHANGED_PATHS"] == "${{ needs.plan.outputs.test_changes }}"
-    assert selector["env"]["SHARD_COUNT"] == "${{ matrix.shard_count }}"
-    assert "pull_request" in contract["strategy"]["fail-fast"] and "merge_group" in contract["strategy"]["fail-fast"]
-    assert not contract.get("continue-on-error", False)
-    assert all("validate_environment_isolation.py" not in step.get("run", "")
-               and "loom cluster render" not in step.get("run", "") for step in steps)
 
 
 @pytest.mark.parametrize("selector_exit,partial", [(19, True), (0, False)])

@@ -102,9 +102,9 @@ OWNERSHIP_AUTHORITY_PATHS = {
 # retain the stronger fallback below.
 REPOSITORY_POLICY_TOOLS = {
     "scripts/check_ci_action_pins.py",
-    "scripts/check_ci_upgrade_policy.py",
     "scripts/check_repository_paths.py",
     "scripts/check_github_cli_logs.py",
+    "scripts/verify_installed_wheel.py",
     # Read-only Actions evidence/reporting tools have dedicated root
     # regressions. They do not change the pool lifecycle exercised by the
     # expensive operator lane; unknown CI tools still retain full coverage.
@@ -168,6 +168,7 @@ OPERATOR_COMPONENT_EXACT = CI_RUNNER_COMPONENTS | {
 }
 RUNTIME_PAYLOAD_TOOLS = {
     "scripts/runtime_payload_conformance.py", "scripts/runtime_payload_dispatch.py",
+    "scripts/verify_installed_wheel.py",
 }
 
 
@@ -312,6 +313,8 @@ class ValidationPlan:
     # The PR's actual diff, kept even when test_changes forces full regression,
     # so affected_only suites still run only when that diff affects them.
     test_diff: tuple[str, ...] = ()
+    # A selector label expands only its own lane; unrelated lanes keep the diff.
+    full_test_lanes: tuple[str, ...] = ()
     shared_pool_simulations: bool = False
     lint_and_static: bool = True
     tests_root: bool = True
@@ -347,6 +350,7 @@ class ValidationPlan:
                 "web_runtime",
             )
         }
+        outputs["full_test_lanes"] = json.dumps(self.full_test_lanes, separators=(",", ":"))
         outputs["gate_mode"] = self.gate_mode
         outputs["go_packages"] = json.dumps(self.go_packages, separators=(",", ":"))
         outputs["iac_targets"] = json.dumps(self.iac_targets, separators=(",", ":"))
@@ -611,12 +615,39 @@ def plan_validations(
         "scripts/export_openapi.py",
     }
 
+    # Ownership globs include fixture libraries, not just executable tests.
+    # Reuse the same independence check as test-paths before omitting consumer
+    # jobs; retaining every file inside a skipped job would not provide coverage.
+    # Inspect the test subset even in a mixed runtime/test diff.
+    test_inputs = tuple(path for path in paths
+                        if (path.startswith("tests/") or (path.startswith("packages/") and "/tests/" in path))
+                        and not _is_documentation_path(path)
+                        and not _component_ownership_manifest().ci_ignores_path(path))
+    independent_tests: tuple[str, ...] | None = None
+    if test_inputs:
+        tracked = _tracked_paths(REPO_ROOT)
+        independent = narrow_test_only_changes(
+            tracked, changed_paths=test_inputs, tracked_paths=tracked, repo_root=REPO_ROOT,
+        )
+        if independent != tracked:
+            independent_tests = independent
+        else:
+            for name in ("integration", "integration_docker", "cluster_smoke", "staging_smoke"):
+                select(name, "shared-or-unknown-test-input")
+
+
     for path in paths:
         if _component_ownership_manifest().ci_ignores_path(path):
             continue
         if _is_documentation_path(path):
             continue
         test_owner_lanes = _test_owner_lanes(path)
+        if path in test_inputs and independent_tests is not None:
+            # Data is an input, not a runnable suite entry. Route known test
+            # fixtures through the consumers proven by the same selector.
+            test_owner_lanes = tuple(sorted({*test_owner_lanes,
+                *(lane for consumer in independent_tests for lane in _test_owner_lanes(consumer)),
+            }))
         policy_tool = path in REPOSITORY_POLICY_TOOLS
         operator_tool = _is_operator_component(path)
         go_input = _is_go_input(path)
@@ -694,26 +725,6 @@ def plan_validations(
             for name in HEAVY_CHECKS:
                 select(name, reason)
 
-    # Ownership globs include fixture libraries, not just executable tests.
-    # Reuse the same independence check as test-paths before omitting consumer
-    # jobs; retaining every file inside a skipped job would not provide coverage.
-    # Inspect the test subset even in a mixed runtime/test diff.
-    test_inputs = tuple(path for path in paths
-                        if (path.startswith("tests/") or (path.startswith("packages/") and "/tests/" in path))
-                        and not _is_documentation_path(path)
-                        and not _component_ownership_manifest().ci_ignores_path(path))
-    independent_tests: tuple[str, ...] | None = None
-    if test_inputs:
-        tracked = _tracked_paths(REPO_ROOT)
-        independent = narrow_test_only_changes(
-            tracked, changed_paths=test_inputs, tracked_paths=tracked, repo_root=REPO_ROOT,
-        )
-        if independent != tracked:
-            independent_tests = independent
-        else:
-            for name in ("integration", "integration_docker", "cluster_smoke", "staging_smoke"):
-                select(name, "shared-or-unknown-test-input")
-
     if selected["coverage_summary"]:
         select("integration", "coverage-summary-requires-integration")
 
@@ -751,7 +762,9 @@ def plan_validations(
     baseline["runtime_payload"] = any(
         path in RUNTIME_PAYLOAD_TOOLS or "runtime-payload" in _test_owner_lanes(path)
         for path in backend_paths
-    ) or bool(test_inputs and independent_tests is None)
+    ) or bool(test_inputs and independent_tests is None) or bool(independent_tests and any(
+        "runtime-payload" in _test_owner_lanes(path) for path in independent_tests
+    ))
     if python_paths and all(_is_operator_component(path) for path in python_paths):
         baseline["tests_packages"] = False
     baseline["go_checks"] = any(_is_go_input(path) or path in GO_CROSSLANGUAGE_CONTRACTS
@@ -766,7 +779,7 @@ def plan_validations(
     )
     # Only independently editable test modules may suppress other owning jobs.
     if (runtime_paths == test_inputs and independent_tests is not None
-            and not force_baseline and not set(labels) & LABEL_TO_CHECK.keys()):
+            and not force_baseline):
         owners = {lane for path in independent_tests for lane in _test_owner_lanes(path)}
         crosslanguage_contract = any(path in GO_CROSSLANGUAGE_CONTRACTS for path in independent_tests)
         baseline.update(tests_root=bool(owners & {"tests-root", "nebius-pool"}),
@@ -774,6 +787,8 @@ def plan_validations(
                         go_checks="go-checks" in owners or crosslanguage_contract,
                         runtime_payload="runtime-payload" in owners,
                         locked_environments=False)
+    if baseline["runtime_payload"]:
+        baseline["lint_and_static"] = True
     if force_baseline:
         baseline = dict.fromkeys(BASELINE_CHECKS, True)
     web_runtime = force_baseline or any(_is_frontend_input(path) or path in web_quality_exact for path in paths)
@@ -794,11 +809,16 @@ def plan_validations(
         coverage_summary=selected["coverage_summary"],
         web_checks=selected["web_checks"],
         reasons={name: tuple(values) for name, values in reasons.items()},
-        # Explicit selector labels and manual runs retain full regression.
         test_changes=paths if event_name in {"pull_request", "merge_group"}
-        and not force_baseline and not set(labels) & LABEL_TO_CHECK.keys() else (),
+        and not force_baseline else (),
         test_diff=paths if event_name in {"pull_request", "merge_group"}
-        and not set(labels) & LABEL_TO_CHECK.keys() else (),
+        and not selected["coverage_summary"] else (),
+        full_test_lanes=tuple(sorted({
+            {"integration": "integration", "integration_docker": "integration-docker",
+             "cluster_smoke": "cluster-smoke", "staging_smoke": "system-smoke"}[check]
+            for label, check in LABEL_TO_CHECK.items()
+            if label in labels and check not in {"images", "coverage_summary"}
+        })),
         shared_pool_simulations=shared_pool_simulations,
         nebius_pool=baseline["tests_root"],
         web_runtime=web_runtime,
@@ -866,7 +886,9 @@ def main() -> int:
     ):
         matrix = test_shard_matrix(
             _component_ownership_manifest(), tracked_paths=tracked_paths, lane=lane,
-            repo_root=REPO_ROOT, changed_paths=effective_changes, test_scope=args.test_scope,
+            repo_root=REPO_ROOT,
+            changed_paths=() if lane in plan.full_test_lanes else effective_changes,
+            test_scope=args.test_scope,
             # Only lanes whose jobs receive TEST_DIFF_PATHS may plan with it.
             diff_paths=effective_diff if lane in AFFECTED_ONLY_LANES else (),
             include_shared_pool=plan.shared_pool_simulations,

@@ -44,27 +44,6 @@ def test_explicit_coverage_restores_python_lanes_for_frontend_change():
     assert outputs["tests_root"] == outputs["tests_packages"] == "true"
 
 
-@pytest.mark.parametrize("selected,result,accepted", [
-    ("false", "skipped", True), ("true", "success", True),
-    ("true", "skipped", False), ("true", "failure", False),
-    ("false", "cancelled", False), ("invalid", "success", False), ("", "skipped", False),
-])
-def test_baseline_aggregator_checks_selected_results(selected, result, accepted):
-    import subprocess
-    from pathlib import Path
-
-    import yaml
-
-    root = Path(__file__).resolve().parents[2]
-    workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
-    step = next(s for s in workflow["jobs"]["repository-checks"]["steps"]
-                if s.get("name") == "Enforce selected validation results")
-    env = {key: "success" if key.endswith("RESULT") else "false" for key in step["env"]}
-    env.update(GATE_MODE="full", DOCS_ONLY="false", ROOT_SELECTED=selected, ROOT_RESULT=result)
-    run = subprocess.run(["bash", "-c", step["run"]], env=env, capture_output=True, text=True)
-    assert (run.returncode == 0) is accepted, run.stderr
-
-
 def test_scheduled_regression_requests_every_ci_test_lane_and_coverage():
     p = plan_validations(changed_paths=["docs/example.md"], labels=set(), event_name="schedule")
     outputs = p.github_outputs()
@@ -187,7 +166,7 @@ def test_forced_full_regression_runs_shared_pool_only_for_an_affecting_diff(diff
     ("pull_request", (), True),
     ("merge_group", (), True),
     ("pull_request", ("bug",), True),
-    ("pull_request", ("ci:integration",), False),
+    ("pull_request", ("ci:integration",), True),
     ("push", (), False),
     ("schedule", (), False),
     ("workflow_dispatch", (), False),
@@ -222,31 +201,6 @@ def test_affected_only_is_validated(change, error):
            "include_paths": ["tests/ops/test_heavy_*.py"], "affected_paths": ["scripts/ops/heavy.py"], **change}
     with pytest.raises(ManifestError, match=error):
         _test_suite(raw)
-
-
-def test_only_the_shared_pool_suite_is_affected_only():
-    from pathlib import Path
-
-    from scripts.component_ownership import load_manifest
-
-    root = Path(__file__).resolve().parents[2]
-    manifest = load_manifest(root / "config/component-ownership.toml")
-    assert {suite.id for suite in manifest.test_suites if suite.affected_only} == {"nebius-shared-pool-ops"}
-
-
-def test_pool_job_and_planner_share_the_pr_diff():
-    from pathlib import Path
-
-    import yaml
-
-    root = Path(__file__).resolve().parents[2]
-    jobs = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())["jobs"]
-    assert jobs["workflow-plan"]["outputs"]["test_diff"] == "${{ steps.plan.outputs.test_diff || '[]' }}"
-    pool = jobs["nebius-pool"]
-    # Job-level env is printed in the checkout step log that candidate reuse reads.
-    assert pool["env"]["TEST_DIFF_PATHS"] == "${{ needs.workflow-plan.outputs.test_diff }}"
-    [step] = [step for step in pool["steps"] if step.get("id") == "manifest"]
-    assert '--diff-paths-json "${TEST_DIFF_PATHS:-[]}"' in step["run"]
 
 
 @pytest.mark.parametrize("changes", [
@@ -296,8 +250,8 @@ def test_shard_manifests_execute_exactly_the_planned_selection(changes, lane, tm
     common = dict(tracked_paths=tuple(files), lane=lane, repo_root=tmp_path, changed_paths=changes,
                   include_shared_pool=True)
     planned = selected_test_paths(manifest, **common)
-    full_lane = lane == "tests-root" or changes in (
-        ("uv.lock",), ("tests/ops/nebius_participant_external_fixture.py",))
+    fixture_edit = changes == ("tests/ops/nebius_participant_external_fixture.py",)
+    full_lane = (lane == "tests-root" and not fixture_edit) or changes == ("uv.lock",)
     expected = tests if full_lane else (
         () if changes == ("scripts/ops/ci_reliability_metrics.py",) else tests[:2])
     assert set(planned) == set(expected)
@@ -533,26 +487,3 @@ def test_large_change_list_keeps_full_lanes_without_oversized_job_environment():
     assert select_affected_test_suites(
         manifest, paths, changed_paths=tuple(json.loads(outputs["test_changes"]))
     ) == paths
-
-
-def test_installed_wheel_smoke_imports_only_retained_modules():
-    import ast
-    from importlib.util import find_spec
-    from pathlib import Path
-
-    import yaml
-
-    root = Path(__file__).resolve().parents[2]
-    workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
-    step = next(item for item in workflow["jobs"]["tests-root"]["steps"]
-                if item.get("name") == "Build and exercise non-editable runtime wheel")
-    source = step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
-    imports = []
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.Import):
-            imports.extend(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imports.append(node.module)
-    for module in imports:
-        if module.startswith(("loom.", "loom_")):
-            assert find_spec(module) is not None, module

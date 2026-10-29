@@ -7,6 +7,7 @@ import argparse
 import ast
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -1486,47 +1487,72 @@ def narrow_test_only_changes(
     paths: tuple[str, ...], *, changed_paths: tuple[str, ...],
     tracked_paths: tuple[str, ...], repo_root: Path,
 ) -> tuple[str, ...]:
-    """Narrow independent test edits; runtime/shared/unknown changes stay full.
+    """Select edited test modules and consumers of test helpers/data.
 
-    Test modules are also used as fixture libraries. Any reference to an edited
-    module name outside the edit set retains the complete lane, including string
-    imports. This deliberately avoids inventing a general dependency graph.
-    An empty diff is the manual/full-regression path.
+    Shared pytest setup, runtime consumers and unreferenced data stay full.
+    Filename references include imports, dynamic loads and mounted probe files;
+    this intentionally avoids a general application dependency graph.
     """
     if not changed_paths:
         return paths
+
+    def test_input(name: str) -> bool:
+        return name.startswith("tests/") or "/tests/" in name
+
+    def test_module(name: str) -> bool:
+        return Path(name).name.startswith("test_") and name.endswith(".py")
+
     changed = set(changed_paths)
-    tracked = set(tracked_paths)
-    if any(
-        name not in tracked or not (name.startswith("tests/") or "/tests/" in name)
-        or not Path(name).name.startswith("test_") or not name.endswith(".py")
-        or name.startswith("tests/support/") or not (repo_root / name).is_file()
-        for name in changed
-    ):
+    if any(not test_input(name) or Path(name).name in {"conftest.py", "__init__.py"}
+           or (not (repo_root / name).is_file() and not test_module(name))
+           for name in changed):
         return paths
+    fixtures = {name for name in changed if not test_module(name)}
     try:
         sources = {name: (repo_root / name).read_text(encoding="utf-8")
-                   for name in tracked_paths if name.endswith(".py") and name not in changed}
+                   for name in tracked_paths if name.endswith(".py")
+                   and (repo_root / name).is_file()}
     except (OSError, UnicodeError):
         return paths
+    if fixtures:
+        # A test data/helper filename may also be loaded by another runtime.
+        # Those consumers are outside this Python-only closure and keep full CI.
+        identifiers = re.compile(r"\b(?:" + "|".join(
+            re.escape(Path(name).stem) for name in fixtures) + r")\b")
+        source_suffixes = {".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+                           ".sh", ".bash", ".yml", ".yaml", ".toml", ".json"}
+        try:
+            for name in tracked_paths:
+                if (name in changed or name == "config/component-ownership.toml"
+                        or Path(name).suffix not in source_suffixes or not (repo_root / name).is_file()):
+                    continue
+                if identifiers.search((repo_root / name).read_text(encoding="utf-8")):
+                    return paths
+        except (OSError, UnicodeError):
+            return paths
     affected = set(changed)
+    referenced = {Path(fixture).stem for fixture in fixtures
+                  if any(name in changed and name != fixture
+                         and re.search(r"\b" + re.escape(Path(fixture).stem) + r"\b", source)
+                         for name, source in sources.items())}
     while True:
         identifiers = re.compile(r"\b(?:" + "|".join(re.escape(Path(name).stem) for name in affected) + r")\b")
         added = set()
         for name, source in sources.items():
             if name in affected or not identifiers.search(source):
                 continue
-            if not identifiers.search(_fixture_reference_source(source, path=name, changed_paths=affected)):
+            source = _fixture_reference_source(source, path=name, changed_paths=affected)
+            references = set(identifiers.findall(source))
+            if not references:
                 continue
-            # Runtime/metadata/unknown consumers still require a complete lane.
-            # Known test-module consumers can expand transitively without also
-            # running every unrelated test module in that same lane.
-            if (name in _TEST_SELECTION_METADATA_FILES
-                    or not (name.startswith("tests/") or "/tests/" in name)
-                    or not Path(name).name.startswith("test_")):
+            if (name in _TEST_SELECTION_METADATA_FILES or not test_input(name)
+                    or Path(name).name in {"conftest.py", "__init__.py"}):
                 return paths
+            referenced.update(references)
             added.add(name)
         if not added:
+            if any(Path(name).stem not in referenced for name in fixtures):
+                return paths
             return tuple(path for path in paths if path in affected)
         affected.update(added)
 
@@ -2031,6 +2057,8 @@ def _parser() -> argparse.ArgumentParser:
                             help="Include unlaunched shared-pool simulations for manual qualification.")
     test_paths.add_argument("--changed-paths-json", default="[]",
                             help="Narrow independent test-only edits; [] retains the default lane selection.")
+    test_paths.add_argument("--full-test-lanes-json", default=os.environ.get("FULL_TEST_LANES") or "[]",
+                            help="Explicit label-selected lanes to exercise in full.")
     test_paths.add_argument("--diff-paths-json", default="[]",
                             help="A PR's actual diff; gates affected_only suites when changed paths are [].")
     test_paths.add_argument("--shard-index", type=int, default=0)
@@ -2155,7 +2183,14 @@ def main(argv: list[str] | None = None) -> int:
             changes = json.loads(args.changed_paths_json)
             if not isinstance(changes, list) or not all(isinstance(path, str) for path in changes):
                 raise ManifestError("changed paths must be a JSON string array")
+            full_lanes = json.loads(args.full_test_lanes_json)
+            if not isinstance(full_lanes, list) or any(
+                not isinstance(lane, str) or lane not in manifest.ci_lanes for lane in full_lanes
+            ):
+                raise ManifestError("full test lanes must be declared CI lanes")
             changed_paths = tuple(_safe_path(path, context="changed path") for path in changes)
+            if args.lane in full_lanes:
+                changed_paths = ()
             diff = json.loads(args.diff_paths_json)
             if not isinstance(diff, list) or not all(isinstance(path, str) for path in diff):
                 raise ManifestError("diff paths must be a JSON string array")

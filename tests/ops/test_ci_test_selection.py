@@ -203,7 +203,6 @@ def test_no_diff_is_explicit_full_regression(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("event,labels", [("workflow_dispatch", set()),
-                                         ("pull_request", {"ci:integration"}),
                                          ("pull_request", {"ci:coverage-summary"})])
 def test_explicit_full_requests_do_not_export_a_reduced_test_diff(event: str, labels: set[str]) -> None:
     plan = plan_validations(changed_paths=["tests/unit/test_alpha.py"],
@@ -321,3 +320,57 @@ def test_shard_workflows_run_complete_disjoint_fail_fast_shards(
         "tests/ops/test_nebius_pool_predecessor.py", "tests/ops/test_nebius_pool_predecessor_live.py",
         "tests/ops/test_nebius_pool_refresh_connected.py")]
     assert len(set(predecessor_groups)) == 3
+
+
+@pytest.mark.parametrize("consumer", ["src/runtime.go", "web/reader.ts", "scripts/probe.sh"])
+def test_fixture_with_a_non_python_consumer_keeps_the_full_lane(tmp_path: Path, consumer: str) -> None:
+    tracked = _repository(tmp_path)
+    fixture = "tests/unit/fixtures/shared.json"
+    target = tmp_path / fixture
+    target.parent.mkdir(parents=True)
+    target.write_text('{}')
+    (tmp_path / tracked[0]).write_text(f'FIXTURE = "{fixture}"\n')
+    target = tmp_path / consumer
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(f'// loads {fixture}\n')
+    assert narrow_test_only_changes(tracked[:2], changed_paths=(fixture,),
+                                    tracked_paths=(*tracked, fixture, consumer), repo_root=tmp_path) == tracked[:2]
+
+
+def test_deleted_standalone_test_does_not_expand_an_independent_edit(tmp_path: Path) -> None:
+    tracked = _repository(tmp_path)
+    removed = tracked[1]
+    (tmp_path / removed).unlink()
+    assert narrow_test_only_changes((tracked[0],), changed_paths=(tracked[0], removed),
+                                    tracked_paths=(tracked[0], tracked[2]), repo_root=tmp_path) == (tracked[0],)
+
+
+def test_label_full_lane_is_the_same_in_the_planner_and_real_cli() -> None:
+    from scripts.component_ownership import (
+        _tracked_paths,
+        load_manifest,
+        selected_test_paths,
+        test_shard_matrix,
+    )
+
+    root = Path(__file__).resolve().parents[2]
+    edited_module = "tests/unit/test_rate_card_lookup.py"
+    plan = plan_validations(changed_paths=[edited_module], labels={"ci:integration"}, event_name="pull_request")
+    manifest = load_manifest(root / "config/component-ownership.toml")
+    common = dict(manifest=manifest, tracked_paths=_tracked_paths(root), repo_root=root, test_scope="nebius")
+    for lane in ("tests-root", "integration"):
+        changes = () if lane in plan.full_test_lanes else plan.test_changes
+        expected = selected_test_paths(lane=lane, changed_paths=changes, **common)
+        matrix = test_shard_matrix(lane=lane, changed_paths=changes, **common)
+        assert matrix
+        result = subprocess.run(
+            [sys.executable, "scripts/component_ownership.py", "test-paths", "--lane", lane,
+             "--test-scope", "nebius", "--changed-paths-json", json.dumps(plan.test_changes)],
+            cwd=root, env={**os.environ, "FULL_TEST_LANES": json.dumps(plan.full_test_lanes)},
+            text=True, capture_output=True, check=True,
+        )
+        assert tuple(result.stdout.splitlines()) == expected
+        if lane == "tests-root":
+            assert expected == (edited_module,)
+        else:
+            assert len(expected) > 1

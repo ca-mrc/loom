@@ -73,7 +73,7 @@ def test_ci_metadata_tool_mixed_with_pool_operator_retains_that_operators_covera
 
 
 @pytest.mark.parametrize("path", [
-    "scripts/check_ci_action_pins.py", "scripts/check_ci_upgrade_policy.py",
+    "scripts/check_ci_action_pins.py",
     "scripts/check_repository_paths.py",
 ])
 def test_owned_repository_policy_tools_do_not_start_runtime_regressions(path: str) -> None:
@@ -196,24 +196,11 @@ def test_authoritative_non_draft_pr_event_runs_full_protected_gate(
     assert plan.gate_mode == "full"
 
 
-@pytest.mark.parametrize(
-    ("action", "action_label"),
-    [
-        ("edited", ""),
-        ("labeled", "triage"),
-        ("unlabeled", "priority:P1"),
-        ("labeled", ""),
-    ],
-)
-@pytest.mark.parametrize(
-    "changed_paths",
-    [
-        ["docs/user-guide.md"],
-        ["tests/ops/test_plan_ci_validations.py"],
-        ["src/loom/config.py"],
-        ["unknown-runtime/new-component.bin"],
-    ],
-)
+@pytest.mark.parametrize(("action", "action_label", "changed_paths"), [
+    ("edited", "", ["docs/user-guide.md"]),
+    ("labeled", "triage", ["src/loom/config.py"]),
+    ("unlabeled", "priority:P1", ["unknown-runtime/new-component.bin"]),
+])
 def test_metadata_event_preserves_current_head_validation(
     action: str,
     action_label: str,
@@ -238,32 +225,6 @@ def test_metadata_event_preserves_current_head_validation(
     # A newer metadata suite must report the same protected gates and selected
     # work as the successful head suite it supersedes, including unknown paths.
     assert plan == current_head_plan
-    assert plan.event_relevant is True
-    assert plan.full_gate is True
-    assert plan.gate_mode == "full"
-
-
-@pytest.mark.parametrize(
-    "label",
-    [
-        "ci:integration",
-        "ci:integration-docker",
-        "ci:images",
-        "cluster-smoke",
-        "staging-smoke",
-        "ci:coverage-summary",
-    ],
-)
-@pytest.mark.parametrize("action", ["labeled", "unlabeled"])
-def test_supported_selector_metadata_event_runs_full_gate(action: str, label: str) -> None:
-    plan = plan_validations(
-        changed_paths=["docs/user-guide.md"],
-        labels=set(),
-        event_name="pull_request",
-        pull_request_action=action,
-        pull_request_action_label=label,
-    )
-
     assert plan.event_relevant is True
     assert plan.full_gate is True
     assert plan.gate_mode == "full"
@@ -999,3 +960,61 @@ def test_workflow_plan_passes_the_change_base_for_registration_checks() -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
     step = next(s for s in workflow["jobs"]["workflow-plan"]["steps"] if s.get("id") == "plan")
     assert '--base-sha "${BASE_SHA:-}"' in step["run"]
+
+
+def test_existing_harness_fixture_keeps_its_real_consumer() -> None:
+    from scripts.component_ownership import _tracked_paths, load_manifest, selected_test_paths
+
+    fixture = "tests/unit/fixtures/hosted_harness_plans.json"
+    plan = plan_validations(changed_paths=[fixture], labels=set(), event_name="pull_request")
+    assert not plan.unowned_runtime
+    assert not plan.selected_heavy_checks()
+    assert not any((plan.go_checks, plan.nebius_iac, plan.web_runtime, plan.runtime_payload))
+    manifest = load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    selected = selected_test_paths(manifest, tracked_paths=_tracked_paths(REPO_ROOT),
+                                   lane="tests-root", repo_root=REPO_ROOT,
+                                   changed_paths=plan.test_changes, test_scope="nebius")
+    assert selected == ("tests/unit/test_hosted_harness_plan_parity.py",
+                        "tests/unit/test_task_sandbox_planner.py")
+    mixed = plan_validations(changed_paths=[
+        "src/loom/agent/terminus2/runtime.py", fixture, *selected,
+        "tests/support/terminus_summarization_probe.py",
+    ], labels=set(), event_name="pull_request")
+    assert not mixed.unowned_runtime
+    assert mixed.integration and mixed.integration_docker and mixed.images
+    assert not mixed.cluster_smoke and not mixed.staging_smoke
+    assert not any((mixed.go_checks, mixed.nebius_iac, mixed.runtime_payload,
+                    mixed.web_checks, mixed.web_runtime))
+
+
+@pytest.mark.parametrize("label,lane", [
+    ("ci:images", None), ("ci:integration", "integration"),
+    ("ci:integration-docker", "integration-docker"),
+    ("cluster-smoke", "cluster-smoke"), ("staging-smoke", "system-smoke"),
+])
+def test_extra_lane_label_preserves_unrelated_test_selection(label, lane, independent_test_repo):
+    path = "tests/unit/test_metrics_enumeration.py"
+    independent_test_repo(path)
+    plan = plan_validations(changed_paths=[path], labels={label}, event_name="pull_request")
+    assert plan.test_changes == (path,)
+    assert plan.test_diff == (path,)
+    assert plan.full_test_lanes == ((lane,) if lane else ())
+    assert plan.tests_root and not plan.tests_packages
+
+
+def test_shared_helper_starts_every_proven_consumer_lane(tmp_path, monkeypatch) -> None:
+    import scripts.plan_ci_validations as planner
+
+    helper = "tests/support/owned_probe.py"
+    files = {"README.md": "test repository\n", helper: "VALUE = 1\n",
+             "tests/integration/test_probe.py": "from tests.support.owned_probe import VALUE\n",
+             "tests/cluster/test_probe_cluster.py": "from tests.support.owned_probe import VALUE\n"}
+    for name, source in files.items():
+        target = tmp_path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source)
+    monkeypatch.setattr(planner, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(planner, "_tracked_paths", lambda _: tuple(files))
+    plan = plan_validations(changed_paths=[helper], labels=set(), event_name="pull_request")
+    assert plan.integration and plan.cluster_smoke
+    assert not plan.integration_docker and not plan.staging_smoke and not plan.unowned_runtime

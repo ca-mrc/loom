@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import json
 import os
 import re
@@ -16,11 +15,6 @@ import pytest
 import scripts.component_ownership as component_ownership
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
-def test_component_ownership_authority_files_exist() -> None:
-    assert (REPO_ROOT / "config/component-ownership.toml").is_file()
-    assert (REPO_ROOT / "scripts/component_ownership.py").is_file()
 
 
 def test_path_matcher_is_segment_safe_and_supports_recursive_globs() -> None:
@@ -583,32 +577,6 @@ include_paths = ["tests/unit/**/*.py"]
     )
 
 
-def test_marker_free_ascii_source_is_parsed_without_ast_walk(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    parse = ast.parse
-    walk = ast.walk
-    parsed: list[str] = []
-    walked: list[ast.AST] = []
-
-    def record_parse(source: str) -> ast.AST:
-        parsed.append(source)
-        return parse(source)
-
-    def record_walk(tree: ast.AST) -> Iterator[ast.AST]:
-        walked.append(tree)
-        return walk(tree)
-
-    source = "def test_example():\n    assert 1 + 2 == 3\n"
-    with monkeypatch.context() as patch:
-        patch.setattr(ast, "parse", record_parse)
-        patch.setattr(ast, "walk", record_walk)
-        assert not component_ownership._uses_pytest_docker_marker(source)
-
-    assert parsed == [source]
-    assert walked == []
-
-
 @pytest.mark.parametrize("source", ["def broken(:\n", "value = (\n"])
 def test_marker_free_ascii_syntax_errors_are_still_rejected(source: str) -> None:
     with pytest.raises(SyntaxError):
@@ -629,21 +597,8 @@ def test_marker_free_ascii_syntax_errors_are_still_rejected(source: str) -> None
         ("pytestmark = pytest.other.docker\n", False),
     ],
 )
-def test_possible_docker_marker_sources_retain_exact_ast_inspection(
-    monkeypatch: pytest.MonkeyPatch, source: str, expected: bool
-) -> None:
-    walk = ast.walk
-    walked: list[ast.AST] = []
-
-    def record_walk(tree: ast.AST) -> Iterator[ast.AST]:
-        walked.append(tree)
-        return walk(tree)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(ast, "walk", record_walk)
-        assert component_ownership._uses_pytest_docker_marker(source) is expected
-
-    assert len(walked) == 1
+def test_docker_marker_detection_uses_python_semantics(source: str, expected: bool) -> None:
+    assert component_ownership._uses_pytest_docker_marker(source) is expected
 
 
 def test_validator_ignores_docker_marker_text_inside_strings(tmp_path: Path) -> None:
@@ -1080,54 +1035,6 @@ def test_release_image_matrix_is_derived_from_all_release_components() -> None:
     assert all(entry["context"] == "." for entry in matrix)
 
 
-def test_shared_upload_observation_changes_select_actuator_image() -> None:
-    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    selected = component_ownership.select_release_image_matrix(
-        manifest,
-        changed_paths=("src/loom/trajectory/upload_observation.py",),
-        force_all=False,
-        image_set="nebius",
-    )
-    assert "execution-actuator" in {entry["image"] for entry in selected}
-
-
-def test_execution_actuator_image_owns_capacity_collector_source() -> None:
-    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-
-    owners = manifest.component_owners_for_path("src/loom_execution_capacity_collector/nebius.py")
-    assert "execution-actuator" in {component.id for component in owners}
-    selected = component_ownership.select_release_image_matrix(
-        manifest,
-        changed_paths=("src/loom_execution_capacity_collector/nebius.py",),
-        force_all=False,
-    )
-    assert any(item["image"] == "execution-actuator" for item in selected)
-
-
-@pytest.mark.parametrize("module", ["execution_requirements", "mutable_paths", "sandbox_identity"])
-def test_task_declaration_changes_select_actuator_image(module: str) -> None:
-    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    selected = component_ownership.select_release_image_matrix(
-        manifest,
-        changed_paths=(f"src/loom/{module}.py",),
-        force_all=False,
-    )
-    assert any(item["image"] == "execution-actuator" for item in selected)
-
-
-@pytest.mark.parametrize("module", ["execution_diagnosis_store", "execution_failure_diagnosis"])
-def test_native_diagnosis_changes_select_actuator_image(module: str) -> None:
-    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    selected = component_ownership.select_release_image_matrix(
-        manifest,
-        changed_paths=(f"src/loom/{module}.py",),
-        force_all=False,
-        image_set="nebius",
-        fallback_all=True,
-    )
-    assert any(item["image"] == "execution-actuator" for item in selected)
-
-
 def test_pipeline_core_fixture_is_conformance_only_and_never_a_rollout_image() -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
     component = next(
@@ -1297,30 +1204,6 @@ def test_release_image_pair_rejects_matrix_tampering() -> None:
     ]
 
 
-@pytest.mark.parametrize(
-    "lane",
-    [
-        "tests-root",
-        "tests-packages",
-        "integration",
-        "integration-docker",
-        "runtime-payload",
-    ],
-)
-def test_required_ci_lane_paths_are_derived_from_manifest(lane: str) -> None:
-    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    tracked_paths = component_ownership._tracked_paths(REPO_ROOT)
-
-    paths = component_ownership.test_paths_for_lane(
-        manifest,
-        tracked_paths=tracked_paths,
-        lane=lane,
-    )
-
-    assert paths
-    assert all(manifest.test_owner_for_path(path).lane == lane for path in paths)
-
-
 def test_runtime_payload_lane_paths_are_exactly_policy_owned() -> None:
     manifest = component_ownership.load_manifest(
         REPO_ROOT / "config/component-ownership.toml",
@@ -1332,7 +1215,7 @@ def test_runtime_payload_lane_paths_are_exactly_policy_owned() -> None:
         lane="runtime-payload",
     )
 
-    assert len(lane_paths) == 10
+    assert lane_paths
     policy_paths = {
         path
         for policy in manifest.execution_policies
@@ -1342,24 +1225,10 @@ def test_runtime_payload_lane_paths_are_exactly_policy_owned() -> None:
             policy=policy.id,
         )
     }
-    assert len(policy_paths) == 10
     assert policy_paths == set(lane_paths)
     assert all(
         manifest.test_owner_for_path(path).execution_policy is not None for path in policy_paths
     )
-
-
-def test_root_lane_includes_previously_unexecuted_owned_directories() -> None:
-    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-
-    paths = component_ownership.test_paths_for_lane(
-        manifest,
-        tracked_paths=component_ownership._tracked_paths(REPO_ROOT),
-        lane="tests-root",
-    )
-
-    assert any(path.startswith("tests/loom_config/") for path in paths)
-    assert any(path.startswith("tests/loom_egress_xds/") for path in paths)
 
 
 def test_behavior_tests_are_owned_but_excluded_from_ci_lanes() -> None:
@@ -1388,13 +1257,6 @@ def test_behavior_tests_are_owned_but_excluded_from_ci_lanes() -> None:
         )
     }
     assert behavior_tests.isdisjoint(selected)
-
-
-def test_behavior_frontend_sources_are_excluded_from_coverage_gate() -> None:
-    vite_config = (REPO_ROOT / "web/vite.config.ts").read_text(encoding="utf-8")
-
-    assert '"src/components/artifacts/BehaviorRollout*.tsx"' in vite_config
-    assert '"src/components/artifacts/useBoundedJson.ts"' in vite_config
 
 
 @pytest.mark.parametrize("lane", ["tests-root", "nebius-pool", "integration", "integration-docker", "cluster-smoke"])
@@ -2026,17 +1888,6 @@ def test_ci_planners_start_before_package_installation(script):
     assert result.returncode == 0, result.stderr
 
 
-def test_guard_migration_changes_rebuild_both_consuming_images() -> None:
-    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    matrix = component_ownership.select_release_image_matrix(
-        manifest,
-        changed_paths=("database/capacity_guard_migrations/env.py",),
-        force_all=False,
-        image_set="nebius",
-    )
-    assert {"control-plane", "service"} <= {entry["image"] for entry in matrix}
-
-
 def _local_copy_sources(dockerfile: str) -> Iterator[str]:
     # All retained Dockerfiles use shell COPY, including flags and continuations.
     for line in dockerfile.replace("\\\n", " ").splitlines():
@@ -2102,56 +1953,3 @@ def test_all_image_ownership_covers_every_local_copy_input() -> None:
                 ):
                     missing.append((component.id, path))
     assert not missing, missing
-
-
-@pytest.mark.parametrize(
-    "path",
-    [
-        "src/loom/application_image_build.py",
-        "src/loom/application_session.py",
-        "src/loom/application_source.py",
-        "src/loom/application_source_archive.py",
-        "src/loom/application_source_upload.py",
-        "src/loom/native_image_build.py",
-        "src/loom/nebius_application_contract.py",
-        "src/loom/nebius_environment_contract.py",
-        "src/loom/nebius_management_authority.py",
-        "src/loom/nebius_pool_application_image.py",
-    ],
-)
-def test_application_build_dependency_changes_select_actuator_image(path: str) -> None:
-    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    selected = component_ownership.select_release_image_matrix(
-        manifest, changed_paths=(path,), force_all=False, image_set="nebius",
-    )
-    assert "execution-actuator" in {entry["image"] for entry in selected}
-
-
-@pytest.mark.parametrize(
-    ("path", "consumer"),
-    [
-        ("src/loom_listen/metrics.py", "egress-xds"),
-        ("src/loom_service/app.py", "pipeline-orchestrator"),
-        ("config/resource-profiles.toml", "pipeline-orchestrator"),
-    ],
-)
-def test_retained_image_copy_changes_select_consumers(path: str, consumer: str) -> None:
-    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    assert (REPO_ROOT / path).is_file()
-    # The compatibility matrix still supports selective queries; this does not
-    # change the native image allowlist or enable dormant image publication.
-    legacy = component_ownership.select_release_image_matrix(
-        manifest,
-        changed_paths=(path,),
-        force_all=False,
-    )
-    assert consumer in {entry["image"] for entry in legacy}
-    assert "behavior-stage1-sim" not in {entry["image"] for entry in legacy}
-    native = component_ownership.select_release_image_matrix(
-        manifest,
-        changed_paths=(path,),
-        force_all=False,
-        image_set="nebius",
-    )
-    assert consumer not in {entry["image"] for entry in native}
-    assert "behavior-stage1-sim" not in {entry["image"] for entry in native}

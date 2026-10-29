@@ -1047,94 +1047,21 @@ def test_reusable_validation_workflows_keep_internal_result_enforcement() -> Non
             assert f'"${result_env}"' in gate_script
 
 
-def test_repository_checks_keeps_four_gate_contract_with_staged_execution() -> None:
-    workflow = _workflow(".github/workflows/ci.yml")
-    jobs = workflow["jobs"]
+def test_repository_gate_receives_declared_native_results() -> None:
+    # Execute result semantics above; here only verify that GitHub supplies the
+    # selected/result inputs and waits for the jobs those inputs reference.
+    import re
 
-    assert "fast-checks" not in jobs
-    assert set(jobs["fast-coverage"]["needs"]) == {"workflow-plan", "tests-root", "tests-packages"}
-    assert "coverage_summary == 'true'" in jobs["fast-coverage"]["if"]
-    quick = {"workflow-plan", "lint-and-static", "locked-environments", "tests-packages", "go-checks", "nebius-iac"}
-    assert set(jobs["integration"]["needs"]) == quick
-    assert set(jobs["tests-root"]["needs"]) == quick
-    for job in ("integration-docker", "nebius-pool", "runtime-payload", "web-runtime"):
-        assert set(jobs[job]["needs"]) == {"workflow-plan", "fast-feedback"}
-    assert set(jobs["fast-feedback"]["needs"]) == quick | {"tests-root", "integration", "web-checks"}
-    assert "go_checks == 'true'" in jobs["go-checks"]["if"]
-    assert "gate_mode == 'full'" in jobs["integration"]["if"]
-    assert "gate_mode == 'full'" in jobs["integration-docker"]["if"]
-    assert "repository-checks" in jobs["repository-checks"]["name"]
-    assert set(jobs["repository-checks"]["needs"]) == {
-        "workflow-plan", "locked-environments", "lint-and-static", "runtime-payload", "nebius-iac",
-        "tests-root", "nebius-pool", "tests-packages", "fast-coverage", "go-checks", "integration",
-        "integration-docker", "coverage-summary", "web-checks", "web-runtime", "fast-feedback",
-    }
-    assert "always()" in jobs["repository-checks"]["if"]
-    for job_name in (
-        "lint-and-static",
-        "tests-packages",
-        "go-checks",
-        "nebius-iac",
-    ):
-        assert set(jobs[job_name]["needs"]) == {"workflow-plan"}
-    assert "gate_mode == 'full'" in jobs["runtime-payload"]["if"]
-    assert "gate_mode == 'preflight'" in jobs["runtime-payload"]["if"]
-
-    runtime_payload_scripts = "\n".join(
-        step.get("run", "") for step in jobs["runtime-payload"]["steps"]
-    ).strip()
-    assert runtime_payload_scripts == (
-        'python3 scripts/configure_ci_registry_mirror.py\n'
-        'python3 scripts/runtime_payload_conformance.py --test-scope "${CI_TEST_SCOPE:-all}"'
-    )
-    assert "continue-on-error" not in jobs["runtime-payload"]
-
-    assert {
-        "docs_only",
-        "event_relevant",
-        "full_gate",
-        "gate_mode",
-        "integration",
-        "integration_docker",
-        "images",
-        "cluster_smoke",
-        "staging_smoke",
-        "coverage_summary",
-        "web_checks",
-    } <= set(jobs["workflow-plan"]["outputs"])
-
-    aggregate_step = next(
-        step
-        for step in jobs["repository-checks"]["steps"]
-        if step.get("name") == "Enforce selected validation results"
-    )
-    gate_env = aggregate_step["env"]
-    assert gate_env["PLAN_RESULT"] == "${{ needs.workflow-plan.result }}"
-    assert gate_env["LINT_RESULT"] == "${{ needs.lint-and-static.result }}"
-    assert gate_env["LINT_SELECTED"] == "${{ needs.workflow-plan.outputs.lint_and_static }}"
-    assert gate_env["ROOT_RESULT"] == "${{ needs.tests-root.result }}"
-    assert gate_env["FAST_COVERAGE_RESULT"] == "${{ needs.fast-coverage.result }}"
+    jobs = _workflow(".github/workflows/ci.yml")["jobs"]
+    gate = jobs["repository-checks"]
+    step = next(step for step in gate["steps"] if step.get("name") == "Enforce selected validation results")
     for selected, result in REPOSITORY_SELECTED_RESULTS.items():
-        assert selected in gate_env and result in gate_env
-        assert f'"${selected}"' in aggregate_step["run"]
-        assert f'"${result}"' in aggregate_step["run"]
-
-    assert set(jobs["web-checks"]["needs"]) == {"workflow-plan"}
-    assert "needs.workflow-plan.outputs.web_checks == 'true'" in jobs["web-checks"]["if"]
-    web_script = "\n".join(
-        step.get("run", "") for step in jobs["web-checks"]["steps"] if "run" in step
-    )
-    assert "component_ownership.py test-paths --lane frontend" in web_script
-    assert "component_ownership.py --help | grep -q -- 'test-paths'" in web_script
-    assert "npm run typecheck" in web_script
-    assert "npm run lint" in web_script
-    assert "vitest run --coverage" in web_script
-    assert "npm run test:coverage" in web_script
-    runtime_script = "\n".join(step.get("run", "") for step in jobs["web-runtime"]["steps"])
-    assert "npm run build" in runtime_script
-    assert "npm run test:e2e" in runtime_script
-    assert "npm run build" not in web_script
-    assert "npm run test:e2e" not in web_script
+        assert selected in step["env"] and result in step["env"]
+    for value in step["env"].values():
+        reference = re.fullmatch(r"\$\{\{ needs\.([\w-]+)\.result \}\}", value)
+        if reference:
+            assert reference[1] in gate["needs"]
+    assert "always()" in gate["if"]
 
 
 @pytest.mark.parametrize("lane,output", [

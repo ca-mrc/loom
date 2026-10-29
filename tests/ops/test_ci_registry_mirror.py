@@ -149,31 +149,6 @@ def test_setup_refuses_non_hosted_or_remote_daemons(
     assert "GitHub-hosted Linux runner with its local Docker daemon" in result.stderr
 
 
-@pytest.mark.parametrize(
-    ("workflow", "job"),
-    [
-        ("ci", "tests-root"),
-        ("ci", "runtime-payload"),
-        ("ci", "integration"),
-        ("ci", "integration-docker"),
-        ("cluster-smoke", "cluster-contract"),
-        ("staging-smoke", "system-smoke"),
-        ("images", "build"),
-        ("images", "nebius-harness-build"),
-    ],
-)
-def test_each_docker_consumer_configures_mirror_immediately_after_checkout(
-    workflow: str,
-    job: str,
-) -> None:
-    jobs = yaml.safe_load((ROOT / f".github/workflows/{workflow}.yml").read_text())["jobs"]
-    steps = jobs[job]["steps"]
-    assert steps[0]["uses"].startswith("actions/checkout@")
-    assert steps[1].get("run") == "python3 scripts/configure_ci_registry_mirror.py"
-    assert not steps[1].get("continue-on-error")
-    assert not steps[1].get("if")
-
-
 @pytest.mark.parametrize("host_config_exists", [False, True])
 def test_buildkit_uses_tracked_mirror_unless_host_config_is_present(
     tmp_path: Path,

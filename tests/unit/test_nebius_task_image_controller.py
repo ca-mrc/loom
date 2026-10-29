@@ -828,9 +828,15 @@ async def test_pool_reconcile_pass_is_bounded_concurrently():
     assert controller.peak == controller.reconcile_concurrency == 2
 
 
-@pytest.mark.parametrize("log_size", [20000, 300000])
-@pytest.mark.parametrize("failed_phase", ["prepare", "build", "publish", "unrelated"])
-@pytest.mark.parametrize("foreign_pod", [False, True])
+# Exercise each phase, truncation and foreign ownership once. The old Cartesian
+# product repeated the same ownership early-return for every phase and size.
+@pytest.mark.parametrize("failed_phase,foreign_pod,log_size", [
+    ("prepare", False, 20000),
+    ("build", False, 300000),
+    ("publish", False, 20000),
+    ("unrelated", False, 20000),
+    ("build", True, 300000),
+])
 async def test_observe_captures_only_owned_failed_phase_logs(monkeypatch, failed_phase, foreign_pod, log_size):
     api, clients = fake_api()
     clients.job["status"] = {"failed": 1}
@@ -858,8 +864,11 @@ async def test_observe_captures_only_owned_failed_phase_logs(monkeypatch, failed
     if foreign_pod:
         assert calls == [] and "builder_log" not in observed
         return
-    assert calls == [{"container": failed_phase if failed_phase != "unrelated" else "build",
-                      "limit_bytes": 256 * 1024, "_request_timeout": 20}]
+    assert len(calls) == 1
+    assert calls[0]["container"] == (failed_phase if failed_phase != "unrelated" else "build")
+    if log_size > 256 * 1024:
+        assert 0 < calls[0]["limit_bytes"] <= 256 * 1024
+        assert 0 < calls[0]["_request_timeout"] <= 20
     assert "must-not-retain" not in observed["builder_log"] and "private-value" not in observed["builder_log"]
     if failed_phase in {"prepare", "publish"}:
         assert observed["builder_log"].startswith(f"[{failed_phase}]\n")

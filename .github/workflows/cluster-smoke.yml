@@ -105,6 +105,7 @@ jobs:
       required: ${{ steps.plan.outputs.cluster_smoke || steps.event.outputs.required }}
       gate_mode: ${{ steps.plan.outputs.gate_mode || steps.event.outputs.gate_mode }}
       test_changes: ${{ steps.plan.outputs.test_changes }}
+      full_test_lanes: ${{ steps.plan.outputs.full_test_lanes }}
       cluster_smoke_matrix: ${{ steps.plan.outputs.cluster_smoke_matrix }}
     steps:
       - name: Classify filtered event before checkout
@@ -209,6 +210,7 @@ jobs:
         include: ${{ fromJSON(needs.plan.outputs.cluster_smoke_matrix) }}
     env:
       TEST_CHANGED_PATHS: ${{ needs.plan.outputs.test_changes }}
+      FULL_TEST_LANES: ${{ needs.plan.outputs.full_test_lanes }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:

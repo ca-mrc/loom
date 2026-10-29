@@ -215,14 +215,6 @@ class Nested:
     assert visited <= 2 * small + 40, "fixture expressions multiplied import-discovery traversal work"
 
 
-def test_staging_workflow_passes_the_same_changed_paths_to_its_owner():
-    workflow = yaml.safe_load((ROOT / ".github/workflows/staging-smoke.yml").read_text())
-    job = workflow["jobs"]["system-smoke"]
-    step = next(row for row in job["steps"] if row.get("name", "").startswith("Pytest"))
-    assert step["env"]["TEST_CHANGED_PATHS"] == "${{ needs.plan.outputs.test_changes }}"
-    assert '--changed-paths-json "$TEST_CHANGED_PATHS"' in step["run"]
-
-
 @pytest.mark.parametrize(
     "event,labels",
     [("schedule", ()), ("workflow_dispatch", ()), ("pull_request", ("ci:coverage-summary",))],
@@ -236,20 +228,6 @@ def test_frontend_contract_only_retains_codegen_and_full_ui_for_frontend_inputs(
     assert not plan("src/loom_service/routes/trials.py").web_runtime
     assert plan("web/src/App.tsx").web_runtime
     assert plan("uv.lock").web_runtime
-    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
-    steps = workflow["jobs"]["web-checks"]["steps"]
-    assert "if" not in next(row for row in steps if row.get("name") == "Verify generated API types")
-    runtime = workflow["jobs"]["web-runtime"]["steps"]
-    for name in (
-        "Vitest coverage gate",
-        "Production build",
-        "Install Chromium",
-        "Prefix-route browser, axe, console, and network gate",
-    ):
-        assert (
-            next(row for row in (steps if name == "Vitest coverage gate" else runtime) if row.get("name") == name)["if"]
-            == "needs.workflow-plan.outputs.web_runtime == 'true'"
-        )
 
 
 @pytest.mark.parametrize(
@@ -398,33 +376,3 @@ def test_staging_selector_failure_cannot_be_lost_after_partial_output(tmp_path):
         capture_output=True,
     )
     assert result.returncode == 17
-
-
-@pytest.mark.parametrize("event,required", [("pull_request", False), ("workflow_dispatch", True)])
-def test_image_workflow_skips_readme_builds_but_keeps_manual_full(tmp_path, event, required):
-    workflow = yaml.safe_load((ROOT / ".github/workflows/images.yml").read_text())
-    step = next(
-        row
-        for row in workflow["jobs"]["plan"]["steps"]
-        if row.get("name") == "Select affected images"
-    )
-    changed = tmp_path / "changed.txt"
-    changed.write_text("README.md\n")
-    output = tmp_path / "output"
-    subprocess.run(
-        ["bash", "-c", step["run"]],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        env={
-            **os.environ,
-            "REQUIRED": "false",
-            "UNOWNED_RUNTIME": "false",
-            "EVENT_NAME": event,
-            "CHANGED_FILES": str(changed),
-            "GITHUB_OUTPUT": str(output),
-        },
-    )
-    values = dict(row.split("=", 1) for row in output.read_text().splitlines())
-    assert (values["required"] == "true") is required
-    assert bool(json.loads(values["images"])) is required

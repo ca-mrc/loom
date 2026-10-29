@@ -100,6 +100,7 @@ jobs:
       required: ${{ steps.plan.outputs.staging_smoke || steps.event.outputs.required }}
       gate_mode: ${{ steps.plan.outputs.gate_mode || steps.event.outputs.gate_mode }}
       test_changes: ${{ steps.plan.outputs.test_changes || '[]' }}
+      full_test_lanes: ${{ steps.plan.outputs.full_test_lanes || '[]' }}
     steps:
       - name: Classify filtered event before checkout
         id: event
@@ -223,6 +224,7 @@ jobs:
         env:
           LOOM_SYSTEM_SMOKE_DIAGNOSTICS: ${{ runner.temp }}/system-smoke-compose.log
           TEST_CHANGED_PATHS: ${{ needs.plan.outputs.test_changes }}
+          FULL_TEST_LANES: ${{ needs.plan.outputs.full_test_lanes }}
         run: |
           set -euo pipefail
           manifest_paths_file="$RUNNER_TEMP/system-smoke-tests.txt"

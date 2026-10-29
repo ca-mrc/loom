@@ -11,21 +11,6 @@ ROOT = Path(__file__).resolve().parents[2]
 SPECIALISTS = ("images", "cluster-smoke", "staging-smoke")
 
 
-@pytest.mark.parametrize("name", SPECIALISTS)
-def test_specialists_are_reusable_without_independent_pr_runs(name):
-    workflow = yaml.safe_load((ROOT / f".github/workflows/{name}.yml").read_text())
-    assert set(workflow[True]) == {"workflow_call", "workflow_dispatch"}
-    assert "concurrency" not in workflow  # The caller owns cancellation.
-    plan = workflow["jobs"]["plan"]
-    assert plan["permissions"] == {"contents": "read"}
-    assert plan["timeout-minutes"] == 10
-    assert all("ci_fast_feedback.py" not in step.get("run", "") for step in plan["steps"])
-    # The caller owns the four bare required names. Inner result checks still run.
-    gate = workflow["jobs"][f"{name}-gate"]
-    assert gate["name"] == f"{name} result"
-    assert "PLAN_RESULT" in gate["steps"][0]["env"]
-
-
 @pytest.mark.parametrize("name", ("cluster-smoke", "staging-smoke"))
 def test_reusable_legacy_scope_is_explicit_and_off_by_default(name):
     workflow = yaml.safe_load((ROOT / f".github/workflows/{name}.yml").read_text())

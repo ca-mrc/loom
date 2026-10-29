@@ -6,7 +6,7 @@ import argparse
 import json
 import os
 import re
-import subprocess
+import urllib.request
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
@@ -43,24 +43,25 @@ SPECIALISTS = {
 
 def read_json(endpoint: str) -> Any:
     """Read native GitHub metadata without exposing CLI output on failures."""
+    request = urllib.request.Request(
+        f"{os.environ.get('GITHUB_API_URL', 'https://api.github.com').rstrip('/')}/{endpoint}",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {os.environ.get('GH_TOKEN', '')}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
     try:
-        response = subprocess.run(
-            ["gh", "api", endpoint], capture_output=True, text=True, timeout=20, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired, UnicodeError):
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return json.loads(response.read())
+    except (OSError, ValueError):
         raise ValueError("base freshness API request failed") from None
-    if response.returncode != 0:
-        raise ValueError("base freshness API request failed")
-    try:
-        return json.loads(response.stdout)
-    except (ValueError, TypeError):
-        raise ValueError("base freshness API returned invalid JSON") from None
 
 
 def check_current_base(
     repository: str, base_ref: str, expected_sha: str, read: Callable[[str], Any] = read_json,
 ) -> None:
-    """Avoid heavy PR work already obsolete under strict, non-queue admission."""
+    """Avoid PR fan-out already obsolete under strict, non-queue admission."""
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) or any(
         part in {".", ".."} for part in repository.split("/")
     ):
@@ -93,7 +94,7 @@ def check_current_base(
     if not isinstance(current_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", current_sha):
         raise ValueError("invalid current base SHA")
     if current_sha != expected_sha:
-        raise ValueError("strict base has advanced; update this PR before starting heavy CI")
+        raise ValueError("strict base has advanced; update this PR before starting validation")
 
 
 def enforce_specialist(needs: dict[str, Any], selector: str) -> None:

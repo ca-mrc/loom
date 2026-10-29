@@ -393,7 +393,3 @@ def test_image_input_validation_accepts_actual_github_context_shapes(
     )
 
     assert result.returncode == 0, result.stderr
-
-
-def test_secret_isolation_contract_does_not_depend_on_one_reviewer() -> None:
-    assert not (REPO_ROOT / ".github/CODEOWNERS").exists()

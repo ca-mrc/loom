@@ -1,10 +1,13 @@
 """Stop obsolete strict-base PR fan-out without interfering with native queues."""
 
 import os
-import shlex
 import subprocess
 import sys
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from pathlib import Path
+from threading import Thread
 
 import pytest
 from scripts import ci_fast_feedback as feedback
@@ -71,52 +74,64 @@ def test_invalid_input_fails_before_any_request(repository, branch, sha):
         feedback.check_current_base(repository, branch, sha, read=read)
 
 
-@pytest.mark.parametrize("failure", ["http", "timeout", "json", "missing"])
-def test_cli_transport_failure_does_not_echo_token_or_response(monkeypatch, failure, capsys):
+@pytest.mark.parametrize("failure", ["http", "timeout", "json"])
+def test_http_transport_failure_does_not_echo_token_or_response(monkeypatch, failure, capsys):
     secret = "private-token-do-not-print"
+    monkeypatch.setenv("GH_TOKEN", secret)
 
-    def run(argv, **kwargs):
-        assert argv == ["gh", "api", "repos/ca-mrc/loom/rules/branches/dev"]
-        assert kwargs == {"capture_output": True, "text": True, "timeout": 20, "check": False}
+    def open_request(request, *, timeout):
+        assert request.full_url == "https://api.github.com/repos/ca-mrc/loom/rules/branches/dev"
+        assert request.get_header("Authorization") == f"Bearer {secret}"
+        assert timeout == 20
         if failure == "timeout":
-            raise subprocess.TimeoutExpired(argv, 20, output=secret, stderr=secret)
-        if failure == "missing":
+            raise TimeoutError(secret)
+        if failure == "http":
             raise OSError(secret)
-        return subprocess.CompletedProcess(argv, 1 if failure == "http" else 0, secret, secret)
+        return BytesIO(secret.encode())
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(urllib.request, "urlopen", open_request)
     with pytest.raises(ValueError) as error:
         feedback.check_current_base("ca-mrc/loom", "dev", OLD)
     assert secret not in str(error.value)
     assert secret not in "".join(capsys.readouterr())
 
 
-@pytest.mark.parametrize("current,mode,expected,requests", [(OLD, "success", 0, 2), (NEW, "success", 1, 2), (OLD, "http", 1, 1), (OLD, "json", 1, 1)])
-def test_actual_check_base_cli_uses_bounded_native_transport(tmp_path, current, mode, expected, requests):
-    calls = tmp_path / "calls"
-    stub = tmp_path / "gh.py"
-    stub.write_text(
-        "import json, os, sys\n"
-        "assert sys.argv[1] == 'api'\n"
-        "with open(os.environ['CALLS'], 'a') as output: output.write(sys.argv[2] + '\\n')\n"
-        "if os.environ['MODE'] == 'http':\n"
-        " print(os.environ['GH_TOKEN'], file=sys.stderr); sys.exit(1)\n"
-        "if os.environ['MODE'] == 'json':\n"
-        " print(os.environ['GH_TOKEN']); sys.exit(0)\n"
-        "print(json.dumps([{'type':'required_status_checks','parameters':{'strict_required_status_checks_policy':True}}]"
-        " if '/rules/' in sys.argv[2] else {'object':{'sha':os.environ['CURRENT']}}))\n"
-    )
-    gh = tmp_path / "gh"
-    gh.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(stub))} \"$@\"\n")
-    gh.chmod(0o755)
+@pytest.mark.parametrize("current,mode,expected", [(OLD, "success", 0), (NEW, "success", 1), (OLD, "http", 1), (OLD, "json", 1)])
+def test_actual_check_base_cli_uses_bounded_native_http(tmp_path, current, mode, expected):
+    # Exercise the real CLI without gh or external network access.
+    import json
+
     secret = "private-token-do-not-print"
-    result = subprocess.run(
-        [sys.executable, str(ROOT / "scripts/ci_fast_feedback.py"), "check-base"],
-        capture_output=True, text=True, env={**os.environ,
-            "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
-            "GITHUB_REPOSITORY": "ca-mrc/loom", "PR_BASE_REF": "dev", "PR_BASE_SHA": OLD,
-            "GH_TOKEN": secret, "CALLS": str(calls), "CURRENT": current, "MODE": mode},
-    )
+    calls = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            calls.append(self.path)
+            assert self.headers["Authorization"] == f"Bearer {secret}"
+            self.send_response(503 if mode == "http" else 200)
+            self.end_headers()
+            value = [STRICT] if "/rules/" in self.path else {"object": {"sha": current}}
+            self.wfile.write(secret.encode() if mode != "success" else json.dumps(value).encode())
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/ci_fast_feedback.py"), "check-base"],
+            capture_output=True, text=True, timeout=10, env={**os.environ,
+                "GITHUB_API_URL": f"http://127.0.0.1:{server.server_port}",
+                "GITHUB_REPOSITORY": "ca-mrc/loom", "PR_BASE_REF": "dev", "PR_BASE_SHA": OLD,
+                "GH_TOKEN": secret},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
     assert result.returncode == expected, result.stderr
-    assert calls.read_text().splitlines() == ["repos/ca-mrc/loom/rules/branches/dev", "repos/ca-mrc/loom/git/ref/heads/dev"][:requests]
+    requests = 2 if mode == "success" else 1
+    assert calls == ["/repos/ca-mrc/loom/rules/branches/dev", "/repos/ca-mrc/loom/git/ref/heads/dev"][:requests]
     assert secret not in result.stdout + result.stderr

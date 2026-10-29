@@ -67,7 +67,6 @@ def test_feedback_owns_mandatory_cli_probe_in_candidate_planners_hosted_environm
     commands = [step.get("run") for step in job["steps"]]
     probe = next(step for step in job["steps"] if step.get("run") == "python3 scripts/check_github_cli_logs.py")
     assert commands.index("python3 scripts/ci_fast_feedback.py enforce") < job["steps"].index(probe)
-    assert job["steps"].index(probe) < commands.index("python3 scripts/ci_fast_feedback.py check-base")
     assert not probe.get("if") and not probe.get("continue-on-error")
     assert "env" not in probe  # The probe needs no real GitHub token.
 
@@ -76,8 +75,7 @@ def test_feedback_owns_mandatory_cli_probe_in_candidate_planners_hosted_environm
     ("nebius-pool", "nebius_pool"), ("runtime-payload", "runtime_payload"),
     ("integration-docker", "integration_docker"), ("web-runtime", "web_runtime"),
 ])
-@pytest.mark.parametrize("ancestor", FEEDBACK_JOBS)
-def test_successful_feedback_releases_selected_heavy_work_after_unselected_ancestor_skip(job_name, selector, ancestor):
+def test_successful_feedback_releases_selected_heavy_work_after_unselected_ancestor_skip(job_name, selector):
     # Native run 39979536847 had successful feedback but selected heavy work
     # skipped because GitHub's implicit success() includes skipped ancestors.
     job = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"][job_name]
@@ -85,7 +83,7 @@ def test_successful_feedback_releases_selected_heavy_work_after_unselected_ances
         "needs.workflow-plan.result": "success", "needs.fast-feedback.result": "success",
         "needs.workflow-plan.outputs.gate_mode": "full",
         f"needs.workflow-plan.outputs.{selector}": "true",
-        f"needs.{ancestor}.result": "skipped",
+        "needs.tests-packages.result": "skipped",
     }
     assert _condition(job["if"], values)
     assert not _condition(job["if"], values, cancelled=True)
@@ -118,29 +116,33 @@ def test_reusable_nodes_allow_skipped_outer_ancestors_but_require_their_own_depe
             assert not _condition(condition, {**values, f"needs.{dependency}.result": result})
 
 
-@pytest.mark.parametrize("event", ["pull_request", "merge_group", "workflow_dispatch", "schedule", "push"])
-@pytest.mark.parametrize("selector", [None, "nebius_pool", "integration_docker", "runtime_payload", "web_runtime", "images", "cluster_smoke", "staging_smoke"])
-def test_base_preflight_runs_only_after_quick_success_for_pr_heavy_work(event, selector):
-    job = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["fast-feedback"]
-    step = next(step for step in job["steps"] if step.get("run") == "python3 scripts/ci_fast_feedback.py check-base")
-    assert job["steps"].index(step) > next(
-        index for index, item in enumerate(job["steps"])
-        if item.get("run") == "python3 scripts/ci_fast_feedback.py enforce"
-    )
+@pytest.mark.parametrize(("event", "selector", "gate", "expected"), [
+    ("pull_request", "runtime_payload", "full", True),
+    ("pull_request", "images", "full", True),
+    ("pull_request", None, "full", False),
+    ("pull_request", "images", "filtered", False),
+    ("merge_group", "images", "full", False),
+    ("workflow_dispatch", "images", "full", False),
+    ("schedule", "images", "full", False),
+    ("push", "images", "full", False),
+])
+def test_base_preflight_stops_obsolete_pr_before_validation_fanout(event, selector, gate, expected):
+    jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
+    steps = jobs["workflow-plan"]["steps"]
+    step = next(item for item in steps if item.get("run") == "python3 scripts/ci_fast_feedback.py check-base")
+    assert steps.index(step) > next(index for index, item in enumerate(steps) if item.get("id") == "plan")
+    assert not any("check-base" in item.get("run", "") for item in jobs["fast-feedback"]["steps"])
     assert not step.get("continue-on-error")
-    values = {f"needs.workflow-plan.outputs.{name}": "false" for name in (
+    values = {f"steps.plan.outputs.{name}": "false" for name in (
         "nebius_pool", "integration_docker", "runtime_payload", "web_runtime", "images", "cluster_smoke", "staging_smoke",
     )}
-    values["github.event_name"] = event
+    values.update({"github.event_name": event, "steps.plan.outputs.gate_mode": gate})
     if selector:
-        values[f"needs.workflow-plan.outputs.{selector}"] = "true"
-    assert _condition(step["if"], values) is (event == "pull_request" and selector is not None)
-    assert not _condition(step["if"], {**values, "needs.quick.result": "failure"})
-    assert step["env"] == {
-        "GH_TOKEN": "${{ github.token }}",
-        "PR_BASE_REF": "${{ github.event.pull_request.base.ref }}",
-        "PR_BASE_SHA": "${{ github.event.pull_request.base.sha }}",
-    }
+        values[f"steps.plan.outputs.{selector}"] = "true"
+    expression = step["if"].replace("steps.plan.outputs.", "needs.plan.outputs.")
+    values = {key.replace("steps.plan.outputs.", "needs.plan.outputs."): value for key, value in values.items()}
+    assert _condition(expression, values) is expected
+    assert not _condition(expression, {**values, "needs.plan.result": "failure"})
 
 
 @pytest.mark.parametrize(("event", "label", "dependent"), [
