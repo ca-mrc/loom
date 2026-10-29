@@ -468,9 +468,12 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     async def _interactive_read_timeout(
         request: Request, exc: OperationalError,
     ) -> JSONResponse:
-        # Only the opt-in browser read timeout cancels statements (#2687);
-        # every other database failure keeps its existing 500 behavior.
-        if not isinstance(exc.orig, psycopg.errors.QueryCanceled):
+        # Only requests that successfully applied the opt-in browser read
+        # policy receive its retry response. Other cancellations retain 500.
+        if not (
+            getattr(request.state, "interactive_read_timeout_applied", False)
+            and isinstance(exc.orig, psycopg.errors.QueryCanceled)
+        ):
             raise exc
         INTERACTIVE_READ_TIMEOUTS_TOTAL.inc()
         return JSONResponse(

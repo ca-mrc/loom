@@ -143,15 +143,31 @@ def instrument_engine(engine: Any) -> None:
         return
 
     @event.listens_for(sync_engine, "before_cursor_execute")
-    def _start(conn: Any, _cursor: Any, _statement: str, *_args: Any) -> None:
-        conn.info.setdefault("_loom_statement_start", []).append(time.perf_counter())
+    def _start(
+        _conn: Any, _cursor: Any, _statement: str, _parameters: Any,
+        context: Any, _executemany: bool,
+    ) -> None:
+        context._loom_statement_start = time.perf_counter()
+
+    def _observe(context: Any, statement: str | None) -> None:
+        started = getattr(context, "_loom_statement_start", None)
+        if started is None:
+            return
+        del context._loom_statement_start
+        verb = statement.lstrip().split(None, 1)[0].lower() if statement and statement.strip() else ""
+        DB_STATEMENT_SEC.labels(verb=verb if verb in _STATEMENT_VERBS else "other").observe(
+            time.perf_counter() - started,
+        )
 
     @event.listens_for(sync_engine, "after_cursor_execute")
-    def _finish(conn: Any, _cursor: Any, statement: str, *_args: Any) -> None:
-        starts = conn.info.get("_loom_statement_start")
-        if not starts:
-            return
-        verb = statement.lstrip().split(None, 1)[0].lower() if statement.strip() else ""
-        DB_STATEMENT_SEC.labels(verb=verb if verb in _STATEMENT_VERBS else "other").observe(
-            time.perf_counter() - starts.pop(),
-        )
+    def _finish(
+        _conn: Any, _cursor: Any, statement: str, _parameters: Any,
+        context: Any, _executemany: bool,
+    ) -> None:
+        _observe(context, statement)
+
+    @event.listens_for(sync_engine, "handle_error")
+    def _failed(context: Any) -> None:
+        # Failed/cancelled statements never emit after_cursor_execute. Keep
+        # their latency, with timing state scoped to this execution only.
+        _observe(context.execution_context, context.statement)

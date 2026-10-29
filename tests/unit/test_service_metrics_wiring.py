@@ -111,3 +111,29 @@ def test_instrument_engine_records_statement_time_by_verb() -> None:
     engine.dispose()
     assert count("select") == before["select"] + 1
     assert count("other") == before["other"] + 1
+
+
+def test_instrument_engine_records_failed_statements_and_recovers() -> None:
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.exc import OperationalError
+
+    from loom_service.metrics import instrument_engine
+
+    def count() -> float:
+        return REGISTRY.get_sample_value(
+            "loom_svc_db_statement_sec_count", {"verb": "select"},
+        ) or 0.0
+
+    engine = create_engine("sqlite://")
+    instrument_engine(engine)
+    before = count()
+    try:
+        with engine.connect() as conn:
+            with pytest.raises(OperationalError, match="no such table"):
+                conn.execute(text("SELECT * FROM missing_table"))
+            # Failed statements (including timeouts) must contribute their latency.
+            assert count() == before + 1
+            conn.execute(text("SELECT 1"))
+            assert count() == before + 2
+    finally:
+        engine.dispose()

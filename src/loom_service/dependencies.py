@@ -102,6 +102,7 @@ async def _limit_interactive_read(
         and request.method.upper() in {"GET", "HEAD"}
     ):
         await session.execute(text(f"SET LOCAL statement_timeout = {int(timeout_ms)}"))
+        request.state.interactive_read_timeout_applied = True
 
 
 async def authed_session(

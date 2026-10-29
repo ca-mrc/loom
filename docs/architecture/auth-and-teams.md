@@ -154,7 +154,9 @@ the same browser, including startup's `/auth/me`, authenticate independently
 its commit), connection-pool wait and SQL time from total request latency.
 `LOOM_SVC_INTERACTIVE_READ_STATEMENT_TIMEOUT_MS` (default `0`, disabled) sets a
 `statement_timeout` on browser-session GET/HEAD reads only; a cancelled read
-returns a retryable `503` with `Retry-After`. Bearer callers, including workers
+returns a retryable `503` with `Retry-After`. This response and its timeout
+counter apply only after that request has successfully installed the optional
+limit; other database cancellations retain their existing error behavior. Bearer callers, including workers
 and task writeback, are never limited. Choose a value from the observed
 statement-time baseline before enabling it.
 
