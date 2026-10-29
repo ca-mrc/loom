@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 from types import SimpleNamespace
@@ -600,20 +601,52 @@ class _Sessions:
         return False
 
 
-def _native_controller(monkeypatch, *, outstanding, claim, reconcile_error=None, max_concurrent=None, jobs=0):
+@pytest.mark.parametrize(("pool_size", "max_overflow", "highest"), [(5, 10, 10), (5, 4, 4), (2, 0, None)])
+def test_reconcile_concurrency_leaves_every_guard_a_second_connection(pool_size, max_overflow, highest):
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from loom_execution_actuator.renderer import ExecutionTargetRuntime
+    from loom_execution_actuator.task_image_controller import (
+        RECONCILE_CONCURRENCY,
+        NativeTaskImageController,
+    )
+
+    sessions = async_sessionmaker(create_async_engine("postgresql+psycopg://loom@localhost/loom",
+                                                      pool_size=pool_size, max_overflow=max_overflow))
+
+    def build(concurrency):
+        return NativeTaskImageController(sessions=sessions, kubernetes=object(),
+            target=ExecutionTargetRuntime(target_id="nebius-a", namespace="executions"),
+            settings=_builder_settings(), reconcile_concurrency=concurrency)
+
+    for concurrency in range(1, 13):
+        if highest is not None and concurrency <= highest:
+            assert build(concurrency).reconcile_concurrency == concurrency
+        else:
+            with pytest.raises(ValueError, match="could exhaust"):
+                build(concurrency)
+    if (pool_size, max_overflow) == (5, 10):  # SQLAlchemy's default, as the actuator uses it
+        assert RECONCILE_CONCURRENCY <= highest
+
+
+def _native_controller(monkeypatch, *, outstanding, claims, reconcile_error=None, max_concurrent=None, jobs=0,
+                       admissions_per_pass=16):
     from loom_execution_actuator.task_image_controller import NativeTaskImageController
 
     controller = object.__new__(NativeTaskImageController)
     controller.sessions = _Sessions
     controller.settings = _builder_settings(max_concurrent=max_concurrent)
+    controller.admissions_per_pass, controller.reconcile_concurrency = admissions_per_pass, 2
+    controller.admission_grace_seconds = 0.05
     controller.calls = []
+    remaining = list(claims)
 
     async def outstanding_rows(session):
         return [SimpleNamespace(id=item) for item in outstanding]
 
     async def reconcile(attempt_id):
         controller.calls.append(("reconcile", attempt_id))
-        if reconcile_error is not None:
+        if reconcile_error is not None and attempt_id in outstanding:
             raise reconcile_error
 
     async def inventory(namespace):
@@ -621,6 +654,7 @@ def _native_controller(monkeypatch, *, outstanding, claim, reconcile_error=None,
 
     async def claim_once():
         controller.calls.append(("claim",))
+        claim = remaining.pop(0) if remaining else None
         if isinstance(claim, Exception):
             raise claim
         return claim
@@ -632,28 +666,34 @@ def _native_controller(monkeypatch, *, outstanding, claim, reconcile_error=None,
     return controller
 
 
-@pytest.mark.parametrize("claim,max_concurrent,jobs,outcome", [
-    ("claimed-id", None, 0, "claimed"),
-    (None, None, 0, "idle"),
-    ("unused", 2, 2, "capped"),
+@pytest.mark.parametrize("claims,max_concurrent,jobs,outcome,claimed", [
+    (["c1", "c2"], None, 0, "idle", 2),
+    ([None], None, 0, "idle", 0),
+    (["unused"], 2, 2, "capped", 0),
+    (["c1", "unused"], 3, 2, "capped", 1),
+    (["c1", "c2", "c3", "unused"], None, 0, "batch_full", 3),
 ])
-async def test_native_build_cycle_records_outstanding_phases_and_admission(
-        monkeypatch, caplog, claim, max_concurrent, jobs, outcome):
+async def test_native_admission_pass_claims_until_idle_capped_or_batch_full(
+        monkeypatch, caplog, claims, max_concurrent, jobs, outcome, claimed):
     sample = _cycle_samples("native")
     before = sample("loom_execution_actuator_task_image_build_admissions_total", outcome=outcome)
+    claims_before = sample("loom_execution_actuator_task_image_build_claims_total")
     phases = sample("loom_execution_actuator_task_image_build_cycle_seconds_count", phase="reconcile")
-    controller = _native_controller(monkeypatch, outstanding=["a", "b"], claim=claim,
-                                    max_concurrent=max_concurrent, jobs=jobs)
+    controller = _native_controller(monkeypatch, outstanding=["a", "b"], claims=claims,
+                                    max_concurrent=max_concurrent, jobs=jobs, admissions_per_pass=3)
 
     with caplog.at_level("INFO", logger="loom_execution_actuator.metrics"):
         await controller.run_once()
 
     assert sample("loom_execution_actuator_task_image_build_admissions_total", outcome=outcome) == before + 1
+    assert sample("loom_execution_actuator_task_image_build_claims_total") == claims_before + claimed
     assert sample("loom_execution_actuator_task_image_build_cycle_seconds_count", phase="reconcile") == phases + 1
     assert sample("loom_execution_actuator_task_image_build_outstanding") == 2
-    assert "outstanding=2" in caplog.text and f"admission={outcome}" in caplog.text
-    # Admission behavior is unchanged: capped cycles never claim.
-    assert (("claim",) in controller.calls) is (outcome != "capped")
+    assert "outstanding=2" in caplog.text and f"claimed={claimed} admission={outcome}" in caplog.text
+    # Every claim is reconciled (Job created) before the next claim; caps never over-claim.
+    new_starts = [call[1] for call in controller.calls if call[0] == "reconcile" and call[1] not in ("a", "b")]
+    assert new_starts == claims[:claimed]
+    assert {("reconcile", "a"), ("reconcile", "b")} <= set(controller.calls)
 
 
 async def test_native_blocked_claim_records_its_reason_and_quiet_idle_cycles_do_not_log(monkeypatch, caplog):
@@ -662,7 +702,7 @@ async def test_native_blocked_claim_records_its_reason_and_quiet_idle_cycles_do_
     sample = _cycle_samples("native")
     reason = "execution_capacity_native_io_observation_unavailable"
     before = sample("loom_execution_actuator_task_image_build_admissions_total", outcome=reason)
-    controller = _native_controller(monkeypatch, outstanding=[], claim=ExecutionProvisioningBlockedError(reason))
+    controller = _native_controller(monkeypatch, outstanding=[], claims=[ExecutionProvisioningBlockedError(reason)])
 
     with caplog.at_level("INFO", logger="loom_execution_actuator.metrics"):
         await controller.run_once()
@@ -672,24 +712,66 @@ async def test_native_blocked_claim_records_its_reason_and_quiet_idle_cycles_do_
     assert "Native build cycle" not in caplog.text
 
 
-async def test_native_reconcile_failure_still_raises_without_claim_and_records_error(monkeypatch):
+async def test_native_reconcile_failure_is_raised_without_blocking_unrelated_admission(monkeypatch):
     sample = _cycle_samples("native")
-    before = sample("loom_execution_actuator_task_image_build_admissions_total", outcome="error")
-    controller = _native_controller(monkeypatch, outstanding=["a"], claim="unused",
+    before = sample("loom_execution_actuator_task_image_build_admissions_total", outcome="idle")
+    controller = _native_controller(monkeypatch, outstanding=["a"], claims=["new"],
                                     reconcile_error=ValueError("boom"))
 
     with pytest.raises(RuntimeError, match="Native build reconciliation failed"):
         await controller.run_once()
 
-    assert ("claim",) not in controller.calls
-    assert sample("loom_execution_actuator_task_image_build_admissions_total", outcome="error") == before + 1
+    assert ("reconcile", "new") in controller.calls
+    assert sample("loom_execution_actuator_task_image_build_admissions_total", outcome="idle") == before + 1
 
 
-def _pool_controller(*, pending, selected=None, select_error=None):
+async def test_native_admission_waits_for_a_slow_unrelated_reconcile_only_until_grace(monkeypatch):
+    controller = _native_controller(monkeypatch, outstanding=["slow"], claims=["c1", "c2"])
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def reconcile(attempt_id):
+        controller.calls.append(("reconcile", attempt_id))
+        if attempt_id == "slow":
+            started.set()
+            await release.wait()
+
+    monkeypatch.setattr(controller, "_reconcile", reconcile, raising=False)
+    cycle = asyncio.create_task(controller.run_once())
+    await started.wait()
+    # Only the grace separates the slow observation from both new starts.
+    async with asyncio.timeout(1):
+        while ("reconcile", "c2") not in controller.calls:
+            await asyncio.sleep(0.01)
+    assert [call[1] for call in controller.calls if call[0] == "reconcile" and call[1] != "slow"] == ["c1", "c2"]
+    assert not cycle.done()
+    release.set()
+    await cycle
+
+
+async def test_native_reconcile_pass_is_bounded_concurrently(monkeypatch):
+    controller = _native_controller(monkeypatch, outstanding=[f"a{index}" for index in range(7)], claims=[])
+    active = peak = 0
+
+    async def reconcile(attempt_id):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+
+    monkeypatch.setattr(controller, "_reconcile", reconcile, raising=False)
+    await controller.run_once()
+    assert peak == controller.reconcile_concurrency == 2
+
+
+def _pool_controller(*, pending, selected=(), select_error=None, admissions_per_pass=16, slow=None):
     from loom_execution_actuator.pool_build_runtime import PoolNativeBuildController
 
     controller = object.__new__(PoolNativeBuildController)
+    controller.admissions_per_pass, controller.reconcile_concurrency = admissions_per_pass, 2
     controller.reconciled = []
+    controller.peak = controller.active = 0
+    remaining = list(selected)
 
     async def iter_pending():
         for key in pending:
@@ -698,10 +780,15 @@ def _pool_controller(*, pending, selected=None, select_error=None):
     async def select_next():
         if select_error is not None:
             raise select_error
-        return None if selected is None else SimpleNamespace(request=SimpleNamespace(key=selected))
+        key = remaining.pop(0) if remaining else None
+        return None if key is None else SimpleNamespace(request=SimpleNamespace(key=key))
 
     async def reconcile(key):
-        controller.reconciled.append(key)
+        controller.active += 1
+        controller.peak = max(controller.peak, controller.active)
+        await asyncio.sleep(0.01 if slow else 0)
+        controller.active -= 1
+        controller.reconciled.append(getattr(key, "local_work_id", key))
 
     controller.driver = SimpleNamespace(outbox=SimpleNamespace(iter_pending=iter_pending))
     controller.selector = SimpleNamespace(select_next=select_next)
@@ -709,21 +796,36 @@ def _pool_controller(*, pending, selected=None, select_error=None):
     return controller
 
 
-async def test_pool_build_cycle_records_selection_outcome_and_preserves_errors():
+async def test_pool_build_cycle_selects_several_and_preserves_errors():
     sample = _cycle_samples("pool")
-    claimed = sample("loom_execution_actuator_task_image_build_admissions_total", outcome="claimed")
+    idle = sample("loom_execution_actuator_task_image_build_admissions_total", outcome="idle")
+    full = sample("loom_execution_actuator_task_image_build_admissions_total", outcome="batch_full")
+    claims = sample("loom_execution_actuator_task_image_build_claims_total")
     errors = sample("loom_execution_actuator_task_image_build_admissions_total", outcome="error")
 
-    controller = _pool_controller(pending=["p1", "p2", "p3"], selected="new")
+    controller = _pool_controller(pending=["p1", "p2", "p3"], selected=["n1", "n2"])
     await controller.run_once()
-    assert controller.reconciled[-1] == "new" and len(controller.reconciled) == 4
+    assert controller.reconciled[-2:] == ["n1", "n2"] and sorted(controller.reconciled[:3]) == ["p1", "p2", "p3"]
     assert sample("loom_execution_actuator_task_image_build_outstanding") == 3
-    assert sample("loom_execution_actuator_task_image_build_admissions_total", outcome="claimed") == claimed + 1
+    assert sample("loom_execution_actuator_task_image_build_admissions_total", outcome="idle") == idle + 1
+
+    bounded = _pool_controller(pending=[], selected=["n1", "n2", "n3"], admissions_per_pass=2)
+    await bounded.run_once()
+    assert bounded.reconciled == ["n1", "n2"]
+    assert sample("loom_execution_actuator_task_image_build_admissions_total", outcome="batch_full") == full + 1
+    assert sample("loom_execution_actuator_task_image_build_claims_total") == claims + 4
 
     failing = _pool_controller(pending=[], select_error=LookupError("selection"))
     with pytest.raises(LookupError):
         await failing.run_once()
     assert sample("loom_execution_actuator_task_image_build_admissions_total", outcome="error") == errors + 1
+
+
+async def test_pool_reconcile_pass_is_bounded_concurrently():
+    controller = _pool_controller(pending=[f"p{index}" for index in range(7)], slow=True)
+    await controller.run_once()
+    assert sorted(controller.reconciled) == sorted(f"p{index}" for index in range(7))
+    assert controller.peak == controller.reconcile_concurrency == 2
 
 
 @pytest.mark.parametrize("log_size", [20000, 300000])

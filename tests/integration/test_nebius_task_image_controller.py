@@ -776,16 +776,19 @@ async def test_node_loss_read_rechecks_build_progress_and_identity(controller_se
     assert not attempts[0].native_build.get("capacity_released_at")
 
 
-async def test_burst_admits_one_build_per_cycle_after_reconciling_every_running_build(controller_setup, monkeypatch):
-    """#2625: a burst ramps one claim per poll, behind a reconcile of all running builds.
+async def test_burst_admits_a_batch_per_pass_after_reconciling_every_running_build(controller_setup, monkeypatch):
+    """#2625/#2701: a burst fills capacity a batch per pass, not one build per poll.
 
-    Set LOOM_NATIVE_BUILD_BURST and LOOM_NATIVE_BUILD_BURST_KUBE_LATENCY_MS and
-    run with -s to print per-cycle timings for a larger, slower-API burst.
+    Set LOOM_NATIVE_BUILD_BURST, LOOM_NATIVE_BUILD_BURST_BATCH and
+    LOOM_NATIVE_BUILD_BURST_KUBE_LATENCY_MS, and run with -s to print per-pass
+    timings for a larger, slower-API burst.
     """
     controller, sessions, team_id, kube = controller_setup
-    burst = int(os.environ.get("LOOM_NATIVE_BUILD_BURST", "6"))
+    burst = int(os.environ.get("LOOM_NATIVE_BUILD_BURST", "10"))
+    batch = int(os.environ.get("LOOM_NATIVE_BUILD_BURST_BATCH", "4"))
     latency = float(os.environ.get("LOOM_NATIVE_BUILD_BURST_KUBE_LATENCY_MS", "0")) / 1000
     controller.settings = controller.settings.model_copy(update={"max_concurrent": None})
+    controller.admissions_per_pass = batch
     for _ in range(burst):
         await seed_image(sessions, team_id)
     observed = []
@@ -810,26 +813,55 @@ async def test_burst_admits_one_build_per_cycle_after_reconciling_every_running_
     event.listen(engine, "before_cursor_execute", count_lock)
     cycles = []
     monkeypatch.setattr(MODULE + ".record_build_cycle", lambda controller, **cycle: cycles.append(cycle))
+    passes = -(-burst // batch) + (burst % batch == 0)
     try:
         per_cycle = []
-        for _ in range(burst + 1):
+        for _ in range(passes):
             before = len(observed), len(locks)
             await controller.run_once()
             per_cycle.append((len(observed) - before[0], len(locks) - before[1]))
     finally:
         event.remove(engine, "before_cursor_execute", count_lock)
-    print("\ncycle outstanding outcome reconcile_s admission_s observes capacity_locks")
+    print("\npass outstanding claimed outcome reconcile_s admission_s observes capacity_locks")
     for index, (cycle, (observes, lock_count)) in enumerate(zip(cycles, per_cycle, strict=True)):
-        print(f"{index:5d} {cycle['outstanding']:11d} {cycle['outcome']:7s} {cycle['reconcile_seconds']:11.3f} "
-              f"{cycle['admission_seconds']:11.3f} {observes:8d} {lock_count:14d}")
-    assert [cycle["outcome"] for cycle in cycles] == ["claimed"] * burst + ["idle"]
-    assert [cycle["outstanding"] for cycle in cycles] == list(range(burst + 1))
-    assert len(kube.jobs) == burst
-    # Every running build costs one observation and a fixed number of global
-    # capacity-lock transactions per poll, before the poll's only admission.
-    assert [observes for observes, _ in per_cycle] == [outstanding + 1 for outstanding in range(burst)] + [burst]
-    lock_counts = [lock_count for _, lock_count in per_cycle]
-    per_build = lock_counts[1] - lock_counts[0]
-    assert per_build > 0
-    assert lock_counts[:burst] == [lock_counts[0] + per_build * outstanding for outstanding in range(burst)]
-    assert lock_counts[-1] == per_build * burst + 1  # the idle cycle's empty claim
+        print(f"{index:4d} {cycle['outstanding']:11d} {cycle['claimed']:7d} {cycle['outcome']:10s} "
+              f"{cycle['reconcile_seconds']:11.3f} {cycle['admission_seconds']:11.3f} {observes:8d} {lock_count:14d}")
+    claims = [min(batch, burst - index * batch) for index in range(passes)]
+    assert [cycle["claimed"] for cycle in cycles] == claims
+    assert [cycle["outcome"] for cycle in cycles] == ["batch_full"] * (passes - 1) + ["idle"]
+    assert [cycle["outstanding"] for cycle in cycles] == [index * batch for index in range(passes)]
+    assert len(kube.jobs) == burst and kube.ensure_calls == burst
+    # Each pass still observes every running build once, plus each new claim.
+    assert [observes for observes, _ in per_cycle] == [
+        cycle["outstanding"] + cycle["claimed"] for cycle in cycles]
+
+
+async def test_slow_unrelated_observation_does_not_hold_new_starts_past_the_grace(controller_setup, monkeypatch):
+    controller, sessions, team_id, kube = controller_setup
+    controller.settings = controller.settings.model_copy(update={"max_concurrent": None})
+    controller.admission_grace_seconds = 0.1
+    slow_id, _ = await seed_image(sessions, team_id)
+    await controller.run_once()
+    images = [(await seed_image(sessions, team_id))[0] for _ in range(3)]
+    (slow_job,) = kube.jobs
+    started, release = asyncio.Event(), asyncio.Event()
+    original = kube.observe
+
+    async def observe(namespace, name, *, capture_logs=False):
+        if name == slow_job:
+            started.set()
+            await release.wait()
+        return await original(namespace, name, capture_logs=capture_logs)
+
+    monkeypatch.setattr(kube, "observe", observe)
+    cycle = asyncio.create_task(controller.run_once())
+    await started.wait()
+    async with asyncio.timeout(10):
+        while kube.ensure_calls < 4:
+            await asyncio.sleep(0.01)
+    assert not cycle.done()
+    release.set()
+    await cycle
+    for image_id in images:
+        assert (await rows(sessions, image_id))[0].state == "running"
+    assert (await rows(sessions, slow_id))[0].state == "running"
