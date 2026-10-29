@@ -36,7 +36,8 @@ def _prepared(*, explicit=False, oversized=False):
         registry_images={"task": image}, image_runtime_metadata={"task": {
             "image_ref": image, "user": "worker", "uid": 1001, "gid": 1002, "home": "/home/worker",
             "workdir": "/app/resolved", "entrypoint": ["/entrypoint.sh"],
-            "environment": {"KEPT": "image", **({"LARGE": "x" * 4000} if oversized else {})},
+            "environment": {"PASSWORD": "diagnostic-fixture-value", "KEPT": "image",
+                            **({"LARGE": "x" * 4000} if oversized else {})},
         }},
     )
     profile = profile.model_copy(update={"supports_task_identity": True})
@@ -58,6 +59,9 @@ def test_plan_handoff_and_deferred_verifier_share_frozen_environment(explicit):
     assert resolved.user == ("root" if explicit else "1001:1002")
     assert resolved.environment["HOME"] == ("/custom/root" if explicit else "/home/worker")
     assert resolved.entrypoint == ("/entrypoint.sh",)
+    assert resolved.environment["PASSWORD"] == "diagnostic-fixture-value"
+    assert "PASSWORD" not in plan.main.environment
+    assert next(s for s in plan.sidecars if s.private_sandbox).environment["PASSWORD"] == "diagnostic-fixture-value"
     for phase in (*plan.setup, *((plan.verifier,) if plan.verifier else ())):
         assert phase.environment[_KEY] == plan.main.environment[_KEY]
     deferred = compile_deferred_verifier_plan(plan, task, verifier_timeout_seconds=120,
@@ -65,6 +69,7 @@ def test_plan_handoff_and_deferred_verifier_share_frozen_environment(explicit):
     assert deferred.main.environment[_KEY] == plan.main.environment[_KEY]
     sandbox = next(s for s in deferred.sidecars if s.private_sandbox)
     assert sandbox.identity.run_as_user == (0 if explicit else 1001)
+    assert sandbox.environment["PASSWORD"] == "diagnostic-fixture-value"
     assert task.model_dump_json() == original
 
 
@@ -195,3 +200,25 @@ def test_unprepared_image_defaults_require_metadata(flag):
     task = task.model_copy(update={"environment": task.environment.model_copy(update={flag: True})})
     assert "task_image_runtime_metadata_required" in automatic_service_execution_rejections(
         task, trial, source_provenance=_provenance())
+
+
+@pytest.mark.parametrize("environment", [
+    {"LOOM_CONTROL": "fixture"}, {"HTTP_PROXY": "fixture"}, {"HTTPS_PROXY": "fixture"},
+    {"ALL_PROXY": "fixture"}, {"NO_PROXY": "fixture"}, {"KUBECONFIG": "fixture"},
+    {"invalid-name": "fixture"}, {"FIXTURE": "nul\x00value"}, {"FIXTURE": "x" * 4097},
+    {f"FIXTURE_{i}": "value" for i in range(63)},
+], ids=["platform-control", "http-proxy", "https-proxy", "all-proxy", "no-proxy",
+        "kubeconfig", "invalid-name", "nul", "overlong", "merged-entry-count"])
+def test_prepared_task_admission_keeps_environment_bounds(environment):
+    from loom.service_execution_materialization import automatic_service_execution_rejections
+    from loom.task_image_materialization import resolve_prepared_task
+
+    task, trial, _, grant = _prepared()
+    task = task.model_copy(update={"environment": task.environment.model_copy(
+        update={"environment": environment},
+    )})
+    grant = grant.model_copy(update={"task_config": task.model_dump(mode="json")})
+    resolved = resolve_prepared_task(task, grant)
+    assert "task_environment_invalid" in automatic_service_execution_rejections(
+        resolved, trial, source_provenance=_provenance(),
+    )
