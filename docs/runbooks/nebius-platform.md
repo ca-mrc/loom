@@ -1199,6 +1199,31 @@ configuration; omission leaves native building disabled:
 }
 ```
 
+Each build loop pass has three steps:
+1. Reconcile outstanding builds, at most four at a time.
+2. Run one admission pass, which claims up to 16 queued builds (`ADMISSIONS_PER_PASS`).
+3. Sleep for `poll_seconds`.
+
+The admission pass waits up to two seconds for that pass's reconciliation, so
+cleanup can free capacity first. It never waits longer, so one slow unrelated
+build observation cannot hold back new starts. Every claim still reserves
+capacity in its own transaction before its Job is created. Capacity, quota, I/O
+pressure and `max_concurrent` stop the pass at the first refusal. The global-pool
+controller reconciles its outbox with the same bound and selects up to 16
+requests per pass for management to prepare.
+
+The pass size and concurrency are source constants. They are deliberately not
+platform settings, so builder configuration and the frozen pool contracts stay
+unchanged.
+
+The `Native build cycle` log line and the
+`loom_execution_actuator_task_image_build_*` metrics record:
+- outstanding builds;
+- reconcile and admission seconds;
+- builds claimed per pass;
+- the outcome that ended the pass (`idle`, `capped`, `batch_full`, `error`,
+  `no_selector`, or the blocked reason).
+
 `snapshotter` selects the BuildKit OCI worker snapshotter (`overlayfs` or
 `native`). It defaults to `native` so unchanged Dockerfiles can hardlink files
 from earlier layers. Rootless OverlayFS copy-up can change inode identity during
