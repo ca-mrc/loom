@@ -85,37 +85,7 @@ def test_reopening_settles_lost_replies_without_repeating_release_or_draining_op
 
     assert callable(reopen_pool_legacy)
     api = restarted(closed_startup)
-    participants = tuple(str(row.participant_id) for row in api.request.fencing.retirement.migration.guards)
-    first, second, *rest = participants
-    api.release_failures = {first: 'after', second: 'before'}
-    original = {name: (api.state / name).read_bytes() for name in ('activation.json', 'legacy-restart.json')}
-    result = reopen(api)
-    assert result == {'status': 'pending_legacy_guard_release', 'operation_id': str(api.request.fencing.retirement.migration.registration.spec.operation_id),
-        'legacy_admission_open': False, 'global_admission_open': False}
-    assert api.releases == [first, second]
-    assert api.guards[first] == 'open' and api.guards[second] == 'fenced'
-    api.local_drains.clear()
-    assert reopen(api) == result and api.releases == [first, second]
-    assert first not in api.local_drains
-    api.guards[second] = 'open'  # Only observation settles the original release.
-    api.busy.add(second)
-    api.local_drains.clear()
-    result = reopen(api)
-    assert result['status'] == 'pool_legacy_reopened' and result['legacy_admission_open'] is True
-    assert result['global_admission_open'] is False and api.mode == 'fenced' and api.machine_phase == 'revoked'
-    assert api.releases == [first, second, *rest]
-    assert not {first, second}.intersection(api.local_drains)
-    assert reopen(api) == result and api.releases == [first, second, *rest]
-    assert set(api.guards.values()) == {'open'} and api.runtime_proofs >= len(participants) + 1
-    assert {name: (api.state / name).read_bytes() for name in original} == original
 
-
-@pytest.mark.timeout(420)
-def test_reopening_refuses_unanchored_or_changed_authority_before_release(closed_startup):
-    from scripts.ops.nebius_pool_legacy_reopening import reopen_pool_legacy
-
-    assert callable(reopen_pool_legacy)
-    api = restarted(closed_startup)
     api.runtime_ready = False
     with pytest.raises(ValueError, match='pool_legacy_reopening_unconfirmed'):
         reopen(api)
@@ -179,3 +149,31 @@ def test_reopening_refuses_unanchored_or_changed_authority_before_release(closed
     api.processes_drained = False
     assert reopen(api)['status'] == 'pending_successor_drain'
     assert not api.releases
+
+    api.processes_drained = True
+    api.runtime_proofs = 0
+    api.local_drains.clear()
+
+    participants = tuple(str(row.participant_id) for row in api.request.fencing.retirement.migration.guards)
+    first, second, *rest = participants
+    api.release_failures = {first: 'after', second: 'before'}
+    original = {name: (api.state / name).read_bytes() for name in ('activation.json', 'legacy-restart.json')}
+    result = reopen(api)
+    assert result == {'status': 'pending_legacy_guard_release', 'operation_id': str(api.request.fencing.retirement.migration.registration.spec.operation_id),
+        'legacy_admission_open': False, 'global_admission_open': False}
+    assert api.releases == [first, second]
+    assert api.guards[first] == 'open' and api.guards[second] == 'fenced'
+    api.local_drains.clear()
+    assert reopen(api) == result and api.releases == [first, second]
+    assert first not in api.local_drains
+    api.guards[second] = 'open'  # Only observation settles the original release.
+    api.busy.add(second)
+    api.local_drains.clear()
+    result = reopen(api)
+    assert result['status'] == 'pool_legacy_reopened' and result['legacy_admission_open'] is True
+    assert result['global_admission_open'] is False and api.mode == 'fenced' and api.machine_phase == 'revoked'
+    assert api.releases == [first, second, *rest]
+    assert not {first, second}.intersection(api.local_drains)
+    assert reopen(api) == result and api.releases == [first, second, *rest]
+    assert set(api.guards.values()) == {'open'} and api.runtime_proofs >= len(participants) + 1
+    assert {name: (api.state / name).read_bytes() for name in original} == original

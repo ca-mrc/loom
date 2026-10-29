@@ -125,7 +125,11 @@ def test_connected_completion_qualifies_open_pool_without_replaying_closed_runti
     from scripts.ops.nebius_pool_completion import complete_pool_cutover, load_pool_completion
 
     with activation_http() as (api, state, advance):
+        state.activation_failure = ('open', 'after')
+        advance()
+        state.activation_failure = None
         assert advance()['status'] == 'pool_activation_complete'
+        assert state.activation_writes.count(('open', None)) == 1
         before = list(state.activation_writes)
         state.runtime_checks.clear()
         state.writes.clear()
@@ -160,24 +164,28 @@ def test_connected_open_release_and_cancel_preserve_authority_and_intent(activat
 
 
 def test_connected_cancel_without_started_or_healthy_successors(activation_http):
-    with activation_http(start=False) as (_, state, advance):
+    with activation_http(start=False) as (api, state, advance):
+        key = next(iter(state.guards))
+        for call, args in ((api.open_pool, ()), (api.fence_pool, ()),
+                (api.release_guard, (key,)), (api.fence_guard, (key,)), (api.fence_guard, ('foreign',))):
+            with pytest.raises(ValueError):
+                call(*args)
+        assert not state.activation_writes
         state.fail_closed = True
         assert advance(cancel=True)['status'] == 'pool_activation_cancelled'
         assert not state.runtime_checks and not state.writes
         assert not any(action == 'open' for action, _ in state.activation_writes)
 
 
-@pytest.mark.parametrize('when', ['before', 'after'])
 @pytest.mark.timeout(180)
-def test_connected_opening_unknown_outcome_is_observed_not_resent(activation_http, when):
+def test_connected_opening_unknown_outcome_is_observed_not_resent(activation_http):
     with activation_http() as (_, state, advance):
-        state.activation_failure = ('open', when)
+        state.activation_failure = ('open', 'before')
         result = advance()
         state.activation_failure = None
-        if when == 'before':
-            assert result['status'] == 'pending_pool_opening'
-            assert advance() == result
-            state.mode = 'global'  # The original delayed dispatch settles.
+        assert result['status'] == 'pending_pool_opening'
+        assert advance() == result
+        state.mode = 'global'  # The original delayed dispatch settles.
         assert advance()['status'] == 'pool_activation_complete'
         assert state.activation_writes.count(('open', None)) == 1
 
@@ -200,13 +208,3 @@ def test_connected_recovery_rejects_drift_without_mutation(activation_http, clos
             advance(cancel=True)
         assert 'private-' not in str(error.value)
         assert not state.activation_writes and not state.writes
-
-
-def test_connected_writes_require_anchored_intent(activation_http):
-    with activation_http(start=False) as (api, state, _):
-        key = next(iter(state.guards))
-        for call, args in ((api.open_pool, ()), (api.fence_pool, ()),
-                (api.release_guard, (key,)), (api.fence_guard, (key,)), (api.fence_guard, ('foreign',))):
-            with pytest.raises(ValueError):
-                call(*args)
-        assert not state.activation_writes
