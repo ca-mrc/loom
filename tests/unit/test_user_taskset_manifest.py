@@ -73,6 +73,59 @@ def test_evaluation_without_verifier_rejected() -> None:
         })
 
 
+def test_bundle_upload_omitted_task_toml_format_stays_auto() -> None:
+    manifest = UserTaskSetManifest.model_validate({
+        "apiVersion": "loom.taskset/v1",
+        "kind": "UserTaskSet",
+        "metadata": {"name": "bundle-tasks", "display_name": "Bundle Tasks"},
+        "source": {"type": "bundle-upload", "locator": "bundle.tar.gz"},
+    })
+    assert manifest.source.task_toml_format == "auto"
+    assert "task_toml_format" not in manifest.source.model_fields_set
+
+
+@pytest.mark.parametrize("task_toml_format", ["terminal-bench", "loom", "auto"])
+def test_bundle_upload_accepts_task_toml_format(task_toml_format: str) -> None:
+    manifest = UserTaskSetManifest.model_validate({
+        "apiVersion": "loom.taskset/v1",
+        "kind": "UserTaskSet",
+        "metadata": {"name": "bundle-tasks", "display_name": "Bundle Tasks"},
+        "source": {
+            "type": "bundle-upload",
+            "locator": "bundle.tar.gz",
+            "task_toml_format": task_toml_format,
+        },
+    })
+    assert manifest.source.task_toml_format == task_toml_format
+
+
+def test_bundle_upload_rejects_unknown_task_toml_format() -> None:
+    with pytest.raises(ValidationError):
+        UserTaskSetManifest.model_validate({
+            "apiVersion": "loom.taskset/v1",
+            "kind": "UserTaskSet",
+            "metadata": {"name": "bundle-tasks", "display_name": "Bundle Tasks"},
+            "source": {
+                "type": "bundle-upload",
+                "locator": "bundle.tar.gz",
+                "task_toml_format": "harbor",
+            },
+        })
+
+
+@pytest.mark.parametrize("task_toml_format", ["terminal-bench", "loom", "auto"])
+def test_non_bundle_source_rejects_task_toml_format(task_toml_format: str) -> None:
+    with pytest.raises(ValidationError, match="task_toml_format_only_for_bundle_upload"):
+        UserTaskSetManifest.model_validate({
+            **_MINIMAL,
+            "source": {
+                "type": "hf",
+                "locator": "org/dataset",
+                "task_toml_format": task_toml_format,
+            },
+        })
+
+
 def test_bundle_upload_evaluation_uses_per_task_verifiers() -> None:
     manifest = UserTaskSetManifest.model_validate({
         "apiVersion": "loom.taskset/v1",

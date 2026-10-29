@@ -63,6 +63,8 @@ class TaskSetSource(BaseModel):
     revision: str | None = None
     subset: str | None = None
     split: str | None = None
+    # Bundle dialect. Omitted stored manifests stay ``auto`` and keep per-file detection.
+    task_toml_format: Literal["terminal-bench", "loom", "auto"] = "auto"
 
 
 class TaskSetVerifier(BaseModel):
@@ -136,10 +138,13 @@ class UserTaskSetManifest(BaseModel):
             validate_bundle_archive_path(self.source.locator)
             if self.transform is not None:
                 raise ValueError("transform_unsupported_for_bundle_upload")
-        elif not self.instance_mapping:
-            raise ValueError("instance_mapping_required")
-        elif not self.task_template:
-            raise ValueError("task_template_required")
+        else:
+            if "task_toml_format" in self.source.model_fields_set:
+                raise ValueError("task_toml_format_only_for_bundle_upload")
+            if not self.instance_mapping:
+                raise ValueError("instance_mapping_required")
+            if not self.task_template:
+                raise ValueError("task_template_required")
 
         if (
             "evaluation" in intents

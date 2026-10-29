@@ -249,6 +249,22 @@ Supported source types are `hf`, `git`, `https`, `jsonl-inline`, and
 `script` verifier. A bundle upload contains complete task directories and can
 use each task's own verifier.
 
+A bundle upload may set `source.task_toml_format` to `terminal-bench`, `loom`,
+or `auto`. Omitting it is `auto`: materialization keeps per-file detection, and
+a stored TaskSet that never set the field keeps that behavior on rebuild.
+`terminal-bench` projects every `task.toml` through the Harbor translator even
+when `[task].name` is absent. The task directory supplies a missing id and
+name. Omitted `os` becomes `linux`. A missing verifier mode follows the files:
+`tests/Dockerfile` or `[verifier.environment]` is a separate verifier image,
+and neither is shared grading in the agent sandbox. A value the file actually
+sets is kept, including timeouts, network policy, and `environment_mode`.
+CPU, memory, and storage omitted from a verifier image are copied from the
+agent environment, because the independent verifier planner requires them.
+The materialized row records `upstream_conversion` so a separate verifier image
+receives declared artifacts instead of a copy of the whole agent workdir.
+`loom` validates each file as an authored Loom task and does not apply those
+defaults. Any other source type rejects the field.
+
 JSONL sources use physical newlines between JSON objects. Escaped newlines
 inside string values are preserved, and a final newline is optional. Literal
 `\n` between records is not a JSONL record delimiter.
@@ -335,7 +351,7 @@ creation times. Details show the readable name and a preview of the first five
 materialized task IDs after the normal visibility check. Configure a batch opens
 the trajectory form with that task set selected.
 
-The submit page places manifest guidance before file selection and reviews parsed YAML/JSON task-set identity, declared purpose, source type, verifier, task template, task limit, and selected filenames/sizes before upload. Syntax, duplicate YAML fields, and required identity/source fields are checked locally. Changing files invalidates that review. This is not a claim that the
+The submit page places manifest guidance before file selection and reviews parsed YAML/JSON task-set identity, declared purpose, source type, bundle task TOML dialect, verifier, task template, task limit, and selected filenames/sizes before upload. Syntax, duplicate YAML fields, and required identity/source fields are checked locally. Changing files invalidates that review. This is not a claim that the
 manifest has passed complete server validation; import validation and status remain
 server-owned. The Errors tab labels retained **samples**: only the first 50 are
 stored, and reaching 50 can mean additional errors exist. The sample count is
