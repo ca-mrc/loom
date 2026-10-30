@@ -171,12 +171,29 @@ def _completed_template_resume(operation, monkeypatch):
 
 
 @pytest.mark.timeout(300)
-@pytest.mark.parametrize('failure', [None, 'retained', 'cleanup', 'processes'])
-def test_completed_template_resume_enters_fresh_role_qualification(operation, monkeypatch, failure):
+def test_completed_template_resume_enters_fresh_role_qualification(operation, monkeypatch):
     from scripts.ops import nebius_pool_operation as target
     from scripts.ops import nebius_pool_role_restoration as roles
 
     state, runtime = _completed_template_resume(operation, monkeypatch)
+
+    for damage in ['template-restoration.json', 'shutdown.json', 'template-anchor']:
+        if damage == 'template-anchor':
+            operation_id = state.parent.request.fencing.retirement.migration.registration.spec.operation_id
+            path = state.parent.anchor_dir / (str(operation_id) + '-template-restoration.json')
+        else:
+            path = state.parent.state_dir / damage
+        original = path.read_bytes()
+        document = json.loads(original)
+        document['unexpected'] = True
+        path.write_text(json.dumps(document))
+        with pytest.raises(target.PoolOperationError) as error:
+            state.run('rollback')
+        assert error.value.stage == 'pool_template_restoration'
+        assert not (state.parent.state_dir / 'role-restoration.json').exists()
+        assert not runtime.legacy_calls
+        path.write_bytes(original)
+
     calls = []
     template, qualify = target.restore_pool_templates, roles.qualify_role_restoration
 
@@ -191,26 +208,30 @@ def test_completed_template_resume_enters_fresh_role_qualification(operation, mo
     monkeypatch.setattr(target, 'restore_pool_templates', template_stage)
     monkeypatch.setattr(roles, 'qualify_role_restoration', role_qualification)
     monkeypatch.setattr(runtime, 'preview_legacy_role', lambda *args: None)
-    if failure == 'retained':
-        runtime.retained = False
-    elif failure == 'cleanup':
-        runtime.cleanup_drained = False
-    elif failure == 'processes':
-        runtime.processes_drained = False
-    if failure == 'retained':
-        with pytest.raises(target.PoolOperationError) as error:
-            state.run('rollback')
-        assert error.value.stage == 'pool_role_restoration'
-        assert calls == []  # Role observe rejects before the drain qualifier.
-    else:
-        result = state.run('rollback')
-        assert result['phase'] == 'role-restoration' and result['status'] == 'pending'
-        assert calls == ['role-qualification']
-    path = state.parent.state_dir / 'role-restoration.json'
-    assert path.exists() is (failure is None)
-    if path.exists():
-        assert all(row['phase'] == 'prepared' for row in json.loads(path.read_bytes())['roles'].values())
-    assert not runtime.legacy_calls
+    flags = runtime.retained, runtime.cleanup_drained, runtime.processes_drained
+    for failure in ('retained', 'cleanup', 'processes', None):
+        calls.clear()
+        if failure == 'retained':
+            runtime.retained = False
+        elif failure == 'cleanup':
+            runtime.cleanup_drained = False
+        elif failure == 'processes':
+            runtime.processes_drained = False
+        if failure == 'retained':
+            with pytest.raises(target.PoolOperationError) as error:
+                state.run('rollback')
+            assert error.value.stage == 'pool_role_restoration'
+            assert calls == []  # Role observe rejects before the drain qualifier.
+        else:
+            result = state.run('rollback')
+            assert result['phase'] == 'role-restoration' and result['status'] == 'pending'
+            assert calls == ['role-qualification']
+        path = state.parent.state_dir / 'role-restoration.json'
+        assert path.exists() is (failure is None)
+        if path.exists():
+            assert all(row['phase'] == 'prepared' for row in json.loads(path.read_bytes())['roles'].values())
+        assert not runtime.legacy_calls
+        runtime.retained, runtime.cleanup_drained, runtime.processes_drained = flags
 
 
 @pytest.mark.timeout(300)
@@ -244,27 +265,6 @@ def test_unfinished_template_resume_keeps_original_stage_and_unknown_intent(oper
     assert calls == ['template'] and runtime.template_calls == saved_calls
     assert path.read_bytes() == original
     assert not (state.parent.state_dir / 'role-restoration.json').exists()
-
-
-@pytest.mark.timeout(300)
-@pytest.mark.parametrize('damage', ['template-restoration.json', 'shutdown.json', 'template-anchor'])
-def test_completed_template_resume_rejects_damaged_evidence(operation, monkeypatch, damage):
-    from scripts.ops.nebius_pool_operation import PoolOperationError
-
-    state, runtime = _completed_template_resume(operation, monkeypatch)
-    if damage == 'template-anchor':
-        operation_id = state.parent.request.fencing.retirement.migration.registration.spec.operation_id
-        path = state.parent.anchor_dir / (str(operation_id) + '-template-restoration.json')
-    else:
-        path = state.parent.state_dir / damage
-    document = json.loads(path.read_bytes())
-    document['unexpected'] = True
-    path.write_text(json.dumps(document))
-    with pytest.raises(PoolOperationError) as error:
-        state.run('rollback')
-    assert error.value.stage == 'pool_template_restoration'
-    assert not (state.parent.state_dir / 'role-restoration.json').exists()
-    assert not runtime.legacy_calls
 
 
 @pytest.mark.timeout(600)

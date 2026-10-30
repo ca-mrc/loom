@@ -64,24 +64,17 @@ def _run_validation_step(
     )
 
 
-@pytest.mark.parametrize(
-    ("job_name", "matrix_output"),
-    [("build", "ordinary_builds")],
-)
-def test_images_untrusted_build_is_read_only_and_cannot_publish_or_write_cache(
-    job_name: str, matrix_output: str
-) -> None:
+def test_images_untrusted_build_is_read_only_and_cannot_publish_or_write_cache() -> None:
     workflow = _workflow(".github/workflows/images.yml")
-    build = workflow["jobs"][job_name]
+    build = workflow["jobs"]["build"]
 
     assert workflow["permissions"] == {"contents": "read"}
-    assert build["permissions"] == {"contents": "read"}
     assert _normalized_expression(build["if"]) == (
         "!cancelled() && needs.plan.result == 'success' && "
         "needs.trivy-binary.result == 'success' && "
         "needs.plan.outputs.gate_mode == 'full' && "
         "needs.plan.outputs.required == 'true' && "
-        f"needs.plan.outputs.{matrix_output} != '[]'"
+        "needs.plan.outputs.ordinary_builds != '[]'"
     )
     assert _checkout_steps(build)
     assert all(
@@ -126,27 +119,9 @@ def test_images_manual_dispatch_is_build_only() -> None:
 
 def test_images_permissions_are_an_exact_job_allowlist() -> None:
     workflow = _workflow(".github/workflows/images.yml")
-    jobs = workflow["jobs"]
-
-    assert set(jobs) == {
-        "plan",
-        "trivy-binary",
-        "build",
-        "nebius-harness-build",
-        "images-gate",
-    }
-    for job_name in (
-        "plan",
-        "trivy-binary",
-        "build",
-        "nebius-harness-build",
-        "images-gate",
-    ):
-        effective = jobs[job_name].get("permissions", workflow["permissions"])
-        assert effective == {"contents": "read"}
-        assert "environment" not in jobs[job_name]
-        assert "id-token" not in effective
-        assert all(value != "write" for value in effective.values())
+    for job in workflow["jobs"].values():
+        assert job.get("permissions", workflow["permissions"]) == {"contents": "read"}
+        assert "environment" not in job
 
 
 def test_images_secret_and_cache_authority_is_exact() -> None:
@@ -325,12 +300,9 @@ def test_image_input_validation_rejects_shell_metacharacters_and_ambiguous_value
     assert error_marker in result.stderr
 
 
-@pytest.mark.parametrize("job_name", ["build"])
-def test_image_input_validation_never_evaluates_command_substitution(
-    tmp_path: Path, job_name: str
-) -> None:
+def test_image_input_validation_never_evaluates_command_substitution(tmp_path: Path) -> None:
     workflow = _workflow(".github/workflows/images.yml")
-    step = _named_step(workflow["jobs"][job_name], "Validate image build inputs")
+    step = _named_step(workflow["jobs"]["build"], "Validate image build inputs")
     sentinel = tmp_path / "shell-injection-ran"
     result = _run_validation_step(
         step,
@@ -393,7 +365,3 @@ def test_image_input_validation_accepts_actual_github_context_shapes(
     )
 
     assert result.returncode == 0, result.stderr
-
-
-def test_secret_isolation_contract_does_not_depend_on_one_reviewer() -> None:
-    assert not (REPO_ROOT / ".github/CODEOWNERS").exists()

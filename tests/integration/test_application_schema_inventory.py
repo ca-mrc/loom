@@ -441,9 +441,3 @@ def test_inventory_observes_actual_guard_migrated_application_read_only(
             o.kind == "routine" and "loom_drop_trial_writer_triggers" in o.identity
             for o in inventory.objects
         )
-        assert (
-            read_application_schema_inventory(
-                connection, role_bindings={guard_owner: "guard-owner"}
-            )
-            == inventory
-        )

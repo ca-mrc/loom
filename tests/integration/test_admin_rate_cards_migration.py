@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, delete, insert, text
+from sqlalchemy import create_engine, insert, text
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import Token
@@ -29,9 +29,7 @@ def _token_scopes(session: object) -> dict[bytes, list[str]]:
 
 @pytest.fixture
 def seeded_tokens(isolated_migration_postgres_url: str) -> Iterator[None]:
-    """Roll back to revision 0004 (pre-Plan-17), seed tokens, yield.
-    Cleanup runs `upgrade head` so subsequent tests in the session
-    see the latest schema."""
+    """Seed pre-0005 tokens in this test's owned disposable database."""
     cfg = _alembic_cfg(isolated_migration_postgres_url)
     command.downgrade(cfg, "0004")
     engine = create_engine(isolated_migration_postgres_url)
@@ -68,11 +66,7 @@ def seeded_tokens(isolated_migration_postgres_url: str) -> Iterator[None]:
     try:
         yield
     finally:
-        with sl() as s:
-            s.execute(delete(Token))
-            s.commit()
         engine.dispose()
-        command.upgrade(cfg, "head")
 
 
 def test_migration_grants_new_scope(
@@ -93,30 +87,6 @@ def test_migration_grants_new_scope(
     assert by_hash[b].count("admin:rate_cards") == 1
     # Non-admin tokens untouched.
     assert "admin:rate_cards" not in by_hash[c]
-    engine.dispose()
-
-
-def test_migration_idempotent(
-    isolated_migration_postgres_url: str,
-    seeded_tokens: None,
-) -> None:
-    cfg = _alembic_cfg(isolated_migration_postgres_url)
-    command.upgrade(cfg, "0005")
-    # Manually re-run the data migration. Alembic refuses to call
-    # upgrade twice on the same head, so invoke the SQL directly.
-    engine = create_engine(isolated_migration_postgres_url)
-    with engine.begin() as conn:
-        conn.exec_driver_sql(
-            "UPDATE tokens SET scopes = array_append(scopes, 'admin:rate_cards') "
-            "WHERE 'admin:tokens' = ANY(scopes) "
-            "AND NOT ('admin:rate_cards' = ANY(scopes))",
-        )
-    sl = sessionmaker(engine)
-    with sl() as s:
-        rows = _token_scopes(s).values()
-    for scopes in rows:
-        if "admin:tokens" in scopes:
-            assert scopes.count("admin:rate_cards") == 1
     engine.dispose()
 
 

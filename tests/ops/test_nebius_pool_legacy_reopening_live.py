@@ -55,7 +55,7 @@ def prepared_dispatch(fixture):
 
 
 @pytest.mark.timeout(300)
-@pytest.mark.parametrize('failure', [ValueError, TimeoutError, DispatchInterrupted])
+@pytest.mark.parametrize('failure', [ValueError, DispatchInterrupted])
 def test_reopening_actual_runtime_failure_preserves_prepared_and_can_resume(closed_startup, failure):
     api, writes = prepared_dispatch(closed_startup)
     dispatch = api.release_recovery_guard

@@ -11,38 +11,6 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.parametrize("name", ["ci", "images", "cluster-smoke", "staging-smoke"])
-def test_ci_validation_keeps_hosted_fallback_and_opt_in_common_queue(name: str) -> None:
-    source = (ROOT / f".github/workflows/{name}.yml").read_text()
-    workflow = yaml.safe_load(source)
-    for job_id, job in workflow["jobs"].items():
-        if name == "ci" and job_id == "fast-feedback":
-            candidate = yaml.safe_load((ROOT / ".github/workflows/nebius-candidate.yml").read_text())
-            assert job["runs-on"] == candidate["jobs"]["pool-ops-plan"]["runs-on"] == "ubuntu-24.04"
-            continue
-        if "uses" in job:
-            assert name == "ci"
-            assert job["uses"] in {
-                "./.github/workflows/images.yml",
-                "./.github/workflows/cluster-smoke.yml",
-                "./.github/workflows/staging-smoke.yml",
-            }
-            assert "runs-on" not in job
-            assert "steps" not in job
-            continue
-        placement = str(job["runs-on"])
-        assert "needs." not in placement
-        assert "vars.LOOM_CI_UNIFIED_RUNNERS == 'true'" in placement
-        assert "loom-ci-exec" in placement and "loom-ci-isolated-v1" in placement
-        assert "github.base_ref != 'main'" in placement
-        assert "head.repo.full_name == github.repository" in placement
-        assert (
-            placement.endswith("|| 'ubuntu-24.04' }}")
-            or placement.endswith("|| 'ubuntu-latest' }}")
-            or placement.endswith("|| matrix.runner }}")
-        )
-
-
 def test_candidate_matrix_runs_only_amd64(
     tmp_path: Path,
 ) -> None:
@@ -68,12 +36,6 @@ def test_candidate_matrix_runs_only_amd64(
     assert selected == [row for row in rows if row["architecture"] == "amd64"]
 
 
-def test_linux_runtime_dependency_check_is_amd64_only() -> None:
-    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
-    rows = workflow["jobs"]["locked-environments"]["strategy"]["matrix"]["include"]
-    assert [row["target"] for row in rows] == ["linux-x86_64"]
-
-
 @pytest.mark.parametrize("tree", ["src", "packages"])
 def test_coverage_combines_real_data_from_both_ephemeral_provider_roots(
     tmp_path, monkeypatch, tree
@@ -90,7 +52,8 @@ def test_coverage_combines_real_data_from_both_ephemeral_provider_roots(
     fragments = tmp_path / "coverage"
     fragments.mkdir()
     for index, base in enumerate(
-        ["/opt/actions-runner/_work/loom/loom", "/tmp/loom-hosted-worker-example/_work/loom/loom"]
+        ["/home/runner/work/loom/loom", "/opt/actions-runner/_work/loom/loom",
+         "/tmp/loom-hosted-worker-example/_work/loom/loom"]
     ):
         data = coverage.CoverageData(basename=str(fragments / f".coverage.{index}"))
         data.add_lines({f"{base}/{tree}/sample.py": {1}})

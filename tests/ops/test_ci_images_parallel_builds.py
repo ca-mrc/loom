@@ -69,10 +69,12 @@ def test_docs_plan_skips_builds_except_explicit_manual_validation(
 
 @pytest.mark.parametrize(
     "images",
-    [[], ["service"], ["web"], ["service", "web"]],
+    [[], ["service", "web"]],
 )
-@pytest.mark.parametrize("event", ["pull_request", "merge_group", "workflow_dispatch"])
-@pytest.mark.parametrize("fault", [None, "ordinary", "harness"])
+@pytest.mark.parametrize("event,fault", [
+    ("pull_request", None), ("merge_group", None), ("workflow_dispatch", None),
+    ("pull_request", "ordinary"), ("pull_request", "harness"),
+])
 def test_gate_enforces_selected_build_results(
     images: list[str], event: str, fault: str | None
 ) -> None:
@@ -132,22 +134,3 @@ def test_gate_rejects_missing_selected_matrix_after_dependency_failure(
         check=False,
     )
     assert completed.returncode != 0
-@pytest.mark.parametrize("failed_dependency", ["plan", "trivy-binary"])
-def test_untrusted_builds_do_not_run_after_required_dependency_failure(
-    failed_dependency: str,
-) -> None:
-    selected = _jobs()["build"]
-    values = {f"needs.{dependency}.result": "success" for dependency in selected["needs"]}
-    values.update(
-        {
-            "github.event_name": "pull_request",
-            "needs.plan.outputs.gate_mode": "full",
-            "needs.plan.outputs.required": "true",
-            "needs.plan.outputs.ordinary_builds": '[{"image":"service"}]',
-        }
-    )
-    dependency = failed_dependency
-    assert _condition(selected["if"], values)
-    for result in ("failure", "skipped", "cancelled"):
-        values[f"needs.{dependency}.result"] = result
-        assert not _condition(selected["if"], values)

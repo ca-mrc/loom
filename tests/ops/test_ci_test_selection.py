@@ -162,6 +162,13 @@ def test_default_pool_balance_preserves_manual_layout(include_shared_pool: bool)
     matrix = ownership.test_shard_matrix(manifest, tracked_paths=tracked, lane="nebius-pool",
                                         repo_root=root, include_shared_pool=include_shared_pool)
     assert [row["shard_index"] for row in matrix] == [index for index, shard in enumerate(actual) if shard]
+    gateway = set(next(shard for shard in actual if "tests/ops/test_nebius_pool_gateway_retirement_live.py" in shard))
+    assert gateway.isdisjoint({"tests/ops/test_nebius_pool_role_restoration_live.py",
+                               "tests/ops/test_nebius_pool_template_restoration_live.py"})
+    predecessor_groups = [next(index for index, shard in enumerate(actual) if path in shard) for path in (
+        "tests/ops/test_nebius_pool_predecessor.py", "tests/ops/test_nebius_pool_predecessor_live.py",
+        "tests/ops/test_nebius_pool_refresh_connected.py")]
+    assert len(set(predecessor_groups)) == 3
 
 
 @pytest.mark.parametrize("include_shared_pool", [False, True])
@@ -255,9 +262,10 @@ def test_shard_workflows_run_complete_disjoint_fail_fast_shards(
     job = workflow["jobs"][lane]
     from scripts import component_ownership as ownership
     manifest = ownership.load_manifest(root / "config/component-ownership.toml")
-    matrix = ownership.test_shard_matrix(manifest, tracked_paths=ownership._tracked_paths(root),
-                                        lane=lane, repo_root=root, test_scope=scope,
-                                        include_shared_pool=include_shared_pool)
+    tracked = ownership._tracked_paths(root)
+    selection = dict(manifest=manifest, tracked_paths=tracked, lane=lane, repo_root=root,
+                     test_scope=scope, include_shared_pool=include_shared_pool)
+    matrix = ownership.test_shard_matrix(**selection)
     step = next(row for row in job["steps"] if row.get("name", "").startswith("Pytest"))
     selector_step = next(row for row in job["steps"] if row.get("id") == "manifest")
     if lane == "nebius-pool":
@@ -265,31 +273,31 @@ def test_shard_workflows_run_complete_disjoint_fail_fast_shards(
         # instead of spawning the same 20 selector/workflow processes twice.
         # A future scope difference must restore distinct execution coverage.
         all_paths = ownership.test_paths_for_lane(
-            manifest, tracked_paths=ownership._tracked_paths(root), lane=lane,
+            manifest, tracked_paths=tracked, lane=lane,
         )
         assert ownership.select_test_scope(manifest, all_paths, scope="all") == (
             ownership.select_test_scope(manifest, all_paths, scope="nebius")
         )
     count = manifest.test_shard_policy(lane).shard_count
     assert sorted(row["shard_index"] for row in matrix) == list(range(count))
-    complete = subprocess.run(
-        [sys.executable, "scripts/component_ownership.py", "test-paths", "--lane", lane,
-         "--test-scope", scope, "--include-shared-pool", str(include_shared_pool).lower()],
-        cwd=root, text=True, capture_output=True, check=True,
-    ).stdout.splitlines()
+    complete = ownership.selected_test_paths(**selection)
+    shards = [ownership.selected_test_paths(**selection, shard_index=index, shard_count=count)
+              for index in range(count)]
+    flattened = [path for shard in shards for path in shard]
+    assert len(flattened) == len(set(flattened))
+    assert set(flattened) == set(complete)
     uv = tmp_path / "uv"
     uv.write_text(
         f"#!{Path(sys.executable).resolve()}\n"
-        "import json, os, subprocess, sys\nfrom pathlib import Path\n"
-        "if 'test-paths' in sys.argv:\n"
-        "    sys.exit(subprocess.run([sys.executable, *sys.argv[sys.argv.index('python') + 1:]]).returncode)\n"
+        "import json, os, sys\nfrom pathlib import Path\n"
         "assert 'pytest' in sys.argv\n"
         "Path(os.environ['SELECTED_TEST_ARGS']).write_text(json.dumps(sys.argv))\n"
         "sys.exit(int(os.environ['PYTEST_EXIT']))\n"
     )
     uv.chmod(0o755)
-    shards = []
-    for row in matrix:
+    # The full partition stays above; exercise the same shell with first/last
+    # indices, failure/success and both scope/manual-flag modes.
+    for row in (matrix[0], matrix[-1]):
         recorded = tmp_path / f"args-{row['shard_index']}.json"
         # A failed test remains a failed shard, including the first shard.
         pytest_exit = 17 if row["shard_index"] == 0 else 0
@@ -307,17 +315,5 @@ def test_shard_workflows_run_complete_disjoint_fail_fast_shards(
         assert result.returncode == pytest_exit, result.stderr
         arguments = json.loads(recorded.read_text())
         assert "-x" in arguments or "--maxfail=1" in arguments
-        paths = {arg for arg in arguments if arg.startswith("tests/")}
-        assert paths
-        assert all(paths.isdisjoint(previous) for previous in shards)
-        shards.append(paths)
-    assert set().union(*shards) == set(complete)
-    if lane != "nebius-pool":
-        return
-    gateway = next(shard for shard in shards if "tests/ops/test_nebius_pool_gateway_retirement_live.py" in shard)
-    assert gateway.isdisjoint({"tests/ops/test_nebius_pool_role_restoration_live.py",
-                               "tests/ops/test_nebius_pool_template_restoration_live.py"})
-    predecessor_groups = [next(index for index, shard in enumerate(shards) if path in shard) for path in (
-        "tests/ops/test_nebius_pool_predecessor.py", "tests/ops/test_nebius_pool_predecessor_live.py",
-        "tests/ops/test_nebius_pool_refresh_connected.py")]
-    assert len(set(predecessor_groups)) == 3
+        paths = tuple(arg for arg in arguments if arg.startswith("tests/"))
+        assert paths == shards[row["shard_index"]]

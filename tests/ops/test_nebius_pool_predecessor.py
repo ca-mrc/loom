@@ -113,8 +113,7 @@ def finish_cutover(operation, *, legacy=False, source_credentials=None):
 
 
 @pytest.mark.timeout(420)
-@pytest.mark.parametrize('renamed_target', [False, True])
-def test_forward_staging_predecessor_uses_current_source_without_replaying_legacy_history(private_cutover, platform_inputs, tmp_path, renamed_target):
+def test_forward_staging_predecessor_uses_current_source_without_replaying_legacy_history(private_cutover, platform_inputs, tmp_path):
     from dataclasses import replace
 
     from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1, load_completed_pool
@@ -132,115 +131,119 @@ def test_forward_staging_predecessor_uses_current_source_without_replaying_legac
         completion_sha256=completion['completion_sha256']), original=root)
     old, = [row for row in context.inputs.installation.participants if row.environment_class == 'development']
     guard, = [row for row in context.inputs.guards if row.participant_id == old.participant_id]
-    config, _, _ = copy.deepcopy(platform_inputs)
-    config.update(namespace=guard.namespace, execution_namespace=old.execution_namespace.name,
-        target_id='replacement-target' if renamed_target else old.targets[0].target_id,
-        cluster_id=context.inputs.installation.cluster_id,
-        execution_node_group_id=context.inputs.installation.node_group_id,
-        task_image_builder={'registry_repository': 'cr.eu-north1.nebius.cloud/current/task-images', 'max_concurrent': 2})
-    candidate = copy.deepcopy(context.inputs.candidate)
-    candidate.update(candidate_sha='e' * 40, repository='ca-mrc/loom', source_ref='refs/heads/dev')
-    profile = context.inputs.profiles[old.participant_id].model_dump(mode='json')
-    profile['candidate_sha'] = candidate['candidate_sha']
-    keyring = context.inputs.installation.profiles.image_admission_keyring
-    rendered = build_platform(config, candidate, profile, keyring, repo_root=Path(__file__).resolve().parents[2])
-    kinds = {'Namespace', 'Deployment', 'StatefulSet', 'CronJob', 'Service', 'ConfigMap',
-        'Role', 'RoleBinding', 'ClusterRole', 'ClusterRoleBinding'}
-    resources = [row for group in rendered.values() for row in group if row['kind'] in kinds]
-    pins = {**legacy.completion.workloads, _key(guard.database.statefulset): guard.database.statefulset,
-        _key(guard.database.service): guard.database.service}
-    namespace_uids = {guard.namespace: str(guard.namespace_uid), old.execution_namespace.name: str(old.execution_namespace.uid),
-        old.build_namespace.name: str(old.build_namespace.uid)}
-    for row in resources:
-        prior = pins.get(_key(row), {}).get('metadata', {})
-        row['metadata'].update(uid=prior.get('uid', str(uuid4())), resourceVersion='101')
-        row['metadata'].setdefault('annotations', {}).update(prior.get('annotations', {}))
-        if row['kind'] == 'Namespace':
-            row['metadata']['uid'] = namespace_uids[row['metadata']['name']]
-    observation = {'schema_version': 'loom.nebius-pool-resource-observation.v1', 'cluster_id': config['cluster_id'],
-        'namespace': config['namespace'], 'candidate_sha': candidate['candidate_sha'], 'resources': resources,
-        'database_credential': {'uid': str(guard.database.credential_uid), 'resource_version': '102'},
-        'actuator_credential': {'uid': str(guard.database.actuator_credential_uid), 'resource_version': '103'}}
-    catalog, _ = initial_catalog(('development',))
-    staged = old.model_dump(mode='json')
-    staged.update(participant_id=str(uuid4()), pool_id=catalog['pool_id'], installation_id=catalog['installation_id'],
-        environment_class='staging', legacy_catalog_environment='development', admission_epoch=catalog['admission_epoch'])
-    staged['targets'][0]['workload_kinds'] = ['trial', 'verifier', 'task_image_build']
-    staged['targets'][0]['target_id'] = config['target_id']
-    attachment = prepare_staging_pool_attachment(participant=PoolParticipantV1.model_validate(staged),
-        observation=observation, candidate=candidate, cluster_id=config['cluster_id'],
-        node_group_id=config['execution_node_group_id'], repo_root=Path(__file__).resolve().parents[2])
-    catalog.update(cluster_id=config['cluster_id'], node_group_id=config['execution_node_group_id'],
-        node_selector={'nebius.com/node-group-id': config['execution_node_group_id']})
-    for kind, field in (('execution', 'runtime'), ('task_images', 'target')):
-        catalog['profiles'][kind][0][field]['node_selector'] = copy.deepcopy(catalog['node_selector'])
-        catalog['profiles'][kind].extend(attachment.profiles.model_dump(mode='json')[kind])
-    catalog['participants'].append(staged)
-    machine = copy.deepcopy(next(row for row in catalog['machines'] if row['role'] == 'participant'))
-    machine.update(machine_id=str(uuid4()), participant_id=staged['participant_id'], token_sha256='f' * 64)
-    catalog['machines'].append(machine)
-    registration = PoolRegistrationRequest(spec=PoolInstallation.model_validate(catalog),
-        binding=replace(context.request.fencing.retirement.migration.registration.binding,
-            installation_id=catalog['installation_id'], namespace='loom-nebius-management-dev'), candidate=candidate)
+    original_inputs = copy.deepcopy((context.inputs, platform_inputs))
+    # Reject changed identity before the valid flow deliberately damages history.
+    for renamed_target in (True, False):
+        config, _, _ = copy.deepcopy(platform_inputs)
+        config.update(namespace=guard.namespace, execution_namespace=old.execution_namespace.name,
+            target_id='replacement-target' if renamed_target else old.targets[0].target_id,
+            cluster_id=context.inputs.installation.cluster_id,
+            execution_node_group_id=context.inputs.installation.node_group_id,
+            task_image_builder={'registry_repository': 'cr.eu-north1.nebius.cloud/current/task-images', 'max_concurrent': 2})
+        candidate = copy.deepcopy(context.inputs.candidate)
+        candidate.update(candidate_sha='e' * 40, repository='ca-mrc/loom', source_ref='refs/heads/dev')
+        profile = context.inputs.profiles[old.participant_id].model_dump(mode='json')
+        profile['candidate_sha'] = candidate['candidate_sha']
+        keyring = context.inputs.installation.profiles.image_admission_keyring
+        rendered = build_platform(config, candidate, profile, keyring, repo_root=Path(__file__).resolve().parents[2])
+        kinds = {'Namespace', 'Deployment', 'StatefulSet', 'CronJob', 'Service', 'ConfigMap',
+            'Role', 'RoleBinding', 'ClusterRole', 'ClusterRoleBinding'}
+        resources = [row for group in rendered.values() for row in group if row['kind'] in kinds]
+        pins = {**legacy.completion.workloads, _key(guard.database.statefulset): guard.database.statefulset,
+            _key(guard.database.service): guard.database.service}
+        namespace_uids = {guard.namespace: str(guard.namespace_uid), old.execution_namespace.name: str(old.execution_namespace.uid),
+            old.build_namespace.name: str(old.build_namespace.uid)}
+        for row in resources:
+            prior = pins.get(_key(row), {}).get('metadata', {})
+            row['metadata'].update(uid=prior.get('uid', str(uuid4())), resourceVersion='101')
+            row['metadata'].setdefault('annotations', {}).update(prior.get('annotations', {}))
+            if row['kind'] == 'Namespace':
+                row['metadata']['uid'] = namespace_uids[row['metadata']['name']]
+        observation = {'schema_version': 'loom.nebius-pool-resource-observation.v1', 'cluster_id': config['cluster_id'],
+            'namespace': config['namespace'], 'candidate_sha': candidate['candidate_sha'], 'resources': resources,
+            'database_credential': {'uid': str(guard.database.credential_uid), 'resource_version': '102'},
+            'actuator_credential': {'uid': str(guard.database.actuator_credential_uid), 'resource_version': '103'}}
+        catalog, _ = initial_catalog(('development',))
+        staged = old.model_dump(mode='json')
+        staged.update(participant_id=str(uuid4()), pool_id=catalog['pool_id'], installation_id=catalog['installation_id'],
+            environment_class='staging', legacy_catalog_environment='development', admission_epoch=catalog['admission_epoch'])
+        staged['targets'][0]['workload_kinds'] = ['trial', 'verifier', 'task_image_build']
+        staged['targets'][0]['target_id'] = config['target_id']
+        attachment = prepare_staging_pool_attachment(participant=PoolParticipantV1.model_validate(staged),
+            observation=observation, candidate=candidate, cluster_id=config['cluster_id'],
+            node_group_id=config['execution_node_group_id'], repo_root=Path(__file__).resolve().parents[2])
+        catalog.update(cluster_id=config['cluster_id'], node_group_id=config['execution_node_group_id'],
+            node_selector={'nebius.com/node-group-id': config['execution_node_group_id']})
+        for kind, field in (('execution', 'runtime'), ('task_images', 'target')):
+            catalog['profiles'][kind][0][field]['node_selector'] = copy.deepcopy(catalog['node_selector'])
+            catalog['profiles'][kind].extend(attachment.profiles.model_dump(mode='json')[kind])
+        catalog['participants'].append(staged)
+        machine = copy.deepcopy(next(row for row in catalog['machines'] if row['role'] == 'participant'))
+        machine.update(machine_id=str(uuid4()), participant_id=staged['participant_id'], token_sha256='f' * 64)
+        catalog['machines'].append(machine)
+        registration = PoolRegistrationRequest(spec=PoolInstallation.model_validate(catalog),
+            binding=replace(context.request.fencing.retirement.migration.registration.binding,
+                installation_id=catalog['installation_id'], namespace='loom-nebius-management-dev'), candidate=candidate)
 
-    from scripts.ops.nebius_shared_pool_handoff import prepare_staging_forward
+        from scripts.ops.nebius_shared_pool_handoff import prepare_staging_forward
 
-    before = {path: path.read_bytes() for path in legacy.history}
-    if renamed_target:
-        # A perfectly self-consistent new renderer/catalog cannot silently
-        # replace an immutable old execution-target identity during handoff.
+        before = {path: path.read_bytes() for path in legacy.history}
+        if renamed_target:
+            # A perfectly self-consistent new renderer/catalog cannot silently
+            # replace an immutable old execution-target identity during handoff.
+            with pytest.raises(ValueError, match='shared pool staging predecessor unqualified'):
+                prepare_staging_forward(registration=registration, observation=observation, legacy=legacy,
+                    repo_root=Path(__file__).resolve().parents[2])
+            assert {path: path.read_bytes() for path in legacy.history} == before
+            assert (context.inputs, platform_inputs) == original_inputs
+            continue
+        result = prepare_staging_forward(registration=registration, observation=observation, legacy=legacy,
+            repo_root=Path(__file__).resolve().parents[2])
+        assert {path: path.read_bytes() for path in legacy.history} == before
+        controller = result.originals[_key(attachment.guard.controller)]
+        assert controller == attachment.guard.controller
+        assert controller['spec'] != legacy.completion.workloads[_key(controller)]['spec']
+        marker = 'loom.nebius/shared-pool-handoff-operation'
+        for key, stopped in result.stopped.items():
+            assert stopped['metadata']['annotations'][marker] == str(registration.spec.operation_id)
+            for name, value in result.originals[key]['metadata'].get('annotations', {}).items():
+                assert stopped['metadata']['annotations'][name] == value
+            assert stopped['spec']['suspend' if stopped['kind'] == 'CronJob' else 'replicas'] in (True, 0)
+        # The real anchored engine must accept, replay and restore these exact
+        # projections; only its external Kubernetes transport is doubled.
+        from scripts.ops.nebius_development_runtime_transition import advance_runtime_workloads
+        from scripts.ops.nebius_ingress_stage import _snapshot
+        from tests.ops.test_nebius_development_runtime_transition import RuntimeAPI
+
+        api = RuntimeAPI(result.originals)
+        api.ready = True
+        options = dict(originals=result.originals, targets=result.stopped, input_digest=result.input_digest,
+            phase='stop', api=api, state_dir=tmp_path / 'forward-stop')
+        assert advance_runtime_workloads(**options) is True
+        assert advance_runtime_workloads(**options) is True
+        assert api.patches == list(result.originals)
+        assert advance_runtime_workloads(originals=copy.deepcopy(api.rows),
+            targets={key: _snapshot(row) for key, row in result.originals.items()},
+            input_digest=result.input_digest, phase='replace', api=api, state_dir=tmp_path / 'forward-restore') is True
+        for key, original in result.originals.items():
+            assert _snapshot(api.rows[key]) == _snapshot(original)
+            assert api.rows[key]['metadata']['uid'] == original['metadata']['uid']
+        assert {path: path.read_bytes() for path in legacy.history} == before
+        with pytest.raises(ValueError, match='shared pool staging predecessor unqualified'):
+            prepare_staging_forward(registration=replace(registration,
+                binding=replace(registration.binding, kube_system_uid=str(uuid4()))),
+                observation=observation, legacy=legacy, repo_root=Path(__file__).resolve().parents[2])
+        altered = copy.deepcopy(observation)
+        current = next(row for row in altered['resources'] if _key(row) == _key(controller))
+        current['metadata']['uid'] = str(uuid4())
+        with pytest.raises(ValueError, match='shared pool staging predecessor unqualified'):
+            prepare_staging_forward(registration=registration, observation=altered, legacy=legacy,
+                repo_root=Path(__file__).resolve().parents[2])
+        path = Path(operation['state_dir']) / 'activation.json'
+        path.write_bytes(path.read_bytes() + b' ')
         with pytest.raises(ValueError, match='shared pool staging predecessor unqualified'):
             prepare_staging_forward(registration=registration, observation=observation, legacy=legacy,
                 repo_root=Path(__file__).resolve().parents[2])
-        assert {path: path.read_bytes() for path in legacy.history} == before
-        return
-    result = prepare_staging_forward(registration=registration, observation=observation, legacy=legacy,
-        repo_root=Path(__file__).resolve().parents[2])
-    assert {path: path.read_bytes() for path in legacy.history} == before
-    controller = result.originals[_key(attachment.guard.controller)]
-    assert controller == attachment.guard.controller
-    assert controller['spec'] != legacy.completion.workloads[_key(controller)]['spec']
-    marker = 'loom.nebius/shared-pool-handoff-operation'
-    for key, stopped in result.stopped.items():
-        assert stopped['metadata']['annotations'][marker] == str(registration.spec.operation_id)
-        for name, value in result.originals[key]['metadata'].get('annotations', {}).items():
-            assert stopped['metadata']['annotations'][name] == value
-        assert stopped['spec']['suspend' if stopped['kind'] == 'CronJob' else 'replicas'] in (True, 0)
-    # The real anchored engine must accept, replay and restore these exact
-    # projections; only its external Kubernetes transport is doubled.
-    from scripts.ops.nebius_development_runtime_transition import advance_runtime_workloads
-    from scripts.ops.nebius_ingress_stage import _snapshot
-    from tests.ops.test_nebius_development_runtime_transition import RuntimeAPI
-
-    api = RuntimeAPI(result.originals)
-    api.ready = True
-    options = dict(originals=result.originals, targets=result.stopped, input_digest=result.input_digest,
-        phase='stop', api=api, state_dir=tmp_path / 'forward-stop')
-    assert advance_runtime_workloads(**options) is True
-    assert advance_runtime_workloads(**options) is True
-    assert api.patches == list(result.originals)
-    assert advance_runtime_workloads(originals=copy.deepcopy(api.rows),
-        targets={key: _snapshot(row) for key, row in result.originals.items()},
-        input_digest=result.input_digest, phase='replace', api=api, state_dir=tmp_path / 'forward-restore') is True
-    for key, original in result.originals.items():
-        assert _snapshot(api.rows[key]) == _snapshot(original)
-        assert api.rows[key]['metadata']['uid'] == original['metadata']['uid']
-    assert {path: path.read_bytes() for path in legacy.history} == before
-    with pytest.raises(ValueError, match='shared pool staging predecessor unqualified'):
-        prepare_staging_forward(registration=replace(registration,
-            binding=replace(registration.binding, kube_system_uid=str(uuid4()))),
-            observation=observation, legacy=legacy, repo_root=Path(__file__).resolve().parents[2])
-    altered = copy.deepcopy(observation)
-    current = next(row for row in altered['resources'] if _key(row) == _key(controller))
-    current['metadata']['uid'] = str(uuid4())
-    with pytest.raises(ValueError, match='shared pool staging predecessor unqualified'):
-        prepare_staging_forward(registration=registration, observation=altered, legacy=legacy,
-            repo_root=Path(__file__).resolve().parents[2])
-    path = Path(operation['state_dir']) / 'activation.json'
-    path.write_bytes(path.read_bytes() + b' ')
-    with pytest.raises(ValueError, match='shared pool staging predecessor unqualified'):
-        prepare_staging_forward(registration=registration, observation=observation, legacy=legacy,
-            repo_root=Path(__file__).resolve().parents[2])
 
 
 @pytest.mark.timeout(420)

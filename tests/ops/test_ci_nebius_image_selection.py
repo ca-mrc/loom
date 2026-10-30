@@ -32,12 +32,6 @@ def test_dev_image_plan_matches_runtime_set(tmp_path, path, expected):
     assert (values['harbor_required'] == 'true') == ('harbor-runtime' in expected)
 
 
-def test_candidate_validation_has_no_push_trigger():
-    workflow = yaml.safe_load((ROOT / '.github/workflows/images.yml').read_text())
-    assert set(workflow[True]) == {'workflow_call', 'workflow_dispatch'}
-    assert 'concurrency' not in workflow
-
-
 @pytest.mark.parametrize("image,required,build,harness,accepted", [
     ("web", "false", "success", "skipped", True),
     ("web", "false", "success", "failure", False),

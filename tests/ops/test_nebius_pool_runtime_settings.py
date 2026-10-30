@@ -110,7 +110,12 @@ def test_fixed_settings_probe_uses_actual_loaded_configuration_and_private_mater
     assert (result.returncode, result.stdout, result.stderr) == (0, b'{"status": "qualified"}\n', b'')
 
 
-@pytest.mark.parametrize('damage', ['settings', 'missing', 'challenge'])
+# Keep each loader's refusals; only the final HMAC challenge check is shared.
+@pytest.mark.parametrize(('settings_case', 'damage'), [
+    *((component, damage) for component in ('controller', 'actuator', 'guest', 'service', 'manager', 'gateway')
+      for damage in ('settings', 'missing')),
+    ('controller', 'challenge'),
+], indirect=['settings_case'])
 def test_fixed_settings_probe_rejects_disabled_or_different_runtime_without_exposing_values(settings_case, tmp_path, damage):
     component, _, environment, _, expected, _, _ = settings_case
     variable = {'controller': 'LOOM_CP_SERVICE_EXECUTION_GLOBAL_POOL_JSON', 'actuator': 'LOOM_EXECUTION_ACTUATOR_GLOBAL_POOL',
@@ -135,10 +140,14 @@ def test_fixed_settings_probe_rejects_disabled_or_different_runtime_without_expo
     assert result.stderr == b'Pool runtime settings unqualified\n'
 
 
-@pytest.mark.parametrize('settings_case', ['controller', 'actuator', 'guest', 'gateway'], indirect=True)
-@pytest.mark.parametrize('damage', ['different', 'missing', 'symlink', 'permissions', 'empty', 'oversized'])
+# File checks use one reader; retain gateway's independent smaller byte bound.
+@pytest.mark.parametrize(('settings_case', 'damage'), [
+    *(('controller', damage) for damage in ('different', 'missing', 'symlink', 'permissions', 'empty', 'oversized')),
+    *((component, 'different') for component in ('actuator', 'guest', 'gateway')),
+    ('gateway', 'oversized'),
+], indirect=['settings_case'])
 def test_fixed_probe_requires_the_same_owner_only_machine_token(settings_case, tmp_path, damage):
-    _, _, _, _, _, token, _ = settings_case
+    component, _, _, _, expected, token, _ = settings_case
     if damage == 'different':
         token.write_text('private-other-machine-marker')
     elif damage == 'missing':
@@ -152,8 +161,11 @@ def test_fixed_probe_requires_the_same_owner_only_machine_token(settings_case, t
     elif damage == 'empty':
         token.write_bytes(b'')
     else:
-        token.write_bytes(b'x' * (16 * 1024 + 1))
-    result = run_probe(settings_case, tmp_path)
+        token.write_bytes(b'x' * ((512 if component == 'gateway' else 16 * 1024) + 1))
+    if damage in {'empty', 'oversized'}:
+        # Keep the digest valid so the reader itself must reject the file size.
+        expected = {**expected, 'token_sha256': hashlib.sha256(token.read_bytes()).hexdigest()}
+    result = run_probe(settings_case, tmp_path, expected=expected)
     assert result.returncode == 1 and result.stdout == b'' and b'private-' not in result.stderr
 
 
@@ -257,28 +269,28 @@ def test_development_manager_challenges_selected_catalog_bytes(
     assert processes[-1].stderr == b'Pool runtime settings unqualified\n'
 
 
-@pytest.mark.parametrize('damage', ['duplicate', 'env_from', 'secret_setting', 'token_scope'])
-def test_expected_settings_cannot_use_ambiguous_or_indirect_configuration(settings_case, damage):
+def test_expected_settings_cannot_use_ambiguous_or_indirect_configuration(settings_case):
     from scripts.ops.nebius_pool_runtime_settings import expected_pool_runtime_settings
 
-    component, target, _, options, _, _, _ = settings_case
-    container = target['spec']['template']['spec']['containers'][0]
-    if damage == 'duplicate':
-        container['env'].append(copy.deepcopy(container['env'][0]))
-    elif damage == 'env_from':
-        container['envFrom'] = [{'secretRef': {'name': 'foreign'}}]
-    elif damage == 'secret_setting':
-        variable = {'controller': 'LOOM_CP_SERVICE_EXECUTION_GLOBAL_POOL_JSON', 'actuator': 'LOOM_EXECUTION_ACTUATOR_GLOBAL_POOL',
-            'service': 'LOOM_SVC_POOL_SUBMISSION_SOURCE_JSON', 'manager': 'LOOM_SVC_POOL_PROFILES_FILE',
-            'gateway': 'LOOM_POOL_GATEWAY_KUBERNETES'}[component]
-        row = env(target)[variable]
-        row.pop('value')
-        row['valueFrom'] = {'secretKeyRef': {'name': 'private-marker', 'key': 'settings'}}
-    else:
-        options = {**options, 'token_sha256': 'private-invalid-marker'}
-    with pytest.raises(ValueError) as error:
-        expected_pool_runtime_settings(component, target, **options)
-    assert 'private-' not in str(error.value)
+    for damage in ('duplicate', 'env_from', 'secret_setting', 'token_scope'):
+        component, target, _, options, _, _, _ = copy.deepcopy(settings_case)
+        container = target['spec']['template']['spec']['containers'][0]
+        if damage == 'duplicate':
+            container['env'].append(copy.deepcopy(container['env'][0]))
+        elif damage == 'env_from':
+            container['envFrom'] = [{'secretRef': {'name': 'foreign'}}]
+        elif damage == 'secret_setting':
+            variable = {'controller': 'LOOM_CP_SERVICE_EXECUTION_GLOBAL_POOL_JSON', 'actuator': 'LOOM_EXECUTION_ACTUATOR_GLOBAL_POOL',
+                'service': 'LOOM_SVC_POOL_SUBMISSION_SOURCE_JSON', 'manager': 'LOOM_SVC_POOL_PROFILES_FILE',
+                'gateway': 'LOOM_POOL_GATEWAY_KUBERNETES'}[component]
+            row = env(target)[variable]
+            row.pop('value')
+            row['valueFrom'] = {'secretKeyRef': {'name': 'private-marker', 'key': 'settings'}}
+        else:
+            options = {**options, 'token_sha256': 'private-invalid-marker'}
+        with pytest.raises(ValueError) as error:
+            expected_pool_runtime_settings(component, target, **options)
+        assert 'private-' not in str(error.value)
 
 
 def test_fixed_probe_sanitizes_an_unavailable_runtime_module(monkeypatch, capsys):

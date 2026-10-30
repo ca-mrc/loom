@@ -516,52 +516,16 @@ def test_manager_image_switch_recovers_each_local_persistence_boundary(image_rep
         assert api.calls == ["isolate", "stop", "template", "start"]
 
 
-def test_prepared_image_correction_blocks_activation_even_with_ready_old_runtime(image_repair_case):
-    from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
-
-    context, remote, state, anchor, _ = image_repair_case
-    persist(entry(image_repair_case))
-    remote.activation.ready = True
-    with pytest.raises(ValueError):
-        advance_pool_activation(request=context.request, api=remote.activation, state_dir=state, anchor_dir=anchor)
-    assert remote.activation.calls == [] and remote.activation.mode == "closed"
-
-
-def test_completed_image_correction_supports_runtime_activation_completion_and_refresh(image_repair_case):
-    from types import SimpleNamespace
-
-    from scripts.ops.nebius_ingress_stage import _key
-    from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
-    from scripts.ops.nebius_pool_completion import complete_pool_cutover, load_pool_completion
-    from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1, load_completed_pool
-    from scripts.ops.nebius_pool_startup import closed_startup_documents
-    from scripts.ops.nebius_pool_startup_live import HTTPSPoolStartupAPI
-
-    context, remote, state, anchor, binding = image_repair_case
-    assert switch(image_repair_case, ImageAPI(image_repair_case))["status"] == "pool_manager_image_repaired_closed"
-    closed, targets = closed_startup_documents(context.request, state_dir=state, anchor_dir=anchor)
-    adapter = SimpleNamespace(request=context.request, state=state, anchor=anchor, closed=closed,
-        targets=targets, _scope=lambda: None, read_workload=remote.read_workload)
-    actual = HTTPSPoolStartupAPI._started_workloads(adapter)
-    assert actual[_key(context.request.manager)]["spec"]["template"]["spec"]["containers"][0]["image"] == binding.candidate["images"]["service"]["image_ref"]
-    remote.activation.ready = True
-    assert advance_pool_activation(request=context.request, api=remote.activation,
-        state_dir=state, anchor_dir=anchor)["status"] == "pool_activation_complete"
-    result = complete_pool_cutover(request=context.request, api=remote.activation, state_dir=state, anchor_dir=anchor)
-    completed = load_pool_completion(request=context.request, state_dir=state, anchor_dir=anchor,
-        completion_sha256=result["completion_sha256"])
-    value = entry(image_repair_case)
-    assert {value.path, value.marker, state / "startup-repair.json"} <= set(completed.history)
-    predecessor = PoolPredecessorV1(operation=context.operation, completion_sha256=result["completion_sha256"])
-    loaded = load_completed_pool(predecessor, original=context.original)
-    assert loaded.active["spec"]["template"]["spec"]["containers"][0]["image"] == binding.candidate["images"]["service"]["image_ref"]
-    assert loaded.deployment.installation.applications.shared.runtime_profile_json == context.predecessor.deployment.installation.applications.shared.runtime_profile_json
-
-
 def test_bound_image_operation_completes_original_pool_and_unbound_install_refuses(image_repair_case, monkeypatch):
     from types import SimpleNamespace
 
     from scripts.ops import nebius_pool_operation as target
+    from scripts.ops.nebius_ingress_stage import _key
+    from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
+    from scripts.ops.nebius_pool_completion import load_pool_completion
+    from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1, load_completed_pool
+    from scripts.ops.nebius_pool_startup import closed_startup_documents
+    from scripts.ops.nebius_pool_startup_live import HTTPSPoolStartupAPI
 
     context, remote, state, anchor, binding = image_repair_case
     api = ImageAPI(image_repair_case)
@@ -570,6 +534,9 @@ def test_bound_image_operation_completes_original_pool_and_unbound_install_refus
     monkeypatch.setattr(target, "HTTPSPoolActivationAPI", lambda **kwargs: remote.activation)
     remote.activation.ready = True
     persist(entry(image_repair_case))
+    with pytest.raises(ValueError):
+        advance_pool_activation(request=context.request, api=remote.activation, state_dir=state, anchor_dir=anchor)
+    assert remote.activation.calls == [] and remote.activation.mode == "closed"
     with pytest.raises(target.PoolOperationError):
         target.run_pool_operation(parent=parent, tokens=context.tokens, action="install")
     assert remote.activation.calls == []
@@ -577,6 +544,20 @@ def test_bound_image_operation_completes_original_pool_and_unbound_install_refus
     assert result["status"] == "pool_cutover_completed" and result["outcome"] == "global"
     assert result["operation_id"] == context.operation["operation_id"]
     assert api.calls == ["isolate", "stop", "template", "start"]
+
+    closed, targets = closed_startup_documents(context.request, state_dir=state, anchor_dir=anchor)
+    adapter = SimpleNamespace(request=context.request, state=state, anchor=anchor, closed=closed,
+        targets=targets, _scope=lambda: None, read_workload=remote.read_workload)
+    actual = HTTPSPoolStartupAPI._started_workloads(adapter)
+    assert actual[_key(context.request.manager)]["spec"]["template"]["spec"]["containers"][0]["image"] == binding.candidate["images"]["service"]["image_ref"]
+    completed = load_pool_completion(request=context.request, state_dir=state, anchor_dir=anchor,
+        completion_sha256=result["completion_sha256"])
+    value = entry(image_repair_case)
+    assert {value.path, value.marker, state / "startup-repair.json"} <= set(completed.history)
+    predecessor = PoolPredecessorV1(operation=context.operation, completion_sha256=result["completion_sha256"])
+    loaded = load_completed_pool(predecessor, original=context.original)
+    assert loaded.active["spec"]["template"]["spec"]["containers"][0]["image"] == binding.candidate["images"]["service"]["image_ref"]
+    assert loaded.deployment.installation.applications.shared.runtime_profile_json == context.predecessor.deployment.installation.applications.shared.runtime_profile_json
 
 
 @pytest.fixture
@@ -788,8 +769,10 @@ def test_image_entry_rejects_unqualified_source_schema_or_parent(private_image_r
         load_image_repair_inputs(operation)
 
 
-@pytest.mark.parametrize("damage", [None, "failed_run", "missing_gate", "tampered", "candidate_bytes", "private_drift"])
-@pytest.mark.parametrize("continued", [False, True])
+@pytest.mark.parametrize("continued,damage", [
+    (False, None), (False, "failed_run"), (False, "missing_gate"), (False, "tampered"),
+    (False, "candidate_bytes"), (False, "private_drift"), (True, None), (True, "private_drift"),
+])
 def test_image_repair_resolves_real_protected_catalog_before_operator_connection(
         private_image_repair, image_repair_case, monkeypatch, damage, continued):
     from contextlib import contextmanager
@@ -889,7 +872,7 @@ def test_late_isolation_after_legacy_opening_cannot_lead_to_a_manager_stop(image
 
 
 @pytest.mark.parametrize(("moment", "loss"), [("prepared", None), ("intent", None), ("prepared_fence", None), ("late_isolate", None),
-    ("late_shutdown", None), ("late_shutdown", "before"), ("late_shutdown", "after"),
+    ("late_shutdown", "before"), ("late_shutdown", "after"),
     ("late_shutdown", "conflict"), ("stopped", None)])
 @pytest.mark.timeout(420)
 def test_legacy_fence_resumes_image_enrollment_without_rewriting_frozen_evidence(image_repair_case, monkeypatch, moment, loss, request):

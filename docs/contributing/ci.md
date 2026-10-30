@@ -276,7 +276,7 @@ heavy validation follows the changed files:
 | Restore verifier operator script | Integration |
 | Nebius Terraform | IaC checks |
 | Nebius IaC checker or its tests | Integration, the IaC checks |
-| Action-pin, upgrade-policy and CI selection tooling | Python root contracts and static checks |
+| Action-pin and CI selection tooling | Python root contracts and static checks |
 | Retained Go runtime modules | Go checks and their affected Docker/image contracts |
 | Candidate workflow/publisher, registry authentication, shared scan validator | Full validation |
 | Unknown runtime or operator files | Full validation |

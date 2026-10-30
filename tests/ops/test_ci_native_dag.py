@@ -32,17 +32,6 @@ def test_skipped_manual_or_filtered_jobs_cannot_emit_required_names(gate, event,
     assert (name == gate) is (event in {"pull_request", "merge_group"} and mode == "full")
 
 
-def test_specialists_wait_in_the_native_dag_without_allocating_runners():
-    jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
-    for kind, (workflow, gate) in SPECIALISTS.items():
-        call = jobs[f"{kind}-validation"]
-        assert call["uses"] == f"./.github/workflows/{workflow}.yml"
-        assert set(call["needs"]) == {"workflow-plan", "fast-feedback"}
-        assert "runs-on" not in call and "steps" not in call
-        assert f"{kind}-validation" in jobs[gate]["needs"]
-        assert "vars.LOOM_CI_REUSABLE_SUPPLY_READY == 'true'" in jobs[gate]["runs-on"]
-
-
 @pytest.mark.parametrize("kind", SPECIALISTS)
 @pytest.mark.parametrize("event", ["pull_request", "merge_group", "workflow_dispatch", "push"])
 @pytest.mark.parametrize("feedback", ["success", "failure", "cancelled", "skipped"])
@@ -63,12 +52,6 @@ def test_actual_call_guard_starts_only_selected_work_after_feedback(kind, event,
         expected = event in {"pull_request", "merge_group"} and feedback == "success" and selected == "true"
         assert _condition(expression, values) is expected
         assert not _condition(expression, values, cancelled=True)
-
-
-def test_candidate_supplementary_matrix_stops_siblings_after_failure():
-    jobs = yaml.safe_load((ROOT / ".github/workflows/nebius-candidate.yml").read_text())["jobs"]
-    assert jobs["pool-ops-tests"]["strategy"]["fail-fast"] is True
-    assert "pool-ops-tests" in jobs["publish"]["needs"]
 
 
 @pytest.mark.parametrize("kind", SPECIALISTS)

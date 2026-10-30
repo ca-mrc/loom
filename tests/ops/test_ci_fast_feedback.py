@@ -76,8 +76,7 @@ def test_feedback_owns_mandatory_cli_probe_in_candidate_planners_hosted_environm
     ("nebius-pool", "nebius_pool"), ("runtime-payload", "runtime_payload"),
     ("integration-docker", "integration_docker"), ("web-runtime", "web_runtime"),
 ])
-@pytest.mark.parametrize("ancestor", FEEDBACK_JOBS)
-def test_successful_feedback_releases_selected_heavy_work_after_unselected_ancestor_skip(job_name, selector, ancestor):
+def test_successful_feedback_releases_selected_heavy_work_after_unselected_ancestor_skip(job_name, selector):
     # Native run 39979536847 had successful feedback but selected heavy work
     # skipped because GitHub's implicit success() includes skipped ancestors.
     job = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"][job_name]
@@ -85,7 +84,7 @@ def test_successful_feedback_releases_selected_heavy_work_after_unselected_ances
         "needs.workflow-plan.result": "success", "needs.fast-feedback.result": "success",
         "needs.workflow-plan.outputs.gate_mode": "full",
         f"needs.workflow-plan.outputs.{selector}": "true",
-        f"needs.{ancestor}.result": "skipped",
+        "needs.tests-packages.result": "skipped",
     }
     assert _condition(job["if"], values)
     assert not _condition(job["if"], values, cancelled=True)
@@ -118,8 +117,14 @@ def test_reusable_nodes_allow_skipped_outer_ancestors_but_require_their_own_depe
             assert not _condition(condition, {**values, f"needs.{dependency}.result": result})
 
 
-@pytest.mark.parametrize("event", ["pull_request", "merge_group", "workflow_dispatch", "schedule", "push"])
-@pytest.mark.parametrize("selector", [None, "nebius_pool", "integration_docker", "runtime_payload", "web_runtime", "images", "cluster_smoke", "staging_smoke"])
+@pytest.mark.parametrize("event,selector", [
+    ("pull_request", None), ("pull_request", "nebius_pool"),
+    ("pull_request", "integration_docker"), ("pull_request", "runtime_payload"),
+    ("pull_request", "web_runtime"), ("pull_request", "images"),
+    ("pull_request", "cluster_smoke"), ("pull_request", "staging_smoke"),
+    ("merge_group", "images"), ("workflow_dispatch", "images"),
+    ("schedule", "images"), ("push", "images"),
+])
 def test_base_preflight_runs_only_after_quick_success_for_pr_heavy_work(event, selector):
     job = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["fast-feedback"]
     step = next(step for step in job["steps"] if step.get("run") == "python3 scripts/ci_fast_feedback.py check-base")

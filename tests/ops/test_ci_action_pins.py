@@ -73,17 +73,6 @@ def _errors(
     ).errors
 
 
-def test_repository_workflows_match_the_verified_action_lock() -> None:
-    result = check_action_pins(
-        workflows_dir=REPO_ROOT / ".github" / "workflows",
-        lock_file=REPO_ROOT / "config" / "ci-actions-lock.json",
-    )
-
-    assert result.errors == ()
-    assert result.workflow_count > 0
-    assert result.reference_count > 0
-
-
 def test_repository_workflows_use_only_actions_allowed_by_github_policy() -> None:
     result = check_action_pins(
         workflows_dir=REPO_ROOT / ".github" / "workflows",

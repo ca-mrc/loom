@@ -23,9 +23,8 @@ from tests.ops.test_nebius_pool_participant_operation import (
 
 
 @pytest.mark.timeout(120)
-@pytest.mark.parametrize('recovery', [False, True])
 def test_operator_host_executes_retained_source_without_runner_paths_or_github(
-        operation_inputs, connection, tmp_path, monkeypatch, recovery, *, via_dispatch=False, via_runner=False):
+        operation_inputs, connection, tmp_path, monkeypatch, recovery=False, *, via_dispatch=False, via_runner=False):
     from scripts.ops import nebius_pool_participant_entry as entry
     from scripts.ops import nebius_shared_pool_entry as shared_entry
     from scripts.ops.nebius_pool_participant_completion import initialize_participant_head
@@ -188,12 +187,11 @@ def test_operator_host_executes_retained_source_without_runner_paths_or_github(
     assert all(not path.exists() for path in paths)
 
 
-@pytest.mark.parametrize('recovery', [False, True, 'completion-ack'])
 @pytest.mark.timeout(120)
 def test_data_only_dispatch_runs_actual_release_and_original_recovery(
-        operation_inputs, connection, tmp_path, monkeypatch, recovery):
+        operation_inputs, connection, tmp_path, monkeypatch):
     test_operator_host_executes_retained_source_without_runner_paths_or_github(
-        operation_inputs, connection, tmp_path, monkeypatch, recovery, via_dispatch=True)
+        operation_inputs, connection, tmp_path, monkeypatch, False, via_dispatch=True)
 
 
 @pytest.mark.parametrize('recovery', [False, True, 'completion-ack'])

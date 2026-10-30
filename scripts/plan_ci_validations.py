@@ -102,7 +102,6 @@ OWNERSHIP_AUTHORITY_PATHS = {
 # retain the stronger fallback below.
 REPOSITORY_POLICY_TOOLS = {
     "scripts/check_ci_action_pins.py",
-    "scripts/check_ci_upgrade_policy.py",
     "scripts/check_repository_paths.py",
     "scripts/check_github_cli_logs.py",
     # Read-only Actions evidence/reporting tools have dedicated root

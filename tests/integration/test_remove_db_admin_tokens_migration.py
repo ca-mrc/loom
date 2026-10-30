@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, delete, insert, text
+from sqlalchemy import create_engine, insert, text
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import Token
@@ -70,11 +70,7 @@ def seeded_admin_tokens(isolated_migration_postgres_url: str) -> Iterator[None]:
     try:
         yield
     finally:
-        with sl() as s:
-            s.execute(delete(Token))
-            s.commit()
         engine.dispose()
-        command.upgrade(cfg, "head")
 
 
 def test_migration_revokes_legacy_db_admin_tokens(

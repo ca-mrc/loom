@@ -8,8 +8,6 @@ historical-step expectation explicitly.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-
 import pytest
 from alembic import command
 from alembic.config import Config
@@ -26,8 +24,8 @@ def _cfg(url: str) -> Config:
 def at_revision_0006(
     isolated_migration_postgres_url: str,
     monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[None]:
-    """Roll back to pre-Plan-19, yield, then bring back to head.
+) -> None:
+    """Roll back this test's disposable database to pre-Plan-19.
 
     Older migration tests used to depend on `LOOM_DB_URL` in the process
     environment. Keep this pin here so any legacy env-only path still points at
@@ -36,10 +34,6 @@ def at_revision_0006(
     monkeypatch.setenv("LOOM_DB_URL", isolated_migration_postgres_url)
     cfg = _cfg(isolated_migration_postgres_url)
     command.downgrade(cfg, "0006")
-    try:
-        yield
-    finally:
-        command.upgrade(cfg, "head")
 
 
 def test_0007_creates_campaigns_table(

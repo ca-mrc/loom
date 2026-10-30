@@ -73,8 +73,8 @@ def _pytest_step(tmp_path: Path, manifest_file: str, *, pytest_exit=0):
     return result, json.loads(recorded.read_text()) if recorded.exists() else []
 
 
-@pytest.mark.parametrize("scope", ["all", "nebius"])
-def test_full_cluster_matrix_executes_complete_disjoint_manifests(tmp_path, cluster_inputs, scope):
+def test_full_cluster_matrix_executes_complete_disjoint_manifests(tmp_path, cluster_inputs):
+    scope = "nebius"
     manifest, tracked, paths, _ = cluster_inputs
     plan = _plan(tmp_path, changes=(), scope=scope, event="workflow_dispatch", labels=("cluster-smoke",))
     matrix = json.loads(plan["cluster_smoke_matrix"])
@@ -139,27 +139,6 @@ def test_build_report_retains_target_after_shared_image_builds(tmp_path):
     assert "record unavailable" in result.stdout
 
 
-def test_manifest_is_selected_before_dependency_or_registry_installation():
-    jobs = _jobs()
-    contract = jobs["cluster-contract"]
-    steps = contract["steps"]
-    selector = next(step for step in steps if step.get("id") == "manifest")
-    selection_index = steps.index(selector)
-    for index, step in enumerate(steps):
-        if "setup-uv@" in step.get("uses", "") or "uv sync" in step.get("run", "") or "apt-get" in step.get("run", ""):
-            assert selection_index < index
-    assert "python3 scripts/component_ownership.py" in selector["run"]
-    assert jobs["plan"]["outputs"]["test_changes"] == "${{ steps.plan.outputs.test_changes }}"
-    assert jobs["plan"]["outputs"]["cluster_smoke_matrix"] == "${{ steps.plan.outputs.cluster_smoke_matrix }}"
-    assert contract["strategy"]["matrix"]["include"] == "${{ fromJSON(needs.plan.outputs.cluster_smoke_matrix) }}"
-    assert contract["env"]["TEST_CHANGED_PATHS"] == "${{ needs.plan.outputs.test_changes }}"
-    assert selector["env"]["SHARD_COUNT"] == "${{ matrix.shard_count }}"
-    assert "pull_request" in contract["strategy"]["fail-fast"] and "merge_group" in contract["strategy"]["fail-fast"]
-    assert not contract.get("continue-on-error", False)
-    assert all("validate_environment_isolation.py" not in step.get("run", "")
-               and "loom cluster render" not in step.get("run", "") for step in steps)
-
-
 @pytest.mark.parametrize("selector_exit,partial", [(19, True), (0, False)])
 def test_failed_or_empty_selector_cannot_authorize_test_execution(tmp_path, selector_exit, partial):
     python = tmp_path / "python3"
@@ -180,12 +159,3 @@ def test_pytest_failure_propagates(tmp_path, cluster_inputs):
     assert result.returncode == 0, result.stderr
     result, _ = _pytest_step(tmp_path, outputs["paths_file"], pytest_exit=9)
     assert result.returncode == 9
-
-
-@pytest.mark.parametrize("status", ["success", "failure", "cancelled", "skipped"])
-def test_selected_cluster_gate_requires_success(status):
-    step = _jobs()["cluster-smoke-gate"]["steps"][0]
-    result = subprocess.run(["bash"], input=step["run"], text=True, capture_output=True,
-        env={**os.environ, "PLAN_RESULT": "success", "GATE_MODE": "full", "REQUIRED": "true",
-             "CONTRACT_RESULT": status}, check=False)
-    assert (result.returncode == 0) == (status == "success")

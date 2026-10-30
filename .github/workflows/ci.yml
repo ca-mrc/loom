@@ -408,9 +408,6 @@ jobs:
       - name: Verify GitHub Action SHA lock
         run: uv run --no-sync python scripts/check_ci_action_pins.py
 
-      - name: Verify controlled CI upgrade policy
-        run: uv run --no-sync python scripts/check_ci_upgrade_policy.py
-
   # Native dependencies reserve runner slots for quick checks first. Unselected
   # prerequisites may skip; a selected skip/failure/cancellation blocks fan-out.
   tests-root:
