@@ -9,7 +9,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 
-import httpx
 from fastapi import FastAPI, Request
 from prometheus_client import make_asgi_app
 from sqlalchemy.ext.asyncio import (
@@ -33,7 +32,7 @@ from loom_control_plane.service_execution_output import ServiceExecutionOutputRo
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.dispatch_audit import DispatchAuditMiddleware, DispatchAuditUnavailableError
 from loom_llm_gateway.drain import ensure_drain_state, install_drain_middleware
-from loom_llm_gateway.egress_client_pool import EgressClientPool
+from loom_llm_gateway.egress_client_pool import EgressClientPool, create_upstream_client
 from loom_llm_gateway.pod_identity import ExecutionPodReviewer
 from loom_llm_gateway.provider_dispatch import settle_stale_provider_dispatches
 from loom_llm_gateway.rate_card import RateCardCache
@@ -175,8 +174,8 @@ def create_app(settings: GatewaySettings) -> FastAPI:
         app.state.execution_pod_reviewer = ExecutionPodReviewer.from_file(
             settings.service_execution_kubernetes_config_file,
         )
-        app.state.upstream_client = httpx.AsyncClient(
-            timeout=settings.upstream_timeout_sec,
+        app.state.upstream_client = create_upstream_client(
+            timeout_sec=settings.upstream_timeout_sec,
         )
         # #190 PR-C2: per-connection-id egress-proxy client pool. When
         # `egress_proxy_url` is empty (default), `pool.get(...)` falls

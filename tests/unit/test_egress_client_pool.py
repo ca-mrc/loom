@@ -2,8 +2,7 @@
 proxy chain (#190 PR-C2).
 
 Tests assert the pool's lazy-build + reuse behavior + the proxy
-config baked into pooled clients. No real network — httpx clients
-inspect-only.
+config baked into pooled clients, plus real loopback transport pressure.
 """
 
 from __future__ import annotations
@@ -12,8 +11,9 @@ import asyncio
 from uuid import uuid4
 
 import httpx
+import pytest
 
-from loom_llm_gateway.egress_client_pool import EgressClientPool
+from loom_llm_gateway.egress_client_pool import EgressClientPool, create_upstream_client
 
 
 def _make_pool(proxy_url: str = "") -> EgressClientPool:
@@ -131,7 +131,7 @@ async def test_pooled_client_uses_correct_proxy_url() -> None:
     # Surface check: at minimum a non-default transport was mounted.
     # If httpx internals change, this test breaks loudly — replace
     # with a live test in integration.
-    assert client._mounts or client._mounts == {}  # type: ignore[truthy-iterable]
+    assert client._mounts or client._mounts == {}
     await pool.aclose()
     await pool.upstream_client.aclose()
 
@@ -188,3 +188,73 @@ async def test_http_provider_proxy_request_carries_header_and_authority() -> Non
     )
     assert "Host: 192.168.32.1:28001\r\n" in raw
     assert "x-loom-connection-id: conn-http\r\n" in raw
+
+
+@pytest.mark.parametrize("proxy_enabled", [False, True], ids=["shared-three-connections", "proxy-one-connection"])
+async def test_upstream_transport_allows_more_than_100_in_flight(
+    proxy_enabled: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise real HTTPX/httpcore pooling while every response is held back."""
+    # Keep the direct loopback case independent of an ambient corporate proxy.
+    # The explicit per-connection proxy remains active in the other case.
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    expected = 101
+    received: list[str] = []
+    all_arrived = asyncio.Event()
+    release = asyncio.Event()
+    handlers: set[asyncio.Task[None]] = set()
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        handlers.add(task)
+        try:
+            headers = (await reader.readuntil(b"\r\n\r\n")).decode("latin1")
+            received.append(headers)
+            if len(received) == expected:
+                all_arrived.set()
+            await release.wait()
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            handlers.discard(task)
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0, backlog=2 * expected)
+    port = server.sockets[0].getsockname()[1]
+    upstream = create_upstream_client(timeout_sec=10)
+    pool = EgressClientPool(upstream_client=upstream,
+        proxy_url=f"http://127.0.0.1:{port}" if proxy_enabled else "",
+        upstream_timeout_sec=10)
+    requests: list[asyncio.Task[httpx.Response]] = []
+    try:
+        clients = [await pool.get(f"connection-{i}") for i in range(1 if proxy_enabled else 3)]
+        url = "http://upstream.invalid/v1/models" if proxy_enabled else f"http://127.0.0.1:{port}/v1/models"
+        requests = [asyncio.create_task(clients[i % len(clients)].get(url)) for i in range(expected)]
+        try:
+            async with asyncio.timeout(10):
+                await all_arrived.wait()
+                assert not any(request.done() for request in requests)
+                release.set()
+                responses = await asyncio.gather(*requests)
+        except TimeoutError:
+            pytest.fail(f"Only {len(received)}/{expected} requests reached the server before any response")
+        assert all(response.status_code == 200 for response in responses)
+        if proxy_enabled:
+            assert all("x-loom-connection-id: connection-0\r\n" in headers for headers in received)
+            assert all(headers.startswith("GET http://upstream.invalid/v1/models HTTP/1.1\r\n") for headers in received)
+        else:
+            assert all(client is upstream for client in clients)
+    finally:
+        release.set()
+        server.close()
+        await server.wait_closed()
+        for request in requests:
+            if not request.done():
+                request.cancel()
+        await asyncio.gather(*requests, return_exceptions=True)
+        await pool.aclose()
+        await upstream.aclose()
+        await asyncio.gather(*handlers, return_exceptions=True)

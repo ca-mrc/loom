@@ -263,9 +263,13 @@ eligibility. Configuration edits preserve the cursor and existing cooldowns.
 
 Members known or conservatively assumed to share upstream quotas should use the
 same `quota_group`. This label groups cooldowns after an upstream 429; it does
-not impose a concurrency limit. Loom does not cap concurrent requests per key or
-quota group and does not add a queue for pool requests. Separate token balances
-do not prove separate account, RPM/TPM, or upstream-channel capacity. Disabled or
+not impose a concurrency limit. This hosted pool path has no Loom per-key or
+quota-group request concurrency limit or queue. Its HTTP clients do not cap
+active connections; the 20-connection keepalive cache counts only idle reuse.
+The optional model proxy uses the highest supported connection/request
+thresholds instead of Envoy's default 1,024-per-cluster limits. This does not
+change physical execution capacity or task-egress I/O admission. Separate token
+balances do not prove separate account, RPM/TPM, or upstream-channel capacity. Disabled or
 cooling members are skipped; when no member is usable the Gateway returns an
 explicit retryable response rather than contacting an invalid member.
 
