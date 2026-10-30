@@ -191,8 +191,11 @@ Since migration 0182 the Gateway also copies `_loom_cost_source`,
 `cost_source`, `cost_confidence` and `usage_status` at insert, using `''` for an
 absent key. Usage aggregates filter on those columns and fall back to
 `provider_extras` only for rows written before 0182 (NULL columns), so new calls
-are counted without reading the raw-log JSON. Existing rows are not backfilled;
-a chunked backfill is a follow-up.
+are counted without reading the raw-log JSON. Run
+`python -m loom_service.llm_call_projection_backfill --apply` in the Service
+environment to project older rows in short committed chunks; without `--apply`
+it only counts them. Until `remaining` is 0 in every environment, keep the
+reader fallback.
 
 ### Legacy migration and rollback
 
