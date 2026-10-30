@@ -195,16 +195,34 @@ async def h2_wave():
  finally:
   for peer in peers:await peer.close()
 
+async def readiness():
+ async def probe(port,frontend=False):
+  reader,writer=await asyncio.wait_for(asyncio.open_connection('127.0.0.1',port,ssl=CLIENT_SSL if frontend and INGRESS else None,server_hostname='provider.example.test' if frontend and INGRESS else None),1)
+  try:
+   if not frontend:
+    writer.write(b'GET /ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n');await writer.drain()
+    if b' 200 ' not in await asyncio.wait_for(reader.readline(),1):raise OSError('Envoy not ready')
+  finally:
+   writer.close()
+   try:await asyncio.wait_for(writer.wait_closed(),.1)
+   except (OSError,TimeoutError):pass
+ try:
+  async with asyncio.timeout(10):
+   while True:
+    try:
+     await probe(CFG.get('front_port',30443),frontend=True)
+     if not INGRESS:await probe(9901)
+     return
+    except (OSError,TimeoutError):await asyncio.sleep(.05)
+ except TimeoutError:raise RuntimeError('native proxy listener/admin readiness failed before concurrency wave') from None
+
 async def main():
  server_ssl=None
  if TLS:
   server_ssl=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);server_ssl.load_cert_chain('/fixture/cert.pem','/fixture/key.pem')
  server=await asyncio.start_server(upstream,'127.0.0.1',19090,ssl=server_ssl,backlog=4096,limit=16384)
  async with server:
-  for _ in range(200):
-   try:
-    reader,writer=await asyncio.open_connection('127.0.0.1',CFG.get('front_port',30443),ssl=CLIENT_SSL if INGRESS else None,server_hostname='provider.example.test' if INGRESS else None);writer.close();await writer.wait_closed();break
-   except OSError:await asyncio.sleep(.05)
+  await readiness()
   result={'scheme':CFG['scheme'],'baseline':CFG['baseline']}
   if CFG.get('client_protocol')=='h2':
    result.update(await h2_wave());result['active_at_end']=STATE['active'];result['header_leaks']=STATE['header_leaks'];result['auth_errors']=STATE['auth_errors'];result['status_request_counts']=dict(STATE['status_requests']);print(json.dumps(result),flush=True);return
@@ -237,6 +255,23 @@ def _run(args: list[str], *, timeout: int = 180, env: dict[str, str] | None = No
     if result.returncode:
         raise RuntimeError(f"disposable proxy command failed ({args[0]}): {result.stderr[-1500:]}")
     return result.stdout
+
+
+def _container_diagnostics(names: list[str]) -> str:
+    """Only disposable synthetic fixtures: keep state/logs until failure capture."""
+    diagnostics = {}
+    for name in names:
+        state = subprocess.run(["docker", "inspect", "--format", "{{json .State}}", name],
+                               capture_output=True, text=True, timeout=10)
+        try:
+            value = json.loads(state.stdout)
+            safe_state = {key: value.get(key) for key in ("Running", "ExitCode", "OOMKilled", "Error")}
+        except (ValueError, AttributeError):
+            safe_state = {"unavailable": True}
+        logs = subprocess.run(["docker", "logs", "--tail", "30", name],
+                              capture_output=True, text=True, timeout=10)
+        diagnostics[name] = {"state": safe_state, "synthetic_logs": (logs.stdout + logs.stderr)[-4000:]}
+    return json.dumps(diagnostics)
 
 
 def _image(image: str) -> None:
@@ -275,20 +310,29 @@ def native_envoy_case(scheme: str, *, baseline: bool, requests: int = 1200, rend
     config = json.loads(payload)
     with tempfile.TemporaryDirectory(prefix="loom-native-model-proxy-") as temporary:
         directory = Path(temporary)
+        # The official Envoy entrypoint drops to its non-root envoy user.
+        # Linux bind mounts retain TemporaryDirectory's 0700 mode (Docker
+        # Desktop can mask this); allow traversal of this synthetic fixture.
+        # certificate() still keeps the disposable private key at 0600.
+        directory.chmod(0o755)
         certificate(directory)
-        (directory / "bootstrap.json").write_text(json.dumps(config))
+        bootstrap = directory / "bootstrap.json"
+        bootstrap.write_text(json.dumps(config))
+        bootstrap.chmod(0o644)
         (directory / "runner.py").write_text(_RUNNER)
         (directory / "scenario.json").write_text(json.dumps({"connection_ids": CONNECTION_IDS, "requests": requests,
                                                              "scheme": scheme, "baseline": baseline}))
         name = "loom-native-model-" + uuid4().hex[:10]
         mount = f"type=bind,source={directory},target=/fixture,readonly"
-        _run(["docker", "run", "-d", "--rm", "--pull=never", "--network", "none", "--name", name,
-              "--mount", mount, ENVOY_IMAGE, "--concurrency", "1", "--disable-hot-restart",
-              "-c", "/fixture/bootstrap.json", "--log-level", "error"], timeout=30)
         try:
+            _run(["docker", "run", "-d", "--pull=never", "--network", "none", "--name", name,
+                  "--mount", mount, ENVOY_IMAGE, "--concurrency", "1", "--disable-hot-restart",
+                  "-c", "/fixture/bootstrap.json", "--log-level", "error"], timeout=30)
             output = _run(["docker", "run", "--rm", "--pull=never", "--network", "container:" + name,
                            "--mount", mount, PYTHON_IMAGE, "python", "/fixture/runner.py"])
             return json.loads(output)
+        except Exception as error:
+            raise RuntimeError(f"{error}\nNative Envoy fixture: {_container_diagnostics([name])}") from error
         finally:
             subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=15)
 
@@ -400,15 +444,17 @@ def native_ingress_case(config: dict[str, Any], *, protocol: str, renderer_env: 
             shutil.copytree(source, vendor / source.name, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         caddy_name, traefik_name = "loom-model-caddy-" + uuid4().hex[:10], "loom-model-ingress-" + uuid4().hex[:10]
         mount = f"type=bind,source={directory},target=/fixture,readonly"
-        _run(["docker", "run", "-d", "--rm", "--pull=never", "--network", "none", "--name", caddy_name,
-              "--mount", mount, caddy_image, "caddy", "run", "--config", "/fixture/caddy.json"], timeout=30)
         try:
-            _run(["docker", "run", "-d", "--rm", "--pull=never", "--network", "container:" + caddy_name,
+            _run(["docker", "run", "-d", "--pull=never", "--network", "none", "--name", caddy_name,
+                  "--mount", mount, caddy_image, "caddy", "run", "--config", "/fixture/caddy.json"], timeout=30)
+            _run(["docker", "run", "-d", "--pull=never", "--network", "container:" + caddy_name,
                   "--name", traefik_name, "--mount", mount, traefik_image,
                   "--configFile=/fixture/traefik.json"], timeout=30)
             result = _run(["docker", "run", "--rm", "--pull=never", "--network", "container:" + caddy_name,
                            "--mount", mount, "--env", "PYTHONPATH=/fixture/vendor", PYTHON_IMAGE, "python", "/fixture/runner.py"])
             return json.loads(result)
+        except Exception as error:
+            raise RuntimeError(f"{error}\nNative ingress fixture: {_container_diagnostics([traefik_name, caddy_name])}") from error
         finally:
             for name in (traefik_name, caddy_name):
                 subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=15)

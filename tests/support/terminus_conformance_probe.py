@@ -47,17 +47,21 @@ class ScriptedLLM:
     def __init__(self, responses):
         self.responses = iter(responses)
         self.requests = []
+        self.transport_clients = []
         self.init_options = None
         self.effective_options = None
 
     async def call(self, *, prompt, message_history, **kwargs):
+        # Keep transport ownership observable by identity, outside the copied
+        # request semantics. SDK clients contain locks and are not wire input.
+        self.transport_clients.append(kwargs.get("client"))
         # Copy at call time: Harbor mutates Chat history after the response.
         self.requests.append(
             copy.deepcopy(
                 {
                     "prompt": prompt,
                     "message_history": message_history,
-                    **{key: value for key, value in kwargs.items() if key != "logging_path"},
+                    **{key: value for key, value in kwargs.items() if key not in {"logging_path", "client"}},
                 }
             )
         )
@@ -299,6 +303,12 @@ class HarborConformanceTests(unittest.IsolatedAsyncioTestCase):
                 )
             except AgentError as exc:
                 loom_error = str(exc)
+        self.assertTrue(loom_llm.transport_clients)
+        self.assertTrue(all(client is None for client in baseline_llm.transport_clients))
+        transport = loom_llm.transport_clients[0]
+        self.assertIsNotNone(transport)
+        self.assertTrue(all(client is transport for client in loom_llm.transport_clients))
+        self.assertTrue(transport.is_closed())
         native_bytes = driver.filesystem[PurePosixPath("/workspace/.loom/agent/trajectory.json")]
         self.assertNotIn(b"loom_step_fixture_credential", native_bytes)
         self.assertNotIn(b'"api_key"', native_bytes)
