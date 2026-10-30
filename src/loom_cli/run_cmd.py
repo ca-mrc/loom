@@ -26,6 +26,7 @@ from uuid import uuid4
 from loom.driver.base import Driver
 from loom.driver.docker import DockerDriver
 from loom.driver.fake import FakeDriver
+from loom.llm_http_client import create_model_http_client
 from loom.models.result import TrialResult, TrialState
 from loom.models.task import TaskConfig
 from loom.models.trial import MAINLAND_PROXY_AGENT_NAMES, TrialConfig
@@ -553,22 +554,32 @@ async def _build_sdk_clients(
         if tokens.get("anthropic"):
             import anthropic
 
+            transport = await stack.enter_async_context(create_model_http_client(
+                timeout_sec=anthropic.DEFAULT_TIMEOUT, follow_redirects=True,
+            ))
             a_client = await stack.enter_async_context(
-                anthropic.AsyncAnthropic(api_key=tokens["anthropic"]),
+                anthropic.AsyncAnthropic(api_key=tokens["anthropic"], http_client=transport),
             )
         if tokens.get("openai"):
             import openai
 
+            transport = await stack.enter_async_context(create_model_http_client(
+                timeout_sec=openai.DEFAULT_TIMEOUT, follow_redirects=True,
+            ))
             o_client = await stack.enter_async_context(
-                openai.AsyncOpenAI(api_key=tokens["openai"]),
+                openai.AsyncOpenAI(api_key=tokens["openai"], http_client=transport),
             )
         if tokens.get("google"):
+            import httpx
             from google import genai
 
             # Local token.google is a Gemini Developer API credential. Do not
             # let ambient Vertex/Enterprise settings change that contract.
             google_client = stack.enter_context(genai.Client(
                 api_key=tokens["google"], vertexai=False, enterprise=False,
+                http_options={"async_client_args": {"limits": httpx.Limits(
+                    max_connections=None, max_keepalive_connections=20,
+                )}},
             ))
             await stack.enter_async_context(google_client.aio)
             g_client = google_client

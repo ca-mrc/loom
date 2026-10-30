@@ -26,11 +26,11 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 
 @dataclass
@@ -108,30 +108,31 @@ def ensure_drain_state(app: FastAPI) -> DrainState:
     return drain_state
 
 
-def install_drain_middleware(app: FastAPI) -> None:
-    """Attach the request-counting middleware to the FastAPI app.
+class DrainMiddleware:
+    """Count the entire ASGI response and cleanup, including streaming bodies."""
 
-    Increments `app.state.drain.in_flight` on request enter, decrements
-    on exit (including exception paths). The `/healthz`, `/drain`, and
-    `/metrics` endpoints are excluded — they're operator-facing probes
-    and should not delay a drain.
-    """
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
 
-    excluded_paths = frozenset({"/healthz", "/drain", "/metrics"})
-
-    @app.middleware("http")
-    async def _track_in_flight(
-        request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
-    ) -> Response:
-        if request.url.path in excluded_paths:
-            return await call_next(request)
-        drain_state = ensure_drain_state(request.app)
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope.get("path") in {
+            "/healthz", "/drain", "/metrics",
+        }:
+            await self.app(scope, receive, send)
+            return
+        drain_state = ensure_drain_state(scope["app"])
         await drain_state.enter()
         try:
-            return await call_next(request)
+            await self.app(scope, receive, send)
         finally:
             await drain_state.leave()
+
+
+def install_drain_middleware(app: FastAPI) -> None:
+    # BaseHTTPMiddleware returns after response headers and also introduces a
+    # cancellation scope around the route's durable cleanup. Pure ASGI keeps
+    # both accounting and the full response lifetime inside the drain count.
+    app.add_middleware(DrainMiddleware)
 
 
 async def drain_and_report(

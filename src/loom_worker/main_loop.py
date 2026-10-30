@@ -43,6 +43,7 @@ from loom.agent.oracle import OracleAgent
 from loom.agent.terminus2.runtime import LoomTerminus2Runtime
 from loom.driver.docker import DockerDriver
 from loom.errors import AgentError, classify_failure_message
+from loom.llm_http_client import create_model_http_client
 from loom.models.resource_usage import TrialResourceUsageReport
 from loom.models.result import FailureReason
 from loom.models.task import TaskConfig
@@ -443,13 +444,14 @@ async def run_worker(
     _log_docker_registry_auth_summary()
 
     async with (
-        httpx.AsyncClient(
+        # Model calls mint their scoped bearer through this shared CP client.
+        create_model_http_client(
             base_url=str(settings.control_plane_url),
-            timeout=30.0,
+            timeout_sec=30.0,
         ) as cp_http,
-        httpx.AsyncClient(
+        create_model_http_client(
             base_url=str(settings.gateway_url),
-            timeout=120.0,
+            timeout_sec=120.0,
         ) as gw_http,
     ):
         cp_client = HttpControlPlaneClient(

@@ -83,6 +83,7 @@ def _patch_harbor(
 
         def __init__(self, logs_dir, **kwargs: object) -> None:
             self._logs_dir = logs_dir
+            self._llm_call_kwargs: dict[str, object] = {}
             if constructed is not None:
                 constructed.append(dict(kwargs))
             if reasoning_seen is not None:
@@ -476,6 +477,7 @@ async def test_runtime_cleanup_leaves_process_env_unchanged_on_failure(
 
         def __init__(self, logs_dir, **kwargs: object) -> None:
             self._logs_dir = logs_dir
+            self._llm_call_kwargs: dict[str, object] = {}
 
         async def setup(self, env: object) -> None:
             return None
@@ -577,6 +579,7 @@ async def test_runtime_wraps_tmux_no_server_runtime_error_as_agent_error(
 
         def __init__(self, logs_dir, **kwargs: object) -> None:
             self._logs_dir = logs_dir
+            self._llm_call_kwargs: dict[str, object] = {}
 
         async def setup(self, env: object) -> None:
             return None

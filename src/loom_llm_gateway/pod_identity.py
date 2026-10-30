@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 from pydantic import TypeAdapter
 
+from loom.llm_http_client import create_model_http_client
 from loom.nebius_kubernetes import NebiusKubernetesConnection, NebiusKubernetesCredentials
 from loom_control_plane.service_execution_output import (
     ServiceExecutionBrokerError,
@@ -57,9 +58,9 @@ class ExecutionPodReviewer:
             if cluster_scope_id not in self._credentials:
                 credentials = NebiusKubernetesCredentials(connection)
                 self._credentials[cluster_scope_id] = credentials
-                self._clients[cluster_scope_id] = httpx.AsyncClient(
+                self._clients[cluster_scope_id] = create_model_http_client(
                     verify=credentials.ssl_context,
-                    timeout=10.0,
+                    timeout_sec=10.0,
                     follow_redirects=False,
                     trust_env=False,
                 )

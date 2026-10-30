@@ -13,6 +13,8 @@ from typing import Any
 
 import litellm
 
+from loom.llm_sdk_clients import ModelSDKClients
+
 
 @dataclass(frozen=True)
 class ParsedResponse:
@@ -96,6 +98,7 @@ async def acompletion(
     messages: list[dict[str, Any]],
     api_key: str | None = None,
     timeout: float = 120.0,
+    model_clients: ModelSDKClients | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
     """Forward to litellm.acompletion. Thin wrapper so we can stub it in tests."""
@@ -107,7 +110,15 @@ async def acompletion(
     if api_key:
         kwargs["api_key"] = api_key
     kwargs.update(extra)
-    response = await litellm.acompletion(**kwargs)
-    if hasattr(response, "model_dump"):
-        return response.model_dump()  # type: ignore[no-any-return]
-    return dict(response)
+    clients = model_clients or ModelSDKClients(timeout_sec=timeout)
+    try:
+        kwargs["client"] = clients.client_for(
+            model=model, api_key=api_key, api_base=extra.get("api_base"),
+        )
+        response = await litellm.acompletion(**kwargs)
+        if hasattr(response, "model_dump"):
+            return response.model_dump()  # type: ignore[no-any-return]
+        return dict(response)
+    finally:
+        if model_clients is None:
+            await clients.aclose()

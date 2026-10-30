@@ -21,6 +21,7 @@ from starlette.responses import JSONResponse
 
 from loom.admin_secret import AdminSecretVerifier, load_optional_admin_secret_verifier
 from loom.db.schema_startup import assert_schema_at_head
+from loom.llm_sdk_clients import ModelSDKClients
 from loom.pipeline.artifact_commit import ArtifactCommitService
 from loom.security.secret_store import assert_existing_secrets_decryptable
 from loom.startup_retry import retry_startup_dependency
@@ -29,6 +30,7 @@ from loom.trajectory.storage import MinioObjectStore
 from loom.trajectory.upload_observation import configure_upload_observations
 from loom_control_plane.artifact_commit_runtime import SqlArtifactCommitRepository
 from loom_control_plane.service_execution_output import ServiceExecutionOutputRouteService
+from loom_llm_gateway.client_disconnect import ModelClientDisconnectMiddleware
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.dispatch_audit import DispatchAuditMiddleware, DispatchAuditUnavailableError
 from loom_llm_gateway.drain import ensure_drain_state, install_drain_middleware
@@ -174,6 +176,7 @@ def create_app(settings: GatewaySettings) -> FastAPI:
         app.state.execution_pod_reviewer = ExecutionPodReviewer.from_file(
             settings.service_execution_kubernetes_config_file,
         )
+        app.state.model_sdk_clients = ModelSDKClients(timeout_sec=settings.upstream_timeout_sec)
         app.state.upstream_client = create_upstream_client(
             timeout_sec=settings.upstream_timeout_sec,
         )
@@ -199,10 +202,13 @@ def create_app(settings: GatewaySettings) -> FastAPI:
             provider_dispatch_reconciler.cancel()
             with suppress(asyncio.CancelledError):
                 await provider_dispatch_reconciler
-            await app.state.egress_client_pool.aclose()
-            await app.state.execution_pod_reviewer.close()
-            await app.state.upstream_client.aclose()
-            await engine.dispose()
+            try:
+                await app.state.model_sdk_clients.aclose()
+            finally:
+                await app.state.egress_client_pool.aclose()
+                await app.state.execution_pod_reviewer.close()
+                await app.state.upstream_client.aclose()
+                await engine.dispose()
 
     app: FastAPI = FastAPI(
         title="Loom LLM Gateway",
@@ -217,6 +223,7 @@ def create_app(settings: GatewaySettings) -> FastAPI:
     # #547: register middleware BEFORE routers so it wraps every route.
     install_drain_middleware(app)
     app.add_middleware(DispatchAuditMiddleware)
+    app.add_middleware(ModelClientDisconnectMiddleware)
 
     @app.exception_handler(DispatchAuditUnavailableError)
     async def dispatch_audit_unavailable(

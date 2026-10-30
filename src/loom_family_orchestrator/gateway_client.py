@@ -26,6 +26,8 @@ from typing import Any
 
 import httpx
 
+from loom.llm_http_client import create_model_http_client
+
 
 @dataclass
 class OrchestratorGatewayClient:
@@ -48,18 +50,20 @@ class OrchestratorGatewayClient:
 
     def _http(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(
+            self._client = create_model_http_client(
                 base_url=self.base_url,
-                timeout=self.timeout_sec,
+                timeout_sec=self.timeout_sec,
             )
             self._owned_gateway = True
         return self._client
 
     def _control_plane(self) -> httpx.AsyncClient:
         if self._control_plane_client is None:
-            self._control_plane_client = httpx.AsyncClient(
+            # Every model call exchanges a scoped bearer here before dispatch;
+            # keep this authority check out of an implicit HTTP pool queue too.
+            self._control_plane_client = create_model_http_client(
                 base_url=self.control_plane_url,
-                timeout=self.timeout_sec,
+                timeout_sec=self.timeout_sec,
             )
             self._owned_control_plane = True
         return self._control_plane_client

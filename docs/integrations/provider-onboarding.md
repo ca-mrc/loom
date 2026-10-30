@@ -268,7 +268,9 @@ quota-group request concurrency limit or queue. Its HTTP clients do not cap
 active connections; the 20-connection keepalive cache counts only idle reuse.
 The optional model proxy uses the highest supported connection/request
 thresholds instead of Envoy's default 1,024-per-cluster limits. This does not
-change physical execution capacity or task-egress I/O admission. Separate token
+change physical execution capacity or task-egress I/O admission. See the
+[forwarding concurrency audit](../architecture/model-forwarding-concurrency.md)
+for SDK, proxy, database, cancellation, and accounting boundaries. Separate token
 balances do not prove separate account, RPM/TPM, or upstream-channel capacity. Disabled or
 cooling members are skipped; when no member is usable the Gateway returns an
 explicit retryable response rather than contacting an invalid member.

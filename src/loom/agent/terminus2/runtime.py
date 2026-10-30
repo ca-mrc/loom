@@ -35,6 +35,7 @@ from loom.agent.terminus2.task_metadata import harbor_mcp_documents
 from loom.attempt_deadline import AttemptDeadline, AttemptDeadlineExceededError
 from loom.driver.base import Driver
 from loom.errors import AgentContinuationError, AgentError, exception_info
+from loom.llm_sdk_clients import ModelSDKClients
 from loom.models.harbor_config import HarborConfig
 from loom.models.mcp import MCPConnection
 from loom.models.trajectory import (
@@ -657,6 +658,7 @@ class LoomTerminus2Runtime:
         repr=False,
     )
     _active_env: Driver | None = field(default=None, init=False, repr=False)
+    _model_clients: ModelSDKClients | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.request_params = sanitize_request_extras(self.request_params)
@@ -667,8 +669,12 @@ class LoomTerminus2Runtime:
     async def aclose_attempt(self) -> None:
         """Interrupt Harbor's attempt-owned tmux session on supervisor stop."""
 
-        if self._active_env is not None:
-            await _reset_harbor_tmux_session(self._active_env)
+        try:
+            if self._model_clients is not None:
+                await self._model_clients.aclose()
+        finally:
+            if self._active_env is not None:
+                await _reset_harbor_tmux_session(self._active_env)
 
     async def setup(self, env: Driver) -> None:
         await ensure_sandbox_deps(env)
@@ -685,8 +691,13 @@ class LoomTerminus2Runtime:
         step_id: str,
     ) -> None:
         try:
-            await self._run(instruction=instruction, env=env, trajectory=trajectory,
-                            mcp=mcp, skills_dir=skills_dir, step_id=step_id)
+            async with ModelSDKClients(timeout_sec=120) as clients:
+                self._model_clients = clients
+                try:
+                    await self._run(instruction=instruction, env=env, trajectory=trajectory,
+                                    mcp=mcp, skills_dir=skills_dir, step_id=step_id)
+                finally:
+                    self._model_clients = None
         except Exception as exc:
             if self.direct_provider is None:
                 raise
@@ -882,6 +893,14 @@ class LoomTerminus2Runtime:
             **harbor_options,
             **task_options,
         )
+        if self._model_clients is not None:
+            # Harbor deep-copies these call kwargs separately from serializable
+            # options. Main, teacher and summary-subagent calls all expand them.
+            # Keep live clients out of constructor options/trajectory metadata.
+            agent._llm_call_kwargs["client"] = self._model_clients.client_for(
+                model=self.direct_provider.harbor_model_name if self.direct_provider else _harbor_model_name(self.model),
+                api_key=step_token, api_base=api_base,
+            )
         if enable_summarize:
             _install_proactive_summarization_guard(agent)
         if self.continue_until_timeout:

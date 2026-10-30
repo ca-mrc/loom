@@ -13,6 +13,7 @@ from loom.agent.gateway_client import (
     GatewayCallResponse,
 )
 from loom.attempt_deadline import AttemptDeadline, AttemptDeadlineExceededError
+from loom.llm_http_client import create_model_http_client
 from loom.models.trajectory import ChatMessage
 from loom.request_params import sanitize_request_extras
 
@@ -45,9 +46,9 @@ class HttpLLMGatewayClient:
         """
 
         if client is None:
-            client = httpx.AsyncClient(
+            client = create_model_http_client(
                 base_url=self.base_url,
-                timeout=self.timeout_sec,
+                timeout_sec=self.timeout_sec,
             )
             owns_client = True
         else:
@@ -129,9 +130,9 @@ class HttpLLMGatewayClient:
         request_budget_sec = (
             None if self.attempt_deadline is None else self._request_budget_sec()
         )
-        client = self._client or httpx.AsyncClient(
+        client = self._client or create_model_http_client(
             base_url=self.base_url,
-            timeout=self.timeout_sec,
+            timeout_sec=self.timeout_sec,
         )
         try:
             if self.attempt_deadline is None:

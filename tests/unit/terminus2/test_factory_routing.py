@@ -83,6 +83,7 @@ def test_terminus2_harbor_ctor_receives_worker_openai_base(tmp_path: Path, monke
 
         def __init__(self, logs_dir, **kwargs: object) -> None:
             self._logs_dir = logs_dir
+            self._llm_call_kwargs: dict[str, object] = {}
             captured.update(kwargs)
 
         async def setup(self, env: object) -> None:

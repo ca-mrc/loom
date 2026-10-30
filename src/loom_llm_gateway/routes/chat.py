@@ -87,7 +87,7 @@ logger = logging.getLogger(__name__)
 # maliciously) includes them in the body, splatting would shadow our named
 # args and TypeError out with a 500.
 _RESERVED_BODY_KEYS = frozenset(
-    {"model", "messages", "loom", "api_key", "timeout"},
+    {"model", "messages", "loom", "api_key", "timeout", "model_clients", "client", "shared_session"},
 )
 
 # Providers we accept on the wire. The Gateway only holds keys for these;
@@ -150,6 +150,8 @@ async def chat_completions(
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=exc.errors()) from exc
 
+    if raw_body.get("stream"):
+        raise HTTPException(status_code=400, detail="legacy chat route requires non-streaming completions")
     settings = request.app.state.settings
     signing_key = settings.step_jwt_signing_key.get_secret_value()
 
@@ -344,6 +346,7 @@ async def chat_completions(
             messages=chat_messages,
             api_key=api_key,
             timeout=settings.upstream_timeout_sec,
+            model_clients=getattr(request.app.state, "model_sdk_clients", None),
             **extra_kwargs,
         )
         if api_base is not None:

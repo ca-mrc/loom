@@ -40,11 +40,13 @@ async def test_google_sdk_construction_and_cleanup(
     async_transport = _ClosingTransport()
 
     def construct(**kwargs: Any) -> genai.Client:
+        options = kwargs.pop("http_options", {})
         return real_client(
             **kwargs,
             http_options={
+                **options,
                 "client_args": {"transport": sync_transport},
-                "async_client_args": {"transport": async_transport},
+                "async_client_args": {**options.get("async_client_args", {}), "transport": async_transport},
             },
         )
 
@@ -84,7 +86,8 @@ async def test_partial_construction_failure_closes_prior_client(
     real_anthropic = anthropic.AsyncAnthropic
 
     def construct_anthropic(**kwargs: Any) -> anthropic.AsyncAnthropic:
-        return real_anthropic(**kwargs, http_client=http)
+        kwargs["http_client"] = http
+        return real_anthropic(**kwargs)
 
     def fail_google(**kwargs: Any) -> None:
         raise RuntimeError("synthetic construction failure")
