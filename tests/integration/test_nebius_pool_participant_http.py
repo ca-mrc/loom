@@ -17,6 +17,7 @@ from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 from tests.integration.test_nebius_pool_build_admission import mixed_setup
 from tests.integration.test_nebius_pool_build_outbox import counts, local_setup, outbox
+from tests.integration.test_nebius_pool_registry import BUILD_POOL_NODE_CPU
 from tests.integration.test_nebius_pool_registry import sessions as sessions
 
 
@@ -83,7 +84,7 @@ async def test_actual_participant_client_and_routes_prepare_replay_activate_and_
 
 
 async def test_native_client_waits_without_attempt_then_cancels_exact_unstarted_selection(sessions, tmp_path):
-    app, _, token, _, _, builds = await setup(sessions, tmp_path, occupied_cpu=3000)
+    app, _, token, _, _, builds = await setup(sessions, tmp_path, occupied_cpu=BUILD_POOL_NODE_CPU)
     request = builds[0]
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as http:
         management = client(http, token)

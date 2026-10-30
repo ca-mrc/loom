@@ -12,6 +12,7 @@ from loom.db.schema import TaskImageMaterialization, Trial
 from tests.integration.test_nebius_pool_build_outbox import counts, local_setup, outbox
 from tests.integration.test_nebius_pool_observation_registry import sessions as sessions
 from tests.integration.test_nebius_pool_participant_http import client, setup
+from tests.integration.test_nebius_pool_registry import BUILD_POOL_NODE_CPU
 
 
 async def selected(sessions, tmp_path, **changes):
@@ -70,7 +71,7 @@ async def test_restart_recovers_one_grant_attempt_and_intent_after_lost_reply(se
 async def test_waiting_does_not_consume_attempt_and_cancellation_finishes(sessions, tmp_path):
     from loom_execution_actuator.pool_build_driver import PoolBuildDriver
 
-    app, token, _, request, journal = await selected(sessions, tmp_path, occupied_cpu=3000)
+    app, token, _, request, journal = await selected(sessions, tmp_path, occupied_cpu=BUILD_POOL_NODE_CPU)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as http:
         driver = PoolBuildDriver(outbox=journal, management=client(http, token))
         assert (await driver.advance(request.key)).phase == "selected"
@@ -83,7 +84,7 @@ async def test_waiting_does_not_consume_attempt_and_cancellation_finishes(sessio
 async def test_withdrawn_waiting_demand_is_cancelled_without_requiring_a_grant(sessions, tmp_path):
     from loom_execution_actuator.pool_build_driver import PoolBuildDriver
 
-    app, token, _, request, journal = await selected(sessions, tmp_path, occupied_cpu=3000)
+    app, token, _, request, journal = await selected(sessions, tmp_path, occupied_cpu=BUILD_POOL_NODE_CPU)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as http:
         management = client(http, token)
         driver = PoolBuildDriver(outbox=journal, management=management)

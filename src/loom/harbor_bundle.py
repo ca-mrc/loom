@@ -7,21 +7,26 @@ from loom.harbor_compose import project_single_service_compose
 from loom.harbor_verifier_script import VERIFIER_SCRIPT_PATH, native_verifier_run_sh_bytes
 
 
-def prepare_harbor_bundle(bundle: Path, config: dict[str, Any]) -> None:
-    """Add the native reward bridge without rewriting authored task files.
+def prepare_harbor_bundle(
+    bundle: Path, config: dict[str, Any], *, install_verifier_bridge: bool = True,
+) -> None:
+    """Prepare native runtime defaults without rewriting authored task files.
 
-    Mutate only the projected config and add one private generated script.
+    Mutate only the projected config. Install the private reward bridge only
+    when the caller selected the default Harbor script; custom verifiers keep
+    their authored script and need not provide tests/test.sh.
     Network defaults describe hosted HTTP(S), never unrestricted TCP egress.
     Explicit policies and verifier environment declarations remain authoritative.
     """
     verifier = config["verifier"]
-    if verifier["name"] != "script":
-        raise ValueError("unsupported Harbor requirement: verifier.name requires the native script verifier")
-    if not (bundle / "instruction.md").is_file() or not (bundle / "tests/test.sh").is_file():
-        raise ValueError("native Harbor package requires instruction.md and tests/test.sh")
     bridge = bundle / VERIFIER_SCRIPT_PATH
-    if (bundle / "verifier").is_symlink() or bridge.exists() or bridge.is_symlink():
-        raise ValueError("native package collides with reserved verifier/run.sh")
+    if install_verifier_bridge:
+        if verifier["name"] != "script":
+            raise ValueError("unsupported Harbor requirement: verifier.name requires the native script verifier")
+        if not (bundle / "instruction.md").is_file() or not (bundle / "tests/test.sh").is_file():
+            raise ValueError("native Harbor package requires instruction.md and tests/test.sh")
+        if (bundle / "verifier").is_symlink() or bridge.exists() or bridge.is_symlink():
+            raise ValueError("native package collides with reserved verifier/run.sh")
 
     environment = config["environment"]
     _hosted_network_default(environment)
@@ -102,10 +107,11 @@ def prepare_harbor_bundle(bundle: Path, config: dict[str, Any]) -> None:
     if (verifier.get("environment") is None
             and environment.get("single_service_compose", {}).get("privileged")):
         verifier.setdefault("user", "root")
-    bridge.parent.mkdir(exist_ok=True)
-    bridge.write_bytes(native_verifier_run_sh_bytes())
-    bridge.chmod(0o755)
-    verifier["args"]["script_path"] = VERIFIER_SCRIPT_PATH
+    if install_verifier_bridge:
+        bridge.parent.mkdir(exist_ok=True)
+        bridge.write_bytes(native_verifier_run_sh_bytes())
+        bridge.chmod(0o755)
+        verifier["args"]["script_path"] = VERIFIER_SCRIPT_PATH
 
 
 def _hosted_network_default(environment: dict[str, Any]) -> None:

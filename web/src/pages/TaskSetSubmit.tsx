@@ -10,6 +10,13 @@ import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import { taskSetHref } from "../utils/taskSetLinks";
 
+function taskTomlFormatReviewLabel(format: string): string {
+  if (format === "terminal-bench") return "Terminal-Bench; omitted fields use Harbor defaults";
+  if (format === "loom") return "Loom TaskConfig";
+  if (format === "auto") return "Detect from each task.toml";
+  return format;
+}
+
 export default function TaskSetSubmit(): JSX.Element {
   const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
@@ -170,7 +177,7 @@ export default function TaskSetSubmit(): JSX.Element {
               </div>
             ) : null}
 
-            {review ? <section className="rounded border p-3" aria-label="Submission review"><h2 className="font-medium">Review manifest before upload</h2>{manifestSummary ? <dl className="my-3 grid gap-2 text-sm sm:grid-cols-2"><div><dt className="text-slate-500">Task set</dt><dd>{manifestSummary.name} ({manifestSummary.slug})</dd></div><div><dt className="text-slate-500">Source</dt><dd>{manifestSummary.sourceType}</dd></div><div><dt className="text-slate-500">Declared purpose</dt><dd>{manifestSummary.intents.map((intent) => intent === "evaluation" ? "Evaluation" : "Trajectory generation").join(", ")}</dd></div><div><dt className="text-slate-500">Verifier</dt><dd>{manifestSummary.verifier}</dd></div><div><dt className="text-slate-500">Task template</dt><dd className="break-words">{manifestSummary.taskName ?? "From source tasks"}</dd></div><div><dt className="text-slate-500">Task limit</dt><dd>{manifestSummary.maxInstances === null ? "Server default" : `At most ${manifestSummary.maxInstances} configured instances`}; actual task count is determined during import.</dd></div></dl> : null}<p className="my-2 text-xs text-slate-500">Declared purpose and verifier are not a claim of evaluation readiness. Server validation remains authoritative.</p><ul>{Array.from(review.entries()).map(([name, value]) => <li key={name}>{name}: {value instanceof File ? `${value.name} (${value.size.toLocaleString()} bytes)` : value}</li>)}</ul><Button onClick={confirmUpload} disabled={submit.isPending || reviewing}>Confirm upload</Button></section> : null}
+            {review ? <section className="rounded border p-3" aria-label="Submission review"><h2 className="font-medium">Review manifest before upload</h2>{manifestSummary ? <dl className="my-3 grid gap-2 text-sm sm:grid-cols-2"><div><dt className="text-slate-500">Task set</dt><dd>{manifestSummary.name} ({manifestSummary.slug})</dd></div><div><dt className="text-slate-500">Source</dt><dd>{manifestSummary.sourceType}</dd></div>{manifestSummary.taskTomlFormat ? <div><dt className="text-slate-500">Task TOML</dt><dd>{taskTomlFormatReviewLabel(manifestSummary.taskTomlFormat)}</dd></div> : null}<div><dt className="text-slate-500">Declared purpose</dt><dd>{manifestSummary.intents.map((intent) => intent === "evaluation" ? "Evaluation" : "Trajectory generation").join(", ")}</dd></div><div><dt className="text-slate-500">Verifier</dt><dd>{manifestSummary.verifier}</dd></div><div><dt className="text-slate-500">Task template</dt><dd className="break-words">{manifestSummary.taskName ?? "From source tasks"}</dd></div><div><dt className="text-slate-500">Task limit</dt><dd>{manifestSummary.maxInstances === null ? "Server default" : `At most ${manifestSummary.maxInstances} configured instances`}; actual task count is determined during import.</dd></div></dl> : null}<p className="my-2 text-xs text-slate-500">Declared purpose and verifier are not a claim of evaluation readiness. Server validation remains authoritative.</p><ul>{Array.from(review.entries()).map(([name, value]) => <li key={name}>{name}: {value instanceof File ? `${value.name} (${value.size.toLocaleString()} bytes)` : value}</li>)}</ul><Button onClick={confirmUpload} disabled={submit.isPending || reviewing}>Confirm upload</Button></section> : null}
             <div className="flex items-center gap-3">
               <Button
                 type="submit"

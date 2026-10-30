@@ -110,7 +110,7 @@ async def controller_setup(claim_setup, monkeypatch):  # noqa: F811
 
     async def reserve(session, *, attempt_id, revalidate_existing=False, **kwargs):
         attempt = await session.get(TaskImageMaterializationAttempt, attempt_id)
-        assert attempt is not None and attempt.native_build["resources"]["vcpu_millis"] == 1000
+        assert attempt is not None and attempt.native_build["resources"]["vcpu_millis"] == 4000
         row = await session.get(TaskImageMaterialization, attempt.materialization_id)
         assert row.state == "claimed" and row.claimed_by == controller.builder_id
         native = {**attempt.native_build}

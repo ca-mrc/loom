@@ -165,6 +165,7 @@ describe("TaskSetSubmit", () => {
     await user.upload(screen.getByLabelText("Manifest (required)"), manifest);
     await user.upload(screen.getByLabelText("Task bundle (optional)"), bundle);
     await user.click(screen.getByRole("button", { name: "Review submission" }));
+    expect(await screen.findByText("Detect from each task.toml")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Confirm upload" }));
 
     expect(await screen.findByText("Task set detail")).toBeInTheDocument();

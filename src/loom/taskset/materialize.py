@@ -48,11 +48,13 @@ from loom.terminal_bench_normalize import (
     DEFAULT_VERIFIER_SCRIPT_PATH,
     is_terminal_bench_shape,
     normalize_terminal_bench_task_toml,
+    project_declared_terminal_bench_task,
 )
 from loom.trajectory.storage import discard_staged_bundle_file_metadata
 
 _NOOP_VERIFIER = b"#!/bin/sh\nexit 0\n"
 _UNSAFE_TASK_ID = re.compile(r"[^a-zA-Z0-9._-]+")
+_VERIFIER_RESOURCE_FIELDS = ("cpus", "memory_mb", "storage_mb")
 
 
 @dataclass(frozen=True)
@@ -353,6 +355,71 @@ def _compatibility_issue_error(
     }
 
 
+def _uses_native_verifier_bridge(config: dict[str, Any]) -> bool:
+    """True when the projected verifier is still the default Harbor script."""
+    verifier = config.get("verifier")
+    if not isinstance(verifier, dict):
+        return False
+    args = verifier.get("args")
+    if not isinstance(args, dict):
+        return False
+    return (
+        verifier.get("name") == "script"
+        and args.get("script_path") == DEFAULT_VERIFIER_SCRIPT_PATH
+    )
+
+
+def _inherit_omitted_verifier_resources(config: dict[str, Any]) -> list[str]:
+    """Copy agent CPU, memory, and storage onto a verifier image that omitted them.
+
+    Harbor leaves those fields optional. The independent verifier planner
+    requires them, and a thin ``[verifier.environment]`` must not drop the
+    resources the task already declared for the agent image.
+    """
+    verifier = config.get("verifier")
+    environment = config.get("environment")
+    if not isinstance(verifier, dict) or not isinstance(environment, dict):
+        return []
+    verifier_env = verifier.get("environment")
+    if not isinstance(verifier_env, dict):
+        return []
+    inherited: list[str] = []
+    for resource in _VERIFIER_RESOURCE_FIELDS:
+        if resource not in verifier_env and environment.get(resource) is not None:
+            verifier_env[resource] = environment[resource]
+            inherited.append(f"verifier.environment.{resource}")
+    return inherited
+
+
+def _stamp_terminal_bench_conversion(
+    config: dict[str, Any], bundle_dir: Path, inherited_resources: list[str],
+) -> None:
+    """Mark an explicit Terminal-Bench row the same way catalog prepare does.
+
+    ``native_independent_verifier_handoff`` reads this stamp. Without it a
+    separate verifier image imports the whole agent workdir. A user upload
+    has no pinned git or Hub revision, so ``upstream_origin`` stays unset.
+    """
+    changes = [
+        "Harbor-native schema -> Loom TaskConfig v1",
+        "task.id",
+        "verifier.args.script_path",
+        *inherited_resources,
+    ]
+    if config.get("environment", {}).get("compose_files"):
+        changes.append("environment.compose_files")
+    if (bundle_dir / "tests/Dockerfile").is_file():
+        changes.extend([
+            "verifier.environment.dockerfile",
+            "verifier.environment.docker_build_context",
+        ])
+    config["upstream_conversion"] = {
+        "importer": "loom.harbor-native.v1",
+        "original_config": "upstream-task.toml",
+        "changes": changes,
+    }
+
+
 def _materialize_bundle_upload(
     *,
     manifest: UserTaskSetManifest,
@@ -446,17 +513,29 @@ def _materialize_bundle_upload(
                         raw_cfg: dict[str, Any] = tomllib.load(f)
                     relative = bundle_dir.relative_to(task_root)
                     contextual_id = slug if relative == Path(".") else relative.as_posix()
-                    harbor_source = is_terminal_bench_shape(raw_cfg)
-                    raw_cfg = normalize_terminal_bench_task_toml(raw_cfg, task_id=contextual_id)
+                    declared_format = manifest.source.task_toml_format
                     native_bridge = False
-                    if (
-                        harbor_source
-                        and raw_cfg["verifier"].get("name") == "script"
-                        and raw_cfg["verifier"].get("args", {}).get("script_path")
-                        == DEFAULT_VERIFIER_SCRIPT_PATH
-                    ):
-                        prepare_harbor_bundle(bundle_dir, raw_cfg)
-                        native_bridge = True
+                    if declared_format == "terminal-bench":
+                        raw_cfg = project_declared_terminal_bench_task(
+                            raw_cfg, task_id=contextual_id,
+                        )
+                        # Apply bundle defaults independently of bridge generation.
+                        # An authored script path or verifier name still wins.
+                        native_bridge = _uses_native_verifier_bridge(raw_cfg)
+                        prepare_harbor_bundle(
+                            bundle_dir, raw_cfg, install_verifier_bridge=native_bridge,
+                        )
+                        inherited_resources = _inherit_omitted_verifier_resources(raw_cfg)
+                        if native_bridge:
+                            _stamp_terminal_bench_conversion(raw_cfg, bundle_dir, inherited_resources)
+                    elif declared_format != "loom":
+                        harbor_source = is_terminal_bench_shape(raw_cfg)
+                        raw_cfg = normalize_terminal_bench_task_toml(
+                            raw_cfg, task_id=contextual_id,
+                        )
+                        if harbor_source and _uses_native_verifier_bridge(raw_cfg):
+                            prepare_harbor_bundle(bundle_dir, raw_cfg)
+                            native_bridge = True
                     task_config = normalize_steps(TaskConfig.model_validate(raw_cfg))
                     if native_bridge:
                         original_config = bundle_dir / "upstream-task.toml"

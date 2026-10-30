@@ -169,6 +169,7 @@ type runtimeServer struct {
 	maxTimeout          time.Duration
 	identity            *guestTaskIdentity
 	maxWorkspaceArchive int64
+	containerExec       *containerExecClient
 }
 
 type execRequest struct {
@@ -217,6 +218,9 @@ func (s runtimeServer) handler() http.Handler {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ready": true, "instance_id": instanceID})
 	})
 	mux.HandleFunc("POST /exec", s.execute)
+	if s.containerExec != nil && (s.identity == nil || s.identity.uid == 0 && s.identity.gid == 0) {
+		mux.HandleFunc("POST /container-exec", s.executeContainer)
+	}
 	s.registerProcesses(mux, newProcessTable(maxManagedProcesses))
 	mux.HandleFunc("PUT /file", s.upload)
 	mux.HandleFunc("GET /file", s.download)
@@ -690,7 +694,12 @@ func main() {
 	defer listener.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	server := &http.Server{Handler: (runtimeServer{maxTransfer: *limit, maxTimeout: time.Duration(*timeout) * time.Second, identity: identity, maxWorkspaceArchive: *archiveLimit}).handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, BaseContext: func(net.Listener) context.Context { return ctx }}
+	var containerExec *containerExecClient
+	if *guest && (identity == nil || identity.uid == 0 && identity.gid == 0) {
+		containerExec = newContainerExecClient()
+		defer containerExec.close()
+	}
+	server := &http.Server{Handler: (runtimeServer{maxTransfer: *limit, maxTimeout: time.Duration(*timeout) * time.Second, identity: identity, maxWorkspaceArchive: *archiveLimit, containerExec: containerExec}).handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, BaseContext: func(net.Listener) context.Context { return ctx }}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)

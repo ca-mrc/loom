@@ -12,7 +12,7 @@ from sqlalchemy import select, update
 from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolRequest
 from loom.pipeline.keys import canonical_digest
 from tests.integration.test_nebius_pool_build_admission import mixed_setup, prepare_build
-from tests.integration.test_nebius_pool_registry import prepare
+from tests.integration.test_nebius_pool_registry import BUILD_POOL_NODE_CPU, prepare
 from tests.integration.test_nebius_pool_registry import sessions as sessions
 
 
@@ -152,7 +152,7 @@ async def test_unqualified_activation_creates_no_intent(sessions, damage):
     from loom_service.pool_management.registry import PoolProfiles
 
     participants, principals, executions, _, profiles, _ = await mixed_setup(sessions,
-        occupied_cpu=3000 if damage == "waiting" else 0)
+        occupied_cpu=BUILD_POOL_NODE_CPU if damage == "waiting" else 0)
     await prepare(sessions, principals[0], executions[0], profiles)
     request, principal = action(executions[0]), principals[0]
     if damage == "digest":
