@@ -2978,6 +2978,52 @@ without rewriting the original rollback receipt. A later manager refresh must
 account for that newer platform deployment; the old full-template baseline alone
 is no longer a current runtime proof.
 
+An older standalone SSH gateway may reject the regional deployer's
+`config view -o json` or explicit `--context` with exit 126 before acquiring the
+rollout guard. Diagnose that command boundary first; it does not justify
+recovering an unrelated failed candidate or changing the guard. Refresh the
+existing gateway only from reviewed merged source, through its established
+operator-admin route:
+
+```sh
+python3 -m scripts.ops.install_nebius_regional_rollout_gateway \
+  --source-sha MERGED_COMMIT --scope /private/operator/regional-scope.json
+# Inspect the secret-free planned result, then install the same reviewed scope.
+python3 -m scripts.ops.install_nebius_regional_rollout_gateway \
+  --source-sha MERGED_COMMIT --scope /private/operator/regional-scope.json --apply
+```
+
+The private scope JSON has `schema_version` equal to
+`loom.nebius-regional-rollout-scope.v1`, `kubeconfig` and `kubectl` equal to the
+existing wrapper's absolute retained paths, and an explicit `regions` list.
+Each entry contains `context`, `cluster_name`, `api_server`, `namespace`,
+`namespace_uid`, and `resources` (objects containing only `kind` and `name`).
+Populate these fields from the already approved configured target and current
+readback, including each existing rendered resource identity. Keep the file
+owner-only and out of Git/artifacts. Plan and apply verify the retained context
+mapping, existing resource names and namespace UID; this installer cannot
+bootstrap a new target, namespace, resource identity or Kubernetes grant.
+
+The extension preserves the original wrapper, its completion/retirement/shared
+input grants and file mode. Primary commands continue through that wrapper.
+Full context discovery returns only the configured regional cluster names and
+servers and context-to-cluster mapping; it omits users, authentication plugins,
+credentials and CA bytes. Selected-context operations are limited to the
+existing deployer's node/policy reads, permission checks, and application of
+explicit resource identities in the retained namespace. The named identity
+Pod probe is allowed only as a server dry-run. Manifest semantics remain owned
+by the normal regional renderer/preflight; secrets, arbitrary Pod creation,
+other contexts, connection overrides and foreign namespaces are rejected.
+
+Installation backs up the exact original wrapper under
+`~/.loom/nebius-auto-rollout/regional-compatibility/MERGED_COMMIT/` and atomically
+replaces only the wrapper prefix. If needed, restore the retained previous
+wrapper with the same command plus `--restore-previous --apply`; restoration
+rejects later grant changes instead of overwriting them. This local installer
+changes neither kubeconfig/RBAC nor rollout/recovery state. Resume ordinary
+protected rollout only after installation readback; mandatory backup, idle
+checks, admission probes and public version acceptance still apply.
+
 Every attempt leaves a separate sanitized JSON phase record, including the candidate version, target
 and failed phase. Evidence excludes kubeconfig material,
 API endpoint details and secret values. A failed attempt is not automatically
