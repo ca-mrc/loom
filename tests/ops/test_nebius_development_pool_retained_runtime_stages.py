@@ -781,6 +781,28 @@ def test_runtime_database_delivery_keeps_old_data_identity_and_separates_credent
     assert len(first['resource_uids']) == 4
     assert 'runtime-actuator-' not in json.dumps(first)
 
+    from scripts.ops import nebius_development_runtime_setup as setup
+
+    if not hasattr(setup, 'validate_database_runtime_proof'):
+        pytest.fail('fixed development runtime database receipt validation is missing')
+
+    job, = [row for row in api.resources.values() if row['kind'] == 'Job']
+    proof = {'job_uid': job['metadata']['uid'], 'pod_uid': '27d6a159-4df3-4bbf-8722-897b2b3c619b',
+        'database': {'status': 'development_runtime_database_installed',
+            'operation_id': 'aecc7407-b7b8-4c38-8d1f-bca5dca9840f', 'role': 'loom_actuator',
+            'role_oid': 17000, 'token_sha256': hashlib.sha256(('loom_br_' + 'r' * 64).encode()).hexdigest()}}
+    assert setup.validate_database_runtime_proof(request, state, proof) is None
+    for field, value in [('status', 'pending'), ('operation_id', '27d6a159-4df3-4bbf-8722-897b2b3c619b'),
+            ('role', 'postgres'), ('role_oid', True), ('role_oid', 0), ('role_oid', 2**32),
+            ('token_sha256', '0' * 64), ('extra', 'not-allowed')]:
+        changed = copy.deepcopy(proof)
+        changed['database'][field] = value
+        with pytest.raises(ValueError, match='development runtime database receipt unqualified'):
+            setup.validate_database_runtime_proof(request, state, changed)
+    for field, value in [('job_uid', proof['pod_uid']), ('pod_uid', str(UUID(int=0))), ('extra', True)]:
+        with pytest.raises(ValueError, match='development runtime database receipt unqualified'):
+            setup.validate_database_runtime_proof(request, state, {**proof, field: value})
+
 
 
 def test_runtime_database_delivery_refuses_invalid_material(completed_pool):
@@ -831,34 +853,6 @@ def test_runtime_database_stage_refuses_caller_modified_job_before_writes(comple
     with pytest.raises(ValueError, match='development runtime database stage unqualified'):
         runtime_database_stage(request, api, state)
     assert not api.creates and not state.exists()
-
-
-
-@pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
-def test_runtime_database_proof_binds_job_operation_role_and_token(completed_pool, tmp_path):
-    from scripts.ops import nebius_development_runtime_setup as setup
-
-    if not hasattr(setup, 'validate_database_runtime_proof'):
-        pytest.fail('fixed development runtime database receipt validation is missing')
-    request = database_runtime(completed_pool)
-    api, state = runtime_database_api(request), tmp_path / 'runtime-database'
-    runtime_database_stage(request, api, state)
-    job, = [row for row in api.resources.values() if row['kind'] == 'Job']
-    proof = {'job_uid': job['metadata']['uid'], 'pod_uid': '27d6a159-4df3-4bbf-8722-897b2b3c619b',
-        'database': {'status': 'development_runtime_database_installed',
-            'operation_id': 'aecc7407-b7b8-4c38-8d1f-bca5dca9840f', 'role': 'loom_actuator',
-            'role_oid': 17000, 'token_sha256': hashlib.sha256(('loom_br_' + 'r' * 64).encode()).hexdigest()}}
-    assert setup.validate_database_runtime_proof(request, state, proof) is None
-    for field, value in [('status', 'pending'), ('operation_id', '27d6a159-4df3-4bbf-8722-897b2b3c619b'),
-            ('role', 'postgres'), ('role_oid', True), ('role_oid', 0), ('role_oid', 2**32),
-            ('token_sha256', '0' * 64), ('extra', 'not-allowed')]:
-        changed = copy.deepcopy(proof)
-        changed['database'][field] = value
-        with pytest.raises(ValueError, match='development runtime database receipt unqualified'):
-            setup.validate_database_runtime_proof(request, state, changed)
-    for field, value in [('job_uid', proof['pod_uid']), ('pod_uid', str(UUID(int=0))), ('extra', True)]:
-        with pytest.raises(ValueError, match='development runtime database receipt unqualified'):
-            setup.validate_database_runtime_proof(request, state, {**proof, field: value})
 
 
 
@@ -1108,6 +1102,38 @@ def test_catalog_job_binds_original_target_and_new_code_without_database_authori
     assert first['status'] == 'management_phase_staged'
     assert len(first['resource_uids']) == 2
 
+    import rfc8785
+    from scripts.ops import nebius_development_catalog_runtime as catalog
+
+    if not hasattr(catalog, 'validate_catalog_runtime_proof'):
+        pytest.fail('fixed development catalog proof validation is missing')
+
+    config, = [row for row in api.resources.values() if row['kind'] == 'ConfigMap']
+    job, = [row for row in api.resources.values() if row['kind'] == 'Job']
+    raw = json.loads(config['data']['catalog.json'])
+    canonical = rfc8785.dumps(raw) + b'\n'
+    proof = {'job_uid': job['metadata']['uid'], 'pod_uid': '27d6a159-4df3-4bbf-8722-897b2b3c619b',
+        'catalog': {'operation_id': 'aecc7407-b7b8-4c38-8d1f-bca5dca9840f',
+            'target_id': raw['topology']['targets'][0]['target_id'],
+            'catalog_sha256': 'sha256:' + hashlib.sha256(canonical).hexdigest()}}
+    assert catalog.validate_catalog_runtime_proof(request, state, proof) is None
+    for field, value in [('operation_id', str(uuid4())), ('target_id', 'staging'),
+            ('catalog_sha256', '0' * 64), ('extra', True)]:
+        changed = copy.deepcopy(proof)
+        changed['catalog'][field] = value
+        with pytest.raises(ValueError, match='development catalog receipt unqualified'):
+            catalog.validate_catalog_runtime_proof(request, state, changed)
+    for field, value in [('job_uid', proof['pod_uid']), ('pod_uid', str(UUID(int=0))), ('extra', True)]:
+        with pytest.raises(ValueError, match='development catalog receipt unqualified'):
+            catalog.validate_catalog_runtime_proof(request, state, {**proof, field: value})
+    journal = state / 'stage.json'
+    saved = json.loads(journal.read_bytes())
+    for row in saved['resources'].values():
+        row['status'] = 'prepared'
+    journal.write_text(json.dumps(saved))
+    with pytest.raises(ValueError, match='development catalog receipt unqualified'):
+        catalog.validate_catalog_runtime_proof(request, state, proof)
+
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
@@ -1136,44 +1162,6 @@ def test_catalog_stage_refuses_modified_runtime_request_before_writes(completed_
     with pytest.raises(ValueError, match='development catalog stage unqualified'):
         catalog_runtime_stage(request, api, state)
     assert not api.creates and not state.exists()
-
-
-
-@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
-def test_catalog_proof_binds_exact_job_request_and_operation(completed_pool, tmp_path):
-    import rfc8785
-    from scripts.ops import nebius_development_catalog_runtime as catalog
-
-    if not hasattr(catalog, 'validate_catalog_runtime_proof'):
-        pytest.fail('fixed development catalog proof validation is missing')
-    request = database_runtime(completed_pool)
-    api, state = runtime_database_api(request), tmp_path / 'catalog'
-    catalog_runtime_stage(request, api, state)
-    config, = [row for row in api.resources.values() if row['kind'] == 'ConfigMap']
-    job, = [row for row in api.resources.values() if row['kind'] == 'Job']
-    raw = json.loads(config['data']['catalog.json'])
-    canonical = rfc8785.dumps(raw) + b'\n'
-    proof = {'job_uid': job['metadata']['uid'], 'pod_uid': '27d6a159-4df3-4bbf-8722-897b2b3c619b',
-        'catalog': {'operation_id': 'aecc7407-b7b8-4c38-8d1f-bca5dca9840f',
-            'target_id': raw['topology']['targets'][0]['target_id'],
-            'catalog_sha256': 'sha256:' + hashlib.sha256(canonical).hexdigest()}}
-    assert catalog.validate_catalog_runtime_proof(request, state, proof) is None
-    for field, value in [('operation_id', str(uuid4())), ('target_id', 'staging'),
-            ('catalog_sha256', '0' * 64), ('extra', True)]:
-        changed = copy.deepcopy(proof)
-        changed['catalog'][field] = value
-        with pytest.raises(ValueError, match='development catalog receipt unqualified'):
-            catalog.validate_catalog_runtime_proof(request, state, changed)
-    for field, value in [('job_uid', proof['pod_uid']), ('pod_uid', str(UUID(int=0))), ('extra', True)]:
-        with pytest.raises(ValueError, match='development catalog receipt unqualified'):
-            catalog.validate_catalog_runtime_proof(request, state, {**proof, field: value})
-    journal = state / 'stage.json'
-    saved = json.loads(journal.read_bytes())
-    for row in saved['resources'].values():
-        row['status'] = 'prepared'
-    journal.write_text(json.dumps(saved))
-    with pytest.raises(ValueError, match='development catalog receipt unqualified'):
-        catalog.validate_catalog_runtime_proof(request, state, proof)
 
 
 

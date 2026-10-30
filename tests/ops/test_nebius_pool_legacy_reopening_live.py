@@ -55,8 +55,7 @@ def prepared_dispatch(fixture):
 
 
 @pytest.mark.timeout(300)
-@pytest.mark.parametrize('failure', [ValueError, DispatchInterrupted])
-def test_reopening_actual_runtime_failure_preserves_prepared_and_can_resume(closed_startup, failure):
+def test_reopening_actual_runtime_failure_preserves_prepared_and_can_resume(closed_startup):
     api, writes = prepared_dispatch(closed_startup)
     dispatch = api.release_recovery_guard
     active = False
@@ -72,12 +71,11 @@ def test_reopening_actual_runtime_failure_preserves_prepared_and_can_resume(clos
             raise failure('runtime-proof-interrupted')
     api.release_recovery_guard = actual
     api._legacy_runtime_probes = probes
-    try:
-        reopen(api)
-    except (ValueError, DispatchInterrupted):
-        pass
-    assert not writes
-    assert set(json.loads((api.state / 'legacy-reopening.json').read_bytes())['guards'].values()) == {'prepared'}
+    for failure in (ValueError, DispatchInterrupted):
+        with pytest.raises(failure):
+            reopen(api)
+        assert not writes
+        assert set(json.loads((api.state / 'legacy-reopening.json').read_bytes())['guards'].values()) == {'prepared'}
     api._legacy_runtime_probes = lambda expected: None
     assert reopen(api)['status'] == 'pool_legacy_reopened'
     assert writes == [str(row.participant_id) for row in api.request.fencing.retirement.migration.guards]
