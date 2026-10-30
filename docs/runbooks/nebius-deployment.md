@@ -2997,12 +2997,20 @@ The private scope JSON has `schema_version` equal to
 `loom.nebius-regional-rollout-scope.v1`, `kubeconfig` and `kubectl` equal to the
 existing wrapper's absolute retained paths, and an explicit `regions` list.
 Each entry contains `context`, `cluster_name`, `api_server`, `namespace`,
-`namespace_uid`, and `resources` (objects containing only `kind` and `name`).
+`namespace_uids`, `resources` (objects containing only `kind`, `name` and
+`namespace`, with null for cluster resources), and `secret_key_reads` (objects
+containing `namespace`, `name` and `required_keys`). `namespace_uids` maps the
+exact execution namespace and, only when already installed and explicitly
+configured, its `-build` sibling to their retained UIDs. No third namespace is
+accepted. Build Secret reads allow only the deployer's fixed key-name output
+template for those exact names and declared keys; Secret values and Secret
+writes remain unavailable.
 Populate these fields from the already approved configured target and current
 readback, including each existing rendered resource identity. Keep the file
 owner-only and out of Git/artifacts. Plan and apply verify the retained context
-mapping, existing resource names and namespace UID; this installer cannot
-bootstrap a new target, namespace, resource identity or Kubernetes grant.
+mapping, existing resource identities, namespace UIDs and populated required
+Secret key names; this installer cannot bootstrap a new target, namespace,
+resource identity or Kubernetes grant.
 
 Also include the already installed policy-bootstrap ServiceAccount in `resources`:
 `{"kind":"ServiceAccount","name":"loom-execution-policy-probe"}`.
@@ -3025,10 +3033,12 @@ Full context discovery returns only the configured regional cluster names and
 servers and context-to-cluster mapping; it omits users, authentication plugins,
 credentials and CA bytes. Selected-context operations are limited to the
 existing deployer's node/policy reads, permission checks, and application of
-explicit resource identities in the retained namespace. The named identity
-Pod probe is allowed only as a server dry-run. Manifest semantics remain owned
-by the normal regional renderer/preflight; secrets, arbitrary Pod creation,
+explicit resource identities in the retained execution/build namespaces. The
+named identity Pod probe is allowed only as a server dry-run. Manifest semantics
+remain owned by the normal regional renderer/preflight; Secret writes, arbitrary Pod creation,
 other contexts, connection overrides and foreign namespaces are rejected.
+A configured build namespace or resource that is not already installed blocks
+this ordinary refresh; this route does not bootstrap it.
 
 Installation backs up the exact original wrapper under
 `~/.loom/nebius-auto-rollout/regional-compatibility/MERGED_COMMIT/` and atomically
