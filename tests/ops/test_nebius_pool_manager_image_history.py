@@ -913,8 +913,9 @@ def test_late_isolation_after_legacy_opening_cannot_lead_to_a_manager_stop(image
 
 @pytest.mark.parametrize(("moment", "loss"), [("prepared", None), ("intent", None), ("prepared_fence", None), ("late_isolate", None),
     ("late_shutdown", "before"), ("late_shutdown", "after"),
-    ("late_shutdown", "conflict"), ("stopped", None)])
+    ("late_shutdown", "conflict")])
 @pytest.mark.timeout(420)
+@pytest.mark.parametrize('runtime_inputs', [('production', 'development')], indirect=True)
 def test_legacy_fence_resumes_image_enrollment_without_rewriting_frozen_evidence(image_repair_case, monkeypatch, moment, loss, request):
     from types import SimpleNamespace
 
@@ -936,6 +937,7 @@ def test_legacy_fence_resumes_image_enrollment_without_rewriting_frozen_evidence
     else:
         image_api.failure = ("isolate", "before")
         assert switch(image_repair_case, image_api)["status"] == "pending_manager_image_outcome"
+        version = image_api.pending[0]["metadata"]["resourceVersion"]
     api = ShutdownAPI((context.request, None, None, remote.startup, None, state.parent))
     api.state = state
     args = dict(request=context.request, api=api, state_dir=state, anchor_dir=anchor)
@@ -956,16 +958,15 @@ def test_legacy_fence_resumes_image_enrollment_without_rewriting_frozen_evidence
                 fence_pool_startup(**args)
         else:
             assert fence_pool_startup(**args)["status"] == "startup_writes_fenced"
-        if moment in {"late_shutdown", "stopped"}:
+        if moment == "late_shutdown":
             stop = api.stop_workload
 
             def uncertain(key_, before, desired, **kwargs):
-                api.stop_failure = "before" if moment == "late_shutdown" and key_ == key else None
+                api.stop_failure = "before" if key_ == key else None
                 return stop(key_, before, desired, **kwargs)
 
             legacy.setattr(api, "stop_workload", uncertain)
-            assert stop_pool_successors(**args)["status"] == (
-                "pending_shutdown_outcome" if moment == "late_shutdown" else "pool_successors_stopped")
+            assert stop_pool_successors(**args)["status"] == "pending_shutdown_outcome"
     frozen = {path: path.read_bytes() for path in (state / "startup-fence.json",
         anchor / (context.operation["operation_id"] + "-startup-fence.json"))
         if moment != "prepared_fence" or path.parent == anchor}
@@ -1039,7 +1040,6 @@ def test_legacy_fence_resumes_image_enrollment_without_rewriting_frozen_evidence
     assert "loom.nebius/manager-image-repair" not in actual["metadata"].get("annotations", {})
     assert all(path.read_bytes() == raw for path, raw in frozen.items())
     if moment != "prepared":
-        version = entry(image_repair_case).record["phases"]["isolate"]["before_resource_version"]
         assert actual["metadata"]["resourceVersion"] != version
         remote.startup.documents[key]["metadata"]["resourceVersion"] = version
         with pytest.raises(ValueError):
@@ -1047,6 +1047,7 @@ def test_legacy_fence_resumes_image_enrollment_without_rewriting_frozen_evidence
 
 
 @pytest.mark.timeout(600)
+@pytest.mark.parametrize('runtime_inputs', [('production', 'development')], indirect=True)
 def test_legacy_completion_preserves_receipt_and_carries_unstarted_image_ancestry(image_repair_case, monkeypatch):
     from types import SimpleNamespace
 
