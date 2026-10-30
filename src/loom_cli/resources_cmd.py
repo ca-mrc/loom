@@ -1,4 +1,4 @@
-"""`loom resources status` exposes Monitor resource-pool slots."""
+"""`loom resources status` exposes Monitor resource-pool slots and native capacity."""
 
 from __future__ import annotations
 
@@ -77,6 +77,61 @@ def _print_text(resources: dict[str, Any]) -> None:
         )
 
 
+def _is_inactive(target: dict[str, Any]) -> bool:
+    return target.get("desired_state") in {"disabled", "retired"}
+
+
+def _capacity_owners(targets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One target per shared compute pool, skipping fully inactive pools.
+
+    Runtimes that name the same capacity owner share its nodes, so their
+    observations must not be listed or added as separate capacity.
+    """
+    groups: dict[object, list[dict[str, Any]]] = {}
+    for index, target in enumerate(targets):
+        owner_id = target.get("capacity_owner_target_id") or target.get("target_id") or index
+        groups.setdefault(owner_id, []).append(target)
+    owners = []
+    for owner_id, members in groups.items():
+        if all(_is_inactive(member) for member in members):
+            continue
+        owners.append(next((m for m in members if m.get("target_id") == owner_id), members[0]))
+    return owners
+
+
+def _print_native_execution(
+    service_execution: dict[str, Any],
+    progress: dict[str, Any],
+) -> None:
+    stages = cast(dict[str, Any], progress.get("stages") or {})
+    print("Native execution:")
+    print(
+        f"  Running: {int(stages.get('running', 0))} · "
+        f"Starting: {int(stages.get('starting', 0))} · "
+        f"Waiting: {int(stages.get('execution_wait', 0))} · "
+        f"Preparing images: {int(stages.get('image_preparation', 0))} · "
+        f"Archiving: {int(stages.get('archiving', 0))}",
+    )
+    owners = _capacity_owners(cast(list[dict[str, Any]], service_execution.get("targets") or []))
+    if not owners:
+        return
+    print()
+    print("  Region      Pool        Nodes  Occupied  Max  PendingJobs  Observation")
+    for owner in owners:
+        observation = cast(dict[str, Any], owner.get("observation") or {})
+        policy = cast(dict[str, Any], owner.get("policy") or {})
+        print(
+            "  "
+            f"{owner.get('region', '-')!s:<11} "
+            f"{owner.get('pool_id', '-')!s:<11} "
+            f"{observation.get('active_nodes', '?')!s:<6} "
+            f"{observation.get('occupied_nodes', '?')!s:<9} "
+            f"{policy.get('max_nodes', '?')!s:<4} "
+            f"{observation.get('pending_jobs', '?')!s:<12} "
+            f"{'fresh' if observation.get('is_fresh') else 'stale'}",
+        )
+
+
 def _status(args: argparse.Namespace) -> int:
     try:
         cfg = require_logged_in()
@@ -98,10 +153,22 @@ def _status(args: argparse.Namespace) -> int:
         return 2
 
     resources = cast(dict[str, Any], body.get("resources") or {})
+    service_execution = cast(dict[str, Any], body.get("service_execution") or {})
+    progress = cast(dict[str, Any], body.get("progress") or {})
     if args.format == "json":
+        if service_execution:
+            resources = {**resources, "service_execution": service_execution, "progress": progress}
         json.dump(resources, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
-    else:
+        return 0
+    # Native Nebius trials hold leases, not worker slots, so the worker summary
+    # below reads 0 for them. Like Monitor, omit it when only native capacity exists.
+    native = bool(service_execution.get("targets"))
+    if native:
+        _print_native_execution(service_execution, progress)
+    if not native or resources.get("pools"):
+        if native:
+            print()
         _print_text(resources)
     return 0
 

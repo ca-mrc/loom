@@ -1468,7 +1468,8 @@ agent, provider, and model constraints with removable active chips. For autoscal
 the resource summary also includes desired slots, pending slots, draining
 slots, idle-window age, and the last autoscaler decision. The same slot summary
 is available from the CLI with `loom resources status` and
-`loom resources status --json`. The table's State dropdown is still reflected
+`loom resources status --json`, which report native Nebius trials and node
+capacity instead of worker slots when no worker pools exist. The table's State dropdown is still reflected
 in the URL, but the health card keeps all lifecycle counters visible so queue
 pressure does not disappear when you filter the rows to failures. Monitor
 filters are reflected in the URL so support links can preserve `view`, `state`,
