@@ -474,6 +474,8 @@ def foundation_publication(completed_pool):
 def test_runtime_keeps_separate_database_publications_and_immutable_application_schema(
         completed_pool, publisher_cloud, published_source):
     """A newer manager must not force its schema or image onto shared dev."""
+    from dataclasses import replace
+
     manager = runtime_publication(completed_pool)
     data = foundation_publication(completed_pool)
     assert manager.bundle.candidate['service_schema_head'] == '0176'
@@ -500,20 +502,8 @@ def test_runtime_keeps_separate_database_publications_and_immutable_application_
     assert all(row.schema_revision == '0175' for row in application.releases)
     assert all(path.read_bytes() == raw for path, raw in request.database.foundation.files.items())
 
-
-@pytest.mark.parametrize('published_source', ['0175'], indirect=True)
-@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material-split-schema'], indirect=True)
-@pytest.mark.parametrize('retained', [False], indirect=True)
-def test_runtime_rejects_manager_image_for_an_older_shared_database(completed_pool, published_source):
     with pytest.raises(ValueError, match='development runtime database delivery unqualified'):
         database_runtime(completed_pool)
-
-
-@pytest.mark.parametrize('published_source', ['0175'], indirect=True)
-@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material-split-schema'], indirect=True)
-@pytest.mark.parametrize('retained', [False], indirect=True)
-def test_split_runtime_refuses_schema_or_source_drift(completed_pool, published_source):
-    from dataclasses import replace
 
     for damage in ('data-schema', 'unknown-schema', 'missing-schema', 'manager-schema', 'source'):
         manager, data = runtime_publication(completed_pool), foundation_publication(completed_pool)

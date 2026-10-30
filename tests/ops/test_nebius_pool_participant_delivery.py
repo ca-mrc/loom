@@ -115,7 +115,7 @@ def test_shared_recovery_selects_original_publication_not_another_success_for_sa
 # complete-roster fault cases stay separate from cross-roster success.
 @pytest.mark.parametrize('staging_attachment_inputs,recover,file_writes', [
     (0, False, True), (1, False, True),
-    (2, False, False), (2, False, True), (2, True, False), (2, True, True),
+    (2, False, False), (2, True, False), (2, True, True),
 ], indirect=['staging_attachment_inputs'])
 def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation_inputs, connection, tmp_path, monkeypatch, recover, file_writes,
         host_delivery=False):
@@ -413,10 +413,13 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
 
 
 @pytest.mark.timeout(120)
-def test_completion_preserves_the_existing_database_clock_skew_allowance(
+def test_shared_delivery_uses_published_schema_and_scoped_ancestry_without_git(
         operation_inputs, connection, tmp_path, monkeypatch):
+    """Real deployment lifecycle; source authority is a separate HTTP-bound test."""
     from datetime import datetime, timedelta
 
+    from scripts.ops import nebius_pool_participant_entry as entry
+    from scripts.ops.nebius_pool_participant_completion import initialize_participant_head
     from tests.ops import test_nebius_pool_participant_adapter as transport
 
     class DatabaseClock:
@@ -425,16 +428,6 @@ def test_completion_preserves_the_existing_database_clock_skew_allowance(
             return datetime.now(tz) + timedelta(seconds=5)
 
     monkeypatch.setattr(transport, 'datetime', DatabaseClock)
-    test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(
-        operation_inputs, connection, tmp_path, monkeypatch, recover=False, file_writes=True)
-
-
-@pytest.mark.timeout(120)
-def test_shared_delivery_uses_published_schema_and_scoped_ancestry_without_git(
-        operation_inputs, connection, tmp_path, monkeypatch):
-    """Real deployment lifecycle; source authority is a separate HTTP-bound test."""
-    from scripts.ops import nebius_pool_participant_entry as entry
-    from scripts.ops.nebius_pool_participant_completion import initialize_participant_head
 
     original_rollout = idle.rollout
     calls, completed = [], []

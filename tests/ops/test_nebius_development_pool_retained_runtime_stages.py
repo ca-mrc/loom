@@ -1181,22 +1181,6 @@ def test_catalog_proof_binds_exact_job_request_and_operation(completed_pool, tmp
 def test_catalog_https_verifies_fixed_job_initializer_and_receipt(runtime_database_live, tmp_path):
     live, state = runtime_database_live, tmp_path / 'catalog'
     with runtime_catalog_https(live) as api:
-        catalog_runtime_stage(live.request, api, state)
-        assert api.catalog_report(state) is None
-        live.complete = True
-        proof = api.catalog_report(state)
-        assert proof['catalog'] == live.report
-        assert live.pod['status']['initContainerStatuses'][0]['name'] == 'prepare-admin-secret'
-        assert api.catalog_report(state) == proof
-        assert len(live.store.creates) == 2
-        assert live.catalog_checks > 2
-
-
-
-@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
-def test_catalog_https_requires_parent_qualification_and_rejects_extra_authority(runtime_database_live, tmp_path):
-    live, state = runtime_database_live, tmp_path / 'catalog'
-    with runtime_catalog_https(live) as api:
         live.catalog_allowed = False
         with pytest.raises(ValueError, match='development catalog stage unqualified'):
             catalog_runtime_stage(live.request, api, state)
@@ -1207,14 +1191,16 @@ def test_catalog_https_requires_parent_qualification_and_rejects_extra_authority
             api.create_resource(foreign)
         assert not live.store.creates
 
-
-
-@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
-def test_catalog_https_late_prerequisite_loss_cannot_report_completion(runtime_database_live, tmp_path):
-    live, state = runtime_database_live, tmp_path / 'catalog'
-    with runtime_catalog_https(live) as api:
         catalog_runtime_stage(live.request, api, state)
+        assert api.catalog_report(state) is None
         live.complete = True
+        proof = api.catalog_report(state)
+        assert proof['catalog'] == live.report
+        assert live.pod['status']['initContainerStatuses'][0]['name'] == 'prepare-admin-secret'
+        assert api.catalog_report(state) == proof
+        assert len(live.store.creates) == 2
+        assert live.catalog_checks > 2
+
         live.on_log = lambda: setattr(live, 'catalog_allowed', False)
         with pytest.raises(ValueError, match='development catalog execution unqualified'):
             api.catalog_report(state)

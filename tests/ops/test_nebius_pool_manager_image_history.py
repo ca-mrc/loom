@@ -689,10 +689,8 @@ def test_image_only_repair_rejects_incompatible_source_schema(private_image_repa
     proof.write_bytes(original)
 
 
-@pytest.mark.parametrize("damage", ["unanchored", "recursive", "private_drift", "same_id", "same_source",
-    "other_parent", "injected_binding", "old_schema_proof"])
 def test_tooling_continuation_rejects_unbound_or_replaced_repair(
-        private_image_repair, image_repair_case, damage):
+        private_image_repair, image_repair_case):
     from pathlib import Path
 
     from scripts.ops import nebius_certificates as private_state
@@ -700,30 +698,47 @@ def test_tooling_continuation_rejects_unbound_or_replaced_repair(
     from scripts.ops.nebius_pool_image_entry import load_image_repair_inputs
     from tests.ops.test_nebius_pool_startup_repair import save_private
 
-    operation, wrapper, fixture = tooling_continuation(private_image_repair, image_repair_case)
-    previous = wrapper["repair_operation"]
-    if damage == "unanchored":
-        retained = entry(fixture)
-        retained.path.unlink()
-        retained.marker.unlink()
-    elif damage == "recursive":
-        previous["schema"] = "loom.nebius-pool-startup-repair-operation.v4"
-    elif damage == "private_drift":
-        Path(previous["inputs_path"]).write_bytes(b"{}")
-    elif damage == "same_id":
-        operation["operation_id"] = previous["operation_id"]
-    elif damage == "same_source":
-        operation["source_sha"] = operation["candidate"] = previous["source_sha"]
-    elif damage == "other_parent":
-        operation["original_operation_id"] = str(uuid4())
-    elif damage == "injected_binding":
-        wrapper["binding"] = fixture[-1].model_dump(mode="json")
-    else:
-        private_state._atomic_json(private_image_repair[2], {"schema": "loom.nebius-manager-schema.v1",
-            "source_sha": previous["source_sha"], "revision": "0174"})
-    save_private(operation, wrapper)
-    with pytest.raises(EntryError):
-        load_image_repair_inputs(operation)
+    original_operation, original_wrapper, fixture = tooling_continuation(private_image_repair, image_repair_case)
+    for damage in ("unanchored", "recursive", "private_drift", "same_id", "same_source",
+            "other_parent", "injected_binding", "old_schema_proof"):
+        operation, wrapper = copy.deepcopy((original_operation, original_wrapper))
+        previous = wrapper["repair_operation"]
+        paths = ()
+        if damage == "unanchored":
+            retained = entry(fixture)
+            paths = (retained.path, retained.marker)
+        elif damage == "private_drift":
+            paths = (Path(previous["inputs_path"]),)
+        elif damage == "old_schema_proof":
+            paths = (private_image_repair[2],)
+        originals = {path: (path.read_bytes(), path.stat().st_mode & 0o777) for path in paths}
+        try:
+            if damage == "unanchored":
+                for path in paths:
+                    path.unlink()
+            elif damage == "recursive":
+                previous["schema"] = "loom.nebius-pool-startup-repair-operation.v4"
+            elif damage == "private_drift":
+                paths[0].write_bytes(b"{}")
+            elif damage == "same_id":
+                operation["operation_id"] = previous["operation_id"]
+            elif damage == "same_source":
+                operation["source_sha"] = operation["candidate"] = previous["source_sha"]
+            elif damage == "other_parent":
+                operation["original_operation_id"] = str(uuid4())
+            elif damage == "injected_binding":
+                wrapper["binding"] = fixture[-1].model_dump(mode="json")
+            else:
+                private_state._atomic_json(paths[0], {"schema": "loom.nebius-manager-schema.v1",
+                    "source_sha": previous["source_sha"], "revision": "0174"})
+            save_private(operation, wrapper)
+            with pytest.raises(EntryError):
+                load_image_repair_inputs(operation)
+        finally:
+            # Only the fault's files change; the anchored image remains prepared.
+            for path, (raw, mode) in originals.items():
+                path.write_bytes(raw)
+                path.chmod(mode)
 
 
 def test_targeted_image_private_entry_requires_matching_operation_and_binding_versions(
