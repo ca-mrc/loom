@@ -328,6 +328,12 @@ def _bootstrap_database(
                         cursor.execute(
                             "GRANT UPDATE (last_used_at, last_seen_at) ON tokens TO loom_gateway"
                         )
+                        # The Gateway caches its Responses probe; connection
+                        # identity, credentials and status stay service-owned.
+                        cursor.execute(
+                            "GRANT UPDATE (responses_api_supported, responses_api_probed_at, "
+                            "responses_api_probe_error) ON provider_connections TO loom_gateway"
+                        )
                     if role == "loom_actuator":
                         # Source journal row locks need UPDATE on one column;
                         # claims only append retained references, never publish
