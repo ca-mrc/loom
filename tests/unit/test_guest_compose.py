@@ -5,6 +5,58 @@ import pytest
 from loom.guest_compose import compile_native_compose
 
 
+async def test_guest_control_does_not_spend_its_deadline_starting_another_docker_cli(tmp_path):
+    import asyncio
+
+    from loom.driver.fake import FakeDriver
+    from loom.driver.guest_compose import GuestComposeRuntime
+    from loom.driver.service_sandbox import ServiceSandboxDriver
+    from loom.models.compose import ComposeServiceSpec, NativeComposeSpec
+    from loom.models.exec import ExecResult
+    from loom.models.networking import NoNetwork
+
+    started, released, cleaned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    controls = []
+
+    class ColdDockerCLI(ServiceSandboxDriver):
+        async def exec(self, command, **kwargs):
+            if "old_umask=$(umask)" in command:
+                started.set()
+                await released.wait()
+                return ExecResult(return_code=0, stdout=b"0022\n", stderr=b"", duration_sec=.1)
+            await started.wait()
+            # Model the observed CLI-startup budget exhaustion before the
+            # daemon accepts a control exec; the command itself is still gated.
+            assert kwargs["timeout_sec"] == 5
+            return ExecResult(return_code=124, stdout=b"", stderr=b"", duration_sec=5.1)
+
+        async def _exec_container(self, container, argv, *, timeout_sec):
+            await started.wait()
+            assert container == "f" * 64 and timeout_sec == 5
+            assert not released.is_set() or cleaned.is_set() or "-TERM" in argv[-1]
+            if "-TERM" in argv[-1]:
+                assert "-KILL" in argv[-1]
+                controls.append("cleanup")
+                cleaned.set()
+            elif " cat " in argv[-1]:
+                controls.append("identity")
+                return ExecResult(return_code=0, stdout=b"123", stderr=b"", duration_sec=.1)
+            else:
+                assert argv[1] == "touch"
+                controls.append("release")
+                released.set()
+            return ExecResult(return_code=0, stdout=b"", stderr=b"", duration_sec=.1)
+
+    guest = ColdDockerCLI(tmp_path / "unused.sock", capabilities=FakeDriver().capabilities,
+                          network_policy=NoNetwork())
+    runtime = GuestComposeRuntime(guest=guest, topology=NativeComposeSpec(source="fixture",
+        services=(ComposeServiceSpec(name="main", image="fixture"),)), image_archives={})
+    runtime.containers["main"] = "f" * 64
+    result = await runtime.driver("main").exec("umask")
+    assert result.return_code == 0 and result.stdout == b"0022\n"
+    assert controls == ["identity", "release", "cleanup"] and cleaned.is_set()
+
+
 @pytest.mark.parametrize("body", [b"ready\n", b"guest-ready\n"])
 def test_http_fixture_frames_the_actual_response_body(body):
     import subprocess

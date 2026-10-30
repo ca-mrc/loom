@@ -73,6 +73,20 @@ The launcher command gains ``--task-uid``, ``--task-gid``, ``--task-groups``,
 and ``--task-home``; the namespace policy still accepts the historical
 command that boots as root.
 
+Native multi-service Compose keeps its Docker control channel in the trusted
+root guest controller; agent commands retain the inner image's user. Identity
+reads, activation and process-group cleanup use the controller's private
+`/container-exec` RPC to the guest-local Docker API. Each operation retains one
+five-second deadline across exec creation, attached output and terminal status
+inspection. This avoids starting an additional Docker CLI inside that budget
+while the supervised command is starting on the same guest CPU. Ordinary
+command execution still uses its existing Docker exec lifecycle. PID validation
+before activation, the activation gate and shielded cleanup remain in place.
+Aborting an API request does not itself stop an accepted daemon exec. Supervisor
+cleanup still stops the controlled command; guest retirement bounds its lifetime.
+Host sandboxes and nonroot guest identities do not expose this control RPC;
+service containers receive no Docker socket or API proxy.
+
 ## Isolation and lifetime
 
 The existing Kubernetes Job, execution lease and attempt generation own the
