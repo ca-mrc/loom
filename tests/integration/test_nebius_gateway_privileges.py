@@ -13,7 +13,7 @@ import httpx
 import psycopg
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import create_engine, insert, select, update
+from sqlalchemy import create_engine, delete, insert, select, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -21,6 +21,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from loom import nebius_platform_bootstrap as bootstrap
 from loom.db.schema import (
     ProviderConnection,
+    ProviderRequestPool,
+    ProviderRequestPoolMember,
     RateCard,
     ServiceExecutionTarget,
     Task,
@@ -487,3 +489,98 @@ async def test_gateway_role_persists_only_the_responses_probe_outcome(
     finally:
         await engine.dispose()
         admin_engine.dispose()
+
+
+def test_gateway_rotates_configured_pool_without_insert_delete_privileges(
+    gateway_database: tuple[str, str],
+) -> None:
+    database_url, password = gateway_database
+    team_id = uuid4()
+    connections = [uuid4() for _ in range(3)]
+    root, spare = connections[:2]
+    owner = create_engine(make_url(database_url).set(drivername="postgresql+psycopg"))
+    gateway_url = make_url(database_url).set(username="loom_gateway", password=password)
+    try:
+        with owner.begin() as db:
+            db.execute(insert(Team).values(id=team_id, name=f"gateway-pool-{team_id}"))
+            for index, connection_id in enumerate(connections):
+                db.execute(insert(ProviderConnection).values(
+                    id=connection_id, team_id=team_id, provider_type="openai-compatible",
+                    display_name=f"gateway-pool-{index}", base_url="https://provider.example.test/v1",
+                    upstream_host="provider.example.test", resolved_egress_ips=["192.0.2.1"],
+                    encrypted_api_key_ref="test://unused-pool-key", created_by="test:gateway-pool",
+                    status="valid", allowed_models=["test-model"],
+                ))
+            db.execute(insert(ProviderRequestPool).values(connection_id=root, required_models=["test-model"]))
+            db.execute(insert(ProviderRequestPoolMember), [
+                {"pool_connection_id": root, "connection_id": value, "ordinal": ordinal,
+                 "quota_group": f"independent-{ordinal}"}
+                for ordinal, value in enumerate(connections)
+            ])
+
+        with psycopg.connect(gateway_url.render_as_string(hide_password=False)) as db:
+            assert db.execute(
+                "SELECT next_member FROM provider_request_pools WHERE connection_id=%s FOR UPDATE",
+                (root,),
+            ).fetchone() == (0,)
+            assert db.execute(
+                "UPDATE provider_request_pools SET next_member=next_member+1 "
+                "WHERE connection_id=%s RETURNING next_member", (root,),
+            ).fetchone() == (1,)
+            members = db.execute(
+                "SELECT connection_id FROM provider_request_pool_members "
+                "WHERE pool_connection_id=%s ORDER BY ordinal FOR UPDATE", (root,),
+            ).fetchall()
+            assert [row[0] for row in members] == connections
+            # Timeout/quota cooldown and invalid-key quarantine update existing
+            # members; pool configuration/membership creation remains elsewhere.
+            assert db.execute(
+                "UPDATE provider_request_pool_members SET cooldown_until=now()+interval '30 seconds', "
+                "enabled=false WHERE pool_connection_id=%s AND connection_id=%s "
+                "RETURNING cooldown_until IS NOT NULL, enabled", (root, spare),
+            ).fetchone() == (True, False)
+            db.commit()
+            for table, columns in (
+                ("provider_request_pools", "connection_id,required_models"),
+                ("provider_request_pool_members", "pool_connection_id,connection_id,ordinal,quota_group"),
+            ):
+                assert db.execute(
+                    "SELECT has_table_privilege(current_user,%s,'SELECT'), "
+                    "has_table_privilege(current_user,%s,'UPDATE'), "
+                    "has_table_privilege(current_user,%s,'INSERT'), "
+                    "has_table_privilege(current_user,%s,'DELETE')", (table,) * 4,
+                ).fetchone() == (True, True, False, False)
+                for statement in (
+                    f"INSERT INTO {table} ({columns}) SELECT {columns} FROM {table} WHERE false",
+                    f"DELETE FROM {table} WHERE false",
+                ):
+                    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                        db.execute(statement)
+                    db.rollback()
+        with psycopg.connect(database_url) as db:
+            assert db.execute(
+                "SELECT next_member FROM provider_request_pools WHERE connection_id=%s", (root,),
+            ).fetchone() == (1,)
+            assert db.execute(
+                "SELECT count(*) FROM provider_request_pool_members "
+                "WHERE pool_connection_id=%s AND enabled", (root,),
+            ).fetchone() == (2,)
+            for table in ("provider_request_pools", "provider_request_pool_members"):
+                assert db.execute(
+                    "SELECT has_table_privilege('loom_actuator',%s,'SELECT'), "
+                    "has_table_privilege('loom_actuator',%s,'UPDATE')", (table, table),
+                ).fetchone() == (False, False)
+                for role in ("loom_service", "loom_control_plane"):
+                    assert db.execute(
+                        "SELECT has_table_privilege(%s,%s,'SELECT'), "
+                        "has_table_privilege(%s,%s,'INSERT'), "
+                        "has_table_privilege(%s,%s,'UPDATE'), "
+                        "has_table_privilege(%s,%s,'DELETE')", (role, table) * 4,
+                    ).fetchone() == (True, True, True, True)
+    finally:
+        with owner.begin() as db:
+            db.execute(delete(ProviderRequestPoolMember).where(ProviderRequestPoolMember.pool_connection_id == root))
+            db.execute(delete(ProviderRequestPool).where(ProviderRequestPool.connection_id == root))
+            db.execute(delete(ProviderConnection).where(ProviderConnection.team_id == team_id))
+            db.execute(delete(Team).where(Team.id == team_id))
+        owner.dispose()
