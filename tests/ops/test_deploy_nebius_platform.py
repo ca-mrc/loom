@@ -1216,9 +1216,15 @@ def test_regional_deploy_waits_for_each_primary_actuator_and_checks_secret_keys(
     write_platform(files, config, candidate, args.render_dir)
     args.apply = True
     kube = FakeKubectl(config, files)
+    from loom.nebius_platform_render import build_regional_execution
+
+    target_id = config["regional_execution_targets"][0]["target_id"]
+    remote_docs = build_regional_execution(config, candidate, repo_root=deploy.ROOT)[target_id]
+    remote = SimpleNamespace(run=lambda *command: kube.commands.append(("regional", *command)))
+    monkeypatch.setattr(deploy, "preflight_regional_rollout", lambda *_args: {target_id: (remote, remote_docs)})
     monkeypatch.setattr(deploy, "public_smoke", lambda *_args: None)
     assert deploy.deploy(args, kube=kube)["status"] == "complete"
-    target_id = config["regional_execution_targets"][0]["target_id"]
+    assert len([command for command in kube.commands if command[0] == "regional"]) == 1
     rollouts = [command[2] for command in kube.commands if command[:2] == ("rollout", "status")]
     assert "deployment/loom-execution-actuator" in rollouts
     assert "deployment/" + target_id + "-actuator" in rollouts
@@ -1229,6 +1235,45 @@ def test_regional_deploy_waits_for_each_primary_actuator_and_checks_secret_keys(
             "credentials.json",
         }
     assert not any(target_id + "-collector-nebius" in name for _, name in kube.secrets)
+
+
+@pytest.mark.parametrize("failure", ["policy", "apply"])
+def test_regional_upgrade_failure_retains_guard_after_backup(
+    rendered: tuple, regional_inputs: tuple, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    from loom.nebius_platform_render import build_regional_execution
+
+    args, _, _, _ = rendered
+    config, candidate, profile = regional_inputs
+    config["cluster_id"] = "nebius-cluster-test"
+    target = config["regional_execution_targets"][0]
+    target["task_identity_policy"] = {"mode": "private-root-v1", "target_id": target["target_id"],
+                                      "execution_namespace": target["execution_namespace"]}
+    args.expected_cluster_id, args.apply = config["cluster_id"], True
+    files = build_platform(config, candidate, profile, {}, repo_root=deploy.ROOT)
+    write_platform(files, config, candidate, args.render_dir)
+    remote_docs = build_regional_execution(config, candidate, repo_root=deploy.ROOT)[target["target_id"]]
+    kube = FakeKubectl(config, files, database=True)
+
+    def policy(*_args):
+        assert kube.guard_identity is not None
+        assert any(command[:2] == ("create", "job") for command in kube.commands)
+        if failure == "policy":
+            raise deploy.DeploymentError("regional policy failed")
+
+    def apply(*_args):
+        assert kube.guard_identity is not None
+        raise deploy.DeploymentError("regional apply failed")
+
+    remote = SimpleNamespace(run=apply)
+    monkeypatch.setattr(deploy, "preflight_regional_rollout", lambda *_args: {target["target_id"]: (remote, remote_docs)})
+    monkeypatch.setattr(deploy, "install_regional_task_identity_policy", policy)
+    with pytest.raises(deploy.DeploymentError, match=r"regional .* failed"):
+        deploy.deploy(args, kube=kube)
+    assert kube.guard_identity is not None
+    assert not any(command[0] == "apply" for command in kube.commands)
+    result = json.loads(next(args.evidence_dir.glob("*.json")).read_text())
+    assert result["dispatch_paused"] is True
 
 
 @pytest.mark.parametrize("status", ["skipped_busy", "skipped_locked"])

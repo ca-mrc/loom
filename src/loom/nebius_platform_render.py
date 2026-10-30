@@ -420,6 +420,10 @@ def _regional_config(config: dict[str, Any], target: dict[str, Any]) -> dict[str
     # Native image builds remain in the primary region, even when execution
     # targets are configured elsewhere.
     result.pop("task_image_builder", None)
+    # Primary guest siblings and its root policy do not grant a remote target
+    # either capability. Regional pod execution opts into its own exact policy.
+    for key in ("guest_execution_target", "emulated_auth_execution_target", "task_identity_policy"):
+        result.pop(key, None)
     result.update({key: value for key, value in target.items() if key != "service_account_ids"})
     result["storage_endpoint"] = f"https://storage.{target['region']}.nebius.cloud"
     return result
@@ -446,7 +450,7 @@ def _validate_regions(config: dict[str, Any]) -> None:
     for target in regions:
         if (
             not isinstance(target, dict)
-            or set(target) - {"execution_resource_quota"} != _REGIONAL_FIELDS
+            or set(target) - {"execution_resource_quota", "task_identity_policy"} != _REGIONAL_FIELDS
         ):
             raise NebiusPlatformError("regional execution target has missing or unknown fields")
         validate_environment(_regional_config(config, target))
@@ -1254,6 +1258,9 @@ def _regional_documents(
     regional = _regional_config(config, target)
     primary: list[dict[str, Any]] = []
     remote = [_namespace(target["execution_namespace"])]
+    if validate_identity_policy(regional):
+        remote[0]["metadata"]["labels"].update(identity_namespace_labels())
+        remote.extend(identity_policy_documents(target["execution_namespace"], target["target_id"]))
     ns, tid = config["execution_namespace"], target["target_id"]
     identities = target["service_account_ids"]
     for doc in _execution_documents(regional, images, repo_root):
@@ -1466,6 +1473,10 @@ def _build_platform(
         raise NebiusPlatformError(
             "task identity readiness requires a qualified policy; execution namespaces remain restricted"
         )
+    if execution_enabled and profile.get("supports_task_identity", False):
+        for regional in config.get("regional_execution_targets", []):
+            if not validate_identity_policy(_regional_config(config, regional)):
+                raise NebiusPlatformError("regional task identity readiness requires its own exact policy")
     # Keep the legacy environment template for older profiles. New node-share
     # profiles resolve their effective budget only after selecting a target.
     default_requests = ExecutionResourceRequestsV1.model_validate(

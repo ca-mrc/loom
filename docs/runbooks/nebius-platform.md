@@ -280,8 +280,8 @@ for destination enforcement and required installed acceptance.
 
 ### Private task identity policy
 
-The default execution namespace enforces restricted Pod Security. An independent,
-single-target deployment may explicitly configure:
+The default execution namespace enforces restricted Pod Security. An independent
+deployment may explicitly configure its primary target:
 
 ```json
 {
@@ -305,8 +305,9 @@ back the runtime materializer, actuator renderer and policy as one candidate
 under the existing idle guard. Host resources,
 shared PID, device claims, added controller capabilities and credential mounts
 into private sidecars are rejected. Pod updates and ephemeral-container updates
-are subject to the same policy. Managed and regional targets remain unsupported
-for this policy mode.
+are subject to the same policy. A regional pod target must declare its own exact
+policy as described below; the primary policy does not grant it root identity.
+Managed targets remain unsupported for this policy mode.
 
 Deployment first retains restricted PSS while it installs the exact policy and
 binding, checks observed generation and CEL type-checking, and performs positive
@@ -339,8 +340,10 @@ until separately reviewed removal; never remove it while baseline PSS remains.
 The [guest runtime](../architecture/guest-execution.md) requires an explicit
 `guest_execution_target` object containing only a distinct `target_id` (a DNS
 label, at most 54 characters, excluding the reserved `loom-execution`). Keep the existing ordinary `target_id` and
-`task_identity_policy` unchanged. Managed/regional deployments are not supported
-by this configuration. The renderer creates a guest catalog and actuator, extends
+`task_identity_policy` unchanged. Guest siblings remain on the primary physical
+target when regional pod targets are configured; they are never copied to a
+secondary cluster. Managed deployments and regional guest targets remain
+unsupported. The renderer creates a guest catalog and actuator, extends
 the single namespace admission policy, and retains one physical collector, quota
 and native builder. Bootstrap registers the ordinary owner before its guest and
 binds both to the same immutable price snapshot. A newly registered guest stays
@@ -938,6 +941,50 @@ namespace; their Kubernetes clients connect to the named remote API using an
 explicit CA and automatically refreshed native IAM tokens. Database, Service,
 CP, Gateway, canonical storage and web/TLS remain in the primary region.
 
+Current Harbor pod execution, including an independent verifier, uses the same
+published runtime profile and immutable prepared task images in each region.
+A web-capable secondary needs a fresh target ID bound to
+`linux-amd64-cpu-web-pod-v1`; retain an older non-web target as disabled history.
+For example, use `nebius-eu-west1-web-pod` with its separately owned namespace.
+Inside that target's `regional_execution_targets` entry, opt into private root
+identity explicitly:
+
+```json
+"task_identity_policy": {
+  "mode": "private-root-v1",
+  "target_id": "nebius-eu-west1-web-pod",
+  "execution_namespace": "<that target's exact execution_namespace>"
+}
+```
+
+Keep the primary policy bound to the primary target and namespace. A profile
+with `supports_task_identity: true` requires an exact policy on every configured
+secondary. The remote render contains that namespace's baseline PSS labels and
+its own fail-closed VAP and binding; it excludes primary guest siblings. Shared
+task-web egress, harness setup and artifact-input support retain the published
+profile's capability declarations. Native image builds remain in the primary
+region; a secondary runs the prepared agent and verifier images, not another
+builder. Read back registry-pull access and both execution phases before routing
+the bundle there.
+
+Do not apply a private-root regional file directly to relax namespace PSS.
+Under the existing idle rollout guard and exact remote-cluster binding, the
+operator first calls `install_regional_task_identity_policy` from
+`scripts/ops/deploy_nebius_platform.py` with the reviewed regional output directory
+and target ID. It checks the exact policy artifact and reuses
+`install_task_identity_policy`: restricted PSS during bootstrap, current CEL
+type-check status, and positive/negative server-side admission probes. Only after
+those checks may the operator apply the reviewed regional file. Failed probes
+leave restricted PSS and the rollout pause in place. This does not activate the
+target or qualify a runtime merely from rendered configuration.
+
+Routing already selects healthy primary capacity before trying an eligible
+secondary; it does not divide a bundle evenly between regions. An isolated
+regional canary uses the existing target health/state controls during an idle
+operator window to leave only the intended target eligible, then restores the
+reviewed primary state. Do not add a user-controlled target selector or rewrite
+immutable execution plans. The old target remains disabled.
+
 The optional Terraform `regional_execution_targets` map in the existing platform
 root composes `modules/regional-execution`. Each entry creates exactly one MK8s
 control plane with audit logging and retained system/execution node groups.
@@ -1125,15 +1172,22 @@ primary and remote files to separate sibling directories:
 
 ```sh
 uv run --no-sync python scripts/ops/render_nebius_platform.py --environment-config /protected/regional.environment.json --candidate /protected/candidate.json --runtime-profile /protected/runtime-profile.json --trusted-keyring /protected/trusted-keyring.json --output /protected/primary-render --regional-output /protected/regional-render
-kubectl --kubeconfig /protected/eu-west1.kubeconfig apply -f /protected/regional-render/nebius-eu-west1-integration.yaml
+uv run --no-sync python scripts/ops/deploy_nebius_platform.py --render-dir /protected/primary-render --regional-render-dir /protected/regional-render --kubeconfig /protected/operator.kubeconfig --expected-cluster-id PRIMARY_CLUSTER_ID --evidence-dir /protected/deployment-evidence
 ```
 
-The second command is a separately authorized remote cluster mutation. Confirm
-its kubeconfig server, CA and cluster identity against the reviewed regional
-outputs first. Never pass the remote directory to `deploy_nebius_platform.py` or
-apply it through the primary kubeconfig. The primary renderer emits no remote
-namespace or regional ClusterRole objects in its deployment files. Apply the
-primary directory through the existing backup-first deploy command. It now waits
+The second command plans the existing backup-first deployment; adding `--apply`
+performs the separately authorized mutations. The operator kubeconfig must contain
+exactly one context matching each configured regional API, with its reviewed CA,
+native cluster identity and namespace/admission-policy permissions. Missing or
+ambiguous contexts and denied permissions fail before mutation. Runtime actuator,
+collector and Gateway identities are not reused as operator authority. The
+primary renderer emits no remote namespace or regional ClusterRole objects in its
+deployment files. After the same idle guard and required backup, deployment
+qualifies each remote identity policy, applies its frozen regional file through
+the matched context, and then rolls out the primary files. A regional failure
+retains the existing rollout pause. The ordinary idle rollout renders and passes
+the separate regional directory automatically, so later candidates update the
+configured regions through this same path. The deployment waits
 for every configured primary-hosted actuator Deployment, including secondary
 targets. Actuator readiness requires successful command and full reconciliation
 loops; full reconciliation includes listing Jobs in the remote namespace.

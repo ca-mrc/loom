@@ -24,9 +24,8 @@ def validate_identity_policy(config: dict[str, Any]) -> bool:
         "execution_namespace": config["execution_namespace"],
     }:
         raise ValueError("task identity policy must bind the exact execution target and namespace")
-    if (config.get("regional_execution_targets")
-            or config.get("schema_version") == "loom.nebius-managed-environment.v1"):
-        raise ValueError("task identity policy is qualified only for a single independent target")
+    if config.get("schema_version") == "loom.nebius-managed-environment.v1":
+        raise ValueError("task identity policy requires an independent target")
     return True
 
 

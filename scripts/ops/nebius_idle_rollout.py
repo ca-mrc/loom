@@ -192,9 +192,12 @@ def check_rollout(args: argparse.Namespace, *, kube: Kubectl | None = None,
     kube = kube or Kubectl(args.kubeconfig)
     data = kube.get("configmap", "loom-platform-config", args.namespace)["data"]
     config = json.loads(data["environment.json"])
-    if (config["namespace"] != args.namespace or config["cluster_id"] != args.expected_cluster_id
-            or config.get("regional_execution_targets")):
+    if config["namespace"] != args.namespace or config["cluster_id"] != args.expected_cluster_id:
         raise DeploymentError("rollout check platform binding differs")
+    if config.get("regional_execution_targets"):
+        from loom.nebius_platform_render import validate_environment
+
+        validate_environment(config)
     current = json.loads(data["profile.json"])["candidate_sha"]
     candidate = args.candidate
     if not re.fullmatch(r"[0-9a-f]{40}", candidate):
@@ -332,12 +335,15 @@ def render_candidate(args: argparse.Namespace, config: dict, keyring: str) -> No
         environment.write_text(json.dumps(config))
         trusted_keys = source / "keyring.json"
         trusted_keys.write_text(keyring)
-        result = subprocess.run([
+        command = [
             sys.executable, str(source / "scripts/ops/render_nebius_platform.py"),
             "--environment-config", str(environment), "--candidate", str(args.publication_dir.resolve() / "candidate.json"),
             "--runtime-profile", str(args.publication_dir.resolve() / "runtime-profile.json"),
             "--trusted-keyring", str(trusted_keys), "--output", str(args.render_dir.resolve()),
-        ], cwd=source, capture_output=True, text=True, check=False)
+        ]
+        if config.get("regional_execution_targets"):
+            command.extend(["--regional-output", str(args.regional_render_dir.resolve())])
+        result = subprocess.run(command, cwd=source, capture_output=True, text=True, check=False)
         if result.returncode:
             raise DeploymentError("selected candidate rendering failed")
 
@@ -418,8 +424,8 @@ def rollout(args: argparse.Namespace, *, participant_rollout: RetainedParticipan
     kube = kube or Kubectl(args.kubeconfig)
     data = kube.get("configmap", "loom-platform-config", args.namespace)["data"]
     config = json.loads(data["environment.json"])
-    if config["namespace"] != args.namespace or config.get("regional_execution_targets"):
-        raise DeploymentError("idle rollout supports the existing single-primary platform only")
+    if config["namespace"] != args.namespace:
+        raise DeploymentError("idle rollout platform namespace differs")
     candidate = json.loads((args.publication_dir / "candidate.json").read_text())
     sha = candidate["candidate_sha"]
     if sha != args.candidate:
@@ -448,6 +454,8 @@ def rollout(args: argparse.Namespace, *, participant_rollout: RetainedParticipan
     elif record is not None and 'shared_pool_release' in record:
         raise DeploymentError('shared recovery requires its retained operation and protected adapter')
     args.render_dir = args.evidence_dir / "rendered"
+    if config.get("regional_execution_targets"):
+        args.regional_render_dir = args.evidence_dir / "rendered-regional"
     if participant_rollout is None:
         render_candidate(args, config, data["keyring.json"])
     else:

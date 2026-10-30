@@ -35,6 +35,6 @@ def _target_id(config: dict[str, Any], field: str) -> str | None:
         raise ValueError("guest execution target must be distinct from its physical owner")
     if target_id == "loom-execution":
         raise ValueError("guest target_id collides with the ordinary actuator Deployment")
-    if config.get("regional_execution_targets") or config.get("schema_version") != "loom.nebius-platform.v1":
+    if config.get("schema_version") != "loom.nebius-platform.v1":
         raise ValueError("guest execution is qualified only for one independent physical target")
     return target_id
