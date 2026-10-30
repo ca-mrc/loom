@@ -195,9 +195,10 @@ def _validate_remote(value: object) -> dict[str, Any]:
     if not isinstance(value, dict) or value.get("read_only") is not True:
         raise DeploymentError("lease census did not prove read-only execution")
     # 0180 adds preview storage, 0181 extends image preparation identity and
-    # 0182 adds llm_calls projection columns; none changes the fixed
+    # 0182 adds llm_calls projections and 0183 adds provider request pools;
+    # none changes the fixed
     # lease/command/trial read columns.
-    if value.get("schema_head") not in {"0175", "0176", "0177", "0178", "0179", "0180", "0181", "0182"}:
+    if value.get("schema_head") not in {"0175", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183"}:
         raise DeploymentError("unsupported installed schema")
     count = value.get("active_count")
     leases = value.get("leases")
