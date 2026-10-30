@@ -82,14 +82,14 @@ def install(root: Path, source: bytes, scope: dict[str, Any], revision: str, *, 
     # Bind this extension to the existing wrapper's retained connection, rather
     # than granting another kubeconfig or arbitrary executable via the scope file.
     tree = ast.parse(original)
-    expected = [n.value.value for n in tree.body if isinstance(n, ast.Assign)
+    expected = [n.value.value for n in ast.walk(tree) if isinstance(n, ast.Assign)
                 and any(isinstance(t, ast.Name) and t.id == "expected" for t in n.targets)
                 and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str)]
     executables = [n.args[0].value for n in ast.walk(tree) if isinstance(n, ast.Call)
                    and isinstance(n.func, ast.Attribute) and n.func.attr == "execv"
                    and n.args and isinstance(n.args[0], ast.Constant)
                    and isinstance(n.args[0].value, str) and n.args[0].value.endswith("/kubectl")]
-    if not expected or scope["kubeconfig"] != expected[-1] or set(executables) != {scope["kubectl"]}:
+    if set(expected) != {scope["kubeconfig"]} or set(executables) != {scope["kubectl"]}:
         raise ValueError("scope must preserve the retained kubectl and kubeconfig")
     directory = root / "regional-compatibility" / revision
     program = directory / "gateway.py"

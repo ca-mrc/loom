@@ -170,7 +170,7 @@ def test_policy_probe_is_server_dry_run_only_and_context_drift_fails(scope, nati
 def test_plan_atomic_install_legacy_grants_idempotency_and_restore(scope, tmp_path):
     tmp_path.chmod(0o700)
     wrapper = tmp_path / "github-kubectl.py"
-    original = (f'# retained completion, retirement, shared-input and primary grants\nexpected = {scope["kubeconfig"]!r}\nif False:\n    import os\n    os.execv({scope["kubectl"]!r}, [])\nprint("old grant")\n').encode()
+    original = (f'# retained completion, retirement, shared-input and primary grants\ntry:\n    expected = {scope["kubeconfig"]!r}\nexcept Exception:\n    raise\nif False:\n    import os\n    os.execv({scope["kubectl"]!r}, [])\nprint("old grant")\n').encode()
     wrapper.write_bytes(original)
     wrapper.chmod(0o600)
     source = b'def entry(path):\n    print("narrow extension")\n    return 0\n'
