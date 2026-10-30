@@ -39,6 +39,18 @@ def test_completed_release_is_the_next_receipt_selected_predecessor(
     from scripts.ops.nebius_pool_participant_prepare import capture_participant_release
     from scripts.ops.nebius_pool_participant_resource import _resource_path
 
+    initialize = getattr(completion, 'initialize_participant_head', None)
+    assert callable(initialize), 'normal releases need a retained compare-and-swap head'
+    initial = operation_inputs['predecessor']
+    retained = connection[0].retained
+    head_options = dict(initial=initial, state_root=retained.state_dir.parent, anchor_dir=retained.anchor_dir)
+    assert initialize(**head_options) == initial
+    assert initialize(**head_options) == initial
+    pointer = retained.state_dir.parent / 'latest.json'
+    initial_bytes = pointer.read_bytes()
+    with pytest.raises(ValueError, match='participant head'):
+        completion.promote_participant_head(**head_options, expected=initial, reference=retained.reference)
+    assert pointer.read_bytes() == initial_bytes
     _exercise_release(
         operation_inputs, connection, tmp_path, monkeypatch, recover=False, file_writes=True)
     loader = getattr(completion, 'load_completed_participant_rollout', None)
@@ -158,49 +170,9 @@ def test_completed_release_is_the_next_receipt_selected_predecessor(
     assert following.release.refresh.after.policy_revision == retained.release.refresh.after.policy_revision + 1
     assert loader(reference=retained.reference, state_root=retained.state_dir.parent,
         anchor_dir=retained.anchor_dir) == successor
-    # Loading recovery's predecessor is independent of the mutable current head.
-    head_options = dict(initial=operation_inputs['predecessor'], state_root=retained.state_dir.parent,
-        anchor_dir=retained.anchor_dir)
-    completion.initialize_participant_head(**head_options)
-    completion.promote_participant_head(**head_options, expected=operation_inputs['predecessor'], reference=retained.reference)
-    assert original_loader(initial=operation_inputs['predecessor'], retained=retained) == operation_inputs['predecessor']
-    assert original_loader(initial=operation_inputs['predecessor'], retained=following) == successor
-    before = {path: path.read_bytes() for root in (retained.state_dir.parent, retained.anchor_dir)
-        for path in root.rglob('*') if path.is_file()}
-    original_loader(initial=operation_inputs['predecessor'], retained=following)
-    assert {path: path.read_bytes() for root in (retained.state_dir.parent, retained.anchor_dir)
-        for path in root.rglob('*') if path.is_file()} == before
-    marker = retained.anchor_dir / (str(retained.reference.operation_id) + '-participant-rollout.json')
-    marker.unlink()
-    with pytest.raises(ValueError, match='predecessor'):
-        original_loader(initial=operation_inputs['predecessor'], retained=following)
-    assert not marker.exists(), 'recovery loading must not reconstruct a lost predecessor anchor'
-
-
-@pytest.mark.timeout(180)
-def test_latest_participant_head_advances_only_from_exact_completed_predecessor(
-        operation_inputs, connection, tmp_path, monkeypatch):
-    from scripts.ops import nebius_certificates as private_state
-    from scripts.ops import nebius_pool_participant_completion as completion
-
-    initialize = getattr(completion, 'initialize_participant_head', None)
-    assert callable(initialize), 'normal releases need a retained compare-and-swap head'
-    initial = operation_inputs['predecessor']
-    retained = connection[0].retained
-    options = dict(initial=initial, state_root=retained.state_dir.parent, anchor_dir=retained.anchor_dir)
-    assert initialize(**options) == initial
-    assert initialize(**options) == initial
-    pointer = retained.state_dir.parent / 'latest.json'
-    initial_bytes = pointer.read_bytes()
-    with pytest.raises(ValueError, match='participant head'):
-        completion.promote_participant_head(**options, expected=initial, reference=retained.reference)
-    assert pointer.read_bytes() == initial_bytes
-    _exercise_release(
-        operation_inputs, connection, tmp_path, monkeypatch, recover=False, file_writes=True)
-
     wrong = replace(initial, state_dir=tmp_path)
     with pytest.raises(ValueError, match='participant head'):
-        completion.promote_participant_head(**options, expected=wrong, reference=retained.reference)
+        completion.promote_participant_head(**head_options, expected=wrong, reference=retained.reference)
     assert pointer.read_bytes() == initial_bytes
     # A committed pointer update whose acknowledgement is lost must be safe to
     # retry; the completed release's frozen history must not contain that pointer.
@@ -214,17 +186,17 @@ def test_latest_participant_head_advances_only_from_exact_completed_predecessor(
     with monkeypatch.context() as patch:
         patch.setattr(private_state, '_atomic_json', lose_ack)
         with pytest.raises(ValueError, match='participant head'):
-            completion.promote_participant_head(**options, expected=initial, reference=retained.reference)
-    successor = completion.promote_participant_head(**options, expected=initial, reference=retained.reference)
+            completion.promote_participant_head(**head_options, expected=initial, reference=retained.reference)
+    assert completion.promote_participant_head(**head_options, expected=initial, reference=retained.reference) == successor
     promoted_bytes = pointer.read_bytes()
     assert promoted_bytes != initial_bytes
-    assert completion.load_participant_head(**options) == successor
+    assert completion.load_participant_head(**head_options) == successor
     assert pointer not in successor.history
-    assert completion.promote_participant_head(**options, expected=initial, reference=retained.reference) == successor
+    assert completion.promote_participant_head(**head_options, expected=initial, reference=retained.reference) == successor
     assert pointer.read_bytes() == promoted_bytes
-    assert initialize(**options) == successor, 'initialization must never rewind a completed head'
+    assert initialize(**head_options) == successor, 'initialization must never rewind a completed head'
     with pytest.raises(ValueError, match='participant head'):
-        completion.promote_participant_head(**options, expected=successor, reference=retained.reference)
+        completion.promote_participant_head(**head_options, expected=successor, reference=retained.reference)
     assert pointer.read_bytes() == promoted_bytes
     # Even a fully completed competing release from the same old predecessor
     # cannot overwrite the already advanced head. Exercise the real receipt
@@ -240,22 +212,35 @@ def test_latest_participant_head_advances_only_from_exact_completed_predecessor(
         _exercise_release(
             competing_inputs, competing, competing_path, patch, recover=False, file_writes=True)
     with pytest.raises(ValueError, match='participant head'):
-        completion.promote_participant_head(**options, expected=initial, reference=competing[0].retained.reference)
+        completion.promote_participant_head(**head_options, expected=initial, reference=competing[0].retained.reference)
     assert pointer.read_bytes() == promoted_bytes
     pointer.unlink()
     with pytest.raises(ValueError, match='participant head'):
-        initialize(**options)
+        initialize(**head_options)
     assert not pointer.exists(), 'lost latest pointer must not reset to the initial handoff'
+    # Re-reading old immutable history remains possible after pointer movement, even without latest.json.
+    assert completion.load_completed_participant_rollout(reference=retained.reference,
+        state_root=retained.state_dir.parent, anchor_dir=retained.anchor_dir) == successor
     private_state._write_private(pointer, promoted_bytes)
     value = json.loads(promoted_bytes)
     value['selected']['operation_id'] = str(uuid4())
     private_state._atomic_json(pointer, value)
     with pytest.raises(ValueError, match='participant head'):
-        completion.load_participant_head(**options)
+        completion.load_participant_head(**head_options)
     private_state._atomic_json(pointer, json.loads(promoted_bytes))
-    # Re-reading old immutable history remains possible after pointer movement.
-    assert completion.load_completed_participant_rollout(reference=retained.reference,
-        state_root=retained.state_dir.parent, anchor_dir=retained.anchor_dir) == successor
+    # Loading recovery's predecessor is independent of the mutable current head.
+    assert original_loader(initial=operation_inputs['predecessor'], retained=retained) == operation_inputs['predecessor']
+    assert original_loader(initial=operation_inputs['predecessor'], retained=following) == successor
+    before = {path: path.read_bytes() for root in (retained.state_dir.parent, retained.anchor_dir)
+        for path in root.rglob('*') if path.is_file()}
+    original_loader(initial=operation_inputs['predecessor'], retained=following)
+    assert {path: path.read_bytes() for root in (retained.state_dir.parent, retained.anchor_dir)
+        for path in root.rglob('*') if path.is_file()} == before
+    marker = retained.anchor_dir / (str(retained.reference.operation_id) + '-participant-rollout.json')
+    marker.unlink()
+    with pytest.raises(ValueError, match='predecessor'):
+        original_loader(initial=operation_inputs['predecessor'], retained=following)
+    assert not marker.exists(), 'recovery loading must not reconstruct a lost predecessor anchor'
 
 
 @pytest.mark.timeout(180)

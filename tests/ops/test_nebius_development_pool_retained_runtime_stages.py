@@ -295,10 +295,9 @@ def test_runtime_closed_database_probe_is_bound_readonly_and_independent_of_mana
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
-@pytest.mark.parametrize('probe_kind', ['settings', 'database'])
 @pytest.mark.parametrize('connected', [None, True], indirect=True, ids=['dev-only', 'common-catalog'])
 def test_runtime_process_settings_challenge_uses_actual_owned_pod_and_rejects_drift(
-        completed_pool, publisher_cloud, handoff, monkeypatch, probe_kind, system_kubectl):
+        completed_pool, publisher_cloud, handoff, monkeypatch, system_kubectl):
     import hmac
     from types import SimpleNamespace
 
@@ -312,90 +311,90 @@ def test_runtime_process_settings_challenge_uses_actual_owned_pod_and_rejects_dr
     runtime, request, parent, state, _ = parent_install_fixture(completed_pool, publisher_cloud)
     parent.database_complete = parent.catalog_complete = True
     runtime.install_development_runtime(request=request, api=parent, execute=True)
-    method = 'qualify_runtime_' + probe_kind
-    assert hasattr(module.HTTPSDevelopmentRuntimeProbes, method), 'concrete process probe is missing'
-    calls, documents, original_handle = runtime_http_inventory(request, parent, completed_pool[3].server, handoff[2])
-    populate_runtime_pods(documents)
-    if probe_kind == 'database':
-        populate_database_backends(documents)
-
-    def handle(message):
-        if message.url.path.endswith('/pods') and message.url.params.get('labelSelector') == 'app=loom-postgres':
-            calls.append(message)
-            listing = copy.deepcopy(documents[message.url.path])
-            listing['items'] = [row for row in listing['items'] if row['metadata']['labels'].get('app') == 'loom-postgres']
-            return httpx.Response(200, json=listing)
-        return original_handle(message)
     spec = request.database.manager.retained.request.registration.spec
     participant, = [row for row in spec.participants if row.environment_class == 'development']
     machine, = (row for row in spec.machines if row.participant_id == participant.participant_id and row.workload_scope == 'environment')
     roles = {(request.database.manager.retained.request.retained.binding.namespace, 'loom-service'): 'manager',
         ('loom-dev', 'loom-service'): 'service', ('loom-dev', 'loom-control-plane'): 'controller',
         (participant.execution_namespace.name, 'loom-execution-actuator'): 'actuator'}
-    commands, mode = [], {'damage': None}
+    for probe_kind in ('settings', 'database'):
+        method = 'qualify_runtime_' + probe_kind
+        assert hasattr(module.HTTPSDevelopmentRuntimeProbes, method), 'concrete process probe is missing'
+        calls, documents, original_handle = runtime_http_inventory(request, parent, completed_pool[3].server, handoff[2])
+        populate_runtime_pods(documents)
+        if probe_kind == 'database':
+            populate_database_backends(documents)
 
-    def execute(argv, **kwargs):
-        commands.append(argv)
-        command = argv[argv.index('exec'):]
-        assert command[7:10] == ['python', '-c', BOUND_POOL_SETTINGS_COMMAND if probe_kind == 'settings' else _BOUND_DATABASE_COMMAND]
-        component, nonce, response = command[10:]
-        namespace = command[2]
-        pod_name = command[3].removeprefix('pod/')
-        pod, = (row for row in documents['/api/v1/namespaces/' + namespace + '/pods']['items'] if row['metadata']['name'] == pod_name)
-        deployment_name = pod_name.removesuffix('-a12b34-test')
-        role = roles[(namespace, deployment_name)]
-        assert ('service' if role == 'manager' and probe_kind == 'database' else role) == component
-        actual = documents['/apis/apps/v1/namespaces/' + namespace + '/deployments/' + deployment_name]
-        if probe_kind == 'settings':
-            wanted = expected_pool_runtime_settings(component, actual,
-                token_sha256=machine.token_sha256 if component in {'controller', 'actuator'} else None,
-                catalog_sha256=hashlib.sha256(spec.profiles.model_dump_json().encode()).hexdigest() if component == 'manager' else None)
-            payload = json.dumps(wanted, sort_keys=True, separators=(',', ':')).encode()
-        else:
-            from pydantic import PostgresDsn
+        def handle(message, calls=calls, documents=documents, original_handle=original_handle):
+            if message.url.path.endswith('/pods') and message.url.params.get('labelSelector') == 'app=loom-postgres':
+                calls.append(message)
+                listing = copy.deepcopy(documents[message.url.path])
+                listing['items'] = [row for row in listing['items'] if row['metadata']['labels'].get('app') == 'loom-postgres']
+                return httpx.Response(200, json=listing)
+            return original_handle(message)
+        commands, mode = [], {'damage': None}
 
-            variable = {'controller': 'LOOM_CP_DB_URL', 'service': 'LOOM_SVC_DB_URL', 'actuator': 'LOOM_EXECUTION_ACTUATOR_DB_URL'}[component]
-            entry, = (row for row in actual['spec']['template']['spec']['containers'][0]['env'] if row['name'] == variable)
-            reference = entry['valueFrom']['secretKeyRef']
-            secret = documents['/api/v1/namespaces/' + namespace + '/secrets/' + reference['name']]
-            url = base64.b64decode(secret['data'][reference['key']]).decode()
-            payload = (url if component == 'actuator' else str(PostgresDsn(url))).encode()
-            assert url not in str(argv)
-        assert hmac.new(bytes.fromhex(nonce), payload, 'sha256').hexdigest() == response
-        if mode['damage'] == 'pod-replaced':
-            pod['metadata']['uid'] = str(uuid4())
-        elif mode['damage'] == 'process-restarted':
-            pod['status']['containerStatuses'][0]['restartCount'] += 1
-        elif mode['damage'] == 'controller-lag':
-            actual['status']['observedGeneration'] = 0
-        return SimpleNamespace(returncode=0, stdout=b'{"status":"wrong"}' if mode['damage'] == 'report' else b'{"status":"qualified"}', stderr=b'')
+        def execute(argv, *, commands=commands, probe_kind=probe_kind, documents=documents, mode=mode, **kwargs):
+            commands.append(argv)
+            command = argv[argv.index('exec'):]
+            assert command[7:10] == ['python', '-c', BOUND_POOL_SETTINGS_COMMAND if probe_kind == 'settings' else _BOUND_DATABASE_COMMAND]
+            component, nonce, response = command[10:]
+            namespace = command[2]
+            pod_name = command[3].removeprefix('pod/')
+            pod, = (row for row in documents['/api/v1/namespaces/' + namespace + '/pods']['items'] if row['metadata']['name'] == pod_name)
+            deployment_name = pod_name.removesuffix('-a12b34-test')
+            role = roles[(namespace, deployment_name)]
+            assert ('service' if role == 'manager' and probe_kind == 'database' else role) == component
+            actual = documents['/apis/apps/v1/namespaces/' + namespace + '/deployments/' + deployment_name]
+            if probe_kind == 'settings':
+                wanted = expected_pool_runtime_settings(component, actual,
+                    token_sha256=machine.token_sha256 if component in {'controller', 'actuator'} else None,
+                    catalog_sha256=hashlib.sha256(spec.profiles.model_dump_json().encode()).hexdigest() if component == 'manager' else None)
+                payload = json.dumps(wanted, sort_keys=True, separators=(',', ':')).encode()
+            else:
+                from pydantic import PostgresDsn
 
-    monkeypatch.setattr(module.subprocess, 'run', execute)
-    with module.HTTPSDevelopmentRuntimeProbes(request=request,
-            api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
-            ssl_context=ssl.create_default_context(cadata=request.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt']),
-            token='operator-test') as probes:
-        for connection in (probes, probes.manager, probes.foundation):
-            connection.client.close()
-            connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server, transport=httpx.MockTransport(handle))
-        for namespace, name in roles:
-            getattr(probes, method)(key='Deployment:' + namespace + ':' + name, state_dir=state)
-        assert len(commands) == 4
-        assert len({row[-2] for row in commands}) == 4
-        manager_key = 'Deployment:' + request.database.manager.retained.request.retained.binding.namespace + ':loom-service'
-        for damage in ('pod-replaced', 'process-restarted', 'controller-lag', 'report'):
-            original = copy.deepcopy(documents)
-            mode['damage'] = damage
-            with pytest.raises(ValueError, match='development runtime process ' + probe_kind + ' unqualified'):
-                getattr(probes, method)(key=manager_key, state_dir=state)
-            documents.clear()
-            documents.update(original)
-        count = len(commands)
-        with pytest.raises(ValueError):
-            getattr(probes, method)(key='Deployment:loom-staging:loom-service', state_dir=state)
-        assert len(commands) == count
-    assert calls and all(row.method == 'GET' for row in calls)
+                variable = {'controller': 'LOOM_CP_DB_URL', 'service': 'LOOM_SVC_DB_URL', 'actuator': 'LOOM_EXECUTION_ACTUATOR_DB_URL'}[component]
+                entry, = (row for row in actual['spec']['template']['spec']['containers'][0]['env'] if row['name'] == variable)
+                reference = entry['valueFrom']['secretKeyRef']
+                secret = documents['/api/v1/namespaces/' + namespace + '/secrets/' + reference['name']]
+                url = base64.b64decode(secret['data'][reference['key']]).decode()
+                payload = (url if component == 'actuator' else str(PostgresDsn(url))).encode()
+                assert url not in str(argv)
+            assert hmac.new(bytes.fromhex(nonce), payload, 'sha256').hexdigest() == response
+            if mode['damage'] == 'pod-replaced':
+                pod['metadata']['uid'] = str(uuid4())
+            elif mode['damage'] == 'process-restarted':
+                pod['status']['containerStatuses'][0]['restartCount'] += 1
+            elif mode['damage'] == 'controller-lag':
+                actual['status']['observedGeneration'] = 0
+            return SimpleNamespace(returncode=0, stdout=b'{"status":"wrong"}' if mode['damage'] == 'report' else b'{"status":"qualified"}', stderr=b'')
 
+        monkeypatch.setattr(module.subprocess, 'run', execute)
+        with module.HTTPSDevelopmentRuntimeProbes(request=request,
+                api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+                ssl_context=ssl.create_default_context(cadata=request.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt']),
+                token='operator-test') as probes:
+            for connection in (probes, probes.manager, probes.foundation):
+                connection.client.close()
+                connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server, transport=httpx.MockTransport(handle))
+            for namespace, name in roles:
+                getattr(probes, method)(key='Deployment:' + namespace + ':' + name, state_dir=state)
+            assert len(commands) == 4
+            assert len({row[-2] for row in commands}) == 4
+            manager_key = 'Deployment:' + request.database.manager.retained.request.retained.binding.namespace + ':loom-service'
+            for damage in ('pod-replaced', 'process-restarted', 'controller-lag', 'report'):
+                original = copy.deepcopy(documents)
+                mode['damage'] = damage
+                with pytest.raises(ValueError, match='development runtime process ' + probe_kind + ' unqualified'):
+                    getattr(probes, method)(key=manager_key, state_dir=state)
+                documents.clear()
+                documents.update(original)
+            count = len(commands)
+            with pytest.raises(ValueError):
+                getattr(probes, method)(key='Deployment:loom-staging:loom-service', state_dir=state)
+            assert len(commands) == count
+        assert calls and all(row.method == 'GET' for row in calls)
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
@@ -726,7 +725,7 @@ def test_runtime_parent_connects_all_https_workload_phases_and_read_only_resume(
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
-def test_runtime_database_delivery_keeps_old_data_identity_and_separates_credentials(completed_pool):
+def test_runtime_database_delivery_keeps_old_data_identity_and_separates_credentials(completed_pool, tmp_path):
     import asyncio
 
     from sqlalchemy.engine import make_url
@@ -782,6 +781,20 @@ def test_runtime_database_delivery_keeps_old_data_identity_and_separates_credent
     assert len(completed_pool[3].server.calls) == calls
     assert all(path.read_bytes() == raw for path, raw in foundation.files.items())
 
+    request = prepared
+    api, state = runtime_database_api(request), tmp_path / 'runtime-database'
+    first = runtime_database_stage(request, api, state)
+    before = copy.deepcopy(api.resources)
+    assert runtime_database_stage(request, api, state) == first
+    assert api.resources == before
+    name = 'loom-dev-runtime-aecc7407b7b84c388d1fbca5dca9840f'
+    assert api.creates == ['Secret:loom-dev:' + name, 'Secret:loom-nebius-dev-execution:' + name,
+        'ConfigMap:loom-dev:' + name, 'Job:loom-dev:' + name]
+    assert first['status'] == 'management_phase_staged'
+    assert first['phase'] == 'development-runtime-database'
+    assert len(first['resource_uids']) == 4
+    assert 'runtime-actuator-' not in json.dumps(first)
+
 
 
 def test_runtime_database_delivery_refuses_invalid_material(completed_pool):
@@ -803,24 +816,6 @@ def test_runtime_database_delivery_rejects_manager_foundation_mismatch(completed
     with pytest.raises(ValueError, match='development runtime database delivery unqualified'):
         database_runtime(completed_pool)
     assert len(completed_pool[3].server.calls) == calls
-
-
-
-@pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
-def test_runtime_database_stage_retains_four_exact_creates_and_replays(completed_pool, tmp_path):
-    request = database_runtime(completed_pool)
-    api, state = runtime_database_api(request), tmp_path / 'runtime-database'
-    first = runtime_database_stage(request, api, state)
-    before = copy.deepcopy(api.resources)
-    assert runtime_database_stage(request, api, state) == first
-    assert api.resources == before
-    name = 'loom-dev-runtime-aecc7407b7b84c388d1fbca5dca9840f'
-    assert api.creates == ['Secret:loom-dev:' + name, 'Secret:loom-nebius-dev-execution:' + name,
-        'ConfigMap:loom-dev:' + name, 'Job:loom-dev:' + name]
-    assert first['status'] == 'management_phase_staged'
-    assert first['phase'] == 'development-runtime-database'
-    assert len(first['resource_uids']) == 4
-    assert 'runtime-actuator-' not in json.dumps(first)
 
 
 
@@ -899,17 +894,19 @@ def test_runtime_database_https_waits_for_bound_sql_receipt_and_replays(runtime_
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
-@pytest.mark.parametrize('damage', ['database', 'execution-namespace'])
-def test_runtime_database_https_rejects_live_identity_drift_before_writes(runtime_database_live, tmp_path, damage):
+def test_runtime_database_https_rejects_live_identity_drift_before_writes(runtime_database_live, tmp_path):
     live = runtime_database_live
-    if damage == 'database':
-        live.foundation.bootstrap.secrets['loom-platform-db']['metadata']['uid'] = str(uuid4())
-    else:
-        live.pool.namespaces['loom-nebius-dev-execution']['metadata']['uid'] = str(uuid4())
-    with runtime_database_https(live) as api, pytest.raises(ValueError, match='development runtime database stage unqualified'):
-        runtime_database_stage(live.request, api, tmp_path / 'runtime-database')
-    assert not live.store.creates
-    assert all(message.method == 'GET' for message in live.calls)
+    for metadata in (live.foundation.bootstrap.secrets['loom-platform-db']['metadata'],
+            live.pool.namespaces['loom-nebius-dev-execution']['metadata']):
+        original_uid = metadata['uid']
+        metadata['uid'] = str(uuid4())
+        try:
+            with runtime_database_https(live) as api, pytest.raises(ValueError, match='development runtime database stage unqualified'):
+                runtime_database_stage(live.request, api, tmp_path / 'runtime-database')
+            assert not live.store.creates
+            assert all(message.method == 'GET' for message in live.calls)
+        finally:
+            metadata['uid'] = original_uid
 
 
 
@@ -1071,7 +1068,7 @@ def test_fresh_actuator_rejects_foreign_task_service_account(completed_pool):
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
-def test_catalog_job_binds_original_target_and_new_code_without_database_authority(completed_pool):
+def test_catalog_job_binds_original_target_and_new_code_without_database_authority(completed_pool, tmp_path):
     name = 'scripts.ops.nebius_development_catalog_runtime'
     if importlib.util.find_spec(name) is None:
         pytest.fail('fixed development catalog Job preparation is missing')
@@ -1113,11 +1110,7 @@ def test_catalog_job_binds_original_target_and_new_code_without_database_authori
     assert all(row['readOnly'] is True for row in container['volumeMounts'])
     assert len(completed_pool[3].server.calls) == before_calls
 
-
-
-@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
-def test_catalog_stage_creates_only_fixed_config_and_job_and_replays(completed_pool, tmp_path):
-    request = database_runtime(completed_pool)
+    request = database
     api, state = runtime_database_api(request), tmp_path / 'catalog'
     first = catalog_runtime_stage(request, api, state)
     before = copy.deepcopy(api.resources)
@@ -1243,39 +1236,48 @@ def test_catalog_https_late_prerequisite_loss_cannot_report_completion(runtime_d
 
 
 
-@pytest.mark.parametrize('damage', ['anchor', 'parent', 'phase', 'incomplete', 'inputs', 'receipt'])
-def test_missing_or_changed_completion_cannot_become_successor_authority(completed_pool, damage):
+def test_missing_or_changed_completion_cannot_become_successor_authority(completed_pool):
     loader = module()
     _, _, _, connected = completed_pool
     selector = reference(loader, completed_pool)
     original = Path(connected.server.request.retained.operation['state_dir']).parent
     state = original / 'pool-installation'
     parent_path = state / 'installation.json'
-    parent = json.loads(parent_path.read_bytes())
-    if damage == 'anchor':
-        (Path(connected.server.request.retained.operation['anchor_dir']) / 'pool-installation.json').unlink()
-    elif damage == 'parent':
-        parent_path.unlink()
-    elif damage == 'phase':
-        (state / 'material/stage.json').unlink()
-    elif damage == 'incomplete':
-        parent['phases']['workload'] = {'status': 'started', 'sha256': None}
-        parent_path.write_text(json.dumps(parent))
-    elif damage == 'inputs':
-        inputs_path = Path(completed_pool[0]['inputs_path'])
-        inputs_path.write_bytes(inputs_path.read_bytes() + b' ')
-    else:
-        registration = original / 'pool-registration/registration.json'
-        value = json.loads(registration.read_bytes())
-        value['proof']['registration']['mode'] = 'global'
-        registration.write_text(json.dumps(value))
-        parent['phases']['registration']['sha256'] = hashlib.sha256(registration.read_bytes()).hexdigest()
-        parent_path.write_text(json.dumps(parent))
-    before = len(connected.server.calls)
-    with pytest.raises(ValueError, match='retained development pool') as caught:
-        loader.load_retained_pool(selector)
-    assert len(connected.server.calls) == before
-    assert not any(token in str(caught.value) for token in connected.intent.tokens.values())
+    paths = {
+        'anchor': (Path(connected.server.request.retained.operation['anchor_dir']) / 'pool-installation.json',),
+        'parent': (parent_path,),
+        'phase': (state / 'material/stage.json',),
+        'incomplete': (parent_path,),
+        'inputs': (Path(completed_pool[0]['inputs_path']),),
+        'receipt': (original / 'pool-registration/registration.json', parent_path),
+    }
+    for damage, targets in paths.items():
+        originals = {path: (path.read_bytes(), path.stat().st_mode & 0o777) for path in targets}
+        parent = json.loads(parent_path.read_bytes())
+        try:
+            if damage in ('anchor', 'parent', 'phase'):
+                targets[0].unlink()
+            elif damage == 'incomplete':
+                parent['phases']['workload'] = {'status': 'started', 'sha256': None}
+                parent_path.write_text(json.dumps(parent))
+            elif damage == 'inputs':
+                targets[0].write_bytes(originals[targets[0]][0] + b' ')
+            else:
+                registration = targets[0]
+                value = json.loads(registration.read_bytes())
+                value['proof']['registration']['mode'] = 'global'
+                registration.write_text(json.dumps(value))
+                parent['phases']['registration']['sha256'] = hashlib.sha256(registration.read_bytes()).hexdigest()
+                parent_path.write_text(json.dumps(parent))
+            before = len(connected.server.calls)
+            with pytest.raises(ValueError, match='retained development pool') as caught:
+                loader.load_retained_pool(selector)
+            assert len(connected.server.calls) == before
+            assert not any(token in str(caught.value) for token in connected.intent.tokens.values())
+        finally:
+            for path, (raw, mode) in originals.items():
+                path.write_bytes(raw)
+                path.chmod(mode)
 
 
 

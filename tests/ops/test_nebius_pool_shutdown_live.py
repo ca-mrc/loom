@@ -131,9 +131,8 @@ def test_connected_shutdown_is_intent_bound_observes_unknown_and_waits_for_termi
 
 
 @pytest.mark.timeout(600)
-@pytest.mark.parametrize('damage', [None, 'uid', 'spec', 'authorization', 'drain_authorization', 'fence', 'busy', 'ancestry'])
 def test_shutdown_reads_cas_after_slow_drain_and_rejects_real_drift(
-        activation_http, closed_startup, monkeypatch, damage):
+        activation_http, closed_startup, monkeypatch):
     from scripts.ops.nebius_pool_shutdown import stop_pool_successors
     from scripts.ops.nebius_pool_startup_fence import fence_pool_startup
 
@@ -229,12 +228,42 @@ def test_shutdown_reads_cas_after_slow_drain_and_rejects_real_drift(
         with httpx.MockTransport(respond) as transport:
             monkeypatch.setattr(api.parent.client, '_transport', transport)
             arguments = dict(request=request, api=api, state_dir=root / 'cutover', anchor_dir=root / 'cutover-anchor')
-            if damage:
-                with pytest.raises(ValueError):
-                    stop_pool_successors(**arguments)
-                assert not writes
-                journal = json.loads((root / 'cutover/shutdown.json').read_bytes())
-                assert all(row['phase'] == 'prepared' for row in journal['workloads'].values())
-            else:
-                assert stop_pool_successors(**arguments)['status'] == 'pool_successors_stopped'
-                assert len(writes) == len(set(writes)) == len(api.targets)
+            for damage in ('uid', 'spec', 'authorization', 'drain_authorization', 'fence', 'busy', 'ancestry', None):
+                drains = 0
+                current = state.objects[next(reversed(api.targets))]
+                uid, spec = current['metadata']['uid'], copy.deepcopy(current['spec'])
+                guard_key = next(iter(state.guards))
+                guard = state.guards[guard_key]
+                role_damage = getattr(state, 'role_damage', False)
+                pool_drain = api.parent.history.recovery_pool_drained
+                ancestry = root / 'cutover/cutover.json'
+                ancestry_bytes = ancestry.read_bytes()
+                try:
+                    if damage:
+                        with pytest.raises(ValueError):
+                            stop_pool_successors(**arguments)
+                        assert not writes
+                        journal = json.loads((root / 'cutover/shutdown.json').read_bytes())
+                        assert all(row == {'phase': 'prepared', 'before_resource_version': None}
+                            for row in journal['workloads'].values())
+                    else:
+                        assert stop_pool_successors(**arguments)['status'] == 'pool_successors_stopped'
+                        assert len(writes) == len(set(writes)) == len(api.targets)
+                finally:
+                    # Rejections never dispatch. Restore only injected drift, keeping
+                    # the prepared journal and observed resource versions monotonic.
+                    if damage == 'uid':
+                        current['metadata']['uid'] = uid
+                    elif damage == 'spec':
+                        current['spec'] = spec
+                    elif damage == 'authorization':
+                        state.role_damage = role_damage
+                    elif damage == 'drain_authorization':
+                        state.role_damage = role_damage
+                        api.parent.history.recovery_pool_drained = pool_drain
+                    elif damage == 'fence':
+                        state.guards[guard_key] = guard
+                    elif damage == 'busy':
+                        api.parent.history.recovery_pool_drained = pool_drain
+                    elif damage == 'ancestry':
+                        ancestry.write_bytes(ancestry_bytes)
