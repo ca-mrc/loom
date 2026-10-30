@@ -28,12 +28,14 @@ PYTHON_IMAGE = "python:3.11-slim"
 CONNECTION_IDS = [str(UUID(int=value)) for value in (1, 2, 3)]
 _CHECKED_IMAGES: set[str] = set()
 
-_RUNNER = r"""import asyncio,collections,json,ssl,time
+_RUNNER = r"""import asyncio,collections,errno,http.client,json,resource,ssl,time
 from pathlib import Path
 
 CFG=json.loads(Path('/fixture/scenario.json').read_text())
 CIDS=CFG['connection_ids'];COUNT=CFG['requests'];INGRESS=CFG.get('hop')=='ingress';TLS=CFG['scheme']=='https' and not INGRESS
 STATE={'active':0,'arrived':0,'peak':0,'header_leaks':0,'auth_errors':0,'per_cid':collections.Counter(),'total_requests':0,'status_requests':collections.Counter()}
+CLIENT={'connected':0,'sent':0,'completed':0,'errors':collections.Counter()}
+CLIENT_FD_LIMITS=resource.getrlimit(resource.RLIMIT_NOFILE)
 RELEASE=asyncio.Event()
 CLIENT_SSL=ssl.create_default_context(cafile='/fixture/cert.pem') if TLS or INGRESS else None
 
@@ -64,13 +66,26 @@ async def upstream(reader,writer):
   try:await asyncio.wait_for(writer.wait_closed(),1)
   except (Exception,asyncio.CancelledError):pass
 
+def error_category(error):
+ if isinstance(error,TimeoutError):return 'timeout'
+ if isinstance(error,ssl.SSLError):return 'tls'
+ if isinstance(error,ConnectionError):return 'connection'
+ if isinstance(error,OSError):return 'file_descriptor_exhausted' if error.errno in {errno.EMFILE,errno.ENFILE} else 'os'
+ if isinstance(error,(ValueError,IndexError,asyncio.IncompleteReadError)):return 'protocol'
+ return 'other'
+
+def client_snapshot(start):
+ return {**{key:CLIENT[key]-start[key] for key in ('connected','sent','completed')},'errors':{key:value-start['errors'].get(key,0) for key,value in CLIENT['errors'].items() if value>start['errors'].get(key,0)}}
+
 async def request(cid,path=None,authority=None,capture=False):
- writer=None
+ writer=None;outcome=None
  try:
   reader,writer=await asyncio.open_connection('127.0.0.1',CFG.get('front_port',30443),ssl=CLIENT_SSL if INGRESS else None,server_hostname='provider.example.test' if INGRESS else None)
+  CLIENT['connected']+=1
   target=authority or ('provider.example.test' if INGRESS else 'provider.example.test:19090')
   if TLS:
    writer.write(f'CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nx-loom-connection-id: {cid}\r\n\r\n'.encode());await writer.drain()
+   CLIENT['sent']+=1
    head=await asyncio.wait_for(reader.readuntil(b'\r\n\r\n'),30)
    status=int(head.split(b' ',2)[1])
    if status!=200:return {'status':status,'content_length':0} if capture else status
@@ -82,12 +97,15 @@ async def request(cid,path=None,authority=None,capture=False):
    outer+=('x-fixture-hold: 1\r\n' if path.startswith('/hold/') else '')
    if path.startswith('/status/'):outer+='x-fixture-status: '+path.split('/')[-1]+'\r\n'
   writer.write(f'POST {uri} HTTP/1.1\r\nHost: {target}\r\n{outer}Authorization: Bearer synthetic-{cid}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'.encode());await writer.drain()
+  if not TLS:CLIENT['sent']+=1
   head=await asyncio.wait_for(reader.readuntil(b'\r\n\r\n'),60)
   status=int(head.split(b' ',2)[1]);length=next((int(line.split(b':',1)[1]) for line in head.split(b'\r\n') if line.lower().startswith(b'content-length:')),None)
   return {'status':status,'content_length':length} if capture else status
- except asyncio.CancelledError:raise
- except Exception:return 'transport_error'
+ except asyncio.CancelledError:outcome='cancelled';raise
+ except Exception as error:outcome=error_category(error);return 'transport_error'
  finally:
+  CLIENT['completed']+=1
+  if outcome:CLIENT['errors'][outcome]+=1
   if writer:
    writer.close()
    try:await asyncio.wait_for(writer.wait_closed(),1)
@@ -98,22 +116,49 @@ async def wait_for(predicate,seconds=15):
  while not predicate() and time.monotonic()<cutoff:await asyncio.sleep(.02)
  return predicate()
 
-async def stats():
+async def stats(seconds=5):
  def read():
-  import http.client
-  connection=http.client.HTTPConnection('127.0.0.1',9901,timeout=5)
+  connection=http.client.HTTPConnection('127.0.0.1',9901,timeout=max(.001,seconds))
   try:
-   connection.request('GET','/stats?format=json&filter=upstream_rq_pending_active')
+   connection.request('GET','/stats?format=json')
    response=connection.getresponse();assert response.status==200
-   data=json.loads(response.read());return sum(x['value'] for x in data['stats'] if 'egress-' in x['name'])
+   data=json.loads(response.read());wanted={'upstream_cx_active','upstream_cx_total','upstream_cx_overflow','upstream_cx_connect_fail','upstream_cx_connect_timeout','upstream_rq_active','upstream_rq_pending_active','upstream_rq_pending_overflow','upstream_rq_timeout','downstream_cx_active','downstream_cx_total','downstream_cx_overflow'}
+   counters={x['name']:x['value'] for x in data['stats'] if x.get('name','').startswith(('cluster.egress-','http.forward_proxy.','listener.')) and x['name'].rsplit('.',1)[-1] in wanted}
+   return {'available':True,'pending_active':sum(value for name,value in counters.items() if name.startswith('cluster.egress-') and name.endswith('.upstream_rq_pending_active')),'counters':counters}
   finally:connection.close()
- return await asyncio.to_thread(read)
+ try:return await asyncio.wait_for(asyncio.to_thread(read),max(.001,seconds))
+ except Exception as error:return {'available':False,'pending_active':None,'error_category':error_category(error),'counters':{}}
+
+def completed_503(tasks):
+ return sum(task.done() and not task.cancelled() and task.exception() is None and task.result()==503 for task in tasks)
 
 async def wave(cids,cancel=False):
  RELEASE.clear();start=STATE['arrived'];STATE['per_cid'].clear()
- tasks=[asyncio.create_task(request(cids[i%len(cids)])) for i in range(COUNT)]
- reached=await wait_for(lambda:STATE['active']==COUNT,10 if CFG['baseline'] else 20)
- observed={'requested':COUNT,'arrived_before_release':STATE['arrived']-start,'active_before_release':STATE['active'],'barrier_reached':reached,'pending_before_release':None if INGRESS else await stats(),'per_cid_before_release':dict(STATE['per_cid'])}
+ client_start={key:dict(value) if isinstance(value,dict) else value for key,value in CLIENT.items()}
+ tasks=[];negative_complete=None;envoy=None;baseline_extra=None
+ def launch(count,offset=0):return [asyncio.create_task(request(cids[(offset+i)%len(cids)])) for i in range(count)]
+ if CFG['baseline']:
+  # First occupy the old cluster ceiling, then measure what happens to every
+  # remaining request: pending and overflow are both real legacy behavior.
+  # Both phases share the original ten-second deadline.
+  deadline=time.monotonic()+10;initial=min(COUNT,1024);extra=COUNT-initial
+  tasks=launch(initial)
+  await wait_for(lambda:STATE['active']==initial,max(0,deadline-time.monotonic()))
+  tasks+=launch(extra,initial);negative_complete=False
+  while time.monotonic()<deadline:
+   envoy=await stats(max(.001,deadline-time.monotonic()))
+   overflow=completed_503(tasks)
+   negative_complete=(STATE['active']==initial and envoy['available'] and envoy['pending_active']+overflow==extra and CLIENT['sent']-client_start['sent']==COUNT)
+   if negative_complete:break
+   await asyncio.sleep(min(.02,max(0,deadline-time.monotonic())))
+  envoy=envoy or await stats()
+  baseline_extra={'requested':extra,'pending_before_release':envoy['pending_active'],'completed_503_before_release':completed_503(tasks)}
+ else:
+  tasks=launch(COUNT)
+  await wait_for(lambda:STATE['active']==COUNT,20)
+ reached=STATE['active']==COUNT
+ if not INGRESS and envoy is None:envoy=await stats()
+ observed={'requested':COUNT,'arrived_before_release':STATE['arrived']-start,'active_before_release':STATE['active'],'peak_before_release':STATE['peak'],'barrier_reached':reached,'negative_control_complete':negative_complete,'baseline_extra':baseline_extra,'pending_before_release':None if INGRESS else envoy['pending_active'],'envoy_before_release':envoy,'client_before_release':client_snapshot(client_start),'per_cid_before_release':dict(STATE['per_cid'])}
  if cancel and reached:
   cancelled=tasks[::2]
   for task in cancelled:task.cancel()
@@ -125,6 +170,8 @@ async def wave(cids,cancel=False):
  RELEASE.set();results=await asyncio.wait_for(asyncio.gather(*tasks,return_exceptions=True),60)
  assert await wait_for(lambda:STATE['active']==0),'upstream slots leaked after completion'
  observed['responses']={str(k):v for k,v in collections.Counter(str(r) for r in results).items()}
+ observed['client_after_wave']=client_snapshot(client_start)
+ observed['envoy_after_wave']=None if INGRESS else await stats()
  return observed
 
 class H2Peer:
@@ -223,7 +270,7 @@ async def main():
  server=await asyncio.start_server(upstream,'127.0.0.1',19090,ssl=server_ssl,backlog=4096,limit=16384)
  async with server:
   await readiness()
-  result={'scheme':CFG['scheme'],'baseline':CFG['baseline']}
+  result={'scheme':CFG['scheme'],'baseline':CFG['baseline'],'client_file_descriptor_limits':list(CLIENT_FD_LIMITS)}
   if CFG.get('client_protocol')=='h2':
    result.update(await h2_wave());result['active_at_end']=STATE['active'];result['header_leaks']=STATE['header_leaks'];result['auth_errors']=STATE['auth_errors'];result['status_request_counts']=dict(STATE['status_requests']);print(json.dumps(result),flush=True);return
   result['same_cid']=await wave([CIDS[0]],cancel=not CFG['baseline'])
@@ -257,6 +304,13 @@ def _run(args: list[str], *, timeout: int = 180, env: dict[str, str] | None = No
     return result.stdout
 
 
+def _container_fd_limits(name: str) -> dict[str, Any]:
+    result = subprocess.run(["docker", "exec", name, "/bin/cat", "/proc/1/limits"],
+                            capture_output=True, text=True, timeout=10)
+    match = re.search(r"^Max open files\s+(\S+)\s+(\S+)", result.stdout, re.MULTILINE)
+    return {"available": True, "soft": match[1], "hard": match[2]} if match else {"available": False}
+
+
 def _container_diagnostics(names: list[str]) -> str:
     """Only disposable synthetic fixtures: keep state/logs until failure capture."""
     diagnostics = {}
@@ -270,7 +324,8 @@ def _container_diagnostics(names: list[str]) -> str:
             safe_state = {"unavailable": True}
         logs = subprocess.run(["docker", "logs", "--tail", "30", name],
                               capture_output=True, text=True, timeout=10)
-        diagnostics[name] = {"state": safe_state, "synthetic_logs": (logs.stdout + logs.stderr)[-4000:]}
+        diagnostics[name] = {"state": safe_state, "file_descriptor_limits": _container_fd_limits(name),
+                             "synthetic_logs": (logs.stdout + logs.stderr)[-4000:]}
     return json.dumps(diagnostics)
 
 
@@ -330,7 +385,11 @@ def native_envoy_case(scheme: str, *, baseline: bool, requests: int = 1200, rend
                   "-c", "/fixture/bootstrap.json", "--log-level", "error"], timeout=30)
             output = _run(["docker", "run", "--rm", "--pull=never", "--network", "container:" + name,
                            "--mount", mount, PYTHON_IMAGE, "python", "/fixture/runner.py"])
-            return json.loads(output)
+            result = json.loads(output)
+            # Preserve bounded diagnostics before finally removes the container;
+            # a successful runner can still fail the caller's count assertions.
+            result["native_container_diagnostics"] = json.loads(_container_diagnostics([name]))
+            return result
         except Exception as error:
             raise RuntimeError(f"{error}\nNative Envoy fixture: {_container_diagnostics([name])}") from error
         finally:
