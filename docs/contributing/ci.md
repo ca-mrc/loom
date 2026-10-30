@@ -363,26 +363,23 @@ native image, cluster and staging validation. Mixed application, shared-fixture,
 dependency and unknown inputs retain their applicable regression coverage;
 shared simulations still require the explicit manual input.
 
-## Pool operator tests run before deployment
+## Pool operator simulations require manual qualification
 
-The `nebius-pool-ops` suite (`tests/ops/test_nebius*pool*.py`) took about 450 of
-the ~500 tests-root runner-minutes. It runs in its own `nebius-pool` lane with 20
-shards sized for its 15-30 minute lifecycle modules, so `tests-root` needs only 4
-shards (~7 minutes of pytest each). A PR or merge group runs it only when a change
-touches its `affected_paths` (operator scripts, Kubernetes and Nebius deploy
-inputs, CI authority files, dependencies), its own tests, or a test helper they
-import. Selection is made once for the whole lane and then sharded, so planned
-shards and job manifests always run the same set. Other changes skip it before
-merge. Component-local pool scripts use `component_sources` to follow their
-operator and test-helper consumers. Common operator mechanisms, generators,
-dependencies and selection authority retain the full suite. The standalone
-archive/terminal-recovery CLIs and read-only retired-structure inventory use their dedicated lifecycle/archive/idle or database-inventory
-regressions without the unrelated pool transition suite. Shared platform fixtures
-and the external phase API double live in `tests/support/`, so importing a
-fixture no longer imports unrelated renderer or management-stage test cases.
-Every platform candidate selects affected modules against its immutable first
-parent; an unavailable boundary retains the default pool suite. Shared-pool simulations
-have their own, narrower rule, below.
+Production/development pool lifecycle and shared-pool handoff simulations are
+not launched. The existing `nebius-pool-ops` and `nebius-shared-pool-ops` suites
+are both `manual_only`; ordinary PRs, merge groups, pushes, schedules and
+candidate supplementary validation exclude them. This includes edits to their
+operators, fixtures, dependencies and selection metadata. The existing manual
+input below enables their original 20-shard layout before feature launch.
+
+Current standalone staging coverage remains automatic. In particular,
+`test_nebius_legacy_pool_completion.py` protects the deployed preflight reader,
+and `test_nebius_staging_pool_attachment.py` retains current staging rendering,
+profile and UID contracts in `tests-root`. Ordinary deployment, idle/recovery,
+unit/integration tests and all four required source gates remain in place.
+Pool fixture modules remain importable by other tests; manual ownership only
+controls which test files are selected.
+
 `nebius-candidate.yml` reuses successful native `CI` pool jobs on that exact
 merge-group commit, or the native squash PR whose tested merge has the same Git
 tree as the published candidate. For squash reuse, the planner verifies the
@@ -416,8 +413,9 @@ Candidate plans print the CLI version alongside their bounded diagnostics.
 There is no reuse across different Git trees or per-test-case cache. This is test scheduling,
 not an additional branch-admission gate. Image building, scanning and artifact
 qualification remain required, as do rollout idle protection, backup and rollback.
-Scheduled and manual full runs still include the ordinary pool suite. Selector labels
-retain full file selection in the validation lanes they request.
+Schedules and ordinary full requests do not enable unlaunched pool simulations.
+Selector labels retain full selection within the default automatic scope;
+explicit manual qualification is required for the pool lifecycle suites.
 
 Participant attachment tests own the three supported target rosters: ordinary,
 ordinary + guest, and ordinary + guest + auth. Downstream recovery, corruption,
@@ -425,9 +423,8 @@ and transport matrices use a fresh complete roster by default instead of
 multiplying every fault by all three subsets. Connected release success also
 runs with the two smaller rosters. Every original recovery fault, both candidate
 write implementations, current/private-material refusal, immutable history and
-exact-absence assertions remain before merge. No test is moved to candidate
-publication, nightly validation or deployment, and no mutable fixture is shared
-between cases.
+exact-absence assertions remain in manual qualification. No scenario is deleted,
+and no mutable fixture is shared between cases.
 
 The recovery and preactivation-recovery census scenarios run as separate whole
 modules on two existing pool shards. Each keeps its 1500-second case limit,
@@ -463,22 +460,18 @@ writer workflow changes (including its first introduction), and daily. It syncs 
 per lock. `test_ci_wheel_cache_has_one_trusted_writer_and_complete_contents`
 keeps readers read-only and covered by that superset.
 
-Shared-pool handoff, migration, recovery and census simulations belong to the
-`nebius-shared-pool-ops` suite. The combined shared system has not launched, so
-this suite is `manual_only`: ordinary PRs, merge groups, pushes, schedules and
-candidate supplementary tests exclude it, including changes to the shared code,
-common fixtures and dependencies. Fast activation rules and all independent
-environment/operator suites keep their existing validation positions. The
-`nebius-pool` lane remains enabled; only this ownership group is excluded.
+The `nebius-pool-ops` suite owns production/development lifecycle simulations;
+`nebius-shared-pool-ops` owns shared handoff, migration, recovery and census.
+Both retain their complete source and parameter matrices for manual use.
 
 For explicit qualification, dispatch `CI` with `shared_pool_simulations=true`.
-The planner accepts the flag only for `workflow_dispatch`, emits it to the
-pool matrix and each executing job, and preserves the complete manual scenario
-set. Local selection uses `scripts/component_ownership.py test-paths --lane
-nebius-pool --include-shared-pool true --suite nebius-shared-pool-ops`. This
-prints the manifest; passing its paths to pytest runs the complete scenarios.
-The existing `affected_only` / `test_diff` rules remain available inside explicit
-selection. Empty-diff manual qualification runs the whole shared suite.
+The planner accepts the flag only for `workflow_dispatch`, emits it to the pool
+matrix and each executing job, and preserves the full manual scenario set.
+Local selection uses `scripts/component_ownership.py test-paths --lane nebius-pool
+--include-shared-pool true`. Add `--suite nebius-pool-ops` or
+`--suite nebius-shared-pool-ops` to select one ownership group. Pass the printed
+paths to pytest to run it. Empty-diff manual qualification selects both suites;
+the existing affected-source rules can narrow explicit selections by diff.
 
 Candidate supplementary execution uses the default selection. Squash coverage
 reuse reads `SHARED_POOL_SIMULATIONS` alongside the job's actual changed-path
@@ -499,8 +492,8 @@ manual compatibility selection.
 
 ## Test shard balance
 
-The root Python lane has four complete, non-overlapping file shards; pool
-operators have twenty. Both use manifest-owned stable hashing. Explicit pool
+The root Python lane has four complete, non-overlapping automatic file shards;
+explicit pool qualification has twenty. Both use manifest-owned stable hashing. Explicit pool
 pins distribute complete modules according to completed source run 38921887321
 and merge-group run 38922178538 (October 16): retained image history, shutdown,
 origin history, recovery qualification, development installation and role
@@ -518,22 +511,13 @@ execution test also proves that the pool lane has identical `all` and `nebius`
 module sets before exercising its 20 shards once, instead of repeating identical
 selector/subprocess coverage. Root scopes still execute independently.
 
-Ordinary pool runs can apply `default_pins` over the shared-qualification pins.
-Scheduled run 40523588535 placed the retained development module (about 671s)
-and installation (about 354s) on shard 3, while ordinary shard 8 took 39s.
-Only the retained module now moves to shard 8 when shared simulations are
-disabled. Both the matrix and execution selector use the same effective pins;
-the default set remains 102 modules, each executed once. The mixed successor
-module retains 25 fast publication/configuration/authority cases. Its 10 full
-cutover/legacy-restoration/manager-refresh scenarios live in the manual-only
-`test_nebius_shared_pool_refresh_successor.py`, with their original assertions,
-fixture behavior and 60/420-second bounds. They require an unlaunched completed
-pool baseline and do not run in ordinary or candidate supplementary validation.
-Explicit shared qualification has 125 modules after this file split; every
-original 124-module shard keeps its ordered paths, with the new simulation
-file pinned to shard 9. The census separation below is retained.
-The timing sample motivates placement; it is not
-a measured end-to-end speedup of the new head.
+Pool qualification retains its original `pins`, stable hash salt and 20-shard
+count. The obsolete automatic-only relocation of the retained development
+module is removed: both pool suites now require the same explicit manual flag.
+The manual lane has 123 modules; the two deployed-staging boundary modules run
+in the ordinary root lane instead. Selection and execution still partition each
+selected file exactly once. The following measurements describe the historical
+manual layout and do not claim a new hosted speedup.
 
 Run 39471175183 (October 20) exhausted shard 8's budget after its handoff module
 alone took 2445 seconds. Activation, cutover, gateway retirement and recovery

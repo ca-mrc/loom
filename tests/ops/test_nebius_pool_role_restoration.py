@@ -122,38 +122,29 @@ def test_lost_role_restoration_only_observes_and_definite_rejection_can_resume(c
     assert len(api.legacy_calls) == 6 + int(failure == 'conflict')
 
 
+@pytest.mark.parametrize('damage', ['templates', 'machine', 'gateway', 'uid', 'rules', 'effective', 'cleanup', 'processes'])
 @pytest.mark.timeout(180)
-def test_restoring_roles_requires_exact_retired_authority_and_fresh_drain(closed_startup, monkeypatch):
+def test_restoring_roles_requires_exact_retired_authority_and_fresh_drain(closed_startup, damage):
     api = templates_restored(closed_startup)
     key = next(iter(api.legacy_roles))
-    template = api.state / 'template-restoration.json'
-    original = template.read_bytes()
-    # The effective-rights rejection runs last because it restores six Roles.
-    for damage in ('templates', 'machine', 'gateway', 'uid', 'rules', 'cleanup', 'processes', 'effective'):
-        with monkeypatch.context() as patch:
-            try:
-                if damage == 'templates':
-                    template.write_bytes(b'{}')
-                elif damage == 'machine':
-                    patch.setattr(api, 'machine_phase', 'active')
-                elif damage == 'gateway':
-                    patch.setattr(api, 'effective_readonly', False)
-                elif damage == 'uid':
-                    patch.setitem(api.legacy_roles[key]['metadata'], 'uid', 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa')
-                elif damage == 'rules':
-                    rule = api.legacy_roles[key]['rules'][0]
-                    patch.setitem(rule, 'verbs', [*rule['verbs'], 'patch'])
-                elif damage == 'effective':
-                    patch.setattr(api, 'effective_legacy', False)
-                else:
-                    patch.setattr(api, 'cleanup_drained' if damage == 'cleanup' else 'processes_drained', False)
-                if damage in {'cleanup', 'processes'}:
-                    assert restore_roles(api)['status'] == ('pending_pool_cleanup' if damage == 'cleanup' else 'pending_successor_drain')
-                else:
-                    with pytest.raises(ValueError) as error:
-                        restore_roles(api)
-                    assert 'private-' not in str(error.value)
-                assert len(api.legacy_calls) == (6 if damage == 'effective' else 0)
-            finally:
-                if damage == 'templates':
-                    template.write_bytes(original)
+    if damage == 'templates':
+        (api.state / 'template-restoration.json').write_bytes(b'{}')
+    elif damage == 'machine':
+        api.machine_phase = 'active'
+    elif damage == 'gateway':
+        api.effective_readonly = False
+    elif damage == 'uid':
+        api.legacy_roles[key]['metadata']['uid'] = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'
+    elif damage == 'rules':
+        api.legacy_roles[key]['rules'][0]['verbs'].append('patch')
+    elif damage == 'effective':
+        api.effective_legacy = False
+    else:
+        setattr(api, 'cleanup_drained' if damage == 'cleanup' else 'processes_drained', False)
+    if damage in {'cleanup', 'processes'}:
+        assert restore_roles(api)['status'] == ('pending_pool_cleanup' if damage == 'cleanup' else 'pending_successor_drain')
+    else:
+        with pytest.raises(ValueError) as error:
+            restore_roles(api)
+        assert 'private-' not in str(error.value)
+    assert len(api.legacy_calls) == (6 if damage == 'effective' else 0)

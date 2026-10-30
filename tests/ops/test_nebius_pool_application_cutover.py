@@ -70,13 +70,11 @@ from tests.unit.test_nebius_application_image_renderer import build_inputs as bu
 
 
 @pytest.fixture
-def platform_inputs(request):
+def platform_inputs():
     values = copy.deepcopy(original_platform_inputs.__wrapped__())
-    environments = getattr(getattr(request.node, 'callspec', None), 'params', {}).get(
-        'runtime_inputs', ('production', 'staging', 'development'))
-    index = environments.index('development')
-    # Bind the completed manager to the selected shared-dev foundation from birth.
-    values[0].update(namespace=f'loom-nebius-platform-{index}', execution_namespace=f'loom-nebius-exec-{index}')
+    # The migration fixture orders production, staging, then shared development.
+    # Give the completed manager that actual retained dev foundation from birth.
+    values[0].update(namespace='loom-nebius-platform-2', execution_namespace='loom-nebius-exec-2')
     return values
 
 

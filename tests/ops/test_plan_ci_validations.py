@@ -23,7 +23,7 @@ def test_ci_metadata_tools_keep_their_regressions_without_restarting_pool(path, 
     tracked = _tracked_paths(REPO_ROOT)
     plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
     selection = dict(manifest=manifest, tracked_paths=tracked, repo_root=REPO_ROOT,
-                     changed_paths=plan.test_changes, test_scope="nebius")
+                     changed_paths=plan.test_changes, test_scope="nebius", include_shared_pool=True)
     pool = selected_test_paths(lane="nebius-pool", **selection)
     assert pool == (), f"metadata-only change unnecessarily selected {len(pool)} pool modules"
     assert test_shard_matrix(lane="nebius-pool", **selection) == ()
@@ -47,7 +47,7 @@ def test_ci_metadata_tool_exception_does_not_suppress_shared_or_unknown_pool_inp
     manifest = load_manifest(REPO_ROOT / "config/component-ownership.toml")
     tracked = _tracked_paths(REPO_ROOT)
     common = dict(manifest=manifest, tracked_paths=tracked, repo_root=REPO_ROOT,
-                  lane="nebius-pool", test_scope="nebius")
+                  lane="nebius-pool", test_scope="nebius", include_shared_pool=True)
     full = selected_test_paths(**common)
     plan = plan_validations(changed_paths=["scripts/ops/nebius_pool_test_plan.py", path],
                             labels=set(), event_name="pull_request")
@@ -68,7 +68,7 @@ def test_ci_metadata_tool_mixed_with_pool_operator_retains_that_operators_covera
     mixed = plan_validations(changed_paths=["scripts/ops/nebius_pool_test_plan.py", path],
                              labels=set(), event_name="pull_request")
     expected = selected_test_paths(changed_paths=operator.test_changes, **common)
-    assert bool(expected) == (include_shared_pool or "nebius_shared_pool_" not in path)
+    assert bool(expected) == include_shared_pool
     assert selected_test_paths(changed_paths=mixed.test_changes, **common) == expected
 
 

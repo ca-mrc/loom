@@ -441,16 +441,15 @@ def shift_install_clock(monkeypatch, days):
     monkeypatch.setattr(installer, 'datetime', Clock, raising=False)
 
 
-def test_noncurrent_credentials_cannot_begin_namespace_or_registration_writes(connected, monkeypatch):
-    for days in (-1, 60):
-        for execute in (False, True):
-            with monkeypatch.context() as patch:
-                shift_install_clock(patch, days)
-                with pytest.raises(ValueError, match='development pool installation'):
-                    install(connected, execute=execute)
-                assert not connected.server.created and not connected.server.store.creates
-                root = Path(connected.server.request.retained.operation['state_dir']).parent
-                assert not (root / 'pool-installation').exists()
+@pytest.mark.parametrize('days', [-1, 60], ids=['not-yet-issued', 'expired'])
+@pytest.mark.parametrize('execute', [False, True], ids=['preflight', 'install'])
+def test_noncurrent_credentials_cannot_begin_namespace_or_registration_writes(connected, monkeypatch, days, execute):
+    shift_install_clock(monkeypatch, days)
+    with pytest.raises(ValueError, match='development pool installation'):
+        install(connected, execute=execute)
+    assert not connected.server.created and not connected.server.store.creates
+    root = Path(connected.server.request.retained.operation['state_dir']).parent
+    assert not (root / 'pool-installation').exists()
 
 
 def test_credentials_expiring_during_namespaces_cannot_begin_registration(connected, monkeypatch):

@@ -271,10 +271,8 @@ def repair(fixture):
     return repair_pool_startup(request=context.request, binding=binding, api=api, state_dir=state, anchor_dir=anchor)
 
 
-def test_preopening_repair_preserves_original_journals_and_replays_readonly(prepared_repair, monkeypatch):
-    from scripts.ops import nebius_certificates as private_state
+def test_preopening_repair_preserves_original_journals_and_replays_readonly(prepared_repair):
     from scripts.ops.nebius_pool_startup import startup_workload_options
-    from scripts.ops.nebius_pool_startup_repair import qualify_repair_configuration
 
     context, _, api, state, anchor = prepared_repair
     originals = {name: (state / name).read_bytes() for name in ('cutover.json', 'startup.json', 'activation.json')}
@@ -291,76 +289,37 @@ def test_preopening_repair_preserves_original_journals_and_replays_readonly(prep
     assert originals == {name: (state / name).read_bytes() for name in originals}
     assert api.activation.calls == [] and api.activation.mode == 'closed'
 
-    path = state / 'source-repair-configuration/stage.json'
-    original = path.read_bytes()
-    key, = json.loads(original)['resources']
-    actual = api.resources.resources[key]
-    for damage in (None, 'foreign_uid', 'altered_config', 'lost_record'):
-        with monkeypatch.context() as patch:
-            try:
-                if damage == 'foreign_uid':
-                    patch.setitem(actual['metadata'], 'uid', str(uuid4()))
-                elif damage == 'altered_config':
-                    patch.setitem(actual['data'], 'installation.json', '{}')
-                elif damage == 'lost_record':
-                    path.unlink()
-                if damage is None:
-                    qualify_repair_configuration(context.request, state=state, anchor=anchor, read=api.resources.get_resource)
-                else:
-                    with pytest.raises(ValueError):
-                        qualify_repair_configuration(context.request, state=state, anchor=anchor, read=api.resources.get_resource)
-            finally:
-                if damage == 'lost_record':
-                    private_state._write_private(path, original)
 
-
-def test_preopening_repair_refuses_ineligible_entry_without_writes(prepared_repair, monkeypatch):
-    context, original_binding, api, state, anchor = prepared_repair
+@pytest.mark.parametrize('damage', ['opening', 'cancellation', 'guard', 'startup', 'closure',
+    'binding', 'mode', 'guards', 'uid', 'recovery', 'completion'])
+def test_preopening_repair_refuses_ineligible_entry_without_writes(prepared_repair, damage):
+    context, binding, api, state, anchor = prepared_repair
+    if damage in {'opening', 'cancellation', 'guard'}:
+        path = state / 'activation.json'
+        record = json.loads(path.read_bytes())
+        if damage == 'guard':
+            record['guards'][next(iter(record['guards']))]['release'] = 'intent'
+        else:
+            record[damage] = 'intent'
+        path.write_text(json.dumps(record))
+    elif damage in {'closure', 'startup'}:
+        path = state / ('cutover.json' if damage == 'closure' else 'startup.json')
+        path.write_bytes(path.read_bytes() + b'\n')
+    elif damage == 'binding':
+        binding = binding.model_copy(update={'startup_sha256': 'f' * 64})
+    elif damage == 'mode':
+        api.startup.mode = 'global'
+    elif damage == 'guards':
+        api.startup.guards_held = False
+    elif damage == 'uid':
+        api.startup.documents[_key(context.request.manager)]['metadata']['uid'] = str(uuid4())
+    else:
+        (state / ('shutdown.json' if damage == 'recovery' else 'completion.json')).write_text('{}')
     before = copy.deepcopy(api.resources.resources)
-    marker = anchor / (context.operation['operation_id'] + '-startup-repair.json')
-    for damage in ('opening', 'cancellation', 'guard', 'startup', 'closure',
-            'binding', 'mode', 'guards', 'uid', 'recovery', 'completion'):
-        binding = original_binding
-        changed, original = None, None
-        with monkeypatch.context() as patch:
-            try:
-                if damage in {'opening', 'cancellation', 'guard'}:
-                    changed = state / 'activation.json'
-                    original = changed.read_bytes()
-                    record = json.loads(original)
-                    if damage == 'guard':
-                        record['guards'][next(iter(record['guards']))]['release'] = 'intent'
-                    else:
-                        record[damage] = 'intent'
-                    changed.write_text(json.dumps(record))
-                elif damage in {'closure', 'startup'}:
-                    changed = state / ('cutover.json' if damage == 'closure' else 'startup.json')
-                    original = changed.read_bytes()
-                    changed.write_bytes(original + b'\n')
-                elif damage == 'binding':
-                    binding = binding.model_copy(update={'startup_sha256': 'f' * 64})
-                elif damage == 'mode':
-                    patch.setattr(api.startup, 'mode', 'global')
-                elif damage == 'guards':
-                    patch.setattr(api.startup, 'guards_held', False)
-                elif damage == 'uid':
-                    patch.setitem(api.startup.documents[_key(context.request.manager)]['metadata'], 'uid', str(uuid4()))
-                else:
-                    path = state / ('shutdown.json' if damage == 'recovery' else 'completion.json')
-                    assert not path.exists()
-                    path.write_text('{}')
-                    changed = path
-                with pytest.raises(ValueError, match='repair'):
-                    repair((context, binding, api, state, anchor))
-                assert api.calls == [] and api.resources.resources == before
-                assert not (state / 'startup-repair.json').exists()
-                assert not marker.exists()
-            finally:
-                if changed is not None:
-                    if original is None:
-                        changed.unlink()
-                    else:
-                        changed.write_bytes(original)
+    with pytest.raises(ValueError, match='repair'):
+        repair((context, binding, api, state, anchor))
+    assert api.calls == [] and api.resources.resources == before
+    assert not (state / 'startup-repair.json').exists()
 
 
 @pytest.mark.parametrize('phase', ['stop', 'template', 'start'])
@@ -568,6 +527,29 @@ def test_repair_fence_https_tests_exact_pending_uid_version_metadata_and_spec(pr
         api.pool_state, api.guard_state = remote.pool_state, remote.guard_state
         assert fence_pool_startup(request=context.request, api=api, state_dir=state, anchor_dir=anchor)['status'] == 'startup_writes_fenced'
     assert writes == [key]
+
+
+@pytest.mark.parametrize('damage', [None, 'foreign_uid', 'altered_config', 'lost_record'])
+def test_repaired_config_live_readback_is_bound_to_journaled_create(prepared_repair, damage):
+    from scripts.ops.nebius_pool_startup_repair import qualify_repair_configuration
+
+    context, _, api, state, anchor = prepared_repair
+    repair(prepared_repair)
+    path = state / 'source-repair-configuration/stage.json'
+    child = json.loads(path.read_bytes())
+    key, = child['resources']
+    actual = api.resources.resources[key]
+    if damage == 'foreign_uid':
+        actual['metadata']['uid'] = str(uuid4())
+    elif damage == 'altered_config':
+        actual['data']['installation.json'] = '{}'
+    elif damage == 'lost_record':
+        path.unlink()
+    if damage is None:
+        qualify_repair_configuration(context.request, state=state, anchor=anchor, read=api.resources.get_resource)
+    else:
+        with pytest.raises(ValueError):
+            qualify_repair_configuration(context.request, state=state, anchor=anchor, read=api.resources.get_resource)
 
 
 @pytest.mark.parametrize('failure', ['config-before', 'template-before', 'start-after'])

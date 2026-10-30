@@ -147,9 +147,6 @@ def test_default_pool_balance_preserves_manual_layout(include_shared_pool: bool)
                       or not manifest.test_owner_for_path(path).manual_only) for shard in original]
     retained = "tests/ops/test_nebius_development_pool_retained.py"
     assert retained in original[2]
-    if not include_shared_pool:
-        expected[2] = tuple(path for path in expected[2] if path != retained)
-        expected[7] = tuple(path for path in complete if path in {*expected[7], retained})
     actual = [ownership.selected_test_paths(
         manifest, tracked_paths=tracked, lane="nebius-pool", repo_root=root,
         include_shared_pool=include_shared_pool, shard_index=index, shard_count=policy.shard_count,
@@ -162,13 +159,14 @@ def test_default_pool_balance_preserves_manual_layout(include_shared_pool: bool)
     matrix = ownership.test_shard_matrix(manifest, tracked_paths=tracked, lane="nebius-pool",
                                         repo_root=root, include_shared_pool=include_shared_pool)
     assert [row["shard_index"] for row in matrix] == [index for index, shard in enumerate(actual) if shard]
-    gateway = set(next(shard for shard in actual if "tests/ops/test_nebius_pool_gateway_retirement_live.py" in shard))
-    assert gateway.isdisjoint({"tests/ops/test_nebius_pool_role_restoration_live.py",
-                               "tests/ops/test_nebius_pool_template_restoration_live.py"})
-    predecessor_groups = [next(index for index, shard in enumerate(actual) if path in shard) for path in (
-        "tests/ops/test_nebius_pool_predecessor.py", "tests/ops/test_nebius_pool_predecessor_live.py",
-        "tests/ops/test_nebius_pool_refresh_connected.py")]
-    assert len(set(predecessor_groups)) == 3
+    if include_shared_pool:
+        gateway = set(next(shard for shard in actual if "tests/ops/test_nebius_pool_gateway_retirement_live.py" in shard))
+        assert gateway.isdisjoint({"tests/ops/test_nebius_pool_role_restoration_live.py",
+                                   "tests/ops/test_nebius_pool_template_restoration_live.py"})
+        predecessor_groups = [next(index for index, shard in enumerate(actual) if path in shard) for path in (
+            "tests/ops/test_nebius_pool_predecessor.py", "tests/ops/test_nebius_pool_predecessor_live.py",
+            "tests/ops/test_nebius_pool_refresh_connected.py")]
+        assert len(set(predecessor_groups)) == 3
 
 
 @pytest.mark.parametrize("include_shared_pool", [False, True])
@@ -195,8 +193,12 @@ def test_default_pool_pin_plans_the_same_independent_test_it_executes(
     arguments = dict(manifest=manifest, tracked_paths=tracked, lane="nebius-pool", repo_root=tmp_path,
                      changed_paths=(retained,), include_shared_pool=include_shared_pool)
     matrix = ownership.test_shard_matrix(**arguments)
+    if not include_shared_pool:
+        assert matrix == ()
+        assert ownership.selected_test_paths(**arguments) == ()
+        return
     assert len(matrix) == 1
-    assert matrix[0]["shard_index"] == (2 if include_shared_pool else 7)
+    assert matrix[0]["shard_index"] == 2
     selected = ownership.selected_test_paths(**arguments, shard_index=matrix[0]["shard_index"],
                                              shard_count=matrix[0]["shard_count"])
     assert selected == (retained,)
@@ -279,13 +281,16 @@ def test_shard_workflows_run_complete_disjoint_fail_fast_shards(
             ownership.select_test_scope(manifest, all_paths, scope="nebius")
         )
     count = manifest.test_shard_policy(lane).shard_count
-    assert sorted(row["shard_index"] for row in matrix) == list(range(count))
     complete = ownership.selected_test_paths(**selection)
     shards = [ownership.selected_test_paths(**selection, shard_index=index, shard_count=count)
               for index in range(count)]
+    assert sorted(row["shard_index"] for row in matrix) == [index for index, shard in enumerate(shards) if shard]
     flattened = [path for shard in shards for path in shard]
     assert len(flattened) == len(set(flattened))
     assert set(flattened) == set(complete)
+    if not matrix:
+        assert lane == "nebius-pool" and not include_shared_pool
+        return
     uv = tmp_path / "uv"
     uv.write_text(
         f"#!{Path(sys.executable).resolve()}\n"

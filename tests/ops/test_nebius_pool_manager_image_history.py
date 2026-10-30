@@ -142,8 +142,6 @@ def test_preflight_qualifies_recovery_with_incomplete_image_without_forward_chec
 
 
 def test_image_entry_preserves_all_original_history_and_returns_fixed_stopped_targets(image_repair_case):
-    from scripts.ops.nebius_pool_manager_image_history import load_manager_image_chain
-
     context, _, state, anchor, _ = image_repair_case
     old = {path: path.read_bytes() for root in (state, anchor) for path in root.iterdir() if path.is_file()}
     value = entry(image_repair_case)
@@ -153,12 +151,16 @@ def test_image_entry_preserves_all_original_history_and_returns_fixed_stopped_ta
     assert images[0] == images[1] == images[2] != images[3] == images[4]
     assert value.identity["operation_id"] == str(context.inputs.installation.operation_id)
     assert old == {path: path.read_bytes() for path in old}
-    binding = runtime_binding(image_repair_case, "collector")
-    with pytest.raises(ValueError, match="manager_image"):
-        entry((*image_repair_case[:-1], binding))
+
+
+def test_anchored_enrollment_prefix_can_be_loaded_without_inventing_write_intent(image_repair_case):
+    from scripts.ops.nebius_pool_manager_image_history import load_manager_image_chain
+
+    value = entry(image_repair_case)
     persist(value, anchor_only=True)
     loaded = entry(image_repair_case)
     assert loaded.anchored and loaded.record is None
+    context, _, state, anchor, _ = image_repair_case
     assert load_manager_image_chain(context.request, state=state, anchor=anchor) == (loaded,)
     persist(loaded)
     assert all(row["phase"] == "prepared" for row in entry(image_repair_case).record["phases"].values())
@@ -237,57 +239,55 @@ def test_mixed_image_history_folds_each_key_and_fences_only_pending_tail(image_r
     assert len(load_manager_image_chain(context.request, state=state, anchor=anchor)) == 4
 
 
-def test_targeted_image_correction_rejects_unqualified_target(image_repair_case):
+def test_targeted_image_correction_rejects_first_enrollment(image_repair_case):
+    binding = runtime_binding(image_repair_case, "collector")
+    with pytest.raises(ValueError, match="manager_image"):
+        entry((*image_repair_case[:-1], binding))
+
+
+@pytest.mark.parametrize("damage", ["unknown_target", "unknown_version", "foreign_registry", "same_image"])
+def test_targeted_image_correction_rejects_unqualified_target(image_repair_case, damage):
     from scripts.ops.nebius_pool_startup import closed_startup_documents
 
     context, api, state, anchor, _ = image_repair_case
     first = entry(image_repair_case)
     persist(first, complete=True)
-    original = runtime_binding(image_repair_case, "collector", first)
-    for damage in ("unknown_target", "unknown_version", "foreign_registry", "same_image"):
-        binding = original
-        if damage in {"unknown_target", "unknown_version"}:
-            binding = binding.model_copy(update={"target" if damage == "unknown_target" else "schema_version": "unknown"})
+    binding = runtime_binding(image_repair_case, "collector", first)
+    if damage in {"unknown_target", "unknown_version"}:
+        binding = binding.model_copy(update={"target" if damage == "unknown_target" else "schema_version": "unknown"})
+    else:
+        candidate = copy.deepcopy(binding.candidate)
+        if damage == "foreign_registry":
+            candidate["images"]["execution_actuator"]["image_ref"] = "foreign/collector@sha256:" + "a" * 64
         else:
-            candidate = copy.deepcopy(binding.candidate)
-            if damage == "foreign_registry":
-                candidate["images"]["execution_actuator"]["image_ref"] = "foreign/collector@sha256:" + "a" * 64
-            else:
-                _, targets = closed_startup_documents(context.request, state_dir=state, anchor_dir=anchor)
-                collector, = (row for row in targets.values() if row["kind"] == "CronJob")
-                candidate["images"]["execution_actuator"]["image_ref"] = collector["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["image"]
-            binding = binding.model_copy(update={"candidate": candidate})
-        with pytest.raises(ValueError, match="manager_image"):
-            entry((context, api, state, anchor, binding))
+            _, targets = closed_startup_documents(context.request, state_dir=state, anchor_dir=anchor)
+            collector, = (row for row in targets.values() if row["kind"] == "CronJob")
+            candidate["images"]["execution_actuator"]["image_ref"] = collector["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["image"]
+        binding = binding.model_copy(update={"candidate": candidate})
+    with pytest.raises(ValueError, match="manager_image"):
+        entry((context, api, state, anchor, binding))
 
 
-def test_image_entry_rejects_changed_scope_or_unqualified_history(image_repair_case):
-    context, api, state, anchor, original = image_repair_case
-    for damage in ("activation", "source_repair", "ordinal", "prior", "foreign_image", "signature"):
-        binding = original
-        path = None
-        if damage in {"activation", "source_repair"}:
-            path = state / ("activation.json" if damage == "activation" else "startup-repair.json")
-            saved = path.read_bytes()
-            path.write_bytes(saved + b"\n")
-        elif damage == "ordinal":
-            binding = binding.model_copy(update={"ordinal": 2})
-        elif damage == "prior":
-            binding = binding.model_copy(update={"predecessor_sha256": "a" * 64})
-        elif damage == "foreign_image":
-            value = copy.deepcopy(binding.candidate)
-            value["images"]["service"]["image_ref"] = "foreign/service@sha256:" + "e" * 64
-            binding = binding.model_copy(update={"candidate": value})
-        else:
-            value = copy.deepcopy(binding.profile)
-            value["image_admission"]["admissions"][0]["signature_base64"] = "AAAA"
-            binding = binding.model_copy(update={"profile": value})
-        try:
-            with pytest.raises(ValueError, match="manager_image"):
-                entry((context, api, state, anchor, binding))
-        finally:
-            if path is not None:
-                path.write_bytes(saved)
+@pytest.mark.parametrize("damage", ["activation", "source_repair", "ordinal", "prior", "foreign_image", "signature"])
+def test_image_entry_rejects_changed_scope_or_unqualified_history(image_repair_case, damage):
+    context, api, state, anchor, binding = image_repair_case
+    if damage in {"activation", "source_repair"}:
+        path = state / ("activation.json" if damage == "activation" else "startup-repair.json")
+        path.write_bytes(path.read_bytes() + b"\n")
+    elif damage == "ordinal":
+        binding = binding.model_copy(update={"ordinal": 2})
+    elif damage == "prior":
+        binding = binding.model_copy(update={"predecessor_sha256": "a" * 64})
+    elif damage == "foreign_image":
+        value = copy.deepcopy(binding.candidate)
+        value["images"]["service"]["image_ref"] = "foreign/service@sha256:" + "e" * 64
+        binding = binding.model_copy(update={"candidate": value})
+    else:
+        value = copy.deepcopy(binding.profile)
+        value["image_admission"]["admissions"][0]["signature_base64"] = "AAAA"
+        binding = binding.model_copy(update={"profile": value})
+    with pytest.raises(ValueError, match="manager_image"):
+        entry((context, api, state, anchor, binding))
 
 
 def test_new_image_entry_requires_completed_tail_and_exact_predecessor_hash(image_repair_case):
@@ -323,44 +323,29 @@ def test_new_image_entry_requires_completed_tail_and_exact_predecessor_hash(imag
         load_manager_image_chain(context.request, state=state, anchor=anchor)
 
 
-def test_image_chain_rejects_orphan_gapped_or_changed_evidence(image_repair_case):
+@pytest.mark.parametrize("damage", ["orphan_record", "gap", "extra", "anchor_bytes", "phase_order"])
+def test_image_chain_rejects_orphan_gapped_or_changed_evidence(image_repair_case, damage):
     from scripts.ops.nebius_certificates import _atomic_json
     from scripts.ops.nebius_pool_manager_image_history import load_manager_image_chain
 
     context, _, state, anchor, _ = image_repair_case
     value = entry(image_repair_case)
     persist(value)
-    record_bytes, marker_bytes = value.path.read_bytes(), value.marker.read_bytes()
-    marker_mode = value.marker.stat().st_mode & 0o777
-    for damage in ("orphan_record", "gap", "extra", "anchor_bytes", "phase_order"):
-        if damage == "orphan_record":
-            value.marker.unlink()
-        elif damage == "gap":
-            value.path.rename(state / value.path.name.replace("-01.json", "-02.json"))
-            value.marker.rename(anchor / value.marker.name.replace("-01.json", "-02.json"))
-        elif damage == "extra":
-            _atomic_json(state / "manager-image-99.json", {})
-        elif damage == "anchor_bytes":
-            value.marker.write_bytes(marker_bytes + b"\n")
-        else:
-            record = json.loads(record_bytes)
-            record["phases"]["template"] = {"phase": "intent", "before_resource_version": "100"}
-            _atomic_json(value.path, record)
-        try:
-            with pytest.raises(ValueError, match="manager_image"):
-                load_manager_image_chain(context.request, state=state, anchor=anchor)
-        finally:
-            # Restore only the injected damage; the real prepared chain never advances.
-            if damage == "gap":
-                (state / value.path.name.replace("-01.json", "-02.json")).rename(value.path)
-                (anchor / value.marker.name.replace("-01.json", "-02.json")).rename(value.marker)
-            elif damage == "extra":
-                (state / "manager-image-99.json").unlink()
-            elif damage == "phase_order":
-                value.path.write_bytes(record_bytes)
-            else:
-                value.marker.write_bytes(marker_bytes)
-                value.marker.chmod(marker_mode)
+    if damage == "orphan_record":
+        value.marker.unlink()
+    elif damage == "gap":
+        value.path.rename(state / value.path.name.replace("-01.json", "-02.json"))
+        value.marker.rename(anchor / value.marker.name.replace("-01.json", "-02.json"))
+    elif damage == "extra":
+        _atomic_json(state / "manager-image-99.json", {})
+    elif damage == "anchor_bytes":
+        value.marker.write_bytes(value.marker.read_bytes() + b"\n")
+    else:
+        record = json.loads(value.path.read_bytes())
+        record["phases"]["template"] = {"phase": "intent", "before_resource_version": "100"}
+        _atomic_json(value.path, record)
+    with pytest.raises(ValueError, match="manager_image"):
+        load_manager_image_chain(context.request, state=state, anchor=anchor)
 
 
 def test_historical_image_chain_survives_activation_but_new_entry_does_not(image_repair_case):
@@ -671,7 +656,8 @@ def test_new_tooling_continues_anchored_image_without_replacing_binding_or_histo
     assert {path: path.read_bytes() for path in paths} == before
 
 
-def test_image_only_repair_rejects_incompatible_source_schema(private_image_repair):
+@pytest.mark.parametrize('revision', ['0175', '0177'])
+def test_image_only_repair_rejects_incompatible_source_schema(private_image_repair, revision):
     import json
 
     from scripts.ops import nebius_certificates as private_state
@@ -679,18 +665,17 @@ def test_image_only_repair_rejects_incompatible_source_schema(private_image_repa
     from scripts.ops.nebius_pool_image_entry import load_image_repair_inputs
 
     operation, _, proof, _ = private_image_repair
-    original = proof.read_bytes()
-    for revision in ('0175', '0177'):
-        document = json.loads(original)
-        document['revision'] = revision
-        private_state._atomic_json(proof, document)
-        with pytest.raises(EntryError):
-            load_image_repair_inputs(operation)
-    proof.write_bytes(original)
+    document = json.loads(proof.read_bytes())
+    document['revision'] = revision
+    private_state._atomic_json(proof, document)
+    with pytest.raises(EntryError):
+        load_image_repair_inputs(operation)
 
 
+@pytest.mark.parametrize("damage", ["unanchored", "recursive", "private_drift", "same_id", "same_source",
+    "other_parent", "injected_binding", "old_schema_proof"])
 def test_tooling_continuation_rejects_unbound_or_replaced_repair(
-        private_image_repair, image_repair_case):
+        private_image_repair, image_repair_case, damage):
     from pathlib import Path
 
     from scripts.ops import nebius_certificates as private_state
@@ -698,51 +683,35 @@ def test_tooling_continuation_rejects_unbound_or_replaced_repair(
     from scripts.ops.nebius_pool_image_entry import load_image_repair_inputs
     from tests.ops.test_nebius_pool_startup_repair import save_private
 
-    original_operation, original_wrapper, fixture = tooling_continuation(private_image_repair, image_repair_case)
-    for damage in ("unanchored", "recursive", "private_drift", "same_id", "same_source",
-            "other_parent", "injected_binding", "old_schema_proof"):
-        operation, wrapper = copy.deepcopy((original_operation, original_wrapper))
-        previous = wrapper["repair_operation"]
-        paths = ()
-        if damage == "unanchored":
-            retained = entry(fixture)
-            paths = (retained.path, retained.marker)
-        elif damage == "private_drift":
-            paths = (Path(previous["inputs_path"]),)
-        elif damage == "old_schema_proof":
-            paths = (private_image_repair[2],)
-        originals = {path: (path.read_bytes(), path.stat().st_mode & 0o777) for path in paths}
-        try:
-            if damage == "unanchored":
-                for path in paths:
-                    path.unlink()
-            elif damage == "recursive":
-                previous["schema"] = "loom.nebius-pool-startup-repair-operation.v4"
-            elif damage == "private_drift":
-                paths[0].write_bytes(b"{}")
-            elif damage == "same_id":
-                operation["operation_id"] = previous["operation_id"]
-            elif damage == "same_source":
-                operation["source_sha"] = operation["candidate"] = previous["source_sha"]
-            elif damage == "other_parent":
-                operation["original_operation_id"] = str(uuid4())
-            elif damage == "injected_binding":
-                wrapper["binding"] = fixture[-1].model_dump(mode="json")
-            else:
-                private_state._atomic_json(paths[0], {"schema": "loom.nebius-manager-schema.v1",
-                    "source_sha": previous["source_sha"], "revision": "0174"})
-            save_private(operation, wrapper)
-            with pytest.raises(EntryError):
-                load_image_repair_inputs(operation)
-        finally:
-            # Only the fault's files change; the anchored image remains prepared.
-            for path, (raw, mode) in originals.items():
-                path.write_bytes(raw)
-                path.chmod(mode)
+    operation, wrapper, fixture = tooling_continuation(private_image_repair, image_repair_case)
+    previous = wrapper["repair_operation"]
+    if damage == "unanchored":
+        retained = entry(fixture)
+        retained.path.unlink()
+        retained.marker.unlink()
+    elif damage == "recursive":
+        previous["schema"] = "loom.nebius-pool-startup-repair-operation.v4"
+    elif damage == "private_drift":
+        Path(previous["inputs_path"]).write_bytes(b"{}")
+    elif damage == "same_id":
+        operation["operation_id"] = previous["operation_id"]
+    elif damage == "same_source":
+        operation["source_sha"] = operation["candidate"] = previous["source_sha"]
+    elif damage == "other_parent":
+        operation["original_operation_id"] = str(uuid4())
+    elif damage == "injected_binding":
+        wrapper["binding"] = fixture[-1].model_dump(mode="json")
+    else:
+        private_state._atomic_json(private_image_repair[2], {"schema": "loom.nebius-manager-schema.v1",
+            "source_sha": previous["source_sha"], "revision": "0174"})
+    save_private(operation, wrapper)
+    with pytest.raises(EntryError):
+        load_image_repair_inputs(operation)
 
 
+@pytest.mark.parametrize("damage", [None, "old_operation", "old_private", "legacy_binding"])
 def test_targeted_image_private_entry_requires_matching_operation_and_binding_versions(
-        private_image_repair, image_repair_case):
+        private_image_repair, image_repair_case, damage):
     from scripts.ops.nebius_management_entry import EntryError
     from scripts.ops.nebius_pool_image_entry import load_image_repair_inputs
     from tests.ops.test_nebius_pool_startup_repair import save_private
@@ -764,49 +733,41 @@ def test_targeted_image_private_entry_requires_matching_operation_and_binding_ve
     from scripts.ops import nebius_certificates as private_state
 
     private_state._private_directory(Path(operation["inputs_path"]).parent)
-    original_operation, original_payload = operation, payload
-    for damage in ("old_operation", "old_private", "legacy_binding", None):
-        operation, payload = copy.deepcopy((original_operation, original_payload))
-        if damage == "old_operation":
-            operation["schema"] = "loom.nebius-pool-startup-repair-operation.v2"
-        elif damage == "old_private":
-            payload["schema_version"] = "loom.nebius-pool-manager-image-private-inputs.v1"
-        elif damage == "legacy_binding":
-            del payload["binding"]["schema_version"], payload["binding"]["target"]
-        save_private(operation, payload)
-        if damage is not None:
-            with pytest.raises(EntryError):
-                load_image_repair_inputs(operation)
-        else:
-            context = load_image_repair_inputs(operation)
-            assert context.original == original and context.inputs.binding.target == "collector"
+    if damage == "old_operation":
+        operation["schema"] = "loom.nebius-pool-startup-repair-operation.v2"
+    elif damage == "old_private":
+        payload["schema_version"] = "loom.nebius-pool-manager-image-private-inputs.v1"
+    elif damage == "legacy_binding":
+        del payload["binding"]["schema_version"], payload["binding"]["target"]
+    save_private(operation, payload)
+    if damage is not None:
+        with pytest.raises(EntryError):
+            load_image_repair_inputs(operation)
+    else:
+        context = load_image_repair_inputs(operation)
+        assert context.original == original and context.inputs.binding.target == "collector"
 
 
-def test_image_entry_rejects_unqualified_source_schema_or_parent(private_image_repair):
+@pytest.mark.parametrize("damage", ["schema_source", "schema_revision", "original_hash", "inputs_hash", "candidate", "closure"])
+def test_image_entry_rejects_unqualified_source_schema_or_parent(private_image_repair, damage):
     from scripts.ops import nebius_certificates as private_state
     from scripts.ops.nebius_management_entry import EntryError
     from scripts.ops.nebius_pool_image_entry import load_image_repair_inputs
     from tests.ops.test_nebius_pool_startup_repair import save_private
 
-    original_operation, original_payload, proof, _ = private_image_repair
-    proof_bytes = proof.read_bytes()
-    for damage in ("schema_source", "schema_revision", "original_hash", "inputs_hash", "candidate", "closure"):
-        operation, payload = copy.deepcopy((original_operation, original_payload))
-        if damage.startswith("schema_"):
-            content = json.loads(proof_bytes)
-            content["source_sha" if damage == "schema_source" else "revision"] = "a" * 40 if damage == "schema_source" else "0174"
-            private_state._atomic_json(proof, content)
-        elif damage == "candidate":
-            payload["binding"]["candidate"]["candidate_sha"] = "f" * 40
-        else:
-            field = {"original_hash": "original_operation_sha256", "inputs_hash": "inputs_sha256", "closure": "closure_sha256"}[damage]
-            payload["binding"][field] = "a" * 64
-        save_private(operation, payload)
-        try:
-            with pytest.raises(EntryError):
-                load_image_repair_inputs(operation)
-        finally:
-            proof.write_bytes(proof_bytes)
+    operation, payload, proof, _ = private_image_repair
+    if damage.startswith("schema_"):
+        content = json.loads(proof.read_bytes())
+        content["source_sha" if damage == "schema_source" else "revision"] = "a" * 40 if damage == "schema_source" else "0174"
+        private_state._atomic_json(proof, content)
+    elif damage == "candidate":
+        payload["binding"]["candidate"]["candidate_sha"] = "f" * 40
+    else:
+        field = {"original_hash": "original_operation_sha256", "inputs_hash": "inputs_sha256", "closure": "closure_sha256"}[damage]
+        payload["binding"][field] = "a" * 64
+    save_private(operation, payload)
+    with pytest.raises(EntryError):
+        load_image_repair_inputs(operation)
 
 
 @pytest.mark.parametrize("continued,damage", [
@@ -913,9 +874,8 @@ def test_late_isolation_after_legacy_opening_cannot_lead_to_a_manager_stop(image
 
 @pytest.mark.parametrize(("moment", "loss"), [("prepared", None), ("intent", None), ("prepared_fence", None), ("late_isolate", None),
     ("late_shutdown", "before"), ("late_shutdown", "after"),
-    ("late_shutdown", "conflict")])
+    ("late_shutdown", "conflict"), ("stopped", None)])
 @pytest.mark.timeout(420)
-@pytest.mark.parametrize('runtime_inputs', [('production', 'development')], indirect=True)
 def test_legacy_fence_resumes_image_enrollment_without_rewriting_frozen_evidence(image_repair_case, monkeypatch, moment, loss, request):
     from types import SimpleNamespace
 
@@ -937,7 +897,6 @@ def test_legacy_fence_resumes_image_enrollment_without_rewriting_frozen_evidence
     else:
         image_api.failure = ("isolate", "before")
         assert switch(image_repair_case, image_api)["status"] == "pending_manager_image_outcome"
-        version = image_api.pending[0]["metadata"]["resourceVersion"]
     api = ShutdownAPI((context.request, None, None, remote.startup, None, state.parent))
     api.state = state
     args = dict(request=context.request, api=api, state_dir=state, anchor_dir=anchor)
@@ -958,15 +917,16 @@ def test_legacy_fence_resumes_image_enrollment_without_rewriting_frozen_evidence
                 fence_pool_startup(**args)
         else:
             assert fence_pool_startup(**args)["status"] == "startup_writes_fenced"
-        if moment == "late_shutdown":
+        if moment in {"late_shutdown", "stopped"}:
             stop = api.stop_workload
 
             def uncertain(key_, before, desired, **kwargs):
-                api.stop_failure = "before" if key_ == key else None
+                api.stop_failure = "before" if moment == "late_shutdown" and key_ == key else None
                 return stop(key_, before, desired, **kwargs)
 
             legacy.setattr(api, "stop_workload", uncertain)
-            assert stop_pool_successors(**args)["status"] == "pending_shutdown_outcome"
+            assert stop_pool_successors(**args)["status"] == (
+                "pending_shutdown_outcome" if moment == "late_shutdown" else "pool_successors_stopped")
     frozen = {path: path.read_bytes() for path in (state / "startup-fence.json",
         anchor / (context.operation["operation_id"] + "-startup-fence.json"))
         if moment != "prepared_fence" or path.parent == anchor}
@@ -1040,6 +1000,7 @@ def test_legacy_fence_resumes_image_enrollment_without_rewriting_frozen_evidence
     assert "loom.nebius/manager-image-repair" not in actual["metadata"].get("annotations", {})
     assert all(path.read_bytes() == raw for path, raw in frozen.items())
     if moment != "prepared":
+        version = entry(image_repair_case).record["phases"]["isolate"]["before_resource_version"]
         assert actual["metadata"]["resourceVersion"] != version
         remote.startup.documents[key]["metadata"]["resourceVersion"] = version
         with pytest.raises(ValueError):
@@ -1047,7 +1008,6 @@ def test_legacy_fence_resumes_image_enrollment_without_rewriting_frozen_evidence
 
 
 @pytest.mark.timeout(600)
-@pytest.mark.parametrize('runtime_inputs', [('production', 'development')], indirect=True)
 def test_legacy_completion_preserves_receipt_and_carries_unstarted_image_ancestry(image_repair_case, monkeypatch):
     from types import SimpleNamespace
 
