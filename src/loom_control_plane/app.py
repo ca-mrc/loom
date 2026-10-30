@@ -6,6 +6,7 @@ import asyncio
 import os
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
+from typing import cast
 
 from fastapi import FastAPI
 from prometheus_client import make_asgi_app
@@ -13,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 
 from loom.admin_secret import AdminSecretVerifier, load_optional_admin_secret_verifier
 from loom.db.schema_startup import assert_schema_at_head
+from loom.execution_contract import ExecutionPlacementPolicy
 from loom.execution_image_admission import ImageAdmissionKeyring
 from loom.pipeline.artifact_commit import ArtifactCommitService
 from loom.service_execution_backend import local_execution_enabled
@@ -258,6 +260,7 @@ def create_app(
                     pool_id=settings.service_execution_scheduler_pool_id,
                     image_admission_keyring=image_keyring,
                     interval_seconds=settings.service_execution_scheduler_interval_sec,
+                    placement_policy=cast(ExecutionPlacementPolicy, settings.service_execution_placement_policy),
                     maximum_deadline_seconds=(
                         settings.service_execution_scheduler_max_deadline_sec
                     ),

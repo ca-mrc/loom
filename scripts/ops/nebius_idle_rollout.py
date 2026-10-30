@@ -319,7 +319,9 @@ def candidate_manifests(sha: str) -> Iterator[Path]:
     """Keep current operator fixes while rendering the selected candidate's YAML."""
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise DeploymentError("invalid candidate commit")
-    result = subprocess.run(["git", "archive", sha, "deploy/k8s", "src/loom", "scripts/ops/render_nebius_platform.py"], cwd=ROOT, capture_output=True, check=False)
+    # Renderer dependencies include actuator/gateway contracts. Keep every
+    # import on this exact candidate rather than falling back to installed code.
+    result = subprocess.run(["git", "archive", sha], cwd=ROOT, capture_output=True, check=False)
     if result.returncode:
         raise DeploymentError("candidate manifest source unavailable")
     with tempfile.TemporaryDirectory(prefix="loom-candidate-manifests-") as directory:
