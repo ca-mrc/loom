@@ -43,6 +43,7 @@ from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.egress_client_pool import EgressClientPool
 from loom_llm_gateway.rate_card import RateCardCache
+from loom_llm_gateway.responses_probe import ProbeBackoff
 from tests.integration.gateway_db import delete_gateway_trial, insert_gateway_trial
 
 _TEST_MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
@@ -330,8 +331,9 @@ async def test_null_probes_then_dispatches_and_caches(
     route_setup,
     postgres_url: str,
 ) -> None:
-    app, jwt, conn_id, _captures = route_setup
+    app, jwt, conn_id, captures = route_setup
     # Leave responses_api_supported as NULL (fixture default).
+    captures["route_response"]["/responses"] = httpx.Response(404)  # type: ignore[index]
 
     r = await _post_responses(app, jwt)
 
@@ -341,7 +343,7 @@ async def test_null_probes_then_dispatches_and_caches(
 
     # After the request settles, the DB should carry the probe finding.
     supported, probed_at = await _read_probe_state(postgres_url, conn_id)
-    assert supported is False  # 504 on /responses → classified unsupported
+    assert supported is False  # 404 on /responses → classified unsupported
     assert probed_at is not None
 
 
@@ -409,7 +411,8 @@ async def test_stale_true_is_reprobed(
     """Even a cached TRUE gets re-checked once it ages past the TTL —
     upstream config drift should not silently reintroduce the 40-min
     hang the whole probe exists to prevent."""
-    app, jwt, conn_id, _captures = route_setup
+    app, jwt, conn_id, captures = route_setup
+    captures["route_response"]["/responses"] = httpx.Response(404)  # type: ignore[index]
     # Set cached TRUE with a 48h-old probed_at (assumed TTL is 24h).
     await _set_probe_state(
         postgres_url,
@@ -421,9 +424,69 @@ async def test_stale_true_is_reprobed(
     await _post_responses(app, jwt)
 
     # After the request, the cache should have been refreshed to FALSE
-    # (the fixture's /responses handler returns 504) — proving we
+    # (/responses now returns 404) — proving we
     # re-probed rather than trusted the stale bool.
     supported, probed_at = await _read_probe_state(postgres_url, conn_id)
     assert supported is False
     assert probed_at is not None
     assert probed_at > datetime.now(UTC) - timedelta(minutes=1)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Transient upstream failure — translate now, cache nothing, retry soon
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "previous",
+    [None, True],
+    ids=["unprobed", "expired-positive"],
+)
+async def test_transient_probe_failure_is_not_cached_and_recovers(
+    route_setup,
+    postgres_url: str,
+    previous: bool | None,
+) -> None:
+    app, jwt, conn_id, captures = route_setup
+    probed_at = datetime.now(UTC) - timedelta(hours=48) if previous else None
+    await _set_probe_state(postgres_url, conn_id, supported=previous, probed_at=probed_at)
+    now = [0.0]
+    app.state.responses_probe_backoff = ProbeBackoff(clock=lambda: now[0])
+    requests: list[httpx.Request] = captures["requests"]  # type: ignore[assignment]
+
+    def native_paths() -> list[str]:
+        return [req.url.path for req in requests if req.url.path.endswith("/responses")]
+
+    # The fixture's /responses returns 504: this request still gets an answer.
+    assert (await _post_responses(app, jwt)).status_code == 200
+    assert len(native_paths()) == 1
+    assert await _read_probe_state(postgres_url, conn_id) == (previous, probed_at)
+
+    # Inside the backoff nothing probes, and the request still translates.
+    assert (await _post_responses(app, jwt)).status_code == 200
+    assert len(native_paths()) == 1
+
+    # Upstream recovers: the next probe after the backoff restores native.
+    captures["route_response"]["/responses"] = httpx.Response(  # type: ignore[index]
+        200,
+        json={
+            "id": "resp_native",
+            "object": "response",
+            "model": "glm-5.1-thinking",
+            "output": [],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+            "status": "completed",
+        },
+    )
+    now[0] += 61
+    assert (await _post_responses(app, jwt)).json()["id"] == "resp_native"
+    assert len(native_paths()) == 3  # the probe, then the native call
+    supported, recovered_at = await _read_probe_state(postgres_url, conn_id)
+    assert supported is True
+    assert recovered_at is not None
+    assert recovered_at > datetime.now(UTC) - timedelta(minutes=1)
+    assert await _recorded_routes(postgres_url) == [
+        "chat_translation",
+        "chat_translation",
+        "native_responses",
+    ]

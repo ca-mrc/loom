@@ -3,11 +3,11 @@ upstream. Used by `routes/responses.py` to decide whether to dispatch a
 codex-shaped request through the native `POST /v1/responses` path or
 through the existing `responses_chat_compat` translator.
 
-Fail-closed policy: any 5xx / timeout / connect-error is classified as
-"unsupported" so the shim runs and codex sees a real translated response
-instead of hanging on a 40-min agent-timeout window. False negatives
-here just cost one config knob at startup; false positives would let
-codex hang.
+Availability is not capability: a 5xx / timeout / connect-error says the
+upstream is unwell right now, not that it lacks Responses, so it is reported as
+transient and never cached. The caller still sends that request through the
+shim so codex sees a real translated response instead of hanging on a 40-min
+agent-timeout window, and waits out `ProbeBackoff` before probing again.
 
 The probe uses a *minimal but complete* Responses payload —
 `{"model": "<sentinel>", "input": "loom-probe", "max_output_tokens": 1}` —
@@ -26,8 +26,11 @@ Reference: docs/architecture/responses-api.md
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 import httpx
 
@@ -39,6 +42,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _PROBE_TIMEOUT_SEC = 5.0
+_TRANSIENT_PROBE_BACKOFF_SEC = 60.0
 
 _SUPPORTED_STATUSES = frozenset({200, 400, 401})
 _UNSUPPORTED_STATUSES = frozenset({404, 501})
@@ -61,10 +65,42 @@ class ProbeOutcome:
     - `supported = None`: probe was inconclusive (ambiguous 4xx that
       wasn't 400/401/404). Caller should keep the previously-cached
       value if any, or fall back to the existing per-request behaviour.
+    - `transient = True` (with `supported = None`): the upstream was
+      unavailable, so the probe learned nothing about Responses. Callers
+      must not cache it.
     """
 
     supported: bool | None
     error_detail: str | None
+    transient: bool = False
+
+
+class ProbeBackoff:
+    """Pauses probing a connection after a transient failure.
+
+    In-process: each replica probes a struggling upstream at most once per
+    window, and a restart only costs one more probe. Entries are bounded by
+    the number of connections and removed on expiry or a conclusive probe.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._until: dict[UUID, float] = {}
+
+    def active(self, connection_id: UUID) -> bool:
+        until = self._until.get(connection_id)
+        if until is None:
+            return False
+        if self._clock() < until:
+            return True
+        del self._until[connection_id]
+        return False
+
+    def record(self, connection_id: UUID) -> None:
+        self._until[connection_id] = self._clock() + _TRANSIENT_PROBE_BACKOFF_SEC
+
+    def clear(self, connection_id: UUID) -> None:
+        self._until.pop(connection_id, None)
 
 
 def classify_probe_status(status_code: int) -> bool | None:
@@ -73,10 +109,10 @@ def classify_probe_status(status_code: int) -> bool | None:
         return True
     if status_code in _UNSUPPORTED_STATUSES:
         return False
-    if 500 <= status_code < 600:
-        return False
     # Other 4xx (403, 429, 422, …): endpoint is reachable but the
     # response neither confirms nor denies Responses-API semantics.
+    # 5xx (other than 501) says nothing about Responses either; `_run_probe`
+    # reports those as transient.
     return None
 
 
@@ -160,8 +196,9 @@ async def _run_probe(
             reason,
         )
         return ProbeOutcome(
-            supported=False,
+            supported=None,
             error_detail=f"transport_{reason.lower()}",
+            transient=True,
         )
     verdict = classify_probe_status(response.status_code)
     if verdict is True:
@@ -170,6 +207,12 @@ async def _run_probe(
         return ProbeOutcome(
             supported=False,
             error_detail=f"upstream_{response.status_code}",
+        )
+    if response.status_code >= 500:
+        return ProbeOutcome(
+            supported=None,
+            error_detail=f"upstream_{response.status_code}",
+            transient=True,
         )
     # Ambiguous 4xx.
     return ProbeOutcome(

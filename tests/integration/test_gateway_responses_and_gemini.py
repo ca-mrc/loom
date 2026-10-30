@@ -9,13 +9,15 @@ on the request URL host/path.
 import base64
 import json
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from pydantic import SecretStr
-from sqlalchemy import create_engine, delete, insert, select, text
+from sqlalchemy import Engine, create_engine, delete, insert, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -27,6 +29,7 @@ from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.egress_client_pool import EgressClientPool
 from loom_llm_gateway.rate_card import RateCardCache
+from loom_llm_gateway.responses_probe import ProbeBackoff
 from tests.integration.gateway_db import (
     delete_gateway_trial,
     delete_team_and_quota,
@@ -479,11 +482,19 @@ async def test_responses_routes_provider_connection_from_step_jwt(
     assert row["team_id"] == team_id
 
 
-async def test_execution_attempt_responses_uses_exactly_once_provider_ledger(
-    gateway_with_provider_connection,
-    postgres_url: str,
-) -> None:
-    app, _trial_jwt, team_id, _trial_id, connection_id, captures = gateway_with_provider_connection
+@dataclass(frozen=True)
+class _SeededAttempt:
+    run_id: UUID
+    attempt_id: UUID
+    worker_id: UUID
+    rate_card_id: str
+    step_jwt: str
+
+
+def _seed_execution_attempt(
+    engine: Engine, app: FastAPI, team_id: UUID, connection_id: UUID
+) -> _SeededAttempt:
+    """A running attempt with a provider budget, bound to `connection_id`."""
     run_id, stage_id, attempt_id, worker_id = uuid4(), uuid4(), uuid4(), uuid4()
     token_id, binding_id, source_id = uuid4(), uuid4(), uuid4()
     binding_digest = "sha256:" + "b" * 64
@@ -503,172 +514,197 @@ async def test_execution_attempt_responses_uses_exactly_once_provider_ledger(
     }
     now = datetime.now(UTC)
     rate_card_id = f"card-terminalgen-{run_id}"
-    engine = create_engine(postgres_url)
-    try:
-        with engine.begin() as connection:
-            connection.execute(
-                text("""
-                    UPDATE provider_connections
-                    SET status='valid',pricing_source='rate-card',rate_card_provider='openai'
-                    WHERE id=:id
-                """),
-                {"id": connection_id},
-            )
-            connection.execute(
-                insert(RateCard).values(
-                    id=rate_card_id,
-                    captured_at=now,
-                    table={
-                        "entries": [
-                            {
-                                "provider": "openai",
-                                "model": "gpt-5",
-                                "input_per_mtok": 5.0,
-                                "output_per_mtok": 10.0,
-                                "cache_read_per_mtok": 0.5,
-                                "cache_write_per_mtok": 6.25,
-                            }
-                        ]
-                    },
-                )
-            )
-            connection.execute(
-                text("""
-                    INSERT INTO workers (
-                        id,hostname,version,capabilities,registered_at,last_seen_at,status
-                    ) VALUES (:id,:hostname,'test','[]'::jsonb,:now,:now,'active')
-                """),
-                {"id": worker_id, "hostname": f"provider-ledger-{worker_id}", "now": now},
-            )
-            connection.execute(
-                text("""
-                    INSERT INTO pipeline_runs (
-                        id,team_id,submission_policy,recipe_name,recipe_version,recipe_digest,
-                        graph_spec_json,graph_spec_digest,parameters_json,parameters_digest,
-                        resolved_inputs_json,budget_json,request_digest,idempotency_key,state
-                    ) VALUES (
-                        :id,:team,'ordinary','terminalgen-authoring',1,:digest,
-                        '{}'::jsonb,:digest,'{}'::jsonb,:digest,'[]'::jsonb,'{}'::jsonb,
-                        :digest,:key,'running'
-                    )
-                """),
-                {
-                    "id": run_id,
-                    "team": team_id,
-                    "digest": "sha256:" + "a" * 64,
-                    "key": f"provider-ledger-{run_id}",
-                },
-            )
-            connection.execute(
-                text("""
-                    INSERT INTO pipeline_stage_runs (
-                        id,pipeline_run_id,node_key,shard_key,node_kind,state,
-                        resolved_execution_spec_json,resolved_execution_spec_bytes,
-                        execution_spec_digest,resource_profile_json,resource_profile_digest,
-                        provider_connection_ref,resolved_input_bindings_json,
-                        resolved_input_bindings_digest,failure_policy,attempt_count,
-                        claimed_at,started_at
-                    ) VALUES (
-                        :id,:run,'generate_card_00','singleton','container','running',
-                        CAST(:spec AS jsonb),:spec_bytes,:spec_digest,'{}'::jsonb,:digest,
-                        :connection,'[]'::jsonb,:inputs_digest,'fail_run',1,:now,:now
-                    )
-                """),
-                {
-                    "id": stage_id,
-                    "run": run_id,
-                    "spec": json.dumps(execution_spec),
-                    "spec_bytes": canonical_document(execution_spec),
-                    "spec_digest": execution_spec_digest,
-                    "digest": "sha256:" + "d" * 64,
-                    "connection": connection_id,
-                    "inputs_digest": canonical_digest([]),
-                    "now": now,
-                },
-            )
-            connection.execute(
-                text("""
-                    INSERT INTO execution_attempts (
-                        id,stage_run_id,attempt_number,state,worker_id,claim_id,lease_epoch,
-                        lease_token_digest,lease_expires_at,step_jwt_id,
-                        execution_authorization_json,execution_authorization_bytes,
-                        execution_authorization_digest,queued_at,claimed_at,started_at
-                    ) VALUES (
-                        :id,:stage,1,'running',:worker,:claim,1,:lease_digest,:expires,:jti,
-                        CAST(:authorization AS jsonb),:authorization_bytes,
-                        :authorization_digest,:now,:now,:now
-                    )
-                """),
-                {
-                    "id": attempt_id,
-                    "stage": stage_id,
-                    "worker": worker_id,
-                    "claim": uuid4(),
-                    "lease_digest": "sha256:" + "e" * 64,
-                    "expires": now + timedelta(minutes=5),
-                    "jti": token_id,
-                    "authorization": json.dumps(authorization),
-                    "authorization_bytes": canonical_document(authorization),
-                    "authorization_digest": authorization_digest,
-                    "now": now,
-                },
-            )
-            connection.execute(
-                text("""
-                    INSERT INTO pipeline_run_control_bindings (
-                        id,pipeline_run_id,logical_name,kind,node_key,source_object_id,
-                        source_version,snapshot_json,snapshot_bytes,snapshot_sha256,
-                        provider_connection_id,provider_request_limit,
-                        provider_cost_limit_microusd,per_call_timeout_seconds
-                    ) VALUES (
-                        :id,:run,'terminalgen_generate_card_00','provider',
-                        'generate_card_00',:source,1,CAST(:snapshot AS jsonb),
-                        :snapshot_bytes,:digest,:connection,2,10000,30
-                    )
-                """),
-                {
-                    "id": binding_id,
-                    "run": run_id,
-                    "source": source_id,
-                    "snapshot": json.dumps(binding_snapshot),
-                    "snapshot_bytes": canonical_document(binding_snapshot),
-                    "digest": binding_digest,
-                    "connection": connection_id,
-                },
-            )
-            connection.execute(
-                text("""
-                    INSERT INTO pipeline_budget_ledgers (
-                        pipeline_run_id,provider_limit_microusd,gpu_limit_seconds,
-                        artifact_limit_bytes,stage_run_limit,attempt_limit,wall_deadline_at
-                    ) VALUES (:run,10000,0,0,1,1,:deadline)
-                """),
-                {"run": run_id, "deadline": now + timedelta(hours=1)},
-            )
-            connection.execute(
-                text("""
-                    INSERT INTO execution_attempt_provider_budgets (
-                        attempt_id,binding_snapshot_sha256,request_limit,
-                        cost_limit_microusd,per_call_timeout_seconds
-                    ) VALUES (:attempt,:binding,2,10000,30)
-                """),
-                {"attempt": attempt_id, "binding": binding_digest},
-            )
-
-        step_jwt = mint_step_jwt(
-            team_id=team_id,
-            execution_attempt_id=attempt_id,
-            step_id="generate_card_00",
-            ttl_sec=300,
-            signing_key=app.state.settings.step_jwt_signing_key.get_secret_value(),
-            provider_connection_id=connection_id,
-            provider_connection_id_bound=True,
-            step_jwt_id=token_id,
-            execution_attempt_lease_epoch=1,
-            execution_spec_digest=execution_spec_digest,
-            control_binding_snapshot_digest=binding_digest,
-            execution_authorization_digest=authorization_digest,
+    with engine.begin() as connection:
+        connection.execute(
+            text("""
+                UPDATE provider_connections
+                SET status='valid',pricing_source='rate-card',rate_card_provider='openai'
+                WHERE id=:id
+            """),
+            {"id": connection_id},
         )
+        connection.execute(
+            insert(RateCard).values(
+                id=rate_card_id,
+                captured_at=now,
+                table={
+                    "entries": [
+                        {
+                            "provider": "openai",
+                            "model": "gpt-5",
+                            "input_per_mtok": 5.0,
+                            "output_per_mtok": 10.0,
+                            "cache_read_per_mtok": 0.5,
+                            "cache_write_per_mtok": 6.25,
+                        }
+                    ]
+                },
+            )
+        )
+        connection.execute(
+            text("""
+                INSERT INTO workers (
+                    id,hostname,version,capabilities,registered_at,last_seen_at,status
+                ) VALUES (:id,:hostname,'test','[]'::jsonb,:now,:now,'active')
+            """),
+            {"id": worker_id, "hostname": f"provider-ledger-{worker_id}", "now": now},
+        )
+        connection.execute(
+            text("""
+                INSERT INTO pipeline_runs (
+                    id,team_id,submission_policy,recipe_name,recipe_version,recipe_digest,
+                    graph_spec_json,graph_spec_digest,parameters_json,parameters_digest,
+                    resolved_inputs_json,budget_json,request_digest,idempotency_key,state
+                ) VALUES (
+                    :id,:team,'ordinary','terminalgen-authoring',1,:digest,
+                    '{}'::jsonb,:digest,'{}'::jsonb,:digest,'[]'::jsonb,'{}'::jsonb,
+                    :digest,:key,'running'
+                )
+            """),
+            {
+                "id": run_id,
+                "team": team_id,
+                "digest": "sha256:" + "a" * 64,
+                "key": f"provider-ledger-{run_id}",
+            },
+        )
+        connection.execute(
+            text("""
+                INSERT INTO pipeline_stage_runs (
+                    id,pipeline_run_id,node_key,shard_key,node_kind,state,
+                    resolved_execution_spec_json,resolved_execution_spec_bytes,
+                    execution_spec_digest,resource_profile_json,resource_profile_digest,
+                    provider_connection_ref,resolved_input_bindings_json,
+                    resolved_input_bindings_digest,failure_policy,attempt_count,
+                    claimed_at,started_at
+                ) VALUES (
+                    :id,:run,'generate_card_00','singleton','container','running',
+                    CAST(:spec AS jsonb),:spec_bytes,:spec_digest,'{}'::jsonb,:digest,
+                    :connection,'[]'::jsonb,:inputs_digest,'fail_run',1,:now,:now
+                )
+            """),
+            {
+                "id": stage_id,
+                "run": run_id,
+                "spec": json.dumps(execution_spec),
+                "spec_bytes": canonical_document(execution_spec),
+                "spec_digest": execution_spec_digest,
+                "digest": "sha256:" + "d" * 64,
+                "connection": connection_id,
+                "inputs_digest": canonical_digest([]),
+                "now": now,
+            },
+        )
+        connection.execute(
+            text("""
+                INSERT INTO execution_attempts (
+                    id,stage_run_id,attempt_number,state,worker_id,claim_id,lease_epoch,
+                    lease_token_digest,lease_expires_at,step_jwt_id,
+                    execution_authorization_json,execution_authorization_bytes,
+                    execution_authorization_digest,queued_at,claimed_at,started_at
+                ) VALUES (
+                    :id,:stage,1,'running',:worker,:claim,1,:lease_digest,:expires,:jti,
+                    CAST(:authorization AS jsonb),:authorization_bytes,
+                    :authorization_digest,:now,:now,:now
+                )
+            """),
+            {
+                "id": attempt_id,
+                "stage": stage_id,
+                "worker": worker_id,
+                "claim": uuid4(),
+                "lease_digest": "sha256:" + "e" * 64,
+                "expires": now + timedelta(minutes=5),
+                "jti": token_id,
+                "authorization": json.dumps(authorization),
+                "authorization_bytes": canonical_document(authorization),
+                "authorization_digest": authorization_digest,
+                "now": now,
+            },
+        )
+        connection.execute(
+            text("""
+                INSERT INTO pipeline_run_control_bindings (
+                    id,pipeline_run_id,logical_name,kind,node_key,source_object_id,
+                    source_version,snapshot_json,snapshot_bytes,snapshot_sha256,
+                    provider_connection_id,provider_request_limit,
+                    provider_cost_limit_microusd,per_call_timeout_seconds
+                ) VALUES (
+                    :id,:run,'terminalgen_generate_card_00','provider',
+                    'generate_card_00',:source,1,CAST(:snapshot AS jsonb),
+                    :snapshot_bytes,:digest,:connection,2,10000,30
+                )
+            """),
+            {
+                "id": binding_id,
+                "run": run_id,
+                "source": source_id,
+                "snapshot": json.dumps(binding_snapshot),
+                "snapshot_bytes": canonical_document(binding_snapshot),
+                "digest": binding_digest,
+                "connection": connection_id,
+            },
+        )
+        connection.execute(
+            text("""
+                INSERT INTO pipeline_budget_ledgers (
+                    pipeline_run_id,provider_limit_microusd,gpu_limit_seconds,
+                    artifact_limit_bytes,stage_run_limit,attempt_limit,wall_deadline_at
+                ) VALUES (:run,10000,0,0,1,1,:deadline)
+            """),
+            {"run": run_id, "deadline": now + timedelta(hours=1)},
+        )
+        connection.execute(
+            text("""
+                INSERT INTO execution_attempt_provider_budgets (
+                    attempt_id,binding_snapshot_sha256,request_limit,
+                    cost_limit_microusd,per_call_timeout_seconds
+                ) VALUES (:attempt,:binding,2,10000,30)
+            """),
+            {"attempt": attempt_id, "binding": binding_digest},
+        )
+
+    step_jwt = mint_step_jwt(
+        team_id=team_id,
+        execution_attempt_id=attempt_id,
+        step_id="generate_card_00",
+        ttl_sec=300,
+        signing_key=app.state.settings.step_jwt_signing_key.get_secret_value(),
+        provider_connection_id=connection_id,
+        provider_connection_id_bound=True,
+        step_jwt_id=token_id,
+        execution_attempt_lease_epoch=1,
+        execution_spec_digest=execution_spec_digest,
+        control_binding_snapshot_digest=binding_digest,
+        execution_authorization_digest=authorization_digest,
+    )
+    return _SeededAttempt(run_id, attempt_id, worker_id, rate_card_id, step_jwt)
+
+
+def _delete_execution_attempt(engine: Engine, seeded: _SeededAttempt) -> None:
+    with engine.begin() as connection:
+        connection.execute(
+            text("DELETE FROM pipeline_provider_dispatches WHERE execution_attempt_id=:id"),
+            {"id": seeded.attempt_id},
+        )
+        connection.execute(
+            text("DELETE FROM llm_calls WHERE execution_attempt_id=:id"),
+            {"id": seeded.attempt_id},
+        )
+        connection.execute(text("DELETE FROM pipeline_runs WHERE id=:id"), {"id": seeded.run_id})
+        connection.execute(text("DELETE FROM workers WHERE id=:id"), {"id": seeded.worker_id})
+        connection.execute(text("DELETE FROM rate_cards WHERE id=:id"), {"id": seeded.rate_card_id})
+
+
+async def test_execution_attempt_responses_uses_exactly_once_provider_ledger(
+    gateway_with_provider_connection,
+    postgres_url: str,
+) -> None:
+    app, _trial_jwt, team_id, _trial_id, connection_id, captures = gateway_with_provider_connection
+    engine = create_engine(postgres_url)
+    seeded = _seed_execution_attempt(engine, app, team_id, connection_id)
+    attempt_id, step_jwt = seeded.attempt_id, seeded.step_jwt
+    try:
         request_id = uuid4()
         payload = {
             "model": "gpt-5",
@@ -778,18 +814,124 @@ async def test_execution_attempt_responses_uses_exactly_once_provider_ledger(
         assert "secret-timeout-canary" not in timeout_row.request_params
         assert "secret-transport-canary" not in timeout_row.provider_extras
     finally:
+        _delete_execution_attempt(engine, seeded)
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "outage",
+    [httpx.Response(503), "timeout"],
+    ids=["503", "timeout"],
+)
+async def test_execution_attempt_recovers_native_after_transient_probe_failure(
+    gateway_with_provider_connection,
+    postgres_url: str,
+    outage: httpx.Response | str,
+) -> None:
+    """#2054: native-required calls re-probe themselves, without ordinary traffic."""
+    app, _trial_jwt, team_id, _trial_id, connection_id, captures = gateway_with_provider_connection
+    engine = create_engine(postgres_url)
+    seeded = _seed_execution_attempt(engine, app, team_id, connection_id)
+    expired = datetime.now(UTC) - timedelta(hours=48)
+    now = [0.0]
+    app.state.responses_probe_backoff = ProbeBackoff(clock=lambda: now[0])
+
+    def probe_state() -> tuple[bool | None, datetime | None]:
+        with engine.connect() as connection:
+            return tuple(connection.execute(
+                select(
+                    ProviderConnection.responses_api_supported,
+                    ProviderConnection.responses_api_probed_at,
+                ).where(ProviderConnection.id == connection_id)
+            ).one())
+
+    async def call() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+        async with httpx.AsyncClient(transport=transport, base_url="http://gw") as client:
+            return await client.post(
+                "/v1/responses",
+                headers={
+                    "Authorization": f"Bearer {seeded.step_jwt}",
+                    "x-loom-provider-request-id": str(uuid4()),
+                },
+                json={"model": "gpt-5", "input": "hi"},
+            )
+
+    try:
         with engine.begin() as connection:
             connection.execute(
-                text("DELETE FROM pipeline_provider_dispatches WHERE execution_attempt_id=:id"),
-                {"id": attempt_id},
+                update(ProviderConnection)
+                .where(ProviderConnection.id == connection_id)
+                .values(responses_api_supported=True, responses_api_probed_at=expired)
             )
-            connection.execute(
-                text("DELETE FROM llm_calls WHERE execution_attempt_id=:id"),
-                {"id": attempt_id},
+        captures["response" if isinstance(outage, httpx.Response) else "timeout"] = (
+            outage if isinstance(outage, httpx.Response) else True
+        )
+
+        failed = await call()
+        assert failed.status_code == 409, failed.text
+        assert failed.json()["detail"] == (
+            "execution-attempt calls require fresh native Responses support"
+        )
+        assert len(captures["requests"]) == 1
+        assert probe_state() == (True, expired)
+
+        # Inside the backoff the attempt fails without another upstream request.
+        assert (await call()).status_code == 409
+        assert len(captures["requests"]) == 1
+
+        captures.pop("response", None)
+        captures.pop("timeout", None)
+        now[0] += 61
+        recovered = await call()
+        assert recovered.status_code == 200, recovered.text
+        assert len(captures["requests"]) == 3  # the probe, then the native call
+        supported, probed_at = probe_state()
+        assert supported is True
+        assert probed_at is not None
+        assert probed_at > datetime.now(UTC) - timedelta(minutes=1)
+    finally:
+        _delete_execution_attempt(engine, seeded)
+        engine.dispose()
+
+
+async def test_execution_attempt_confirmed_unsupported_is_rejected_until_stale(
+    gateway_with_provider_connection,
+    postgres_url: str,
+) -> None:
+    app, _trial_jwt, team_id, _trial_id, connection_id, captures = gateway_with_provider_connection
+    engine = create_engine(postgres_url)
+    seeded = _seed_execution_attempt(engine, app, team_id, connection_id)
+
+    async def call() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+        async with httpx.AsyncClient(transport=transport, base_url="http://gw") as client:
+            return await client.post(
+                "/v1/responses",
+                headers={
+                    "Authorization": f"Bearer {seeded.step_jwt}",
+                    "x-loom-provider-request-id": str(uuid4()),
+                },
+                json={"model": "gpt-5", "input": "hi"},
             )
-            connection.execute(text("DELETE FROM pipeline_runs WHERE id=:id"), {"id": run_id})
-            connection.execute(text("DELETE FROM workers WHERE id=:id"), {"id": worker_id})
-            connection.execute(text("DELETE FROM rate_cards WHERE id=:id"), {"id": rate_card_id})
+
+    try:
+        for probed_at, probes in (
+            (datetime.now(UTC), 0),
+            (datetime.now(UTC) - timedelta(hours=48), 1),
+        ):
+            with engine.begin() as connection:
+                connection.execute(
+                    update(ProviderConnection)
+                    .where(ProviderConnection.id == connection_id)
+                    .values(responses_api_supported=False, responses_api_probed_at=probed_at)
+                )
+            captures["requests"].clear()
+            captures["response"] = httpx.Response(404)
+            assert (await call()).status_code == 409
+            assert len(captures["requests"]) == probes
+    finally:
+        _delete_execution_attempt(engine, seeded)
         engine.dispose()
 
 

@@ -37,6 +37,7 @@ from loom_llm_gateway.egress_client_pool import EgressClientPool
 from loom_llm_gateway.pod_identity import ExecutionPodReviewer
 from loom_llm_gateway.provider_dispatch import settle_stale_provider_dispatches
 from loom_llm_gateway.rate_card import RateCardCache
+from loom_llm_gateway.responses_probe import ProbeBackoff
 from loom_llm_gateway.routes import (
     admin,
     chat,
@@ -213,6 +214,7 @@ def create_app(settings: GatewaySettings) -> FastAPI:
     # (including ASGI-transport integration tests that skip lifespan)
     # can increment in_flight. Lifespan startup reuses this instance.
     ensure_drain_state(app)
+    app.state.responses_probe_backoff = ProbeBackoff()
     # #547: register middleware BEFORE routers so it wraps every route.
     install_drain_middleware(app)
     app.add_middleware(DispatchAuditMiddleware)
