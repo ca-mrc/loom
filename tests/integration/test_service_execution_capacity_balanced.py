@@ -3,15 +3,15 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import (
+    ExecutionAdmissionPolicy,
     ExecutionAdmissionReservation,
     ExecutionProvisioningAuthorization,
     ServiceExecutionLease,
 )
-from loom_control_plane.execution_admission import upsert_execution_admission_policy
 from loom_control_plane.service_execution_scheduler import reserve_next_service_execution
 from tests.integration import test_service_execution_leases as fixtures
 from tests.integration.test_nebius_task_image_capacity import native_setup as _native_setup
@@ -30,6 +30,7 @@ async def test_two_healthy_regions_mix_only_when_enabled_and_preserve_global_lim
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(UTC)
     original = fixtures._target
+    policy_id = None
     try:
         async with sessions() as session, session.begin():
             first = await fixtures._seed_ready_trial(session, now=now)
@@ -48,8 +49,11 @@ async def test_two_healthy_regions_mix_only_when_enabled_and_preserve_global_lim
                 policy = await session.get(ExecutionCapacityPolicy, first[1].target_id)
                 policy.observation_max_age_seconds = 10
             if case == "global_limit":
-                await upsert_execution_admission_policy(session, scope_kind="global", scope_key="*",
-                    max_concurrent=1, enabled=True, reason="bounded test", now=now)
+                policy = ExecutionAdmissionPolicy(scope_kind="global", scope_key="*",
+                    max_concurrent=1, enabled=True, reason="bounded test", updated_at=now)
+                session.add(policy)
+                await session.flush()
+                policy_id = policy.id
         chosen = []
         for offset in (20, 21):
             async with sessions() as session, session.begin():
@@ -80,6 +84,12 @@ async def test_two_healthy_regions_mix_only_when_enabled_and_preserve_global_lim
             assert await session.scalar(select(func.count()).select_from(ExecutionAdmissionReservation).where(
                 ExecutionAdmissionReservation.owner_id.in_(own))) == len(chosen)
     finally:
+        # This policy is global rather than owned by a seeded team/target, so
+        # the shared service-execution cleanup cannot identify it for us.
+        if policy_id is not None:
+            async with sessions() as session, session.begin():
+                await session.execute(delete(ExecutionAdmissionPolicy).where(
+                    ExecutionAdmissionPolicy.id == policy_id))
         await engine.dispose()
 
 

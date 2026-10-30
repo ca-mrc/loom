@@ -160,21 +160,37 @@ def test_failed_check_cli_reports_failed_without_leaking_exception(monkeypatch, 
     assert 'private database' not in output.out + output.err + (tmp_path / 'summary').read_text()
 
 
-def test_candidate_manifest_archive_is_pinned_and_cleaned(monkeypatch):
+@pytest.mark.parametrize('render_fails', [False, True])
+def test_candidate_manifest_archive_is_pinned_and_cleaned(monkeypatch, render_fails):
     import io
     import tarfile
+    from contextlib import nullcontext
+
+    files = {
+        'deploy/k8s/candidate.yaml': b'candidate manifest',
+        'src/loom_execution_actuator/task_image_settings.py': b'candidate builder settings',
+        'src/loom_llm_gateway/task_egress.py': b'candidate gateway contract',
+        'pyproject.toml': b'candidate dependencies',
+        'uv.lock': b'candidate dependency lock',
+    }
     blob = io.BytesIO()
     with tarfile.open(fileobj=blob, mode='w') as archive:
-        row = tarfile.TarInfo('deploy/k8s/candidate.yaml')
-        payload = b'candidate manifest'
-        row.size = len(payload)
-        archive.addfile(row, io.BytesIO(payload))
+        for name, payload in files.items():
+            row = tarfile.TarInfo(name)
+            row.size = len(payload)
+            archive.addfile(row, io.BytesIO(payload))
     def command(argv, **kwargs):
-        assert argv == ['git', 'archive', SHA, 'deploy/k8s', 'src/loom', 'scripts/ops/render_nebius_platform.py']
+        # No path filters: the renderer must own all exact-candidate imports.
+        assert argv == ['git', 'archive', SHA]
+        assert kwargs == {'cwd': module.ROOT, 'capture_output': True, 'check': False}
         return SimpleNamespace(returncode=0, stdout=blob.getvalue())
     monkeypatch.setattr(module.subprocess, 'run', command)
-    with module.candidate_manifests(SHA) as source:
-        assert (source / 'deploy/k8s/candidate.yaml').read_bytes() == b'candidate manifest'
+    with pytest.raises(RuntimeError, match='render failed') if render_fails else nullcontext():
+        with module.candidate_manifests(SHA) as source:
+            for name, payload in files.items():
+                assert (source / name).read_bytes() == payload
+            if render_fails:
+                raise RuntimeError('render failed')
     assert not source.exists()
 
 
