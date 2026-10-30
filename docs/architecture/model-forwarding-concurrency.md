@@ -78,8 +78,11 @@ go test -race ./cmd/loom-execution-runtime
 ```
 
 Docker integration tests require the declared images and disposable PostgreSQL;
-SDK tests use the installed dependency versions (application LiteLLM 1.92.2;
-locked Harbor 0.24.0 / LiteLLM 1.106.4 / OpenAI 2.54.0). Native SDK verification
+SDK tests use the installed dependency versions: application LiteLLM 1.92.2;
+the cached pinned-source Harbor fixture has Harbor 0.24.0, LiteLLM 1.106.4 and
+OpenAI 2.54.0. These are verified fixture versions, not a dependency lock for the
+next candidate image; publication/deployment must read back its actual versions.
+Native SDK verification
 also covers 1001 held requests, actual student/teacher/student and summary calls,
 serializable options/trajectories, default versus explicit-zero retries,
 connection-error recovery, cancellation, streaming close, and owner teardown.
