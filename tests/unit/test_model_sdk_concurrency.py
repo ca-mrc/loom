@@ -370,7 +370,8 @@ async def exercise_harbor_contract() -> dict[str, Any]:
                 assert files and all("AsyncOpenAI" not in f.read_text() for f in files)
                 assert [len(body["messages"]) for body in bodies] == [1, 3, 5, 7]
                 assert [body["model"] for body in bodies] == ["gpt-4.1-mini", "gpt-4o-mini", "gpt-4.1-mini", "gpt-4.1-mini"]
-            assert sdk.is_closed
+                assert not sdk.is_closed()
+            assert sdk.is_closed()
             return {"harbor_role_schedule": "student-teacher-student", "summary": True,
                 "message_counts": [1, 3, 5, 7], "options_and_trajectory_serialized": True, "owned_client_closed": True}
     finally:

@@ -233,6 +233,7 @@ async def test_hosted_terminus_rejects_an_unseeded_beta_plan(tmp_path: Path) -> 
 def _patch_harbor(monkeypatch: Any, *, summarize: bool = False) -> None:
     class Harbor:
         def __init__(self, logs_dir: Path, **kwargs: Any) -> None:
+            self._llm_call_kwargs: dict[str, Any] = {}
             self.path = logs_dir
             assert kwargs["model_name"] == "openai/glm-5.2"
             assert kwargs["llm_kwargs"]["api_key"] == "loom_workload_proxy"
