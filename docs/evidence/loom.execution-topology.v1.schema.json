@@ -166,7 +166,10 @@
       "type": "string"
     },
     "placement_policy": {
-      "const": "environment-local-health-first",
+      "enum": [
+        "environment-local-health-first",
+        "environment-local-capacity-balanced"
+      ],
       "title": "Placement Policy",
       "type": "string"
     },
