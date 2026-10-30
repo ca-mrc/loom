@@ -22,7 +22,14 @@ from tests.integration.test_nebius_pool_application_build_admission import (
 from tests.integration.test_nebius_pool_control import action, operate
 from tests.integration.test_nebius_pool_native_runtime import readback
 from tests.integration.test_nebius_pool_observation_registry import capture_scope
-from tests.integration.test_nebius_pool_registry import machine, publish_placement
+from tests.integration.test_nebius_pool_registry import (
+    BUILD_POOL_CPU_WITH_ONE_BUILD_FREE,
+    BUILD_POOL_NODE_CPU,
+    BUILD_POOL_NODE_MEMORY,
+    BUILD_POOL_NODE_STORAGE,
+    machine,
+    publish_placement,
+)
 from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 
@@ -138,15 +145,16 @@ async def test_cancelled_personal_wait_does_not_protect_capacity_from_another_ow
     from tests.execution_placement_fixtures import placement_fixture
 
     factory, principals, requests, profiles, observer, *_ = await setup_application_pool(
-        environment_registry, build_inputs, occupied_cpu=3000)
+        environment_registry, build_inputs, occupied_cpu=BUILD_POOL_NODE_CPU)
     for request in requests:
         assert (await prepare_application(factory, principals[0], request, profiles)).phase == "waiting"
     async with factory.begin() as session:
         await session.execute(update(NebiusApplicationBuild).where(
             NebiusApplicationBuild.build_id == requests[0].build.build_id).values(desired_state="cancelled"))
     await publish_placement(factory, observer, CapacityPlacement.model_validate(placement_fixture(
-        target_id="pool-test", node_cpu=3000, node_memory=8192, node_storage=32768,
-        requested_cpu=2000, quota_nodes=1)))
+        target_id="pool-test", node_cpu=BUILD_POOL_NODE_CPU, node_memory=BUILD_POOL_NODE_MEMORY,
+        node_storage=BUILD_POOL_NODE_STORAGE, requested_cpu=BUILD_POOL_CPU_WITH_ONE_BUILD_FREE,
+        quota_nodes=1)))
     assert (await prepare_application(factory, principals[0], requests[1], profiles)).phase == "reserved"
 
 

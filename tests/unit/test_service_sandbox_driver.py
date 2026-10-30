@@ -32,6 +32,36 @@ def driver_for(path: Path, *, limit: int = 1024) -> ServiceSandboxDriver:
     )
 
 
+@pytest.mark.parametrize("success", [True, False])
+async def test_private_container_control_keeps_deadline_and_safe_rpc_result(tmp_path, success):
+    import httpx
+
+    requests = []
+    document = {"container": "a" * 64, "argv": ["/loom/compose-tools/busybox", "true"], "timeout_sec": 5}
+
+    def respond(request):
+        requests.append(request)
+        assert request.method == "POST" and request.url.path == "/container-exec"
+        assert json.loads(request.content) == document
+        if not success:
+            return httpx.Response(502, headers={"X-Loom-Sandbox-Error": "container_exec_failed"},
+                                  text="private-daemon-error")
+        return httpx.Response(200, json={"return_code": 75, "stdout": "MTIz", "stderr": "",
+                                        "truncated": False, "duration_sec": .125})
+
+    driver = driver_for(tmp_path / "unused.sock")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond), base_url="http://sandbox") as client:
+        driver._client, driver._started = client, True
+        if success:
+            result = await driver._exec_container(document["container"], document["argv"], timeout_sec=5)
+            assert result.return_code == 75 and result.stdout == b"123" and result.duration_sec == .125
+        else:
+            with pytest.raises(SandboxRPCError, match=r"container_exec.*HTTP 502.*container_exec_failed") as error:
+                await driver._exec_container(document["container"], document["argv"], timeout_sec=5)
+            assert "private" not in str(error.value)
+    assert len(requests) == 1
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("health", [{"ready": True}, {"ready": True, "instance_id": "a" * 32}])
 async def test_socket_rpc_exec_files_and_lifecycle(tmp_path: Path, health: dict) -> None:

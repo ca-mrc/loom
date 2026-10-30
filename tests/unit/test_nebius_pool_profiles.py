@@ -60,7 +60,7 @@ def test_loaded_catalog_drives_both_real_renderers(tmp_path):
     profile_id = participant.targets[0].profile_id
     native = render(participant, build, profiles.task_images[profile_id])
     assert native.job["spec"]["template"]["spec"]["serviceAccountName"] == "build-sa"
-    assert native.resources.cpu_millis == 1000
+    assert native.resources.cpu_millis == 4000
     _, body = inputs()
     body.update(pool_id=participant.pool_id, participant_revision=participant.binding_revision)
     body["key"]["participant_id"] = participant.participant_id

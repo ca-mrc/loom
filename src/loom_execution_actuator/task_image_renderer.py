@@ -55,9 +55,9 @@ class TaskImageJobConfig:
     archive_secret_name: str | None = None
     registry_auth_kind: Literal["docker-config", "nebius"] = "docker-config"
     buildkit_image: str = BUILDKIT_IMAGE
-    cpu_millis: int = 1000
-    memory_mib: int = 2048
-    ephemeral_storage_mib: int = MIN_TASK_IMAGE_EPHEMERAL_STORAGE_MIB
+    cpu_millis: int = 4000
+    memory_mib: int = 4096
+    ephemeral_storage_mib: int = 32768
     max_processes: int = 512
     active_deadline_seconds: int = 1800
     # Authored builds may hardlink files from earlier layers (for example a

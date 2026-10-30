@@ -26,6 +26,7 @@ from tests.integration.test_nebius_application_build_worker import (
 from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
 )
+from tests.integration.test_nebius_pool_registry import BUILD_POOL_NODE_CPU
 from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 
@@ -37,7 +38,7 @@ async def cancel(factory, build_id):
 
 
 async def test_waiting_cancel_retains_request_until_real_pool_tombstone(environment_registry, build_inputs, tmp_path):
-    async with setup_worker(environment_registry, build_inputs, tmp_path, occupied_cpu=3000) as (factory, _, requests, _, worker, _):
+    async with setup_worker(environment_registry, build_inputs, tmp_path, occupied_cpu=BUILD_POOL_NODE_CPU) as (factory, _, requests, _, worker, _):
         request = requests[0]
         await worker.reconcile_once(request.build.build_id, attempt=1)
         before = await saved(factory, request)

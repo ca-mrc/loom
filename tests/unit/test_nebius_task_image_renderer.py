@@ -252,12 +252,12 @@ def test_job_bounds_resources_and_only_builder_has_rootless_exceptions(inputs) -
         for volume in pod["volumes"]
         if "emptyDir" in volume
     }
-    assert sizes == {"build": 16384, "builder-tmp": 16384, "prepare-tmp": 4096, "publish-tmp": 4096}
-    # A build can use >7 GiB scratch plus a small output without a volume
-    # eviction. Aggregate Pod accounting still enforces the same 16 GiB.
+    assert sizes == {"build": 32768, "builder-tmp": 32768, "prepare-tmp": 8192, "publish-tmp": 8192}
+    # A build can use the scratch budget plus a small output without a volume
+    # eviction. Aggregate Pod accounting still enforces the same 32 GiB.
     assert 8192 < sizes["builder-tmp"]
     assert 8192 + 1024 < inputs["config"].ephemeral_storage_mib
-    assert all(container["resources"]["limits"]["ephemeral-storage"] == "16384Mi"
+    assert all(container["resources"]["limits"]["ephemeral-storage"] == "32768Mi"
                for container in pod["initContainers"] + pod["containers"])
     assert sizes["build"] > 512 + 1024 + 1024 + 3072
     assert sizes["prepare-tmp"] > 1024 and sizes["publish-tmp"] > 3072

@@ -21,7 +21,15 @@ from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
 )
 from tests.integration.test_nebius_pool_observation_registry import capture_scope
-from tests.integration.test_nebius_pool_registry import prepare, publish_placement, setup
+from tests.integration.test_nebius_pool_registry import (
+    BUILD_POOL_CPU_WITH_ONE_BUILD_FREE,
+    BUILD_POOL_NODE_CPU,
+    BUILD_POOL_NODE_MEMORY,
+    BUILD_POOL_NODE_STORAGE,
+    prepare,
+    publish_placement,
+    setup,
+)
 from tests.integration.test_nebius_pool_registry import sessions as sessions
 from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_pool_task_image_render import build_inputs
@@ -32,6 +40,9 @@ async def mixed_setup(sessions, *, build_concurrency_limit=2, **kwargs):
     from loom_service.pool_management.capacity import _placement
     from loom_service.pool_management.registry import PoolProfiles
 
+    kwargs.setdefault("node_cpu", BUILD_POOL_NODE_CPU)
+    kwargs.setdefault("node_memory", BUILD_POOL_NODE_MEMORY)
+    kwargs.setdefault("node_storage", BUILD_POOL_NODE_STORAGE)
     participants, principals, requests, execution_profiles, observer = await setup(sessions, **kwargs)
     if build_concurrency_limit != 2:
         async with sessions.begin() as session:
@@ -83,7 +94,7 @@ async def test_concurrent_builds_and_execution_cannot_spend_the_same_capacity(se
     assert sorted(row.phase for row in results) == ["reserved", "reserved", "waiting"]
     async with sessions() as session:
         rows = (await session.scalars(select(NebiusPoolRequest))).all()
-        assert sum(row.cpu_millis for row in rows if row.phase == "reserved") <= 3000
+        assert sum(row.cpu_millis for row in rows if row.phase == "reserved") <= BUILD_POOL_NODE_CPU
         assert await session.scalar(select(func.count()).select_from(TaskImageMaterializationAttempt)) == 0
 
 
@@ -105,9 +116,10 @@ async def test_build_concurrency_is_pool_wide_and_does_not_reserve_idle_executio
 @pytest.mark.parametrize("first_kind", ["build", "execution"])
 async def test_resource_only_mode_charges_each_workload_reservation_against_the_other(sessions, first_kind):
     _, principals, executions, builds, profiles, _ = await mixed_setup(
-        sessions, occupied_cpu=1000, max_nodes=2, quota_nodes=1, build_concurrency_limit=None)
-    # One node has 2 CPUs free: either workload fits alone, but their real
-    # 1 CPU build and 1.5 CPU execution requests cannot both be granted.
+        sessions, occupied_cpu=BUILD_POOL_CPU_WITH_ONE_BUILD_FREE, max_nodes=2, quota_nodes=1,
+        build_concurrency_limit=None)
+    # One node has 4 vCPU free: either a build or a 1.5 vCPU execution fits
+    # alone, and the two reservations cannot both be granted.
     first, second = ((prepare_build, builds[0]), (prepare, executions[1])) if first_kind == "build" else (
         (prepare, executions[0]), (prepare_build, builds[1]))
     assert (await first[0](sessions, principals[0], first[1], profiles)).phase == "reserved"
@@ -116,7 +128,7 @@ async def test_resource_only_mode_charges_each_workload_reservation_against_the_
     async with sessions() as session:
         reserved = (await session.scalars(select(NebiusPoolRequest).where(NebiusPoolRequest.phase == "reserved"))).all()
         assert len(reserved) == 1
-        assert reserved[0].cpu_millis == (1000 if first_kind == "build" else 1500)
+        assert reserved[0].cpu_millis == (4000 if first_kind == "build" else 1500)
 
 
 @pytest.mark.parametrize("build_concurrency_limit", [2, None])
@@ -127,12 +139,14 @@ async def test_resource_only_mode_charges_each_workload_reservation_against_the_
                                            (("production", "staging"), "build")])
 async def test_mixed_waiting_work_uses_class_then_age_not_workload_kind(sessions, classes, winner, build_concurrency_limit):
     _, principals, executions, builds, profiles, observer = await mixed_setup(
-        sessions, occupied_cpu=3000, environment_classes=classes, build_concurrency_limit=build_concurrency_limit)
+        sessions, occupied_cpu=BUILD_POOL_NODE_CPU, environment_classes=classes,
+        build_concurrency_limit=build_concurrency_limit)
     assert (await prepare_build(sessions, principals[0], builds[0], profiles)).phase == "waiting"
     assert (await prepare(sessions, principals[1], executions[1], profiles)).phase == "waiting"
     await publish_placement(sessions, observer, CapacityPlacement.model_validate(placement_fixture(
-        target_id="pool-test", node_cpu=3000, node_memory=8192, node_storage=32768,
-        requested_cpu=1500, quota_nodes=1)))
+        target_id="pool-test", node_cpu=BUILD_POOL_NODE_CPU, node_memory=BUILD_POOL_NODE_MEMORY,
+        node_storage=BUILD_POOL_NODE_STORAGE, requested_cpu=BUILD_POOL_CPU_WITH_ONE_BUILD_FREE,
+        quota_nodes=1)))
     if winner == "build":
         assert (await prepare(sessions, principals[1], executions[1], profiles)).phase == "waiting"
         assert (await prepare_build(sessions, principals[0], builds[0], profiles)).phase == "reserved"
@@ -174,7 +188,8 @@ async def test_personal_and_shared_work_use_distinct_priority_in_the_same_partic
     await registry.create(principal=alice, idempotency_key="mixed-personal-origin", **plan)
     app = plan["prepared"].registration
     participants, principals, executions, builds, profiles, observer = await mixed_setup(sessions,
-        occupied_cpu=3000, data_environment_id=app.data_environment_id, cluster_id=app.cluster_id)
+        occupied_cpu=BUILD_POOL_NODE_CPU, data_environment_id=app.data_environment_id,
+        cluster_id=app.cluster_id)
     origin = PoolWorkOriginV1.model_validate({"kind": "application", "submission_id": uuid4(),
         "data_environment_id": app.data_environment_id, "application": {
             "application_id": app.application_id, "incarnation": app.incarnation,
@@ -191,8 +206,9 @@ async def test_personal_and_shared_work_use_distinct_priority_in_the_same_partic
     with pytest.raises(PoolAdmissionError, match="pool_request_conflict"):
         await personal_prepare(sessions, principals[0], spoofed, profiles)
     await publish_placement(sessions, observer, CapacityPlacement.model_validate(placement_fixture(
-        target_id="pool-test", node_cpu=3000, node_memory=8192, node_storage=32768,
-        requested_cpu=1500, quota_nodes=1)))
+        target_id="pool-test", node_cpu=BUILD_POOL_NODE_CPU, node_memory=BUILD_POOL_NODE_MEMORY,
+        node_storage=BUILD_POOL_NODE_STORAGE, requested_cpu=BUILD_POOL_CPU_WITH_ONE_BUILD_FREE,
+        quota_nodes=1)))
     assert (await personal_prepare(sessions, principals[0], personal_body, profiles)).phase == "waiting"
     shared = await shared_prepare(sessions, principals[0], shared_body, profiles)
     assert shared.phase == "reserved"

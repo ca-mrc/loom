@@ -74,6 +74,7 @@ _SUMMARY = {
 class _MockServer:
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
+        self.summary: dict[str, Any] = _SUMMARY
 
 
 @pytest.fixture
@@ -102,7 +103,7 @@ def mock_resources_server(
     def _handler(request: httpx.Request) -> httpx.Response:
         server.requests.append(request)
         if request.method == "GET" and request.url.path == "/api/v1/monitor/summary":
-            return httpx.Response(200, json=_SUMMARY)
+            return httpx.Response(200, json=server.summary)
         return httpx.Response(404, json={"detail": "not found"})
 
     transport = httpx.MockTransport(_handler)
@@ -151,3 +152,90 @@ def test_resources_status_text_shows_slots_and_pool_breakdown(
     assert "2/2" in out
     assert "Autoscaler" not in out
     assert "desired" not in out
+
+
+def _native_target(target_id: str, **overrides: Any) -> dict[str, Any]:
+    return {
+        "target_id": target_id,
+        "capacity_owner_target_id": target_id,
+        "region": "eu-north1",
+        "pool_id": "nebius-cpu",
+        "desired_state": "active",
+        "policy": {"max_nodes": 8},
+        "observation": {
+            "is_fresh": True,
+            "active_nodes": 3,
+            "occupied_nodes": 2,
+            "pending_jobs": 1,
+        },
+        **overrides,
+    }
+
+
+_NATIVE_SUMMARY = {
+    "resources": {"aggregate": {"current_active_slots": 0, "occupied_slots": 0}, "pools": []},
+    "progress": {
+        "stages": {
+            "image_preparation": 4,
+            "execution_wait": 3,
+            "starting": 2,
+            "running": 20,
+            "archiving": 1,
+        },
+    },
+    "service_execution": {
+        "targets": [
+            _native_target("owner"),
+            # Shares owner's nodes: one row, not double-counted capacity.
+            _native_target("web", capacity_owner_target_id="owner", observation={}),
+            _native_target("old", region="eu-west1", desired_state="retired"),
+        ],
+    },
+}
+
+
+def test_resources_status_text_reports_native_trials_not_empty_worker_slots(
+    mock_resources_server: _MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_resources_server.summary = _NATIVE_SUMMARY
+
+    assert main(["resources", "status"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Running: 20 · Starting: 2 · Waiting: 3 · Preparing images: 4 · Archiving: 1" in out
+    assert out.count("nebius-cpu") == 1
+    assert "eu-west1" not in out
+    row = next(line for line in out.splitlines() if "nebius-cpu" in line).split()
+    assert row == ["eu-north1", "nebius-cpu", "3", "2", "8", "1", "fresh"]
+    assert "Concurrent tasks" not in out
+    assert "no active resource pools" not in out
+
+
+def test_resources_status_text_keeps_worker_pools_beside_native_capacity(
+    mock_resources_server: _MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_resources_server.summary = {**_SUMMARY, **{
+        key: _NATIVE_SUMMARY[key] for key in ("progress", "service_execution")
+    }}
+
+    assert main(["resources", "status"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Native execution:" in out
+    assert "Concurrent tasks: 2 / 12" in out
+
+
+def test_resources_status_json_adds_native_capacity(
+    mock_resources_server: _MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_resources_server.summary = _NATIVE_SUMMARY
+
+    assert main(["resources", "status", "--json"]) == 0
+
+    body = json.loads(capsys.readouterr().out)
+    assert body["pools"] == []
+    assert body["service_execution"] == _NATIVE_SUMMARY["service_execution"]
+    assert body["progress"]["stages"]["running"] == 20

@@ -38,7 +38,7 @@ from loom.models.types import OS
 if TYPE_CHECKING:
     from loom.trial.workspace import WorkspaceStagingPolicy
 
-_RPC_OPERATIONS = {"/health": "health", "/exec": "exec", "/file": "file_transfer",
+_RPC_OPERATIONS = {"/health": "health", "/exec": "exec", "/container-exec": "container_exec", "/file": "file_transfer",
                    "/workspace-archive": "workspace_archive_transfer",
                    "/stop-processes": "stop_processes", "/pause-processes": "pause_processes",
                    "/resume-processes": "resume_processes", "/restore-directory": "directory_restore"}
@@ -98,6 +98,7 @@ class SandboxRPCError(DriverError):
             reason = exc.response.headers.get("X-Loom-Sandbox-Error", "")
             allowed_reasons = (
                 _EXEC_REASONS if path == "/exec" else
+                _EXEC_REASONS | {"container_exec_failed"} if path == "/container-exec" else
                 _PROCESS_REASONS if process else
                 _FILE_REASONS if path in {"/file", "/workspace-archive"} else
                 frozenset({"restore_request_invalid", "directory_restore_failed"})
@@ -314,6 +315,18 @@ class ServiceSandboxDriver:
                 "timeout_sec": timeout_sec or 0,
             },
             timeout=None,  # The server bounds execution and kills its process group.
+        )
+        result = response.json()
+        for key in ("stdout", "stderr"):
+            result[key] = base64.b64decode(result[key] or "", validate=True)
+        return ExecResult.model_validate(result)
+
+    async def _exec_container(self, container: str, argv: list[str], *, timeout_sec: float) -> ExecResult:
+        """Run trusted Compose controls through the root guest's private daemon."""
+        response = await self._request(
+            "POST", "/container-exec",
+            json={"container": container, "argv": argv, "timeout_sec": timeout_sec},
+            timeout=None,  # One server deadline includes create, start and inspect.
         )
         result = response.json()
         for key in ("stdout", "stderr"):

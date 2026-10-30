@@ -345,6 +345,16 @@ class GuestComposeServiceDriver:
             command.extend(["--env", key + "=" + value])
         return [*command, self.container, *argv]
 
+    async def _control(self, argv: list[str]) -> ExecResult:
+        from loom.driver.service_sandbox import ServiceSandboxDriver
+
+        # Starting another Docker CLI competes with the supervised command for
+        # the guest CPU before Docker can even accept this five-second control.
+        # The private guest RPC uses the same daemon exec without a CLI process.
+        if isinstance(self.runtime.guest, ServiceSandboxDriver):
+            return await self.runtime.guest._exec_container(self.container, argv, timeout_sec=5)
+        return await self.runtime.guest.exec(shlex.join(self._exec(argv, user="0:0")), timeout_sec=5)
+
     async def exec(self, cmd: str, *, user: str | int | None = None, cwd: PurePosixPath | None = None,
                    env: Mapping[str, str] | None = None, timeout_sec: float | None = None) -> ExecResult:
         argv, marker = self._controlled(["/bin/sh", "-c", cmd])
@@ -442,15 +452,13 @@ class GuestComposeServiceDriver:
                           f"if {helper} cat {marker} 2>/dev/null; then exit 0; "
                           f"elif test ! -e {marker}; then exit {self._IDENTITY_NOT_READY}; "
                           "else exit 2; fi")
-                result = await self.runtime.guest.exec(shlex.join(self._exec(
-                    [helper, "sh", "-c", script], user="0:0")), timeout_sec=5)
+                result = await self._control([helper, "sh", "-c", script])
                 if result.return_code == 0:
                     value = result.stdout.decode().strip()
                     if not value.isdecimal() or not 1 < int(value) < 2**31:
                         raise _ComposeControlError("identity", return_code=result.return_code,
                                                    duration_sec=result.duration_sec)
-                    activated = await self.runtime.guest.exec(shlex.join(self._exec(
-                        [helper, "touch", marker + ".go"], user="0:0")), timeout_sec=5)
+                    activated = await self._control([helper, "touch", marker + ".go"])
                     if activated.return_code:
                         raise _ComposeControlError("activation", return_code=activated.return_code,
                                                    duration_sec=activated.duration_sec)
@@ -487,8 +495,7 @@ class GuestComposeServiceDriver:
                   f"{helper} kill -TERM -- -\"$p\" 2>/dev/null || true; {helper} sleep 0.1; "
                   f"{helper} kill -KILL -- -\"$p\" 2>/dev/null || true; "
                   f"elif test -e {marker}; then exit 1; fi; {helper} rm -f {marker} {marker}.go {marker}.pending")
-        operation = asyncio.create_task(self.runtime.guest.exec(shlex.join(self._exec(
-            [helper, "sh", "-c", script], user="0:0")), timeout_sec=5))
+        operation = asyncio.create_task(self._control([helper, "sh", "-c", script]))
         cancelled = False
         while not operation.done():
             try:

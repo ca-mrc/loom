@@ -9,6 +9,7 @@ export interface TaskSetManifestReview {
   taskName: string | null;
   verifier: string;
   maxInstances: number | null;
+  taskTomlFormat: string | null;
 }
 
 function object(value: unknown): Record<string, unknown> {
@@ -47,5 +48,9 @@ export function reviewTaskSetManifest(text: string): TaskSetManifestReview {
     taskName: typeof task.name === "string" ? task.name : null,
     verifier: typeof verifier === "string" ? verifier : source.type === "bundle-upload" ? "From task bundle, if present" : "Not declared",
     maxInstances: typeof maxInstances === "number" ? maxInstances : null,
+    taskTomlFormat: source.type === "bundle-upload"
+      ? (typeof source.task_toml_format === "string" && source.task_toml_format.trim()
+        ? source.task_toml_format.trim() : "auto")
+      : null,
   };
 }

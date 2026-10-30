@@ -301,9 +301,9 @@ def test_native_builds_share_the_actuator_but_have_an_isolated_namespace(
     assert collector["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_BUILD_CONCURRENCY_LIMIT"] == str(concurrency)
     assert quota["spec"]["hard"]["pods"] == str(concurrency)
     assert quota["spec"]["hard"]["count/jobs.batch"] == str(concurrency)
-    assert quota["spec"]["hard"]["requests.cpu"] == f"{1000 * concurrency}m"
-    assert quota["spec"]["hard"]["requests.memory"] == f"{2048 * concurrency}Mi"
-    assert quota["spec"]["hard"]["requests.ephemeral-storage"] == f"{16384 * concurrency}Mi"
+    assert quota["spec"]["hard"]["requests.cpu"] == f"{4000 * concurrency}m"
+    assert quota["spec"]["hard"]["requests.memory"] == f"{4096 * concurrency}Mi"
+    assert quota["spec"]["hard"]["requests.ephemeral-storage"] == f"{32768 * concurrency}Mi"
     for resource in ("cpu", "memory", "ephemeral-storage"):
         assert quota["spec"]["hard"][f"limits.{resource}"] == quota["spec"]["hard"][f"requests.{resource}"]
     assert quota["spec"]["hard"]["count/configmaps"] == str(concurrency + 1)

@@ -64,7 +64,7 @@ def render(participant, body, profile, now=None, reservation_id=RESERVATION):
 def test_native_adapter_renders_actual_sequential_peak_and_loadable_protected_claim(tmp_path):
     participant, body, profile = build_inputs()
     prepared = render(participant, body, profile)
-    assert prepared.resources.model_dump() == {"cpu_millis": 1000, "memory_mib": 2048, "storage_mib": 16384}
+    assert prepared.resources.model_dump() == {"cpu_millis": 4000, "memory_mib": 4096, "storage_mib": 32768}
     assert prepared.pod_slots == 1 and prepared.namespace_uid == participant.build_namespace.uid
     assert prepared.lease_epoch == 3  # selection generation7 is not an attempt.
     assert prepared.job["metadata"]["name"] == prepared.configmap["metadata"]["name"] == "loom-pool-aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"
@@ -163,7 +163,7 @@ def test_native_adapter_charges_qualified_runtime_overhead():
     profile = replace(profile, target=replace(profile.target, runtime_class_name="qualified"),
         runtime_class_overhead=ResourceTotals(cpu_millis=125, memory_mib=64, storage_mib=32))
     assert render(participant, body, profile).resources.model_dump() == {
-        "cpu_millis": 1125, "memory_mib": 2112, "storage_mib": 16416}
+        "cpu_millis": 4125, "memory_mib": 4160, "storage_mib": 32800}
 
 
 def test_registered_source_is_bound_to_exact_config_revision_and_materialization(tmp_path):

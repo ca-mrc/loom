@@ -55,7 +55,7 @@ def test_personal_pool_job_keeps_real_claim_isolation_absolute_deadline_and_reso
     now = datetime.now(UTC)
     first = render(participant, body, profile, now=now)
     later = render(participant, body, profile, now=now + timedelta(seconds=30))
-    assert first.resources.model_dump() == {"cpu_millis": 1000, "memory_mib": 2048, "storage_mib": 16384}
+    assert first.resources.model_dump() == {"cpu_millis": 4000, "memory_mib": 4096, "storage_mib": 32768}
     assert first.pod_slots == 1 and first.namespace_uid == participant.build_namespace.uid
     assert first.lease_epoch == body["build"]["attempt"] == 2
     assert first.request_sha256 == later.request_sha256
@@ -125,7 +125,7 @@ def test_personal_pool_charges_runtime_class_overhead(build_inputs):
     profile = replace(profile, target=replace(profile.target, runtime_class_name="qualified"),
         runtime_class_overhead=ResourceTotals(cpu_millis=125, memory_mib=64, storage_mib=32))
     assert render(participant, body, profile).resources.model_dump() == {
-        "cpu_millis": 1125, "memory_mib": 2112, "storage_mib": 16416}
+        "cpu_millis": 4125, "memory_mib": 4160, "storage_mib": 32800}
 
 
 def test_protected_catalog_loads_personal_builder_without_changing_existing_catalog_hashes(build_inputs, tmp_path):

@@ -24,7 +24,18 @@ func TestFrozenIdentityOwnsCommandAndFile(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("observing another uid requires root")
 	}
-	dir := t.TempDir()
+	// t.TempDir's root-owned 0700 parent is not traversable after setfsuid.
+	// Keep this fixture directly below the shared temp root so the frozen UID
+	// can reach the writable directory whose ownership behavior is under test.
+	dir, err := os.MkdirTemp("", "loom-frozen-identity-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("remove owned identity fixture: %v", err)
+		}
+	})
 	if err := os.Chmod(dir, 0777); err != nil {
 		t.Fatal(err)
 	}

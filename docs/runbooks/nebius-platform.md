@@ -1240,9 +1240,9 @@ configuration; omission leaves native building disabled:
   "registry_repository": "cr.eu-north1.nebius.cloud/REGISTRY/task-images",
   "cache_bucket": "EXISTING_ARTIFACTS_BUCKET",
   "max_concurrent": 1,
-  "cpu_millis": 1000,
-  "memory_mib": 2048,
-  "ephemeral_storage_mib": 16384,
+  "cpu_millis": 4000,
+  "memory_mib": 4096,
+  "ephemeral_storage_mib": 32768,
   "max_processes": 512,
   "active_deadline_seconds": 1800,
   "snapshotter": "native",
@@ -1631,7 +1631,7 @@ template before any kubelet can add labels; missing template labels prevent
 scale-up even when capacity is available. Keep these labels aligned with the
 actual node type in Terraform and preserve the node group's limits.
 
-Default limits are one build, 1 CPU, 2 GiB RAM, 16 GiB ephemeral storage, 512
+Default limits are one build, 4 CPU, 4 GiB RAM, 32 GiB ephemeral storage, 512
 processes and 30 minutes. Sources are bounded to 2,000 files/512 MiB; one attempt
 supports at most eight components and each OCI archive at most 3 GiB. Component
 outputs must fit the shared volume together. BuildKit scratch is cleared between

@@ -291,7 +291,9 @@ def canonical_api_job(job, *, null_defaults=False):
     for volume in pod["volumes"]:
         if "emptyDir" in volume:
             size = volume["emptyDir"]["sizeLimit"]
-            volume["emptyDir"]["sizeLimit"] = {"16384Mi": "16Gi", "7168Mi": "7Gi", "4096Mi": "4Gi"}.get(size, size)
+            volume["emptyDir"]["sizeLimit"] = {
+                "32768Mi": "32Gi", "16384Mi": "16Gi", "8192Mi": "8Gi", "7168Mi": "7Gi", "4096Mi": "4Gi",
+            }.get(size, size)
     return observed
 
 

@@ -135,6 +135,29 @@ def normalize_terminal_bench_task_toml(
     return payload
 
 
+def project_declared_terminal_bench_task(
+    raw: dict[str, Any], *, task_id: str,
+) -> dict[str, Any]:
+    """Project a manifest-declared Terminal-Bench task.
+
+    ``[task].name`` is not required. The task directory fills only an id or
+    name the file omitted; an authored value is left as written. Remaining
+    Harbor defaults come from ``project_harbor_task``.
+    """
+    from loom.harbor_task_import import project_harbor_task
+
+    payload = deepcopy(raw)
+    source_task = payload.get("task")
+    if not isinstance(source_task, dict):
+        source_task = {}
+        payload["task"] = source_task
+    if not isinstance(source_task.get("name"), str) or not source_task["name"]:
+        source_task["name"] = task_id
+    if not isinstance(source_task.get("id"), str) or not source_task["id"]:
+        source_task["id"] = task_id
+    return project_harbor_task(payload)
+
+
 def _normalize_harbor_native_task_toml(payload: dict[str, Any]) -> dict[str, Any]:
     from loom.harbor_task_import import project_harbor_task
 
@@ -153,4 +176,5 @@ __all__ = [
     "DEFAULT_VERIFIER_TIMEOUT_SEC",
     "is_terminal_bench_shape",
     "normalize_terminal_bench_task_toml",
+    "project_declared_terminal_bench_task",
 ]

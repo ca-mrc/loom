@@ -28,9 +28,9 @@ class NativeTaskImageSettings(BaseModel):
     source_bucket: str
     cache_bucket: str | None = None
     registry_repository: str
-    cpu_millis: int = Field(default=1000, ge=100, le=64000)
-    memory_mib: int = Field(default=2048, ge=512, le=262144)
-    ephemeral_storage_mib: int = Field(default=16384, ge=16384, le=524288)
+    cpu_millis: int = Field(default=4000, ge=100, le=64000)
+    memory_mib: int = Field(default=4096, ge=512, le=262144)
+    ephemeral_storage_mib: int = Field(default=32768, ge=16384, le=524288)
     max_processes: int = Field(default=512, ge=64, le=4096)
     active_deadline_seconds: int = Field(default=1800, ge=60, le=7200)
     # Optional operator guard; physical resource/quota admission always applies.
