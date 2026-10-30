@@ -3013,7 +3013,7 @@ Secret key names; this installer cannot bootstrap a new target, namespace,
 resource identity or Kubernetes grant.
 
 Also include the already installed policy-bootstrap ServiceAccount in `resources`:
-`{"kind":"ServiceAccount","name":"loom-execution-policy-probe"}`.
+`{"kind":"ServiceAccount","name":"loom-execution-policy-probe","namespace":"<retained-execution-namespace>"}`.
 The guarded policy installer applies it with the existing Namespace before the
 admission probes; it is not part of the main regional render. A scope containing
 only rendered identities therefore passes preflight but rejects this bootstrap
