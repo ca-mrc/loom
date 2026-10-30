@@ -717,6 +717,7 @@ class NativeTaskImageController:
         return "batch_full", claimed
 
     async def _claim(self) -> UUID | None:
+        blocked: ExecutionProvisioningBlockedError
         async with self.sessions() as session, session.begin():
             await session.execute(_CAPACITY_ADMISSION_LOCK)
             waiting: tuple[UUID, int, dict[str, Any]] | None = None
@@ -745,7 +746,9 @@ class NativeTaskImageController:
                     lease_epoch=lease_epoch, pool_id=self.settings.pool_id,
                     resources=native_build_resources(native), now=datetime.now(UTC), reason=exc.reason,
                 )
-                return None
+                blocked = exc
+        # Raised after commit so the waiting head survives and the pass reports why it stopped.
+        raise blocked
 
     async def _prepare_claim(self, session: AsyncSession) -> TaskImageMaterializationAttempt | None:
         target = await session.get(ServiceExecutionTarget, self.target.target_id)

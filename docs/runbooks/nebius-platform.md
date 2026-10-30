@@ -1293,6 +1293,10 @@ The `Native build cycle` log line and the
 - the outcome that ended the pass (`idle`, `capped`, `batch_full`, `error`,
   `no_selector`, or the blocked reason).
 
+`idle` means no build was claimable. A queued head that cannot start reports its
+blocked reason instead, such as `execution_capacity_native_io_feedback_pending`.
+The log line appears only for passes with outstanding or claimed builds.
+
 `snapshotter` selects the BuildKit OCI worker snapshotter (`overlayfs` or
 `native`). It defaults to `native` so unchanged Dockerfiles can hardlink files
 from earlier layers. Rootless OverlayFS copy-up can change inode identity during

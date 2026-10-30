@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from prometheus_client import REGISTRY
 from sqlalchemy import delete, event, select
 
 from loom.db.schema import (
@@ -155,9 +156,17 @@ async def test_claim_reserve_transaction_rolls_back_without_job_or_attempt(contr
     async def blocked(*args, **kwargs):
         raise ExecutionProvisioningBlockedError("execution_capacity_provider_quota_nodes_exceeded")
 
+    def admissions(outcome):
+        return REGISTRY.get_sample_value("loom_execution_actuator_task_image_build_admissions_total",
+                                         {"controller": "native", "outcome": outcome}) or 0.0
+
+    reason = "execution_capacity_provider_quota_nodes_exceeded"
+    idle, reported = admissions("idle"), admissions(reason)
     with monkeypatch.context() as waiting:
         waiting.setattr(MODULE + ".reserve_native_task_image_capacity", blocked)
         await controller.run_once()
+    # A blocked head is not an empty queue.
+    assert (admissions("idle"), admissions(reason)) == (idle, reported + 1)
     row, attempts = await rows(sessions, image_id)
     assert (row.state, row.lease_epoch, row.attempt_count) == ("queued", 0, 0)
     assert not attempts and not kube.ensure_calls
