@@ -808,8 +808,8 @@ async def test_admission_pass_starts_one_build_per_node_until_its_io_feedback(na
     monkeypatch.setattr("loom_execution_actuator.task_image_controller.record_build_cycle",
                         lambda controller, **cycle: cycles.append(cycle))
     await controller.run_once()
-    # A blocked, validated head becomes the target's wait rather than an error.
-    assert (cycles[-1]["claimed"], cycles[-1]["outcome"]) == (1, "idle")
+    # A blocked, validated head becomes the target's wait and reports why it stopped.
+    assert (cycles[-1]["claimed"], cycles[-1]["outcome"]) == (1, "execution_capacity_native_io_feedback_pending")
     assert kube.ensure_calls == 1
     states = {image: (await rows(sessions, image))[0].state for image in (image_id, second_id)}
     assert sorted(states.values()) == ["queued", "running"]

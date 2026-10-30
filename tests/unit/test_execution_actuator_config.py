@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 
 import pytest
 
@@ -68,3 +70,22 @@ def test_optional_native_build_loop_parses_env_and_participates_in_readiness(
     assert not health.ready()
     health.mark_success("build")
     assert health.ready()
+
+
+def test_actuator_main_prints_its_own_info_logs_but_not_dependency_info() -> None:
+    script = """
+import logging
+import loom_execution_actuator.__main__ as actuator
+from loom_execution_actuator.metrics import record_build_cycle
+
+async def run():
+    record_build_cycle("native", outstanding=1, reconcile_seconds=0.1, outcome="idle", admission_seconds=0.1)
+    logging.getLogger("httpx").info("dependency info line")
+
+actuator._run = run
+actuator.main()
+"""
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True, timeout=60)
+
+    assert "Native build cycle controller=native outstanding=1" in result.stderr
+    assert "dependency info line" not in result.stderr

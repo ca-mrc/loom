@@ -252,7 +252,14 @@ async def _run() -> None:
             await asyncio.gather(*tasks, return_exceptions=True)
 
 
+def _configure_logging() -> None:
+    # Dependencies stay at WARNING: SDK INFO lines can carry request URLs.
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("loom_execution_actuator").setLevel(logging.INFO)
+
+
 def main() -> None:
+    _configure_logging()
     asyncio.run(_run())
 
 
