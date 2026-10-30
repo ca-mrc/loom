@@ -36,9 +36,16 @@ def test_explicit_manual_selection_matches_every_shard_execution():
                 changed_paths=plan.test_changes, diff_paths=plan.test_diff, include_shared_pool=True)
     paths = ownership.selected_test_paths(**args)
     shared = {path for path in paths if manifest.test_owner_for_path(path).id == "nebius-shared-pool-ops"}
-    assert len(shared) == 23 and len(paths) == 122
+    assert len(shared) == 23 and len(paths) == 129
     assert SIMULATED_SUCCESSOR in shared and FAST_SUCCESSOR in paths
     assert all(manifest.test_owner_for_path(path).manual_only for path in paths)
+    development = {f"tests/ops/test_nebius_development_{name}.py" for name in (
+        "activation", "collector_runtime", "schema_live", "schema_jobs", "schema_resources",
+        "schema_projection", "schema_upgrade",
+    )}
+    assert {path for path in paths if not Path(path).name.startswith((
+        "test_nebius_pool_", "test_nebius_development_pool_", "test_nebius_shared_pool_",
+    ))} == development
     matrix = ownership.test_shard_matrix(**args)
     executed = [path for row in matrix for path in ownership.selected_test_paths(
         **args, shard_index=row["shard_index"], shard_count=row["shard_count"])]
@@ -111,7 +118,9 @@ def test_fast_rules_stay_in_the_default_root_selection():
             "tests/unit/test_nebius_shared_pool_contract_inputs.py",
             "tests/ops/test_nebius_legacy_pool_completion.py",
             "tests/ops/test_nebius_staging_pool_attachment.py",
-            "tests/ops/test_nebius_management_startup_inspection.py"}
+            "tests/ops/test_nebius_management_startup_inspection.py",
+            "tests/ops/test_nebius_development_schema_consumers.py",
+            "tests/ops/test_nebius_development_schema_entry.py"}
     tracked = ownership._tracked_paths(ROOT)
     assert fast <= set(tracked)
     paths = ownership.selected_test_paths(manifest, tracked_paths=tracked, lane="tests-root",

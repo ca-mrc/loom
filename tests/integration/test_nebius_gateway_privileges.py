@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -59,25 +60,25 @@ from tests.integration.test_service_execution_leases import (
 pytestmark = pytest.mark.docker
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def gateway_database(
     request: pytest.FixtureRequest,
-    monkeypatch: pytest.MonkeyPatch,
-) -> tuple[str, str]:
-    database_url = request.getfixturevalue("platform_database")
-    monkeypatch.setattr(bootstrap, "database_url", lambda _value, _namespace: database_url)
-    monkeypatch.setenv("LOOM_DB_URL", database_url)
-    monkeypatch.setenv("LOOM_COLLECTOR_TOKEN", "loom_ecc_" + "f" * 64)
-    monkeypatch.setenv("LOOM_BATCH_RUNNER_TOKEN", "loom_br_" + "b" * 64)
-    password = "gateway-test-password-" + "x" * 32
-    for role in ("SERVICE", "CONTROL_PLANE", "GATEWAY", "ACTUATOR"):
-        monkeypatch.setenv("LOOM_DB_" + role + "_PASSWORD", password)
-    monkeypatch.setenv("LOOM_ENV", "development")
-    monkeypatch.setenv("LOOM_NAMESPACE", "gateway-grants-test")
-    bootstrap.bootstrap_database({"namespace": "loom-nebius-platform"})
-    # A repeated migration/bootstrap must preserve these restricted grants.
-    bootstrap.bootstrap_database({"namespace": "loom-nebius-platform"})
-    return database_url, password
+) -> Iterator[tuple[str, str]]:
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        database_url = request.getfixturevalue("platform_database")
+        monkeypatch.setattr(bootstrap, "database_url", lambda _value, _namespace: database_url)
+        monkeypatch.setenv("LOOM_DB_URL", database_url)
+        monkeypatch.setenv("LOOM_COLLECTOR_TOKEN", "loom_ecc_" + "f" * 64)
+        monkeypatch.setenv("LOOM_BATCH_RUNNER_TOKEN", "loom_br_" + "b" * 64)
+        password = "gateway-test-password-" + "x" * 32
+        for role in ("SERVICE", "CONTROL_PLANE", "GATEWAY", "ACTUATOR"):
+            monkeypatch.setenv("LOOM_DB_" + role + "_PASSWORD", password)
+        monkeypatch.setenv("LOOM_ENV", "development")
+        monkeypatch.setenv("LOOM_NAMESPACE", "gateway-grants-test")
+        bootstrap.bootstrap_database({"namespace": "loom-nebius-platform"})
+        # A repeated migration/bootstrap must preserve these restricted grants.
+        bootstrap.bootstrap_database({"namespace": "loom-nebius-platform"})
+        yield database_url, password
 
 
 async def test_gateway_completion_records_usage_with_restricted_tls_role(

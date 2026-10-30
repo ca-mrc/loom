@@ -1033,6 +1033,13 @@ exclude_paths = [
   "tests/ops/test_nebius_pool_*.py",
   "tests/ops/test_nebius_development_pool_*.py",
   "tests/ops/test_nebius_shared_pool_*.py",
+  "tests/ops/test_nebius_development_activation.py",
+  "tests/ops/test_nebius_development_collector_runtime.py",
+  "tests/ops/test_nebius_development_schema_live.py",
+  "tests/ops/test_nebius_development_schema_jobs.py",
+  "tests/ops/test_nebius_development_schema_resources.py",
+  "tests/ops/test_nebius_development_schema_projection.py",
+  "tests/ops/test_nebius_development_schema_upgrade.py",
   "tests/ops/test_ci_runner_*.py",
   "tests/ops/test_ci_unified_runner_supply.py",
 ]
@@ -1059,6 +1066,13 @@ lane = "nebius-pool"
 include_paths = [
   "tests/ops/test_nebius_pool_*.py",
   "tests/ops/test_nebius_development_pool_*.py",
+  "tests/ops/test_nebius_development_activation.py",
+  "tests/ops/test_nebius_development_collector_runtime.py",
+  "tests/ops/test_nebius_development_schema_live.py",
+  "tests/ops/test_nebius_development_schema_jobs.py",
+  "tests/ops/test_nebius_development_schema_resources.py",
+  "tests/ops/test_nebius_development_schema_projection.py",
+  "tests/ops/test_nebius_development_schema_upgrade.py",
 ]
 manual_only = true
 # These recovery CLIs have dedicated lifecycle/archive/idle-protection tests in

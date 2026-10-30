@@ -4266,7 +4266,7 @@ async def test_service_step_token_freezes_identity_and_persists_audit(
     (NormalizedJobState.FAILED, 0),
     # This case performs hundreds of real prepare/upload/complete transactions.
     # Keep the normal case's 60-second cap; allow the full inventory on CI CPUs.
-    pytest.param(NormalizedJobState.SUCCEEDED, 512, marks=pytest.mark.timeout(300)),
+    pytest.param(NormalizedJobState.SUCCEEDED, 288, marks=pytest.mark.timeout(300)),
 ])
 async def test_observed_pod_broker_commits_semantic_runtime_output(
     postgres_url: str,

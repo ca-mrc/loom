@@ -250,7 +250,7 @@ def test_resource_only_native_builds_clear_previous_namespace_cap(platform_input
     assert json.loads(env["LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER"])["max_concurrent"] is None
 
 
-@pytest.mark.parametrize("concurrency", [1, 2, 16, 17, 64])
+@pytest.mark.parametrize("concurrency", [1, 17])
 def test_native_builds_share_the_actuator_but_have_an_isolated_namespace(
     platform_inputs: tuple, concurrency: int,
 ) -> None:

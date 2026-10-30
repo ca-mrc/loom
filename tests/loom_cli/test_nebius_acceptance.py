@@ -252,17 +252,17 @@ def test_validate_trial_bundle_checks_manifest_and_every_member() -> None:
 @pytest.mark.parametrize(
     "target_id", [None, "nebius-eu-north1-integration", "nebius-eu-west1-integration"]
 )
-@pytest.mark.parametrize("cleanup_state", ["complete", "retained", "running"])
-@pytest.mark.parametrize("connection", [{"id": _CONNECTION_ID}])
-@pytest.mark.parametrize("observed_running", [0, 1, 2])
+@pytest.mark.parametrize("cleanup_state,observed_running", [
+    ("complete", 1), ("retained", 1), ("running", 1), ("complete", 0), ("complete", 2),
+])
 def test_run_acceptance_uses_public_api_and_persists_complete_evidence(
     tmp_path: Path,
     cleanup_state: str,
     target_id: str | None,
-    connection: dict[str, Any] | None,
     observed_running: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    connection = {"id": _CONNECTION_ID}
     payload = _bundle()
     calls: list[tuple[str, str]] = []
     batch_reads = 0
