@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, TypeVar
 from uuid import UUID, uuid4
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from sqlalchemy import insert, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -116,6 +116,9 @@ class DispatchAudit:
         self.provider_connection_id = provider_connection_id
         self.purpose = purpose
 
+    async def _prepare_dispatch(self, session: AsyncSession, values: dict[str, Any]) -> None:
+        """Resolve optional transport policy in the receipt admission transaction."""
+
     async def _admit(self, attempt: int) -> UUID:
         if attempt < 1:
             raise ValueError("dispatch attempt must be positive")
@@ -143,8 +146,12 @@ class DispatchAudit:
         try:
             async with asyncio.timeout(_AUDIT_TIMEOUT_SECONDS):
                 async with self.state.session_factory() as session:
+                    await self._prepare_dispatch(session, values)
                     await session.execute(insert(GatewayDispatchReceipt).values(**values))
                     await session.commit()
+        except HTTPException:
+            # A routing policy may decline admission before any provider I/O.
+            raise
         except asyncio.CancelledError:
             logger.warning(
                 "gateway_dispatch_admission_cancelled_commit_unknown request_id=%s receipt_id=%s",

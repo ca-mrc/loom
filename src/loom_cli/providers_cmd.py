@@ -690,6 +690,44 @@ def _add_pricing_args(parser: argparse.ArgumentParser) -> None:
         parser.add_argument(f"--{name}-usd-per-1m", type=float)
 
 
+
+def _pool(args: argparse.Namespace) -> int:
+    """Read or configure an opt-in request pool; configuration contains IDs only."""
+    def run() -> int:
+        cfg = require_logged_in()
+        with authed_client(cfg) as client:
+            row = _resolve_by_name(client, args.name)
+            path = f"/api/v1/provider-connections/{row['id']}/request-pool"
+            if args.config is not None:
+                from pathlib import Path
+
+                payload = json.loads(Path(args.config).read_text())
+                if not isinstance(payload, dict):
+                    raise ValueError("pool config must be a JSON object")
+                # The API accepts only IDs/settings. Catch accidental secret
+                # sources before they can be copied into a configuration file.
+                from loom.security.redaction import redact_mapping
+
+                if redact_mapping(payload) != payload:
+                    raise ValueError("pool config must not contain credentials")
+                headers, error = _optional_admin_actor_headers(args)
+                if error is not None:
+                    return error
+                response = client.put(path, json=payload, headers=headers)
+            elif args.disable:
+                headers, error = _optional_admin_actor_headers(args)
+                if error is not None:
+                    return error
+                response = client.delete(path, headers=headers)
+            else:
+                response = client.get(path)
+            result = assert_2xx(response, action="manage provider request pool")
+            print(json.dumps(result, indent=2))
+        return 0
+
+    return _run_with_error_handling(run)
+
+
 def dispatch(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="loom providers",
@@ -699,6 +737,14 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     sub = parser.add_subparsers(dest="providers_cmd", required=True)
+
+    pool = sub.add_parser("pool", help="Read, configure, or disable request-level rotation.")
+    pool.add_argument("name", help="Logical provider connection display name.")
+    pool_action = pool.add_mutually_exclusive_group()
+    pool_action.add_argument("--config", help="JSON file containing member IDs and pool settings.")
+    pool_action.add_argument("--disable", action="store_true", help="Disable rotation; retain its configuration.")
+    pool.add_argument("--admin-actor", default=None)
+    pool.set_defaults(handler=_pool)
 
     # --- create ---
     p_create = sub.add_parser(

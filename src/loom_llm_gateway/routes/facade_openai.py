@@ -43,7 +43,9 @@ Out of scope for this route (explicit follow-ups):
 
 from __future__ import annotations
 
+import asyncio
 import json
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -67,6 +69,7 @@ from loom_llm_gateway.model_switch_correlation import (
     persist_correlated_intent,
 )
 from loom_llm_gateway.request_params import normalize_request_params
+from loom_llm_gateway.request_pool import prepare_request_pool
 from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
     build_raw_provider_log,
@@ -164,8 +167,15 @@ async def openai_chat_facade(
             ctx.team_id,
             supported_types=_OPENAI_SHAPED_TYPES,
             dialect_label="/openai/v1/chat/completions",
+            allow_request_pool=True,
         )
-        api_key = await decrypt_facade_api_key(session, row)
+        # Pool members decrypt their own credential inside atomic admission.
+        api_key = ""
+
+    pool_audit = await prepare_request_pool(request, ctx, connection_id, payload)
+    if pool_audit is None:
+        async with request.app.state.session_factory() as session:
+            api_key = await decrypt_facade_api_key(session, row)
 
     upstream_url = f"{row.base_url.rstrip('/')}/chat/completions"
     upstream_headers = {
@@ -177,13 +187,30 @@ async def openai_chat_facade(
     upstream_attempted = False
 
     async def send_upstream() -> httpx.Response:
-        nonlocal upstream_attempted
-        timeout = upstream_timeout(request, settings.upstream_timeout_sec)
+        nonlocal upstream_attempted, row, api_key, upstream_url, upstream_headers, upstream
+        timeout_seconds = settings.upstream_timeout_sec
+        if pool_audit is not None:
+            assert pool_audit.row is not None
+            row, api_key = pool_audit.row, pool_audit.api_key
+            upstream_url = f"{row.base_url.rstrip('/')}/chat/completions"
+            upstream_headers = {
+                "Authorization": f"Bearer {api_key}", "content-type": "application/json",
+            }
+            upstream = await request.app.state.egress_client_pool.get(row.id)
+            timeout_seconds = min(timeout_seconds, pool_audit.attempt_timeout_sec)
+        timeout = upstream_timeout(request, timeout_seconds)
         upstream_attempted = True
-        return await upstream.post(
-            upstream_url, json=upstream_payload, headers=dispatch_request_headers(upstream_headers),
-            timeout=timeout, follow_redirects=False,
-        )
+        try:
+            # Bound the whole send as well as individual httpx phases. This
+            # leaves time for a spare member within the existing retry budget.
+            async with asyncio.timeout(timeout_seconds if pool_audit else None):
+                return await upstream.post(
+                    upstream_url, json=upstream_payload,
+                    headers=dispatch_request_headers(upstream_headers),
+                    timeout=timeout, follow_redirects=False,
+                )
+        except TimeoutError:
+            raise httpx.ReadTimeout("bounded upstream send timed out") from None
 
     try:
         outcome = await send_with_retry(
@@ -191,11 +218,13 @@ async def openai_chat_facade(
             settings=settings,
             dialect="facade_openai",
             deadline=request_attempt_deadline(request),
-            dispatch_audit=request_dispatch_audit(
+            dispatch_audit=pool_audit or request_dispatch_audit(
                 request,
                 dialect="facade_openai",
                 provider_connection_id=connection_id,
             ),
+            response_retryable=pool_audit.response_retryable if pool_audit else None,
+            respect_retry_after=pool_audit is not None,
         )
         upstream_response = outcome.response
     except AttemptDeadlineReachedError as exc:
@@ -204,7 +233,9 @@ async def openai_chat_facade(
                 request=request, ctx=ctx, row=row, dialect=_FACADE_DIALECT,
                 model=payload["model"], request_payload=payload,
                 failure_category="attempt_deadline_reached",
-                failure_error_type=type(exc).__name__, correlation=correlation,
+                failure_error_type=type(exc).__name__, attempt=pool_audit.last_attempt if pool_audit else 1,
+                correlation=correlation,
+                request_pool_attribution=pool_audit.attribution() if pool_audit else None,
             )
         raise_deadline_http_exception(exc)
     except httpx.TimeoutException as e:
@@ -217,11 +248,14 @@ async def openai_chat_facade(
             request_payload=payload,
             failure_category="upstream_timeout",
             failure_error_type=type(e).__name__,
+            attempt=pool_audit.last_attempt if pool_audit else 1,
             correlation=correlation,
+            request_pool_attribution=pool_audit.attribution() if pool_audit else None,
         )
         raise HTTPException(
             status_code=504,
-            detail=f"upstream timeout against {upstream_url}: {e}",
+            detail=("request pool upstream timeout" if pool_audit
+                    else f"upstream timeout against {upstream_url}: {e}"),
         ) from e
     except httpx.RequestError as e:
         await record_facade_failed_call(
@@ -233,16 +267,30 @@ async def openai_chat_facade(
             request_payload=payload,
             failure_category="upstream_transport",
             failure_error_type=type(e).__name__,
+            attempt=pool_audit.last_attempt if pool_audit else 1,
             correlation=correlation,
+            request_pool_attribution=pool_audit.attribution() if pool_audit else None,
         )
         raise HTTPException(
             status_code=502,
-            detail=(f"upstream request error against {upstream_url}: {type(e).__name__}: {e}"),
+            detail=("request pool upstream transport error" if pool_audit
+                    else f"upstream request error against {upstream_url}: {type(e).__name__}: {e}"),
         ) from e
+
+    except HTTPException:
+        if pool_audit is not None and upstream_attempted:
+            await record_facade_failed_call(
+                request=request, ctx=ctx, row=row, dialect=_FACADE_DIALECT,
+                model=payload["model"], request_payload=payload,
+                failure_category="request_pool_unavailable", attempt=pool_audit.last_attempt,
+                correlation=correlation, request_pool_attribution=pool_audit.attribution(),
+            )
+        raise
 
     enforce_request_attempt_deadline(request)
     if upstream_response.status_code >= 400:
-        excerpt = redact_api_key(upstream_response.text, api_key)
+        excerpt = (pool_audit.redact(upstream_response.text) if pool_audit
+                   else redact_api_key(upstream_response.text, api_key))
         await record_facade_failed_call(
             request=request,
             ctx=ctx,
@@ -254,6 +302,7 @@ async def openai_chat_facade(
             failure_status_code=upstream_response.status_code,
             attempt=outcome.attempt,
             correlation=correlation,
+            request_pool_attribution=pool_audit.attribution() if pool_audit else None,
         )
         raise HTTPException(
             status_code=upstream_response.status_code,
@@ -277,11 +326,15 @@ async def openai_chat_facade(
             failure_error_type=type(e).__name__,
             attempt=outcome.attempt,
             correlation=correlation,
+            request_pool_attribution=pool_audit.attribution() if pool_audit else None,
         )
         raise HTTPException(
             status_code=502,
             detail=f"upstream returned invalid JSON body: {e}",
         ) from e
+
+    if pool_audit is not None:
+        body = json.loads(pool_audit.redact(json.dumps(body)))
 
     # Token usage — OpenAI shape is `usage.{prompt,completion,total}_tokens`.
     # Missing usage retains attribution with explicit missing-usage metadata;
@@ -294,6 +347,28 @@ async def openai_chat_facade(
         rate_card_cache=request.app.state.rate_card_cache,
     )
     usage = token_usage_with_cost_metadata(usage, cost_estimate)
+    if pool_audit is not None:
+        usage = replace(usage, provider_extras={
+            **usage.provider_extras, "_loom_request_pool": pool_audit.attribution(),
+        })
+
+    raw_provider_log = build_raw_provider_log(
+        dialect=_FACADE_DIALECT,
+        provider=row.provider_type,
+        provider_connection_id=row.id,
+        attempt=outcome.attempt,
+        request_method="POST",
+        request_url=upstream_url,
+        request_headers=upstream_headers,
+        request_body=upstream_payload,
+        response_status_code=upstream_response.status_code,
+        response_headers=dict(upstream_response.headers),
+        response_body=body,
+        api_key=api_key,
+        auth_context=ctx,
+    )
+    if pool_audit is not None:
+        raw_provider_log = pool_audit.redact_log(raw_provider_log)
 
     # Audit. We use a fresh session so the upstream call's latency
     # didn't keep the connection-lookup session open longer than
@@ -313,21 +388,7 @@ async def openai_chat_facade(
             provider=row.provider_type,
             attempt=outcome.attempt,
             request_params=normalize_request_params(payload),
-            raw_provider_log=build_raw_provider_log(
-                dialect=_FACADE_DIALECT,
-                provider=row.provider_type,
-                provider_connection_id=connection_id,
-                attempt=outcome.attempt,
-                request_method="POST",
-                request_url=upstream_url,
-                request_headers=upstream_headers,
-                request_body=upstream_payload,
-                response_status_code=upstream_response.status_code,
-                response_headers=dict(upstream_response.headers),
-                response_body=body,
-                api_key=api_key,
-                auth_context=ctx,
-            ),
+            raw_provider_log=raw_provider_log,
             response_model=body.get("model") if isinstance(body.get("model"), str) else None,
             **{
                 k: correlation[k]

@@ -20,6 +20,7 @@ error messages.
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -39,6 +40,7 @@ async def validate_provider_connection(
     *,
     team_id: UUID,
     agent_submission: bool = False,
+    submission_configs: list[dict[str, Any]] | None = None,
 ) -> None:
     """Raise HTTPException if the connection is missing, soft-deleted,
     or owned by a different team. With `agent_submission`, also reject
@@ -89,3 +91,12 @@ async def validate_provider_connection(
                 "accept only OpenAI-compatible Provider Connections"
             ),
         )
+
+    # Pool selection keeps the existing logical connection id, while every
+    # physical member must satisfy the new submission's agent/model contract.
+    from loom_service.provider_pool_validation import validate_request_pool_submission
+
+    await validate_request_pool_submission(
+        session, provider_connection_id, team_id=team_id,
+        submission_configs=submission_configs,
+    )

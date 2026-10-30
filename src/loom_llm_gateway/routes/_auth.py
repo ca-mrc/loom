@@ -6,8 +6,10 @@ import logging
 from typing import Any
 
 from fastapi import HTTPException, Request
+from sqlalchemy import select
 
 from loom.auth import AuthContext, validate_bearer_token
+from loom.db.schema import ProviderRequestPool
 from loom_llm_gateway.attempt_deadline import (
     AttemptDeadlineReachedError,
     AttemptDeadlineRequiredError,
@@ -69,6 +71,17 @@ async def require_llm_call_bearer(
             },
         )
     if request is not None:
+        # A bound logical pool must not silently use a platform credential on
+        # another dialect. Caller headers cannot opt unsupported routes in.
+        if (result.context.provider_connection_id is not None
+            and request.scope.get("path") != "/openai/v1/chat/completions"):
+            pool_enabled = await session.scalar(select(ProviderRequestPool.enabled).where(
+                ProviderRequestPool.connection_id == result.context.provider_connection_id,
+            ))
+            if pool_enabled:
+                raise HTTPException(
+                    400, "request pool requires hosted Terminus2 non-streaming complete-messages Chat",
+                )
         try:
             bind_request_attempt_deadline(request, result.context)
         except AttemptDeadlineRequiredError:

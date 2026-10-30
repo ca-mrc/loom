@@ -1502,6 +1502,7 @@ async def submit_trial(
             payload.provider_connection_id,
             team_id=ctx.team_id,
             agent_submission=True,
+            submission_configs=[payload.config],
         )
     if is_codex(payload.config.get("agent_name")):
         await refresh_codex_model_preflight(

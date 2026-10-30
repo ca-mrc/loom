@@ -8129,6 +8129,11 @@ class GatewayDispatchReceipt(Base):
     step_jwt_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     agent_attempt_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     provider_connection_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    pool_connection_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("provider_connections.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    failover_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     dialect: Mapped[str] = mapped_column(Text, nullable=False)
     purpose: Mapped[str] = mapped_column(Text, nullable=False)
     attempt_deadline_wall_clock: Mapped[datetime | None] = mapped_column(
@@ -8626,6 +8631,51 @@ class ProviderConnection(Base):
         server_default=func.now(),
         nullable=False,
     )
+
+
+class ProviderRequestPool(Base):
+    """Opt-in request routing behind a stable logical provider connection."""
+
+    __tablename__ = "provider_request_pools"
+    __table_args__ = (
+        CheckConstraint("cardinality(required_models) > 0", name="provider_request_pool_models_check"),
+        CheckConstraint("next_member >= 0", name="provider_request_pool_cursor_check"),
+        CheckConstraint(
+            "attempt_timeout_sec > 0 AND cooldown_sec > 0",
+            name="provider_request_pool_timeout_check",
+        ),
+    )
+    connection_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("provider_connections.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    required_models: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    next_member: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    attempt_timeout_sec: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("20"))
+    cooldown_sec: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("30"))
+
+
+class ProviderRequestPoolMember(Base):
+    """Physical connections and shared-quota buckets; no copied credentials."""
+
+    __tablename__ = "provider_request_pool_members"
+    __table_args__ = (
+        UniqueConstraint("pool_connection_id", "ordinal", name="provider_request_pool_member_ordinal_key"),
+        CheckConstraint("ordinal >= 0", name="provider_request_pool_member_ordinal_check"),
+    )
+    pool_connection_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("provider_request_pools.connection_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    connection_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("provider_connections.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    quota_group: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    cooldown_until: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
 
 class ProviderConnectionShare(Base):

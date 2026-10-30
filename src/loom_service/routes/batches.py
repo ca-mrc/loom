@@ -141,6 +141,7 @@ from loom_service.provider_model_gate import (
     refresh_codex_model_preflight,
     reject_if_known_failed_provider_model,
 )
+from loom_service.provider_pool_validation import provider_submission_configs
 from loom_service.service_execution_status import (
     SERVICE_EXECUTION_LIFECYCLE_STAGES,
     service_execution_lifecycle_case,
@@ -1191,6 +1192,11 @@ async def _create_batch_record(
                 conn_id,
                 team_id=submission_team_id,
                 agent_submission=True,
+                submission_configs=provider_submission_configs(
+                    trial_config=trial_config,
+                    combinations=[combo.model_dump(mode="json") for combo in payload.combinations],
+                    connection_id=conn_id,
+                ),
             )
         except HTTPException:
             SUBMISSION_REJECTS_TOTAL.labels(
@@ -3086,6 +3092,12 @@ async def rerun_failed_batch(
                 conn_id,
                 team_id=b.team_id,
                 agent_submission=True,
+                submission_configs=provider_submission_configs(
+                    trial_config=rerun_trial_config,
+                    combinations=combinations,
+                    connection_id=conn_id,
+                    indices={int(target["combination_idx"]) for target in targets},
+                ),
             )
         except HTTPException:
             SUBMISSION_REJECTS_TOTAL.labels(reason="provider_connection").inc()

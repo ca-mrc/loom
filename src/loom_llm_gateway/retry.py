@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import random
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING
 
 import httpx
@@ -62,6 +65,8 @@ async def send_with_retry(
     now: Callable[[], float] = time.monotonic,
     deadline: GatewayAttemptDeadline | None = None,
     dispatch_audit: DispatchAudit | None = None,
+    response_retryable: Callable[[httpx.Response], bool] | None = None,
+    respect_retry_after: bool = False,
 ) -> RetryOutcome:
     """Run `send()` with retry on transient failures.
 
@@ -134,7 +139,9 @@ async def send_with_retry(
         # Successful (2xx/3xx) or non-retryable status (deterministic
         # 4xx like 401/403/404). Return immediately — let the caller's
         # existing `if status >= 400` raise an HTTPException.
-        if status < 400 or not _status_retryable(status):
+        if status < 400 or not (
+            response_retryable(response) if response_retryable else _status_retryable(status)
+        ):
             RETRY_ATTEMPTS.labels(dialect=dialect).observe(attempt)
             outcome = "success" if status < 400 else "non_retryable_error"
             RETRY_TOTAL.labels(
@@ -160,6 +167,8 @@ async def send_with_retry(
             jitter=jitter,
             cap=max_backoff,
         )
+        if respect_retry_after:
+            wait_for = max(wait_for, retry_after_seconds(response))
         if deadline is not None and wait_for >= deadline.require_remaining():
             await deadline.sleep(wait_for, sleep=sleep)
         if (now() - started) + wait_for > budget:
@@ -184,6 +193,22 @@ async def send_with_retry(
         raise last_exc
     assert last_response is not None  # nosec - last_response set on every iter
     return RetryOutcome(response=last_response, attempt=max_attempts)
+
+
+def retry_after_seconds(response: httpx.Response) -> float:
+    """A server delay is a minimum, including when it exhausts the retry budget."""
+    raw = response.headers.get("Retry-After", "")
+    try:
+        seconds = float(raw)
+        return max(0.0, seconds) if math.isfinite(seconds) else 0.0
+    except ValueError:
+        try:
+            date = parsedate_to_datetime(raw)
+            if date.tzinfo is None:
+                date = date.replace(tzinfo=UTC)
+            return max(0.0, (date - datetime.now(UTC)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
 
 
 def _status_retryable(status: int) -> bool:

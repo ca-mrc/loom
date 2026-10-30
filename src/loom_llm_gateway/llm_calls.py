@@ -246,6 +246,7 @@ async def record_failed_call(
     correlation_status: str = "legacy_uncorrelated",
     auth_context: AuthContext | None = None,
     commit: bool = True,
+    request_pool_attribution: dict[str, Any] | None = None,
 ) -> None:
     """Insert one zero-token audit row for an attempted upstream call.
 
@@ -291,6 +292,8 @@ async def record_failed_call(
         "_loom_failure_category": failure_category,
         "_loom_usage_status": "missing",
     }
+    if request_pool_attribution is not None:
+        provider_extras["_loom_request_pool"] = request_pool_attribution
     if failure_status_code is not None:
         provider_extras["_loom_failure_status_code"] = int(failure_status_code)
     if failure_error_type:

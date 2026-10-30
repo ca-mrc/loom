@@ -93,6 +93,8 @@ async def prepare_family_run_state(
             session,
             evolver_provider_connection_id,
             team_id=submission_team_id,
+            # Evolver adapter calls are outside hosted Terminus-2 Chat pools.
+            submission_configs=[{"agent_name": "family-evolver"}],
         )
 
     task_shims: list[TaskLike] = [

@@ -199,3 +199,80 @@ and the last successful or failed generation preflight. Refreshing discovery doe
 not verify generation access. Model help and CLI opens the supported
 `loom providers models NAME --refresh` command on demand; connection names are
 shell-quoted so names containing spaces or apostrophes remain a single argument.
+
+### Request-level rotation and timeout failover
+
+An owner can opt an existing OpenAI-compatible connection into a request pool.
+The selected connection remains the logical Batch/Trial/JWT binding; each model
+request chooses a physical member in equal round-robin order. A retryable timeout
+can choose another member within the same retry-count, backoff, and absolute
+attempt-deadline budget. The pool's default per-send timeout is 20 seconds so a
+60-second retry budget can retain room for a spare; configure it for the actual
+model latency. A timeout may already have executed upstream and can cause
+uncertain duplicate inference cost.
+
+First register each upstream endpoint/key through the ordinary provider create
+flow. Secrets remain in SecretStore, and pool membership contains only connection
+IDs. Validate each connection, refresh its models, and verify every required student and teacher model.
+All members must expose the complete visible model set; definitive model
+preflight rejections block configuration, while missing or inconclusive probes
+do not add a paid-probe prerequisite. An operator must also establish equivalent model versions and request
+semantics: matching names or model enumeration alone does not prove equivalence.
+
+Prepare a JSON configuration using the connection IDs from `loom providers show`:
+
+```json
+{
+  "required_models": ["your-student-model", "your-teacher-model"],
+  "equivalent_models": true,
+  "attempt_timeout_sec": 20,
+  "cooldown_sec": 30,
+  "members": [
+    {
+      "connection_id": "00000000-0000-0000-0000-000000000001",
+      "quota_group": "existing-supplier"
+    },
+    {
+      "connection_id": "00000000-0000-0000-0000-000000000002",
+      "quota_group": "yibu-shared"
+    },
+    {
+      "connection_id": "00000000-0000-0000-0000-000000000003",
+      "quota_group": "yibu-shared"
+    }
+  ]
+}
+```
+
+The logical connection itself must be a member. For example, when ID `...0001`
+is `loom-testing`, configure and inspect its pool with:
+
+```bash
+loom providers pool loom-testing --config pool.json
+loom providers pool loom-testing
+loom providers pool loom-testing --disable
+```
+
+The matching API is `PUT`, `GET`, or `DELETE`
+`/api/v1/provider-connections/{connection_id}/request-pool`. `DELETE` disables
+rotation while retaining the configuration. Owner tokens need `providers:manage`;
+admin token mutations require the existing `X-Loom-Admin-Actor` audit header.
+Shared users can read a pool only when they can also access all its members,
+and cannot change it. Each dispatch rechecks current member authorization and
+eligibility. Configuration edits preserve the cursor and existing cooldowns.
+
+Members known or conservatively assumed to share upstream quotas should use the
+same `quota_group`. This label groups cooldowns after an upstream 429; it does
+not impose a concurrency limit. Loom does not cap concurrent requests per key or
+quota group and does not add a queue for pool requests. Separate token balances
+do not prove separate account, RPM/TPM, or upstream-channel capacity. Disabled or
+cooling members are skipped; when no member is usable the Gateway returns an
+explicit retryable response rather than contacting an invalid member.
+
+Rotation is restricted to trusted hosted Terminus2, non-streaming Chat
+Completions carrying complete messages. Streaming, Responses continuation,
+account-local resource references, upstream hosted tools, other agents, and
+local direct-provider execution cannot opt in. Existing non-pooled connections
+retain their normal routing. Actual physical connection and failover reason are
+recorded on dispatch receipts; the final response is priced with the member that
+served it, while the Trial retains its logical connection and model schedule.
