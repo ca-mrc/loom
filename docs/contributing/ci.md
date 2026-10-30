@@ -375,8 +375,11 @@ input below enables their original 20-shard layout before feature launch.
 Current standalone staging coverage remains automatic. In particular,
 `test_nebius_legacy_pool_completion.py` protects the deployed preflight reader,
 and `test_nebius_staging_pool_attachment.py` retains current staging rendering,
-profile and UID contracts in `tests-root`. Ordinary deployment, idle/recovery,
-unit/integration tests and all four required source gates remain in place.
+profile and UID contracts in `tests-root`.
+`test_nebius_management_startup_inspection.py` also stays automatic: the installed
+management-preflight route calls these read-only diagnostics, whose tests guard
+log ownership, replaced Pods, redaction and bounded reads. Ordinary deployment,
+idle/recovery, unit/integration tests and all four required source gates remain.
 Pool fixture modules remain importable by other tests; manual ownership only
 controls which test files are selected.
 
@@ -514,8 +517,8 @@ selector/subprocess coverage. Root scopes still execute independently.
 Pool qualification retains its original `pins`, stable hash salt and 20-shard
 count. The obsolete automatic-only relocation of the retained development
 module is removed: both pool suites now require the same explicit manual flag.
-The manual lane has 123 modules; the two deployed-staging boundary modules run
-in the ordinary root lane instead. Selection and execution still partition each
+The manual lane has 122 modules; the three current staging/management boundary
+modules run in the ordinary root lane instead. Selection and execution still partition each
 selected file exactly once. The following measurements describe the historical
 manual layout and do not claim a new hosted speedup.
 

@@ -36,7 +36,7 @@ def test_explicit_manual_selection_matches_every_shard_execution():
                 changed_paths=plan.test_changes, diff_paths=plan.test_diff, include_shared_pool=True)
     paths = ownership.selected_test_paths(**args)
     shared = {path for path in paths if manifest.test_owner_for_path(path).id == "nebius-shared-pool-ops"}
-    assert len(shared) == 23 and len(paths) == 123
+    assert len(shared) == 23 and len(paths) == 122
     assert SIMULATED_SUCCESSOR in shared and FAST_SUCCESSOR in paths
     assert all(manifest.test_owner_for_path(path).manual_only for path in paths)
     matrix = ownership.test_shard_matrix(**args)
@@ -76,8 +76,9 @@ def test_workflow_manual_input_is_passed_to_planner_and_execution():
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     assert workflow.get("on", workflow.get(True))["workflow_dispatch"]["inputs"]["shared_pool_simulations"]["default"] is False
     jobs = workflow["jobs"]
-    assert "shared_pool_simulations" in jobs["workflow-plan"]["outputs"]
+    assert jobs["workflow-plan"]["outputs"]["shared_pool_simulations"] == "${{ steps.plan.outputs.shared_pool_simulations || 'false' }}"
     step = next(step for step in jobs["workflow-plan"]["steps"] if step.get("id") == "plan")
+    assert step["env"]["DISPATCH_SHARED_POOL"] == "${{ github.event_name == 'workflow_dispatch' && inputs.shared_pool_simulations || false }}"
     assert "--shared-pool-simulations" in step["run"]
     assert jobs["nebius-pool"]["env"]["SHARED_POOL_SIMULATIONS"] == "${{ needs.workflow-plan.outputs.shared_pool_simulations }}"
     step = next(step for step in jobs["nebius-pool"]["steps"] if step.get("id") == "manifest")
@@ -109,7 +110,8 @@ def test_fast_rules_stay_in_the_default_root_selection():
     fast = {"tests/unit/test_nebius_pool_activation_record.py",
             "tests/unit/test_nebius_shared_pool_contract_inputs.py",
             "tests/ops/test_nebius_legacy_pool_completion.py",
-            "tests/ops/test_nebius_staging_pool_attachment.py"}
+            "tests/ops/test_nebius_staging_pool_attachment.py",
+            "tests/ops/test_nebius_management_startup_inspection.py"}
     tracked = ownership._tracked_paths(ROOT)
     assert fast <= set(tracked)
     paths = ownership.selected_test_paths(manifest, tracked_paths=tracked, lane="tests-root",

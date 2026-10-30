@@ -1052,7 +1052,7 @@ include_paths = [
 [[test_suites]]
 # Unlaunched shared/development pool lifecycle simulations retain their source
 # and existing shards for explicit manual qualification before feature launch.
-# Standalone staging attachment/completion contracts stay in tests-root.
+# Standalone staging and management-preflight contracts stay in tests-root.
 id = "nebius-pool-ops"
 language = "python"
 lane = "nebius-pool"
