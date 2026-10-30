@@ -150,6 +150,21 @@ def _repair_record(request: PoolCutoverRequest, *, state: Path, anchor: Path,
     """Validate historical entry independently of subsequent activation progress."""
     from scripts.ops.nebius_pool_startup import _startup_record, closed_startup_documents
 
+    closed, targets = closed_startup_documents(request, state_dir=state, anchor_dir=anchor)
+    _, startup = _startup_record(request, state=state, anchor=anchor, closed=closed, targets=targets)
+    return _read_repair_record(request, state=state, anchor=anchor, binding=binding,
+        targets=targets, startup=startup)
+
+
+def _read_repair_record(request: PoolCutoverRequest, *, state: Path, anchor: Path,
+        targets: dict[str, dict[str, Any]], startup: dict[str, Any] | None,
+        binding: PoolStartupRepairBinding | None = None
+        ) -> tuple[tuple[dict[str, Any], ...], dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    """Qualify repair evidence against ancestors freshly read in this local call.
+
+    No remote observation or write may intervene between reading those ancestors
+    and this reader. Standalone callers use _repair_record to read them again.
+    """
     path, marker = _paths(request, state, anchor)
     retained = json.loads(private_state._private_read(marker, limit=1024**2)) if _exists(marker) else None
     if retained is None and (_exists(path) or _exists(state / 'source-repair-configuration')):
@@ -165,8 +180,6 @@ def _repair_record(request: PoolCutoverRequest, *, state: Path, anchor: Path,
     operation = request.fencing.retirement.migration.registration.spec.operation_id
     if not binding.operation_id.int or binding.operation_id == operation:
         raise ValueError
-    closed, targets = closed_startup_documents(request, state_dir=state, anchor_dir=anchor)
-    _, startup = _startup_record(request, state=state, anchor=anchor, closed=closed, targets=targets)
     activation_identity, activation = _activation_record(request, state=state, anchor=anchor)
     if (startup is None or any(row['phase'] != 'started' for row in startup['workloads'].values())
             or activation is None or _hash(state / 'cutover.json') != binding.closure_sha256

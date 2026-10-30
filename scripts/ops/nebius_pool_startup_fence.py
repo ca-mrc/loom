@@ -79,7 +79,7 @@ def _fence_sources(request: PoolCutoverRequest, *, state: Path, anchor: Path,
     )
     from scripts.ops.nebius_pool_startup_repair import (
         _manager_options,
-        _repair_record,
+        _read_repair_record,
         original_recovery_repair,
         startup_repair_exists,
     )
@@ -92,7 +92,8 @@ def _fence_sources(request: PoolCutoverRequest, *, state: Path, anchor: Path,
     if startup_repair_exists(request, state=state, anchor=anchor):
         if original_recovery_repair(request, state=state, anchor=anchor) is not None:
             return sources, history
-        documents, _, _, repair = _repair_record(request, state=state, anchor=anchor)
+        documents, _, _, repair = _read_repair_record(request, state=state, anchor=anchor,
+            targets=targets, startup=startup)
         if repair is None or _key(request.manager) in sources:
             raise ValueError
         version = next((row['before_resource_version'] for row in repair['phases'].values() if row['phase'] == 'intent'), None)
@@ -100,7 +101,8 @@ def _fence_sources(request: PoolCutoverRequest, *, state: Path, anchor: Path,
         config = state / 'source-repair-configuration/stage.json'
         history = {'repair_sha256': _hash(state / 'startup-repair.json'),
             'repair_configuration_sha256': _hash(config) if config.exists() or config.is_symlink() else None}
-    chain = load_manager_image_chain(request, state=state, anchor=anchor)
+    chain = load_manager_image_chain(request, state=state, anchor=anchor,
+        _ancestors=(closed, targets, startup))
     if chain and original_recovery_image(request, state=state, anchor=anchor) is None:
         sources.update(image_chain_sources(chain))
         history['manager_image_sha256'] = digest({str(path): _hash(path) if path.exists() else None

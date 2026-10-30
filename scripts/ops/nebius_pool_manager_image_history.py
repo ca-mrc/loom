@@ -32,7 +32,7 @@ from scripts.ops.nebius_pool_startup import _startup_record, closed_startup_docu
 from scripts.ops.nebius_pool_startup_repair import (
     PoolStartupRepairBinding,
     _exists,
-    _repair_record,
+    _read_repair_record,
     startup_repair_exists,
 )
 
@@ -139,7 +139,9 @@ def _record(path: Path, identity: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _entry(request: PoolCutoverRequest, binding: ManagerImageRepairBinding, *, state: Path,
-        anchor: Path, prior: tuple[ManagerImageEntry, ...]) -> ManagerImageEntry:
+        anchor: Path, prior: tuple[ManagerImageEntry, ...],
+        ancestors: tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, Any] | None] | None = None
+        ) -> ManagerImageEntry:
     binding = parse_image_binding(binding.model_dump())
     operation = request.fencing.retirement.migration.registration.spec.operation_id
     path, marker = _paths(operation, binding.ordinal, state, anchor)
@@ -163,8 +165,11 @@ def _entry(request: PoolCutoverRequest, binding: ManagerImageRepairBinding, *, s
     verify_execution_image_admission(ExecutionImageAdmissionBundleV1.model_validate(binding.profile['image_admission']),
         keyring=ImageAdmissionKeyring.from_json(json.dumps(delivery.before.installation.keyring)),
         required_image_refs=ServiceExecutionRuntimeProfileV1.model_validate(binding.profile).published_image_refs())
-    closed, targets = closed_startup_documents(request, state_dir=state, anchor_dir=anchor)
-    _, startup = _startup_record(request, state=state, anchor=anchor, closed=closed, targets=targets)
+    if ancestors is None:
+        closed, targets = closed_startup_documents(request, state_dir=state, anchor_dir=anchor)
+        _, startup = _startup_record(request, state=state, anchor=anchor, closed=closed, targets=targets)
+    else:
+        closed, targets, startup = ancestors
     activation_identity, activation = _activation_record(request, state=state, anchor=anchor)
     if (startup is None or any(row['phase'] != 'started' for row in startup['workloads'].values())
             or activation is None or _hash(state / 'cutover.json') != binding.closure_sha256
@@ -181,7 +186,8 @@ def _entry(request: PoolCutoverRequest, binding: ManagerImageRepairBinding, *, s
         raise ValueError
     manager = copy.deepcopy(targets[_key(request.manager)])
     if startup_repair_exists(request, state=state, anchor=anchor):
-        source_documents, _, _, source = _repair_record(request, state=state, anchor=anchor)
+        source_documents, _, _, source = _read_repair_record(request, state=state, anchor=anchor,
+            targets=targets, startup=startup)
         if (source is None or any(row['phase'] != 'applied' for row in source['phases'].values())
                 or binding.source_repair_sha256 != _hash(state / 'startup-repair.json')):
             raise ValueError
@@ -225,8 +231,21 @@ def _entry(request: PoolCutoverRequest, binding: ManagerImageRepairBinding, *, s
     return ManagerImageEntry(binding, identity, documents, _record(path, identity), path, marker, retained is not None)
 
 
-def load_manager_image_chain(request: PoolCutoverRequest, *, state: Path, anchor: Path) -> tuple[ManagerImageEntry, ...]:
+def load_manager_image_chain(request: PoolCutoverRequest, *, state: Path, anchor: Path,
+        _ancestors: tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, Any] | None] | None = None
+        ) -> tuple[ManagerImageEntry, ...]:
     """Validate every entry, rejecting gaps, orphan records and history drift."""
+    return _read_manager_image_chain(request, state=state, anchor=anchor, ancestors=_ancestors)
+
+
+def _read_manager_image_chain(request: PoolCutoverRequest, *, state: Path, anchor: Path,
+        ancestors: tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, Any] | None] | None = None
+        ) -> tuple[ManagerImageEntry, ...]:
+    """Share freshly read startup ancestors only within this local chain read.
+
+    Every image entry and repair journal is still read and qualified. No result
+    survives this read or crosses a remote observation, preview or CAS boundary.
+    """
     try:
         operation = request.fencing.retirement.migration.registration.spec.operation_id
         expected = {_paths(operation, ordinal, state, anchor) for ordinal in range(1, MAX_CORRECTIONS + 1)}
@@ -249,7 +268,11 @@ def load_manager_image_chain(request: PoolCutoverRequest, *, state: Path, anchor
             binding = parse_image_binding(identity['binding'])
             if binding.ordinal != ordinal:
                 raise ValueError
-            result += (_entry(request, binding, state=state, anchor=anchor, prior=result),)
+            if ancestors is None:
+                closed, targets = closed_startup_documents(request, state_dir=state, anchor_dir=anchor)
+                _, startup = _startup_record(request, state=state, anchor=anchor, closed=closed, targets=targets)
+                ancestors = closed, targets, startup
+            result += (_entry(request, binding, state=state, anchor=anchor, prior=result, ancestors=ancestors),)
         return result
     except Exception:
         raise ValueError('pool_manager_image_history_unqualified') from None
