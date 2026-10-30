@@ -288,9 +288,10 @@ def test_gateway_runtime_binds_closed_child_identity_settings_and_management_dat
     _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage, action='probe')
 
 
-@pytest.mark.parametrize('damage', [None, 'db_settings', 'token', 'original_running', 'unready', 'uid',
-    'pod', 'template', 'registration', 'secret', 'backend', 'history', 'authority', 'kubernetes', 'capacity',
-    'late_capacity_pod', 'open_report', 'open_unknown', 'open_secret', 'open_backend', 'open_pod', 'open_authority'])
+# Shared runtime failures are covered by the complete closed gateway matrix.
+# Keep opening's qualification barrier and every post-dispatch failure here.
+@pytest.mark.parametrize('damage', [None, 'db_settings', 'capacity', 'late_capacity_pod',
+    'open_report', 'open_unknown', 'open_secret', 'open_backend', 'open_pod', 'open_authority'])
 def test_pool_opening_uses_qualified_gateway_once(management_history, projected_gateway, monkeypatch, damage):
     _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage, action='open')
 
@@ -307,8 +308,9 @@ def test_gateway_active_probe_uses_read_only_global_capacity_qualification(manag
     _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage, action='active-probe')
 
 
-@pytest.mark.parametrize('damage', [None, 'db_settings', 'token', 'unready', 'secret', 'backend',
-    'history', 'authority', 'kubernetes', 'late_kubernetes_secret', 'late_kubernetes_backend', 'late_kubernetes_pod'])
+# The common process qualification matrix runs through the closed probe above.
+# This entry proves continuous checks avoid all-active admission on success and failure.
+@pytest.mark.parametrize('damage', [None, 'db_settings', 'late_kubernetes_secret'])
 def test_gateway_process_probe_does_not_require_all_active_admission(management_history, projected_gateway, monkeypatch, damage):
     _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage, action='process')
 

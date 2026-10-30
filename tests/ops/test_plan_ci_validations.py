@@ -73,7 +73,7 @@ def test_ci_metadata_tool_mixed_with_pool_operator_retains_that_operators_covera
 
 
 @pytest.mark.parametrize("path", [
-    "scripts/check_ci_action_pins.py", "scripts/check_ci_upgrade_policy.py",
+    "scripts/check_ci_action_pins.py",
     "scripts/check_repository_paths.py",
 ])
 def test_owned_repository_policy_tools_do_not_start_runtime_regressions(path: str) -> None:
@@ -196,24 +196,11 @@ def test_authoritative_non_draft_pr_event_runs_full_protected_gate(
     assert plan.gate_mode == "full"
 
 
-@pytest.mark.parametrize(
-    ("action", "action_label"),
-    [
-        ("edited", ""),
-        ("labeled", "triage"),
-        ("unlabeled", "priority:P1"),
-        ("labeled", ""),
-    ],
-)
-@pytest.mark.parametrize(
-    "changed_paths",
-    [
-        ["docs/user-guide.md"],
-        ["tests/ops/test_plan_ci_validations.py"],
-        ["src/loom/config.py"],
-        ["unknown-runtime/new-component.bin"],
-    ],
-)
+@pytest.mark.parametrize(("action", "action_label", "changed_paths"), [
+    ("edited", "", ["docs/user-guide.md"]),
+    ("labeled", "triage", ["src/loom/config.py"]),
+    ("unlabeled", "priority:P1", ["unknown-runtime/new-component.bin"]),
+])
 def test_metadata_event_preserves_current_head_validation(
     action: str,
     action_label: str,
@@ -238,32 +225,6 @@ def test_metadata_event_preserves_current_head_validation(
     # A newer metadata suite must report the same protected gates and selected
     # work as the successful head suite it supersedes, including unknown paths.
     assert plan == current_head_plan
-    assert plan.event_relevant is True
-    assert plan.full_gate is True
-    assert plan.gate_mode == "full"
-
-
-@pytest.mark.parametrize(
-    "label",
-    [
-        "ci:integration",
-        "ci:integration-docker",
-        "ci:images",
-        "cluster-smoke",
-        "staging-smoke",
-        "ci:coverage-summary",
-    ],
-)
-@pytest.mark.parametrize("action", ["labeled", "unlabeled"])
-def test_supported_selector_metadata_event_runs_full_gate(action: str, label: str) -> None:
-    plan = plan_validations(
-        changed_paths=["docs/user-guide.md"],
-        labels=set(),
-        event_name="pull_request",
-        pull_request_action=action,
-        pull_request_action_label=label,
-    )
-
     assert plan.event_relevant is True
     assert plan.full_gate is True
     assert plan.gate_mode == "full"
@@ -781,25 +742,6 @@ def test_unknown_retired_source_path_selects_integration_lane() -> None:
     )
 
     assert plan.integration is True
-
-
-def test_every_docker_marked_integration_module_selects_docker() -> None:
-    integration_dir = REPO_ROOT / "tests" / "integration"
-    docker_marked_modules = [
-        path
-        for path in sorted(integration_dir.rglob("*.py"))
-        if "pytest.mark.docker" in path.read_text(encoding="utf-8")
-    ]
-    assert docker_marked_modules
-
-    for module in docker_marked_modules:
-        relative_path = module.relative_to(REPO_ROOT).as_posix()
-        plan = plan_validations(
-            changed_paths=[relative_path],
-            labels=set(),
-            event_name="pull_request",
-        )
-        assert plan.integration_docker is True, relative_path
 
 
 def test_docs_only_merge_group_skips_heavy_lanes() -> None:

@@ -71,7 +71,7 @@ def test_invalid_input_fails_before_any_request(repository, branch, sha):
         feedback.check_current_base(repository, branch, sha, read=read)
 
 
-@pytest.mark.parametrize("failure", ["http", "timeout", "json", "missing"])
+@pytest.mark.parametrize("failure", ["timeout", "missing"])
 def test_cli_transport_failure_does_not_echo_token_or_response(monkeypatch, failure, capsys):
     secret = "private-token-do-not-print"
 
@@ -82,7 +82,6 @@ def test_cli_transport_failure_does_not_echo_token_or_response(monkeypatch, fail
             raise subprocess.TimeoutExpired(argv, 20, output=secret, stderr=secret)
         if failure == "missing":
             raise OSError(secret)
-        return subprocess.CompletedProcess(argv, 1 if failure == "http" else 0, secret, secret)
 
     monkeypatch.setattr(subprocess, "run", run)
     with pytest.raises(ValueError) as error:

@@ -87,12 +87,12 @@ def target(request):
     return request.param
 
 
-# Every phase/commit combination runs on the manager. Collector and gateway share
-# the same fencing path behind their own runtime binding, so one phase covers it.
+# The HTTP case owns the pending template CAS. Keep late template commits and
+# the manager's remaining phase/commit combinations in this matrix.
 CANCELLATION_CASES = [
     *(("manager", phase, late_commit) for phase in ("isolate", "stop", "template", "start")
-      for late_commit in (False, True)),
-    *((target, "template", late_commit) for target in ("collector", "gateway") for late_commit in (False, True)),
+      for late_commit in (False, True) if phase != "template" or late_commit),
+    *((target, "template", True) for target in ("collector", "gateway")),
 ]
 
 
@@ -137,6 +137,7 @@ def test_https_cancellation_fences_image_intent_not_completed_source_repair(imag
     from scripts.ops.nebius_ingress_stage import _key
     from scripts.ops.nebius_pool_activation_live import HTTPSPoolActivationAPI
     from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
+    from scripts.ops.nebius_pool_shutdown import stop_pool_successors
     from scripts.ops.nebius_pool_startup import closed_startup_documents
     from scripts.ops.nebius_pool_startup_fence import fence_pool_startup
     from tests.ops.test_nebius_pool_shutdown import ShutdownAPI
@@ -149,6 +150,7 @@ def test_https_cancellation_fences_image_intent_not_completed_source_repair(imag
     image_api = ImageAPI(image_repair_case)
     image_api.failure = ("template", "before")
     assert switch(image_repair_case, image_api)["status"] == "pending_manager_image_outcome"
+    old_version = image_api.pending[0]["metadata"]["resourceVersion"]
     api = ShutdownAPI((context.request, None, None, remote.startup, None, state.parent))
     api.state = state
     assert advance_pool_activation(request=context.request, api=api, state_dir=state,
@@ -185,3 +187,8 @@ def test_https_cancellation_fences_image_intent_not_completed_source_repair(imag
         assert fence_pool_startup(request=context.request, api=api, state_dir=state,
             anchor_dir=anchor)["status"] == "startup_writes_fenced"
         assert len(writes) == 1
+        assert api.read_workload(key)["metadata"]["resourceVersion"] != old_version
+        assert stop_pool_successors(request=context.request, api=api, state_dir=state,
+            anchor_dir=anchor)["status"] == "pool_successors_stopped"
+        with pytest.raises(ValueError):
+            switch(image_repair_case, image_api)

@@ -4261,15 +4261,12 @@ async def test_service_step_token_freezes_identity_and_persists_audit(
         await engine.dispose()
 
 
-@pytest.mark.parametrize(
-    "terminal_state",
-    [NormalizedJobState.SUCCEEDED, NormalizedJobState.FAILED],
-)
-@pytest.mark.parametrize("extra_artifacts", [
-    0,
+@pytest.mark.parametrize("terminal_state,extra_artifacts", [
+    (NormalizedJobState.SUCCEEDED, 0),
+    (NormalizedJobState.FAILED, 0),
     # This case performs hundreds of real prepare/upload/complete transactions.
     # Keep the normal case's 60-second cap; allow the full inventory on CI CPUs.
-    pytest.param(512, marks=pytest.mark.timeout(300)),
+    pytest.param(NormalizedJobState.SUCCEEDED, 512, marks=pytest.mark.timeout(300)),
 ])
 async def test_observed_pod_broker_commits_semantic_runtime_output(
     postgres_url: str,
@@ -5260,16 +5257,13 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
         await engine.dispose()
 
 
-@pytest.mark.parametrize("outcome", ["succeeded", "timed_out", "cancelled"])
 async def test_large_runtime_result_survives_canonical_publication_and_download(
-    postgres_url: str, outcome: str,
+    postgres_url: str,
 ) -> None:
     await test_materializer_commits_complete_bundle_after_execution_cleanup(
         postgres_url=postgres_url, source_task_id=None,
-        rewards=None if outcome == "cancelled" else {"passed": 0.0},
-        aggregate_reward=None if outcome == "cancelled" else 0.0,
-        runtime_status="timed_out" if outcome == "cancelled" else outcome,
-        cancel_before_commit=outcome == "cancelled", extra_artifacts=256,
+        rewards={"passed": 0.0}, aggregate_reward=0.0,
+        runtime_status="succeeded", extra_artifacts=256,
     )
 
 

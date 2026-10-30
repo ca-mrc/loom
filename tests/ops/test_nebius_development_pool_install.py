@@ -177,27 +177,27 @@ def test_common_catalog_profile_ids_are_scoped_by_workload_kind(pool_inputs):
     assert len(request.registration.spec.profiles.task_images) == 2
 
 
-@pytest.mark.parametrize('damage', ['missing', 'architecture', 'os', 'reserved'])
-def test_intent_rejects_native_build_selectors_that_cannot_render(pool_inputs, damage):
-    _, catalog, _ = pool_inputs
-    selectors = [catalog['node_selector'],
-        *[row['runtime']['node_selector'] for row in catalog['profiles']['execution']],
-        *[row['target']['node_selector'] for kind in ('task_images', 'application_images')
-            for row in catalog['profiles'][kind]]]
-    # Keep physical registration internally consistent: the defect is that the
-    # native build renderer must transform or reject this immutable selector.
-    for selector in selectors:
-        if damage == 'missing':
-            selector.pop('loom.nebius/node-os')
-            selector.pop('loom.nebius/node-arch')
-        elif damage == 'architecture':
-            selector['loom.nebius/node-arch'] = 'arm64'
-        elif damage == 'os':
-            selector['loom.nebius/node-os'] = 'windows'
-        else:
-            selector['kubernetes.io/arch'] = 'amd64'
-    with pytest.raises(ValueError, match='development pool intent unqualified'):
-        prepare(pool_inputs)
+def test_intent_rejects_native_build_selectors_that_cannot_render(pool_inputs):
+    for damage in ('missing', 'architecture', 'os', 'reserved'):
+        reference, catalog, tokens = copy.deepcopy(pool_inputs)
+        selectors = [catalog['node_selector'],
+            *[row['runtime']['node_selector'] for row in catalog['profiles']['execution']],
+            *[row['target']['node_selector'] for kind in ('task_images', 'application_images')
+                for row in catalog['profiles'][kind]]]
+        # Keep physical registration internally consistent: the defect is that the
+        # native build renderer must transform or reject this immutable selector.
+        for selector in selectors:
+            if damage == 'missing':
+                selector.pop('loom.nebius/node-os')
+                selector.pop('loom.nebius/node-arch')
+            elif damage == 'architecture':
+                selector['loom.nebius/node-arch'] = 'arm64'
+            elif damage == 'os':
+                selector['loom.nebius/node-os'] = 'windows'
+            else:
+                selector['kubernetes.io/arch'] = 'amd64'
+        with pytest.raises(ValueError, match='development pool intent unqualified'):
+            prepare((reference, catalog, tokens))
 
 
 def test_intent_accepts_distinct_task_bundle_and_application_source_buckets(pool_inputs, retained):
@@ -235,61 +235,61 @@ def test_complete_intent_binds_only_observed_namespace_uids(pool_inputs):
     assert not any(token in repr(intent) for token in pool_inputs[2].values())
 
 
-@pytest.mark.parametrize('damage', ['missing-builder', 'publication', 'runtime-binary', 'service-image',
-    'schema', 'source', 'physical-group', 'supplied-uid', 'token', 'extra-token', 'missing-task-profile', 'missing-trial'])
-def test_incomplete_or_foreign_catalog_is_rejected_before_namespace_creation(pool_inputs, damage):
-    reference, value, tokens = pool_inputs
-    participant, = value['participants']
-    if damage == 'missing-builder':
-        value['profiles'].pop('application_images')
-        participant['targets'] = [row for row in participant['targets'] if row['workload_kinds'] != ['application_image_build']]
-        removed, = [row for row in value['machines'] if row.get('workload_scope') == 'application_builder']
-        value['machines'].remove(removed)
-        del tokens[UUID(removed['machine_id'])]
-    elif damage == 'publication':
-        value['profiles']['execution'][0]['candidate_sha'] = 'd' * 40
-    elif damage == 'runtime-binary':
-        value['profiles']['execution'][0]['runtime_binary_sha256'] = 'sha256:' + 'd' * 64
-    elif damage == 'service-image':
-        value['profiles']['task_images'][0]['settings']['service_image'] = 'registry.example/foreign@sha256:' + 'd' * 64
-    elif damage == 'schema':
-        value['profiles']['application_images'][0]['recipe']['schema_revision'] = '9999'
-    elif damage == 'source':
-        value['profiles']['task_images'][0]['settings']['source_bucket'] = 'foreign-source'
-    elif damage == 'physical-group':
-        value['node_group_id'] = 'foreign-group'
-    elif damage == 'supplied-uid':
-        participant['execution_namespace']['uid'] = str(uuid4())
-    elif damage == 'token':
-        tokens[next(iter(tokens))] = 'changed-private-token'
-    elif damage == 'extra-token':
-        tokens[uuid4()] = 'extra-private-token'
-    elif damage == 'missing-trial':
-        for target in participant['targets']:
-            target['workload_kinds'] = ['verifier' if kind == 'trial' else kind for kind in target['workload_kinds']]
-    else:
-        value['profiles']['task_images'] = []
-    with pytest.raises(ValueError, match='development pool intent') as caught:
-        module().prepare_intent(reference=reference, catalog=value, tokens=tokens)
-    assert not any(token in str(caught.value) for token in tokens.values())
+def test_incomplete_or_foreign_catalog_is_rejected_before_namespace_creation(pool_inputs):
+    for damage in ('missing-builder', 'publication', 'runtime-binary', 'service-image',
+            'schema', 'source', 'physical-group', 'supplied-uid', 'token', 'extra-token', 'missing-task-profile', 'missing-trial'):
+        reference, value, tokens = copy.deepcopy(pool_inputs)
+        participant, = value['participants']
+        if damage == 'missing-builder':
+            value['profiles'].pop('application_images')
+            participant['targets'] = [row for row in participant['targets'] if row['workload_kinds'] != ['application_image_build']]
+            removed, = [row for row in value['machines'] if row.get('workload_scope') == 'application_builder']
+            value['machines'].remove(removed)
+            del tokens[UUID(removed['machine_id'])]
+        elif damage == 'publication':
+            value['profiles']['execution'][0]['candidate_sha'] = 'd' * 40
+        elif damage == 'runtime-binary':
+            value['profiles']['execution'][0]['runtime_binary_sha256'] = 'sha256:' + 'd' * 64
+        elif damage == 'service-image':
+            value['profiles']['task_images'][0]['settings']['service_image'] = 'registry.example/foreign@sha256:' + 'd' * 64
+        elif damage == 'schema':
+            value['profiles']['application_images'][0]['recipe']['schema_revision'] = '9999'
+        elif damage == 'source':
+            value['profiles']['task_images'][0]['settings']['source_bucket'] = 'foreign-source'
+        elif damage == 'physical-group':
+            value['node_group_id'] = 'foreign-group'
+        elif damage == 'supplied-uid':
+            participant['execution_namespace']['uid'] = str(uuid4())
+        elif damage == 'token':
+            tokens[next(iter(tokens))] = 'changed-private-token'
+        elif damage == 'extra-token':
+            tokens[uuid4()] = 'extra-private-token'
+        elif damage == 'missing-trial':
+            for target in participant['targets']:
+                target['workload_kinds'] = ['verifier' if kind == 'trial' else kind for kind in target['workload_kinds']]
+        else:
+            value['profiles']['task_images'] = []
+        with pytest.raises(ValueError, match='development pool intent') as caught:
+            module().prepare_intent(reference=reference, catalog=value, tokens=tokens)
+        assert not any(token in str(caught.value) for token in tokens.values())
 
 
-@pytest.mark.parametrize('damage', ['missing', 'extra', 'duplicate', 'nil'])
-def test_namespace_receipt_requires_exact_distinct_non_nil_identities(pool_inputs, damage):
+def test_namespace_receipt_requires_exact_distinct_non_nil_identities(pool_inputs):
     intent = prepare(pool_inputs)
     participant, = pool_inputs[1]['participants']
     names = [participant[field]['name'] for field in ('execution_namespace', 'build_namespace')]
-    uids = {name: str(uuid4()) for name in names}
-    if damage == 'missing':
-        del uids[names[0]]
-    elif damage == 'extra':
-        uids['loom-nebius-platform'] = str(uuid4())
-    elif damage == 'duplicate':
-        uids[names[1]] = uids[names[0]]
-    else:
-        uids[names[0]] = str(UUID(int=0))
-    with pytest.raises(ValueError, match='development pool namespace'):
-        module().bind_namespaces(intent, uids)
+    for damage in ('missing', 'extra', 'duplicate', 'nil'):
+        uids = {name: str(uuid4()) for name in names}
+        if damage == 'missing':
+            del uids[names[0]]
+        elif damage == 'extra':
+            uids['loom-nebius-platform'] = str(uuid4())
+        elif damage == 'duplicate':
+            uids[names[1]] = uids[names[0]]
+        else:
+            uids[names[0]] = str(UUID(int=0))
+        with pytest.raises(ValueError, match='development pool namespace'):
+            module().bind_namespaces(intent, uids)
 
 
 def test_fixed_delivery_keeps_credentials_scoped_and_runtime_disabled(pool_inputs):

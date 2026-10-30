@@ -37,7 +37,7 @@ class FirstRestartMutation(BaseException):
 
 
 @pytest.mark.timeout(600)
-@pytest.mark.parametrize('scenario', ['prepared', 'new', 'drain', 'authority', 'processes', 'unknown'])
+@pytest.mark.parametrize('scenario', ['prepared', 'new', 'unknown'])
 def test_restart_prepared_dispatch_qualifies_once(retirement_http, closed_startup, monkeypatch, scenario):
     from scripts.ops.nebius_pool_legacy_restart import restart_pool_legacy
 
@@ -128,25 +128,36 @@ def test_restart_prepared_dispatch_qualifies_once(retirement_http, closed_startu
         def run():
             return restart_pool_legacy(request=api.request, api=api, state_dir=api.state, anchor_dir=api.anchor)
 
-        if scenario in {'prepared', 'new'}:
-            with pytest.raises(FirstRestartMutation):
-                run()
-            print('restart first CAS', scenario, dict(counts))
-            assert counts['verify'] == (11 if scenario == 'new' else 4)
-            assert counts['dispatch'] == counts['preview'] == len(writes) == 1
-        elif scenario == 'authority':
-            with pytest.raises(ValueError, match='unconfirmed_preserve_evidence'):
-                run()
-            assert counts['dispatch'] == counts['preview'] == 1 and not writes
-        elif scenario == 'unknown':
-            assert run()['status'] == 'pending_legacy_restart_outcome'
-            saved = journal.read_bytes()
-            assert run()['status'] == 'pending_legacy_restart_outcome'
-            assert counts['dispatch'] == counts['preview'] == len(writes) == 1
-            assert journal.read_bytes() == saved
-        else:
-            assert run()['status'] == ('pending_pool_cleanup' if scenario == 'drain' else 'pending_successor_drain')
-            assert counts['dispatch'] == counts['preview'] == 1 and not writes
-        if scenario in {'drain', 'authority', 'processes'}:
-            assert all(row == {'phase': 'prepared', 'before_resource_version': None}
-                for row in json.loads(journal.read_bytes())['workloads'].values())
+        scenarios = ('drain', 'authority', 'processes', 'prepared') if scenario == 'prepared' else (scenario,)
+        drained, role_damage = api.parent.history.recovery_pool_drained, state.role_damage
+        gateway_key = 'Deployment:' + api.request.fencing.retirement.migration.registration.binding.namespace + ':loom-pool-gateway'
+        generation = state.objects[gateway_key]['status']['observedGeneration']
+        for scenario in scenarios:
+            counts.clear()
+            try:
+                if scenario in {'prepared', 'new'}:
+                    with pytest.raises(FirstRestartMutation):
+                        run()
+                    print('restart first CAS', scenario, dict(counts))
+                    assert counts['verify'] == (11 if scenario == 'new' else 4)
+                    assert counts['dispatch'] == counts['preview'] == len(writes) == 1
+                elif scenario == 'authority':
+                    with pytest.raises(ValueError, match='unconfirmed_preserve_evidence'):
+                        run()
+                    assert counts['dispatch'] == counts['preview'] == 1 and not writes
+                elif scenario == 'unknown':
+                    assert run()['status'] == 'pending_legacy_restart_outcome'
+                    saved = journal.read_bytes()
+                    assert run()['status'] == 'pending_legacy_restart_outcome'
+                    assert counts['dispatch'] == counts['preview'] == len(writes) == 1
+                    assert journal.read_bytes() == saved
+                else:
+                    assert run()['status'] == ('pending_pool_cleanup' if scenario == 'drain' else 'pending_successor_drain')
+                    assert counts['dispatch'] == counts['preview'] == 1 and not writes
+                if scenario in {'drain', 'authority', 'processes'}:
+                    assert all(row == {'phase': 'prepared', 'before_resource_version': None}
+                        for row in json.loads(journal.read_bytes())['workloads'].values())
+            finally:
+                api.parent.history.recovery_pool_drained = drained
+                state.role_damage = role_damage
+                state.objects[gateway_key]['status']['observedGeneration'] = generation

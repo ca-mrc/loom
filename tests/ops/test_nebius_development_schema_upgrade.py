@@ -316,6 +316,28 @@ def test_parent_completes_all_phases_without_rewriting_ancestry_and_replays(comp
         reference=retained.reference) == completed
     assert all(path.read_bytes() == data for path, data in raw.items())
 
+    record = schema._record(retained)
+    wrong_probe = copy.deepcopy(record['phases']['shared-probe']['proof'])
+    wrong_probe['database'] = record['phases']['manager-probe']['proof']['database']
+    wrong_backup = copy.deepcopy(record['phases']['shared-backup']['proof'])
+    wrong_backup['key'] = record['phases']['manager-backup']['proof']['key']
+    wrong_upgrade = copy.deepcopy(record['phases']['shared-upgrade']['proof'])
+    wrong_upgrade['database']['checkpoint_sha256'] = '0' * 64
+    wrong_inspection = copy.deepcopy(record['phases']['shared-inspect']['proof'])
+    wrong_inspection['database']['successor']['grants_sha256'] = 'd' * 64
+    for phase, proof in (('shared-probe', wrong_probe), ('shared-backup', wrong_backup),
+            ('shared-upgrade', wrong_upgrade), ('shared-inspect', wrong_inspection)):
+        with pytest.raises(ValueError):
+            schema.validate_phase_proof(retained, record, phase, proof)
+
+    original = copy.deepcopy(retained)
+    config = schema.phase_documents(retained, schema._record(retained), 'configuration')
+    next(iter(config.values()))['data']['foreign'] = 'value'
+    before, after = schema.transition_documents(retained, 'stop')
+    next(iter(before.values()))['metadata']['name'] = 'foreign'
+    next(iter(after.values()))['metadata']['name'] = 'foreign'
+    assert retained == original
+
 
 def test_prepare_has_no_remote_effect_and_recover_never_creates_new_operation(schema_retained):
     api = SchemaParentAPI(schema_retained)
@@ -396,24 +418,6 @@ def test_unknown_effect_is_observed_without_dispatching_again(schema_retained, e
         assert api.writes() == writes
 
 
-def test_completed_loader_rejects_rewritten_stage_even_if_parent_digest_is_updated(completed_schema):
-    retained, api, _ = completed_schema
-    phase = 'configuration'
-    path = schema._child(retained, phase)
-    journal = retained.state_dir / 'operation.json'
-    original, parent_raw = path.read_bytes(), journal.read_bytes()
-    child = json.loads(original)
-    key = next(iter(child['resources']))
-    child['resources'][key]['observed']['data']['unapproved'] = 'payload'
-    state._atomic_json(path, child)
-    parent = json.loads(parent_raw)
-    parent['phases'][phase]['child_sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
-    state._atomic_json(journal, parent)
-    with pytest.raises(ValueError, match='stage_snapshot_changed'):
-        schema.load_completed_development_schema_successor(runtime=retained.runtime.request, reference=retained.reference)
-    assert api.catalog_commits == 1
-
-
 def test_completed_loader_rejects_phase_jumps_anchor_and_ancestor_drift(completed_schema, monkeypatch):
     from scripts.ops import nebius_shared_pool_entry as runtime_entry
 
@@ -464,30 +468,18 @@ def test_completed_loader_rejects_phase_jumps_anchor_and_ancestor_drift(complete
         ancestor.write_bytes(raw)
     assert api.catalog_commits == 1
 
-
-def test_phase_proofs_reject_cross_database_checkpoint_and_changed_poststart_grants(completed_schema):
-    retained, _, _ = completed_schema
-    record = schema._record(retained)
-    wrong_probe = copy.deepcopy(record['phases']['shared-probe']['proof'])
-    wrong_probe['database'] = record['phases']['manager-probe']['proof']['database']
-    wrong_backup = copy.deepcopy(record['phases']['shared-backup']['proof'])
-    wrong_backup['key'] = record['phases']['manager-backup']['proof']['key']
-    wrong_upgrade = copy.deepcopy(record['phases']['shared-upgrade']['proof'])
-    wrong_upgrade['database']['checkpoint_sha256'] = '0' * 64
-    wrong_inspection = copy.deepcopy(record['phases']['shared-inspect']['proof'])
-    wrong_inspection['database']['successor']['grants_sha256'] = 'd' * 64
-    for phase, proof in (('shared-probe', wrong_probe), ('shared-backup', wrong_backup),
-            ('shared-upgrade', wrong_upgrade), ('shared-inspect', wrong_inspection)):
-        with pytest.raises(ValueError):
-            schema.validate_phase_proof(retained, record, phase, proof)
-
-
-def test_document_callers_cannot_modify_frozen_schema_plan(completed_schema):
-    retained, _, _ = completed_schema
-    original = copy.deepcopy(retained)
-    config = schema.phase_documents(retained, schema._record(retained), 'configuration')
-    next(iter(config.values()))['data']['foreign'] = 'value'
-    before, after = schema.transition_documents(retained, 'stop')
-    next(iter(before.values()))['metadata']['name'] = 'foreign'
-    next(iter(after.values()))['metadata']['name'] = 'foreign'
-    assert retained == original
+    monkeypatch.setattr(schema, 'schema_runtime_resources', project)
+    phase = 'configuration'
+    path = schema._child(retained, phase)
+    journal = retained.state_dir / 'operation.json'
+    original, parent_raw = path.read_bytes(), journal.read_bytes()
+    child = json.loads(original)
+    key = next(iter(child['resources']))
+    child['resources'][key]['observed']['data']['unapproved'] = 'payload'
+    state._atomic_json(path, child)
+    parent = json.loads(parent_raw)
+    parent['phases'][phase]['child_sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
+    state._atomic_json(journal, parent)
+    with pytest.raises(ValueError, match='stage_snapshot_changed'):
+        schema.load_completed_development_schema_successor(runtime=retained.runtime.request, reference=retained.reference)
+    assert api.catalog_commits == 1

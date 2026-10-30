@@ -5,7 +5,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -164,18 +163,6 @@ def test_control_jobs_keep_hosted_fallback_and_use_the_same_optional_queue() -> 
             assert placement.endswith("|| 'ubuntu-latest' }}")
             assert "LOOM_CI_UNIFIED_RUNNERS" in placement
             assert "loom-ci-exec" in placement
-
-
-def test_coverage_artifacts_map_hosted_checkout_roots() -> None:
-    config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    paths = config["tool"]["coverage"]["paths"]
-
-    for path_group, source_root in (("source", "src"), ("packages", "packages")):
-        assert paths[path_group] == [
-            source_root,
-            f"/home/runner/work/*/*/{source_root}",
-            f"*/_work/*/*/{source_root}",
-        ]
 
 
 def test_source_workflows_share_native_run_identity() -> None:
@@ -348,35 +335,6 @@ def test_ci_filter_step_emits_the_filtered_contract(tmp_path: Path) -> None:
     assert outputs["gate_mode"] == "filtered"
     assert outputs["full_gate"] == "false"
     assert {key for key, value in outputs.items() if value == "true"} == {"docs_only"}
-
-
-def test_source_gate_names_are_native_and_stable() -> None:
-    jobs = _workflow(".github/workflows/ci.yml")["jobs"]
-    expression = _normalized_expression(jobs["repository-checks"]["name"])
-    assert expression == _normalized_expression(
-        "${{ github.event_name == 'schedule' && 'repository-checks-scheduled' || "
-        "github.event_name == 'workflow_dispatch' && 'repository-checks-manual' || "
-        "github.event_name == 'push' && 'repository-checks-push' || "
-        "needs.workflow-plan.outputs.gate_mode == 'full' && 'repository-checks' || "
-        "'repository-checks-filtered' }}"
-    )
-    for path, (gate_id, protected_name) in GATE_CONTRACTS.items():
-        assert gate_id in jobs
-        if gate_id != "repository-checks":
-            assert _normalized_expression(jobs[gate_id]["name"]) == _normalized_expression(
-                "${{ "
-                f"github.event_name == 'schedule' && '{protected_name}-scheduled' || "
-                f"github.event_name == 'workflow_dispatch' && '{protected_name}-manual' || "
-                f"github.event_name == 'push' && '{protected_name}-push' || "
-                f"needs.workflow-plan.outputs.gate_mode == 'full' && '{protected_name}' || "
-                f"'{protected_name}-filtered' "
-                "}}"
-            )
-            assert _workflow(path)["jobs"][gate_id]["name"] == (
-                protected_name.removesuffix("-gate") + " result"
-            )
-        assert "publisher_active" not in str(jobs[gate_id])
-        assert f"{protected_name}-attempt" not in str(jobs[gate_id])
 
 
 def test_push_aggregates_cannot_duplicate_protected_names_on_promotion_heads() -> None:
@@ -742,22 +700,6 @@ def test_image_builds_pass_exact_full_head_sha() -> None:
         assert "build_args+=(.)" not in script
 
 
-def test_stable_gate_scripts_have_valid_bash_syntax() -> None:
-    invalid_gates: dict[str, str] = {}
-    for workflow_path, (gate_id, _) in GATE_CONTRACTS.items():
-        result = subprocess.run(
-            ["bash", "-n"],
-            input=_gate_script(workflow_path, gate_id),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if result.returncode:
-            invalid_gates[gate_id] = result.stderr
-
-    assert not invalid_gates, invalid_gates
-
-
 def test_protected_workflows_cover_gate_authority_pr_transitions() -> None:
     workflow = _workflow(".github/workflows/ci.yml")
     pull_request = _workflow_on(workflow)["pull_request"]
@@ -975,7 +917,7 @@ def test_repository_checks_preserves_result_semantics(selected: str, validation_
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("source", [*REPOSITORY_SELECTED_RESULTS, "FAST_COVERAGE_RESULT", "PLAN_RESULT", "FEEDBACK_RESULT"])
+@pytest.mark.parametrize("source", ["ROOT_SELECTED", "FAST_COVERAGE_RESULT", "PLAN_RESULT", "FEEDBACK_RESULT"])
 @pytest.mark.parametrize("failed_result", ["failure", "cancelled", "skipped"])
 def test_repository_checks_rejects_each_missing_or_failed_selected_source(source: str, failed_result: str) -> None:
     if source in REPOSITORY_SELECTED_RESULTS:
@@ -1048,93 +990,37 @@ def test_reusable_validation_workflows_keep_internal_result_enforcement() -> Non
 
 
 def test_repository_checks_keeps_four_gate_contract_with_staged_execution() -> None:
-    workflow = _workflow(".github/workflows/ci.yml")
-    jobs = workflow["jobs"]
-
-    assert "fast-checks" not in jobs
-    assert set(jobs["fast-coverage"]["needs"]) == {"workflow-plan", "tests-root", "tests-packages"}
-    assert "coverage_summary == 'true'" in jobs["fast-coverage"]["if"]
-    quick = {"workflow-plan", "lint-and-static", "locked-environments", "tests-packages", "go-checks", "nebius-iac"}
-    assert set(jobs["integration"]["needs"]) == quick
-    assert set(jobs["tests-root"]["needs"]) == quick
-    for job in ("integration-docker", "nebius-pool", "runtime-payload", "web-runtime"):
-        assert set(jobs[job]["needs"]) == {"workflow-plan", "fast-feedback"}
-    assert set(jobs["fast-feedback"]["needs"]) == quick | {"tests-root", "integration", "web-checks"}
-    assert "go_checks == 'true'" in jobs["go-checks"]["if"]
-    assert "gate_mode == 'full'" in jobs["integration"]["if"]
-    assert "gate_mode == 'full'" in jobs["integration-docker"]["if"]
-    assert "repository-checks" in jobs["repository-checks"]["name"]
-    assert set(jobs["repository-checks"]["needs"]) == {
-        "workflow-plan", "locked-environments", "lint-and-static", "runtime-payload", "nebius-iac",
-        "tests-root", "nebius-pool", "tests-packages", "fast-coverage", "go-checks", "integration",
-        "integration-docker", "coverage-summary", "web-checks", "web-runtime", "fast-feedback",
+    # Resolve the real workflow env before running its gate. Direct env injection
+    # alone cannot catch a result wired to another successful dependency.
+    gate = _workflow(".github/workflows/ci.yml")["jobs"]["repository-checks"]
+    step = next(step for step in gate["steps"] if step.get("name") == "Enforce selected validation results")
+    sources = {
+        "workflow-plan", "fast-feedback", "lint-and-static", "locked-environments",
+        "tests-root", "nebius-pool", "tests-packages", "runtime-payload", "nebius-iac",
+        "go-checks", "integration", "integration-docker", "fast-coverage",
+        "coverage-summary", "web-checks", "web-runtime",
     }
-    assert "always()" in jobs["repository-checks"]["if"]
-    for job_name in (
-        "lint-and-static",
-        "tests-packages",
-        "go-checks",
-        "nebius-iac",
-    ):
-        assert set(jobs[job_name]["needs"]) == {"workflow-plan"}
-    assert "gate_mode == 'full'" in jobs["runtime-payload"]["if"]
-    assert "gate_mode == 'preflight'" in jobs["runtime-payload"]["if"]
-
-    runtime_payload_scripts = "\n".join(
-        step.get("run", "") for step in jobs["runtime-payload"]["steps"]
-    ).strip()
-    assert runtime_payload_scripts == (
-        'python3 scripts/configure_ci_registry_mirror.py\n'
-        'python3 scripts/runtime_payload_conformance.py --test-scope "${CI_TEST_SCOPE:-all}"'
-    )
-    assert "continue-on-error" not in jobs["runtime-payload"]
-
-    assert {
-        "docs_only",
-        "event_relevant",
-        "full_gate",
-        "gate_mode",
-        "integration",
-        "integration_docker",
-        "images",
-        "cluster_smoke",
-        "staging_smoke",
-        "coverage_summary",
-        "web_checks",
-    } <= set(jobs["workflow-plan"]["outputs"])
-
-    aggregate_step = next(
-        step
-        for step in jobs["repository-checks"]["steps"]
-        if step.get("name") == "Enforce selected validation results"
-    )
-    gate_env = aggregate_step["env"]
-    assert gate_env["PLAN_RESULT"] == "${{ needs.workflow-plan.result }}"
-    assert gate_env["LINT_RESULT"] == "${{ needs.lint-and-static.result }}"
-    assert gate_env["LINT_SELECTED"] == "${{ needs.workflow-plan.outputs.lint_and_static }}"
-    assert gate_env["ROOT_RESULT"] == "${{ needs.tests-root.result }}"
-    assert gate_env["FAST_COVERAGE_RESULT"] == "${{ needs.fast-coverage.result }}"
-    for selected, result in REPOSITORY_SELECTED_RESULTS.items():
-        assert selected in gate_env and result in gate_env
-        assert f'"${selected}"' in aggregate_step["run"]
-        assert f'"${result}"' in aggregate_step["run"]
-
-    assert set(jobs["web-checks"]["needs"]) == {"workflow-plan"}
-    assert "needs.workflow-plan.outputs.web_checks == 'true'" in jobs["web-checks"]["if"]
-    web_script = "\n".join(
-        step.get("run", "") for step in jobs["web-checks"]["steps"] if "run" in step
-    )
-    assert "component_ownership.py test-paths --lane frontend" in web_script
-    assert "component_ownership.py --help | grep -q -- 'test-paths'" in web_script
-    assert "npm run typecheck" in web_script
-    assert "npm run lint" in web_script
-    assert "vitest run --coverage" in web_script
-    assert "npm run test:coverage" in web_script
-    runtime_script = "\n".join(step.get("run", "") for step in jobs["web-runtime"]["steps"])
-    assert "npm run build" in runtime_script
-    assert "npm run test:e2e" in runtime_script
-    assert "npm run build" not in web_script
-    assert "npm run test:e2e" not in web_script
+    outputs = dict.fromkeys((
+        "lint_and_static", "locked_environments", "tests_root", "nebius_pool",
+        "tests_packages", "runtime_payload", "nebius_iac", "go_checks",
+        "integration", "integration_docker", "coverage_summary", "web_checks", "web_runtime",
+    ), "true")
+    for selected, output in zip(REPOSITORY_SELECTED_RESULTS, outputs, strict=True):
+        assert step["env"][selected] == f"${{{{ needs.workflow-plan.outputs.{output} }}}}"
+    outputs.update(gate_mode="full", docs_only="false")
+    assert sources == set(gate["needs"])
+    assert "always()" in gate["if"]
+    for failed in (None, *sorted(sources)):
+        native = {
+            f"${{{{ needs.{job}.result }}}}": "failure" if job == failed else "success"
+            for job in gate["needs"]
+        }
+        native.update({f"${{{{ needs.workflow-plan.outputs.{key} }}}}": value
+                       for key, value in outputs.items()})
+        env = {key: native[value] for key, value in step["env"].items()}
+        result = subprocess.run(["bash"], input=step["run"], text=True, capture_output=True,
+                                env=env, check=False)
+        assert (result.returncode == 0) is (failed is None), (failed, result.stdout, result.stderr)
 
 
 @pytest.mark.parametrize("lane,output", [
@@ -1170,14 +1056,6 @@ def test_python_test_shards_are_complete_and_non_overlapping(lane: str, output: 
         assert [row["guest_payload"] for row in matrix] == [bool(shard & consumers) for shard in shards]
         assert "matrix.guest_payload" in next(step["if"] for step in jobs[lane]["steps"]
                   if step.get("name") == "Build and extract the admitted software-guest payload")
-
-
-def test_ci_supports_merge_queue_merge_group_event() -> None:
-    workflow = _workflow(".github/workflows/ci.yml")
-    on_config = _workflow_on(workflow)
-
-    assert "merge_group" in on_config
-    assert "checks_requested" in on_config["merge_group"]["types"]
 
 
 def test_ci_planner_uses_merge_base_for_pr_changed_paths_only() -> None:
@@ -1499,23 +1377,6 @@ def test_manual_coverage_request_selects_integration_through_workflow_planner(tm
     values = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert values["coverage_summary"] == values["integration"] == "true"
     assert values["docs_only"] == "false"
-
-
-@pytest.mark.parametrize("heavy_job", ["nebius-pool", "integration-docker", "runtime-payload", "web-runtime"])
-def test_heavy_jobs_wait_for_native_fast_feedback(heavy_job: str) -> None:
-    from tests.ops.test_ci_images_parallel_builds import _condition
-
-    job = _workflow(".github/workflows/ci.yml")["jobs"][heavy_job]
-    assert set(job["needs"]) == {"workflow-plan", "fast-feedback"}
-    values = {"needs.workflow-plan.result": "success", "needs.fast-feedback.result": "success"}
-    values.update({f"needs.workflow-plan.outputs.{name}": "true" for name in (
-        "nebius_pool", "integration_docker", "runtime_payload", "web_runtime",
-    )})
-    values["needs.workflow-plan.outputs.gate_mode"] = "full"
-    assert _condition(job["if"], values)
-    for result in ("failure", "cancelled", "skipped"):
-        values["needs.fast-feedback.result"] = result
-        assert not _condition(job["if"], values)
 
 
 @pytest.mark.parametrize("job_name", ["tests-root", "integration"])

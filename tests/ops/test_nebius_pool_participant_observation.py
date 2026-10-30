@@ -265,23 +265,24 @@ def guard_connection(resource_connection, tmp_path, monkeypatch):
     return state, connect, {'kubeconfig': kubeconfig, 'executable': Path('/usr/bin/kubectl')}
 
 
-@pytest.mark.parametrize('phase,status,accepted', [('preflight', 'open', True), ('preflight', 'held', True),
-    ('guarded', 'held', True), ('ready', 'held', True), ('released', 'open', True),
-    ('guarded', 'open', False), ('ready', 'skipped_locked', False), ('released', 'held', False),
-    ('preflight', 'skipped_locked', False)])
-def test_selected_guard_uses_release_owner_and_real_backend(guard_connection, phase, status, accepted):
+def test_selected_guard_uses_release_owner_and_real_backend(guard_connection):
     state, _, options = guard_connection
-    state.guard_status = status
-    with observer(state.retained, lambda: state.rows)[0] as live:
-        before = evidence(state.retained)
-        if accepted:
-            assert live.observe_guard(phase=phase, **options) == status
-            assert len(state.guard_queries) >= 2
-        else:
-            with pytest.raises(ValueError, match='preserve'):
-                live.observe_guard(phase=phase, **options)
-        assert evidence(state.retained) == before
-        assert state.writes == []
+    for phase, status, accepted in [('preflight', 'open', True), ('preflight', 'held', True),
+        ('guarded', 'held', True), ('ready', 'held', True), ('released', 'open', True),
+        ('guarded', 'open', False), ('ready', 'skipped_locked', False), ('released', 'held', False),
+        ('preflight', 'skipped_locked', False)]:
+        state.guard_queries.clear()
+        state.guard_status = status
+        with observer(state.retained, lambda: state.rows)[0] as live:
+            before = evidence(state.retained)
+            if accepted:
+                assert live.observe_guard(phase=phase, **options) == status
+                assert len(state.guard_queries) >= 2
+            else:
+                with pytest.raises(ValueError, match='preserve'):
+                    live.observe_guard(phase=phase, **options)
+            assert evidence(state.retained) == before
+            assert state.writes == []
 
 
 @pytest.mark.parametrize('staging_attachment_inputs', [2], indirect=True)
@@ -467,6 +468,9 @@ def test_selected_guard_blocks_real_pool_effects_after_ownership_loss(guard_conn
         state.guard_status = 'held'
         pool.finish(kube, state.retained.release)
         pool.read_capacity(kube, state.retained.release, observation_id=uuid4())
+        before = evidence(pool_state.retained)
+        assert live.observe()[_key(pool_state.manager)] == pool_state.manager
+        assert evidence(pool_state.retained) == before
         assert pool_state.effects == ['config', 'fence', 'stage', 'config', 'manager', 'open', 'capacity']
 
 
@@ -533,21 +537,6 @@ def test_observer_rejects_missing_or_unrelated_dispatch_evidence(resource_connec
     with observer(state.retained, lambda: state.rows)[0] as live:
         with pytest.raises(ValueError, match='preserve'):
             live.observe()
-
-
-@pytest.mark.timeout(180)
-def test_pool_adapter_uses_live_observer_through_catalog_and_job_transitions(pool_connection):
-    state, kube, connect = pool_connection
-    with observer(state.retained, lambda: state.api.resources)[0] as live:
-        state.qualify = lambda _: live.observe()
-        pool = connect()
-        assert pool.activate(kube, state.retained.release) == 'ready'
-        pool.finish(kube, state.retained.release)
-        pool.read_capacity(kube, state.retained.release, observation_id=uuid4())
-        before = evidence(state.retained)
-        assert live.observe()[_key(state.manager)] == state.manager
-        assert evidence(state.retained) == before
-        assert state.effects == ['config', 'fence', 'stage', 'config', 'manager', 'open', 'capacity']
 
 
 def test_job_retry_observation_selects_current_uid_and_preserves_predecessors(creation_connection):

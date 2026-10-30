@@ -1561,10 +1561,9 @@ async def test_runtime_cloud_uses_observer_credentials_and_rejects_authority_or_
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
-@pytest.mark.parametrize('completion', ['lost-history', 'complete'])
 @pytest.mark.timeout(300)  # Complete parent with real history/crypto, HTTP boundary only.
 def test_concrete_runtime_parent_qualifies_before_writes_and_resumes_pending_sql(
-        completed_pool, publisher_cloud, published_source, handoff, monkeypatch, tmp_path, completion, system_kubectl):
+        completed_pool, publisher_cloud, published_source, handoff, monkeypatch, tmp_path, system_kubectl):
     import hmac
     from types import SimpleNamespace
 
@@ -1720,14 +1719,15 @@ def test_concrete_runtime_parent_qualifies_before_writes_and_resumes_pending_sql
     with module.HTTPSDevelopmentRuntimeAPI(**arguments) as api:
         assert runtime.install_development_runtime(request=request, api=api, execute=True)['status'] == 'pending_database'
         assert len(writes) == 4
-    if completion == 'lost-history':
-        path = state / 'database/stage.json'
-        path.rename(path.with_name('stage-preserved.json'))
-        with module.HTTPSDevelopmentRuntimeAPI(**arguments) as api:
-            with pytest.raises(ValueError, match='development runtime installation unqualified'):
-                runtime.install_development_runtime(request=request, api=api, execute=True)
-        assert len(writes) == 4, 'a fresh process cannot adopt lost child history'
-        return
+    path = state / 'database/stage.json'
+    preserved = path.with_name('stage-preserved.json')
+    path.rename(preserved)
+    with module.HTTPSDevelopmentRuntimeAPI(**arguments) as api:
+        with pytest.raises(ValueError, match='development runtime installation unqualified'):
+            runtime.install_development_runtime(request=request, api=api, execute=True)
+    assert len(writes) == 4, 'a fresh process cannot adopt lost child history'
+    assert not path.exists()
+    preserved.rename(path)
     def complete_job(phase):
         selected, = (row for row in parent.plan.fixed[phase].values() if row['kind'] == 'Job')
         job = documents['/apis/batch/v1/namespaces/loom-dev/jobs/' + selected['metadata']['name']]

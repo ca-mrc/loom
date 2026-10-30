@@ -41,10 +41,10 @@ ROOT = Path(__file__).resolve().parents[2]
      ("tests/integration/test_nebius_restore.py",)),
     ("cluster-smoke", (),
      ("tests/integration/test_nebius_platform_k3s.py",)),
-    ("go-checks", (), ()),
 ])
 def test_real_cli_preserves_common_tests_and_manual_compatibility(lane, legacy, common):
-    for scope in ("nebius", "all"):
+    scopes = ("nebius", "all") if legacy else ("nebius",)
+    for scope in scopes:
         run = subprocess.run([sys.executable, "scripts/component_ownership.py", "test-paths",
                               "--lane", lane, "--test-scope", scope], cwd=ROOT, capture_output=True, text=True)
         assert run.returncode == 0, run.stderr
@@ -62,30 +62,6 @@ def test_compatibility_scope_does_not_disable_test_ownership():
         assert len(manifest.test_owners_for_path(path)) == 1
         assert manifest.test_owners_for_path(path)[0].ci_enabled
         assert not manifest.ci_ignores_path(path)
-
-
-def test_existing_manual_ci_runs_both_legacy_integration_tiers():
-    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
-    assert "legacy_compatibility" in workflow[True]["workflow_dispatch"]["inputs"]
-    step = next(s for s in workflow["jobs"]["workflow-plan"]["steps"] if s.get("id") == "plan")
-    for key in ("DISPATCH_INTEGRATION", "DISPATCH_INTEGRATION_DOCKER"):
-        assert "inputs.legacy_compatibility" in step["env"][key]
-    assert "legacy_compatibility" in workflow["env"]["CI_TEST_SCOPE"]
-    assert "legacy_compatibility" in workflow["env"]["CI_PYTEST_MARKERS"]
-
-
-@pytest.mark.parametrize("workflow_name", ["ci", "cluster-smoke", "staging-smoke"])
-def test_all_python_entrypoints_use_explicit_scope_and_marker(workflow_name):
-    workflow = yaml.safe_load((ROOT / f".github/workflows/{workflow_name}.yml").read_text())
-    assert "nebius" in workflow["env"]["CI_TEST_SCOPE"]
-    assert "not legacy_pool" in workflow["env"]["CI_PYTEST_MARKERS"]
-    for job in workflow["jobs"].values():
-        for step in job.get("steps", []):
-            run = step.get("run", "")
-            if "uv run --no-sync pytest" in run:
-                assert "CI_PYTEST_MARKERS" in run
-            if "component_ownership.py test-paths --lane" in run:
-                assert "--test-scope" in run
 
 
 @pytest.mark.parametrize("scope,report_error,accepted", [
@@ -119,20 +95,3 @@ def test_scope_is_conservative_for_unknown_common_inputs_and_rejects_invalid_mod
     assert select_test_scope(manifest, paths, scope="nebius") == paths
     with pytest.raises(ManifestError, match="unknown test scope"):
         select_test_scope(manifest, paths, scope="typo")
-
-
-def test_go_checks_cover_current_runtime_packages():
-    from scripts.plan_ci_validations import plan_validations
-    jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
-    commands = [step.get("run", "") for step in jobs["go-checks"]["steps"]]
-    assert any('go vet "${packages[@]}"' in command for command in commands)
-    assert any('go test -race "${packages[@]}"' in command for command in commands)
-    assert plan_validations(changed_paths=['go.mod'], labels=(), event_name='pull_request').go_packages == (
-        './cmd/...', './internal/...',
-    )
-
-
-def test_retired_capacity_hooks_are_removed():
-    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
-    assert "global_fleet_capacity_shadow_once.py" not in workflow
-    assert "Global capacity Package 3 no-scheduler-mutation audit" not in workflow

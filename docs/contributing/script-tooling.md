@@ -8,7 +8,7 @@ Use its owning runbook for arguments and authority requirements.
 
 | Area | Entry points and ownership |
 | --- | --- |
-| Repository policy | `check_repository_paths.py`, `check_ci_action_pins.py`, `check_ci_upgrade_policy.py`, `check_install_scripts_pinned.py` and `check_nebius_iac.py` validate checked-in contracts. |
+| Repository policy | `check_repository_paths.py`, `check_ci_action_pins.py`, `check_install_scripts_pinned.py` and `check_nebius_iac.py` validate checked-in contracts. |
 | CI selection | `component_ownership.py` reads `config/component-ownership.toml`; `plan_ci_validations.py` selects validation from paths and additive labels. Workflows consume their output. |
 | Runtime conformance | `runtime_payload_conformance.py` executes the manifest-owned payload lane in disposable containers; `runtime_payload_dispatch.py` is its container helper. |
 | Release artifacts | `install_trivy.py`, `summarize_trivy_report.py`, `write_trivy_release_policy.py` and `validate_trivy_release_report.py` support image vulnerability evidence. |

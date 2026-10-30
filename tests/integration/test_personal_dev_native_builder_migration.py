@@ -244,5 +244,4 @@ def test_0123_downgrade_removes_only_native_builder_objects(
                 for column in inspector.get_columns("personal_dev_candidates")
             } == candidate_columns_before
     finally:
-        command.upgrade(config, "head")
         engine.dispose()

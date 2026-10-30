@@ -11,8 +11,6 @@ should be symmetric even if no one expects to run it).
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-
 import pytest
 from alembic import command
 from alembic.config import Config
@@ -29,16 +27,11 @@ def _cfg(url: str) -> Config:
 def at_revision_0011(
     isolated_migration_postgres_url: str,
     monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[None]:
-    """Roll back to just BEFORE the workflow drop, yield, then
-    bring back to head."""
+) -> None:
+    """Roll back this test's disposable database before the workflow drop."""
     monkeypatch.setenv("LOOM_DB_URL", isolated_migration_postgres_url)
     cfg = _cfg(isolated_migration_postgres_url)
     command.downgrade(cfg, "0011")
-    try:
-        yield
-    finally:
-        command.upgrade(cfg, "head")
 
 
 def test_0012_drops_workflows_table_and_batches_workflow_id(
