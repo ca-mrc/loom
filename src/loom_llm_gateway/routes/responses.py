@@ -55,6 +55,7 @@ from loom_llm_gateway.request_params import (
     sanitize_request_extras,
 )
 from loom_llm_gateway.responses_probe import (
+    ProbeBackoff,
     ProbeOutcome,
     probe_responses_api,
 )
@@ -136,16 +137,46 @@ async def _resolve_responses_support(
 
     Ambiguous probe outcomes (4xx that isn't 400/401/404) default to
     True — the existing native path still has the 400-signature
-    fallback as its second line of defence.
-
-    The probe shares the caller's `httpx.AsyncClient` so it flows
-    through the same egress proxy and DNS resolution set as real
-    upstream traffic, and so test MockTransport rigs intercept it too.
+    fallback as its second line of defence. A transient upstream failure,
+    or the backoff after one, sends this request through the translator
+    and caches nothing.
     """
     if row.responses_api_supported is not None and _probe_result_is_fresh(
         row.responses_api_probed_at,
     ):
         return row.responses_api_supported
+    outcome = await _probe_and_persist(
+        session_factory=session_factory,
+        row=row,
+        api_key=api_key,
+        upstream=upstream,
+        request=request,
+    )
+    if outcome is None or outcome.transient:
+        return False
+    if outcome.supported is None:
+        return True  # ambiguous — leave native path in play
+    return outcome.supported
+
+
+async def _probe_and_persist(
+    *,
+    session_factory: Any,
+    row: ProviderConnectionRow,
+    api_key: str,
+    upstream: httpx.AsyncClient,
+    request: Request,
+) -> ProbeOutcome | None:
+    """Probe the upstream and cache a conclusive result. Returns None while
+    the connection is backing off from a transient failure.
+
+    The probe shares the caller's `httpx.AsyncClient` so it flows
+    through the same egress proxy and DNS resolution set as real
+    upstream traffic, and so test MockTransport rigs intercept it too.
+    """
+    backoff: ProbeBackoff = request.app.state.responses_probe_backoff
+    if backoff.active(row.id):
+        return None
     try:
         outcome = await probe_responses_api(
             upstream_url=f"{row.base_url.rstrip('/')}/responses",
@@ -161,10 +192,17 @@ async def _resolve_responses_support(
         )
     except AttemptDeadlineReachedError as exc:
         raise_deadline_http_exception(exc)
+    if outcome.transient:
+        logger.warning(
+            "responses probe transiently failed for %s: %s",
+            row.id,
+            outcome.error_detail,
+        )
+        backoff.record(row.id)
+        return outcome
+    backoff.clear(row.id)
     await _persist_probe_outcome(session_factory, row.id, outcome)
-    if outcome.supported is None:
-        return True  # ambiguous — leave native path in play
-    return outcome.supported
+    return outcome
 
 
 async def _dispatch_via_chat_translator(
@@ -617,9 +655,23 @@ async def _dispatch_execution_attempt_responses(
 ) -> dict[str, Any]:
     """Dispatch one attempt call with a pre-send durable accounting fence."""
 
-    if row.responses_api_supported is not True or not _probe_result_is_fresh(
+    # Native is required here, so an expired or missing result is probed now
+    # rather than waiting for ordinary traffic to refresh it. A confirmed
+    # unsupported result stands until it goes stale.
+    if row.responses_api_supported is not None and _probe_result_is_fresh(
         row.responses_api_probed_at
     ):
+        native_confirmed = row.responses_api_supported
+    else:
+        outcome = await _probe_and_persist(
+            session_factory=request.app.state.session_factory,
+            row=row,
+            api_key=api_key,
+            upstream=upstream,
+            request=request,
+        )
+        native_confirmed = outcome is not None and outcome.supported is True
+    if not native_confirmed:
         raise HTTPException(
             status_code=409,
             detail="execution-attempt calls require fresh native Responses support",
