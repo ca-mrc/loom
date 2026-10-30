@@ -14,12 +14,19 @@ whether the upstream implements `/responses`:
 2. A missing or older-than-24-hours result triggers an inline five-second probe
    through the same egress client used by normal traffic.
 3. The probe posts a minimal request with a nonexistent sentinel model. Status
-   `200`, `400`, or `401` means the route exists; `404`, `501`, a `5xx`, or a
-   transport failure means it is unavailable. Other `4xx` responses are
-   inconclusive and retain the native path.
-4. The result, probe timestamp, and redacted error classification are stored on
-   the provider connection. Persistence is best-effort; a failed write causes a
-   later request to probe again.
+   `200`, `400`, or `401` means the route exists; `404` or `501` means it is
+   unavailable. Other `4xx` responses are inconclusive and retain the native
+   path.
+4. Any other `5xx` or a transport failure says the upstream is unwell, not what
+   it supports. Nothing is stored, that request uses the Chat translation, and
+   that Gateway replica waits 60 seconds before probing the connection again.
+5. Otherwise the result, probe timestamp, and redacted error classification are
+   stored on the provider connection. Persistence is best-effort; a failed write
+   causes a later request to probe again.
+
+Execution-attempt calls require native Responses and have no translation. They
+probe when the stored result is missing or stale, and return `409` unless the
+upstream is confirmed native.
 
 When the route is unavailable, Loom converts the Responses request to Chat
 Completions, calls `/chat/completions`, and converts the result back to a

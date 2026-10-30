@@ -13,12 +13,14 @@ import httpx
 import psycopg
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import create_engine, insert
+from sqlalchemy import create_engine, insert, select, update
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom import nebius_platform_bootstrap as bootstrap
 from loom.db.schema import (
+    ProviderConnection,
     RateCard,
     ServiceExecutionTarget,
     Task,
@@ -42,7 +44,9 @@ from loom_control_plane.service_execution_output import (
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.rate_card import RateCardCache
+from loom_llm_gateway.responses_probe import ProbeOutcome
 from loom_llm_gateway.routes import service_execution
+from loom_llm_gateway.routes.responses import _persist_probe_outcome
 from tests.integration.test_nebius_platform_bootstrap import platform_database  # noqa: F401
 from tests.integration.test_service_execution_leases import (
     _reserve,
@@ -423,3 +427,63 @@ async def test_gateway_role_can_reclaim_and_checkpoint_terminus_execution(
             assert checkpoint.json()["version"] == 1
     finally:
         await engine.dispose()
+
+
+async def test_gateway_role_persists_only_the_responses_probe_outcome(
+    gateway_database: tuple[str, str],
+) -> None:
+    """#2054: a denied write leaves every connection unprobed and re-probing."""
+    database_url, password = gateway_database
+    team_id, connection_id = uuid4(), uuid4()
+    admin_engine = create_engine(make_url(database_url).set(drivername="postgresql+psycopg"))
+    gateway_url = make_url(database_url).set(username="loom_gateway", password=password)
+    engine = create_async_engine(gateway_url.set(drivername="postgresql+psycopg"))
+    try:
+        with admin_engine.begin() as db:
+            db.execute(insert(Team).values(id=team_id, name="gateway-probe-" + team_id.hex))
+            db.execute(
+                insert(ProviderConnection).values(
+                    id=connection_id,
+                    team_id=team_id,
+                    provider_type="openai-compatible",
+                    display_name=str(connection_id),
+                    base_url="https://provider.invalid/v1",
+                    upstream_host="provider.invalid",
+                    resolved_egress_ips=[],
+                    encrypted_api_key_ref="test://redacted",
+                    allowed_models=["gpt-test"],
+                    status="valid",
+                    created_by="test",
+                )
+            )
+
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        await _persist_probe_outcome(
+            session_factory,
+            connection_id,
+            ProbeOutcome(supported=False, error_detail="upstream_404"),
+        )
+
+        with admin_engine.connect() as db:
+            supported, probed_at, probe_error = db.execute(
+                select(
+                    ProviderConnection.responses_api_supported,
+                    ProviderConnection.responses_api_probed_at,
+                    ProviderConnection.responses_api_probe_error,
+                ).where(ProviderConnection.id == connection_id)
+            ).one()
+        assert supported is False
+        assert probed_at is not None
+        assert probe_error == "upstream_404"
+
+        for denied in ({"base_url": "https://other.invalid/v1"}, {"status": "invalid"}):
+            async with session_factory() as session:
+                with pytest.raises(ProgrammingError, match="permission denied"):
+                    await session.execute(
+                        update(ProviderConnection)
+                        .where(ProviderConnection.id == connection_id)
+                        .values(**denied)
+                    )
+    finally:
+        await engine.dispose()
+        admin_engine.dispose()
