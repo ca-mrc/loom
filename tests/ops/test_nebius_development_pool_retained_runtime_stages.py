@@ -401,7 +401,7 @@ def test_runtime_process_settings_challenge_uses_actual_owned_pod_and_rejects_dr
 @pytest.mark.parametrize('retained', [False], indirect=True)
 def test_runtime_https_fixed_phases_use_real_journal_and_never_emit_staging_or_writer_grants(completed_pool, publisher_cloud, tmp_path):
     from scripts.ops.nebius_ingress_stage import _key
-    from scripts.ops.nebius_management_stage import _stage_fixed_documents
+    from scripts.ops.nebius_management_stage import _MARKER, _stage_fixed_documents
     from tests.support.nebius_phase_api import PhaseAPI as PhaseAPI
 
     from loom.nebius_platform_render import digest
@@ -440,6 +440,21 @@ def test_runtime_https_fixed_phases_use_real_journal_and_never_emit_staging_or_w
                 return handle(message)
             api.client.close()
             api.client = type(completed_pool[3].api.client)(base_url=api.api_server, transport=httpx.MockTransport(transport))
+            if phase == 'authority':
+                for damage in ('other-phase', 'foreign-namespace', 'write-verb', 'missing-marker'):
+                    document = copy.deepcopy(next(row for row in plan.fixed['authority'].values() if row['kind'] == 'Role'))
+                    if damage == 'other-phase':
+                        document = copy.deepcopy(next(iter(plan.fixed['material'].values())))
+                    elif damage == 'foreign-namespace':
+                        document['metadata']['namespace'] = 'loom-staging'
+                    elif damage == 'write-verb':
+                        document['rules'][0]['verbs'].append('create')
+                    if damage != 'missing-marker':
+                        document['metadata'].setdefault('annotations', {})[_MARKER] = str(uuid4())
+                    with pytest.raises(ValueError, match='outside fixed development runtime phase'):
+                        api.create_resource(document)
+                    assert not calls
+                    assert not qualifications
             args = dict(documents=documents, revision=digest(documents), phase='development-runtime-' + phase,
                 binding=binding, api=api, state_dir=tmp_path / phase)
             _stage_fixed_documents(**args)
@@ -449,35 +464,6 @@ def test_runtime_https_fixed_phases_use_real_journal_and_never_emit_staging_or_w
     assert store.creates and qualifications and any(writing for _, writing in qualifications)
     assert any('/apis/rbac.authorization.k8s.io/v1/clusterroles' == call.url.path for call in calls)
     assert any('/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies' == call.url.path for call in calls)
-
-
-
-@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
-@pytest.mark.parametrize('retained', [False], indirect=True)
-def test_runtime_https_rejects_unbound_writes_before_transport(completed_pool, publisher_cloud):
-    from scripts.ops.nebius_management_stage import _MARKER
-
-    runtime, request = runtime_install_request(completed_pool, publisher_cloud)
-    plan, calls = runtime.prepare_runtime_install(request), []
-    with runtime_resources_api(request, 'authority', lambda *_: None) as api:
-        api.client.close()
-        def transport(message):
-            calls.append(message)
-            return httpx.Response(201, json=document)
-        api.client = type(completed_pool[3].api.client)(base_url=api.api_server, transport=httpx.MockTransport(transport))
-        for damage in ('other-phase', 'foreign-namespace', 'write-verb', 'missing-marker'):
-            document = copy.deepcopy(next(row for row in plan.fixed['authority'].values() if row['kind'] == 'Role'))
-            if damage == 'other-phase':
-                document = copy.deepcopy(next(iter(plan.fixed['material'].values())))
-            elif damage == 'foreign-namespace':
-                document['metadata']['namespace'] = 'loom-staging'
-            elif damage == 'write-verb':
-                document['rules'][0]['verbs'].append('create')
-            if damage != 'missing-marker':
-                document['metadata'].setdefault('annotations', {})[_MARKER] = str(uuid4())
-            with pytest.raises(ValueError, match='outside fixed development runtime phase'):
-                api.create_resource(document)
-            assert not calls
 
 
 

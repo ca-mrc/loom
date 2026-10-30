@@ -261,7 +261,7 @@ def test_completed_pool_load_is_readonly_and_keeps_actual_identities(completed_p
     from scripts.ops import nebius_development_pool_install, nebius_development_pool_intent
 
     loader = module()
-    operation, _, _, connected = completed_pool
+    operation, inputs, _, connected = completed_pool
     before = len(connected.server.calls)
     monkeypatch.setattr(nebius_development_pool_install, 'install_development_pool',
         lambda **_: pytest.fail('installer replayed'))
@@ -279,10 +279,6 @@ def test_completed_pool_load_is_readonly_and_keeps_actual_identities(completed_p
     assert all(path.read_bytes() == raw for path, raw in value.files.items())
     assert not any(token in repr(value) for token in connected.intent.tokens.values())
 
-
-def test_retired_operator_files_do_not_invalidate_completed_pool(completed_pool):
-    loader = module()
-    _, inputs, _, connected = completed_pool
     for name in ('ca_file', 'credentials_file'):
         Path(inputs['operator_connection'][name]).unlink()
     value = loader.load_retained_pool(reference(loader, completed_pool))

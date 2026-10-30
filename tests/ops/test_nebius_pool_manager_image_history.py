@@ -142,6 +142,8 @@ def test_preflight_qualifies_recovery_with_incomplete_image_without_forward_chec
 
 
 def test_image_entry_preserves_all_original_history_and_returns_fixed_stopped_targets(image_repair_case):
+    from scripts.ops.nebius_pool_manager_image_history import load_manager_image_chain
+
     context, _, state, anchor, _ = image_repair_case
     old = {path: path.read_bytes() for root in (state, anchor) for path in root.iterdir() if path.is_file()}
     value = entry(image_repair_case)
@@ -151,16 +153,12 @@ def test_image_entry_preserves_all_original_history_and_returns_fixed_stopped_ta
     assert images[0] == images[1] == images[2] != images[3] == images[4]
     assert value.identity["operation_id"] == str(context.inputs.installation.operation_id)
     assert old == {path: path.read_bytes() for path in old}
-
-
-def test_anchored_enrollment_prefix_can_be_loaded_without_inventing_write_intent(image_repair_case):
-    from scripts.ops.nebius_pool_manager_image_history import load_manager_image_chain
-
-    value = entry(image_repair_case)
+    binding = runtime_binding(image_repair_case, "collector")
+    with pytest.raises(ValueError, match="manager_image"):
+        entry((*image_repair_case[:-1], binding))
     persist(value, anchor_only=True)
     loaded = entry(image_repair_case)
     assert loaded.anchored and loaded.record is None
-    context, _, state, anchor, _ = image_repair_case
     assert load_manager_image_chain(context.request, state=state, anchor=anchor) == (loaded,)
     persist(loaded)
     assert all(row["phase"] == "prepared" for row in entry(image_repair_case).record["phases"].values())
@@ -237,12 +235,6 @@ def test_mixed_image_history_folds_each_key_and_fences_only_pending_tail(image_r
         assert sources[_key(completed.documents[0])] == (None, (completed.documents[-1],))
     assert history["manager_image_sha256"] is not None
     assert len(load_manager_image_chain(context.request, state=state, anchor=anchor)) == 4
-
-
-def test_targeted_image_correction_rejects_first_enrollment(image_repair_case):
-    binding = runtime_binding(image_repair_case, "collector")
-    with pytest.raises(ValueError, match="manager_image"):
-        entry((*image_repair_case[:-1], binding))
 
 
 def test_targeted_image_correction_rejects_unqualified_target(image_repair_case):
@@ -344,6 +336,7 @@ def test_image_chain_rejects_orphan_gapped_or_changed_evidence(image_repair_case
         if damage == "orphan_record":
             value.marker.unlink()
         elif damage == "gap":
+            value.path.rename(state / value.path.name.replace("-01.json", "-02.json"))
             value.marker.rename(anchor / value.marker.name.replace("-01.json", "-02.json"))
         elif damage == "extra":
             _atomic_json(state / "manager-image-99.json", {})
@@ -359,6 +352,7 @@ def test_image_chain_rejects_orphan_gapped_or_changed_evidence(image_repair_case
         finally:
             # Restore only the injected damage; the real prepared chain never advances.
             if damage == "gap":
+                (state / value.path.name.replace("-01.json", "-02.json")).rename(value.path)
                 (anchor / value.marker.name.replace("-01.json", "-02.json")).rename(value.marker)
             elif damage == "extra":
                 (state / "manager-image-99.json").unlink()
@@ -732,9 +726,8 @@ def test_tooling_continuation_rejects_unbound_or_replaced_repair(
         load_image_repair_inputs(operation)
 
 
-@pytest.mark.parametrize("damage", [None, "old_operation", "old_private", "legacy_binding"])
 def test_targeted_image_private_entry_requires_matching_operation_and_binding_versions(
-        private_image_repair, image_repair_case, damage):
+        private_image_repair, image_repair_case):
     from scripts.ops.nebius_management_entry import EntryError
     from scripts.ops.nebius_pool_image_entry import load_image_repair_inputs
     from tests.ops.test_nebius_pool_startup_repair import save_private
@@ -756,19 +749,22 @@ def test_targeted_image_private_entry_requires_matching_operation_and_binding_ve
     from scripts.ops import nebius_certificates as private_state
 
     private_state._private_directory(Path(operation["inputs_path"]).parent)
-    if damage == "old_operation":
-        operation["schema"] = "loom.nebius-pool-startup-repair-operation.v2"
-    elif damage == "old_private":
-        payload["schema_version"] = "loom.nebius-pool-manager-image-private-inputs.v1"
-    elif damage == "legacy_binding":
-        del payload["binding"]["schema_version"], payload["binding"]["target"]
-    save_private(operation, payload)
-    if damage is not None:
-        with pytest.raises(EntryError):
-            load_image_repair_inputs(operation)
-    else:
-        context = load_image_repair_inputs(operation)
-        assert context.original == original and context.inputs.binding.target == "collector"
+    original_operation, original_payload = operation, payload
+    for damage in ("old_operation", "old_private", "legacy_binding", None):
+        operation, payload = copy.deepcopy((original_operation, original_payload))
+        if damage == "old_operation":
+            operation["schema"] = "loom.nebius-pool-startup-repair-operation.v2"
+        elif damage == "old_private":
+            payload["schema_version"] = "loom.nebius-pool-manager-image-private-inputs.v1"
+        elif damage == "legacy_binding":
+            del payload["binding"]["schema_version"], payload["binding"]["target"]
+        save_private(operation, payload)
+        if damage is not None:
+            with pytest.raises(EntryError):
+                load_image_repair_inputs(operation)
+        else:
+            context = load_image_repair_inputs(operation)
+            assert context.original == original and context.inputs.binding.target == "collector"
 
 
 def test_image_entry_rejects_unqualified_source_schema_or_parent(private_image_repair):
