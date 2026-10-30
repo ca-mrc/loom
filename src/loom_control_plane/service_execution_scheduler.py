@@ -23,6 +23,7 @@ from loom.db.schema import (
     TrialTaskImageMaterialization,
 )
 from loom.execution_contract import (
+    ExecutionPlacementPolicy,
     ExecutionRoutingReason,
     WorkloadRequirementsV1,
     workload_requirements_from_task,
@@ -184,6 +185,8 @@ async def _ready_targets(
     pool_id: str,
     execution_class_id: str,
     now: datetime,
+    placement_policy: ExecutionPlacementPolicy = "environment-local-health-first",
+    region: str | None = None,
 ) -> list[ServiceExecutionTarget]:
     targets = (
         (
@@ -205,11 +208,19 @@ async def _ready_targets(
     )
     ready = []
     for target in targets:
+        if region is not None and target.region != region:
+            continue
         if target.health_observed_at is None:
             continue
         stale_after = int(target.spec_json["health_stale_after_seconds"])
         if target.health_observed_at + timedelta(seconds=stale_after) > now:
             ready.append(target)
+    if placement_policy == "environment-local-capacity-balanced":
+        from loom_control_plane.execution_capacity_ordering import order_targets_by_capacity
+
+        return await order_targets_by_capacity(session, ready, now=now)
+    if placement_policy != "environment-local-health-first":
+        raise ValueError("unsupported service execution placement policy")
     return sorted(ready, key=lambda target: target.spec_json.get("health_role") != "primary")
 
 
@@ -220,6 +231,7 @@ async def reserve_next_service_execution(
     pool_id: str,
     image_admission_keyring: ImageAdmissionKeyring,
     maximum_deadline_seconds: int = 7200,
+    placement_policy: ExecutionPlacementPolicy = "environment-local-health-first",
     now: datetime | None = None,
 ) -> ServiceExecutionLease | None:
     """Reserve one normally queued, explicitly converted service task."""
@@ -245,6 +257,7 @@ async def reserve_next_service_execution(
                     image_admission_keyring=image_admission_keyring,
                     maximum_deadline_seconds=maximum_deadline_seconds,
                     current_time=current_time,
+                    placement_policy=placement_policy,
                 )
         except ServiceExecutionParentTerminalError:
             # The parent changed after selection. Its cancellation/settlement
@@ -312,10 +325,12 @@ async def _compile_service_candidate(
     pool_id: str,
     maximum_deadline_seconds: int,
     current_time: datetime,
+    placement_policy: ExecutionPlacementPolicy = "environment-local-health-first",
 ) -> CompiledServiceExecution | None:
     try:
         return await _compile_service_candidate_plan(session, row=row, environment=environment,
-            pool_id=pool_id, maximum_deadline_seconds=maximum_deadline_seconds, current_time=current_time)
+            pool_id=pool_id, maximum_deadline_seconds=maximum_deadline_seconds, current_time=current_time,
+            placement_policy=placement_policy)
     except ValidationError:
         # Pydantic messages include input values. Both local and shared-pool
         # callers receive the same safe error before any attempt or reservation.
@@ -333,6 +348,7 @@ async def _compile_service_candidate_plan(
     pool_id: str,
     maximum_deadline_seconds: int,
     current_time: datetime,
+    placement_policy: ExecutionPlacementPolicy = "environment-local-health-first",
 ) -> CompiledServiceExecution | None:
     # Architecture records are alternatives. Nebius's current execution class
     # uses x86_64; an unused arm64 build must not hold up admission.
@@ -426,6 +442,7 @@ async def _compile_service_candidate_plan(
         pool_id=pool_id,
         execution_class_id=runtime_plan.execution_class_id,
         now=current_time,
+        placement_policy=placement_policy,
     )
     requirements = workload_requirements_from_task(
         resolve_prepared_task(task, grant) if grant
@@ -450,9 +467,11 @@ async def _reserve_service_candidate(
     image_admission_keyring: ImageAdmissionKeyring,
     maximum_deadline_seconds: int,
     current_time: datetime,
+    placement_policy: ExecutionPlacementPolicy = "environment-local-health-first",
 ) -> ServiceExecutionLease | None:
     compiled = await _compile_service_candidate(session, row=row, environment=environment,
-        pool_id=pool_id, maximum_deadline_seconds=maximum_deadline_seconds, current_time=current_time)
+        pool_id=pool_id, maximum_deadline_seconds=maximum_deadline_seconds, current_time=current_time,
+        placement_policy=placement_policy)
     if compiled is None:
         return None
     runtime_plan, requirements = compiled.runtime_plan, compiled.requirements
@@ -564,6 +583,7 @@ async def reserve_next_verifier_executions(
     pool_id: str,
     image_admission_keyring: ImageAdmissionKeyring,
     maximum_deadline_seconds: int = 7200,
+    placement_policy: ExecutionPlacementPolicy = "environment-local-health-first",
     now: datetime | None = None,
     limit: int = 32,
 ) -> list[ServiceExecutionLease]:
@@ -584,6 +604,7 @@ async def reserve_next_verifier_executions(
                     session, parent=parent, trial=trial,
                     image_admission_keyring=image_admission_keyring,
                     maximum_deadline_seconds=maximum_deadline_seconds, current_time=current_time,
+                    placement_policy=placement_policy,
                 ))
         except (ExecutionProvisioningBlockedError, ServiceExecutionConflict) as exc:
             # Capacity, rollout and target health are waits, bounded per handoff.
@@ -653,6 +674,7 @@ async def _reserve_verifier_candidate(
     image_admission_keyring: ImageAdmissionKeyring,
     maximum_deadline_seconds: int,
     current_time: datetime,
+    placement_policy: ExecutionPlacementPolicy = "environment-local-health-first",
 ) -> ServiceExecutionLease:
     plan, deadline_at = await compile_verifier_candidate(session, parent=parent, trial=trial,
         maximum_deadline_seconds=maximum_deadline_seconds, current_time=current_time)
@@ -684,7 +706,8 @@ async def _reserve_verifier_candidate(
         if parent_target is None:
             raise ServiceExecutionConflict("verifier parent target is unavailable")
         targets = await _ready_targets(session, environment=parent_target.environment,
-            pool_id=parent_target.logical_pool_id, execution_class_id=plan.execution_class_id, now=current_time)
+            pool_id=parent_target.logical_pool_id, execution_class_id=plan.execution_class_id, now=current_time,
+            placement_policy=placement_policy, region=parent_target.region)
         target_ids = [target.id for target in targets
                       if requirements.data_residency is None or target.data_residency == requirements.data_residency]
     blocked = None
@@ -722,6 +745,7 @@ async def run_service_execution_scheduler_loop(
     image_admission_keyring: ImageAdmissionKeyring,
     interval_seconds: float,
     maximum_deadline_seconds: int,
+    placement_policy: ExecutionPlacementPolicy = "environment-local-health-first",
     global_selector: GlobalExecutionSelector | None = None,
 ) -> None:
     """Continuously reserve converted service tasks; cancellation stops the loop."""
@@ -744,6 +768,7 @@ async def run_service_execution_scheduler_loop(
                         pool_id=pool_id,
                         image_admission_keyring=image_admission_keyring,
                         maximum_deadline_seconds=maximum_deadline_seconds,
+                        placement_policy=placement_policy,
                     )
                     await session.commit()
                 if cancellation_requested():
@@ -769,6 +794,7 @@ async def run_service_execution_scheduler_loop(
                     pool_id=pool_id,
                     image_admission_keyring=image_admission_keyring,
                     maximum_deadline_seconds=maximum_deadline_seconds,
+                    placement_policy=placement_policy,
                 )
                 await session.commit()
             if lease is not None:

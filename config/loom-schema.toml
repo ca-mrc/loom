@@ -146,6 +146,12 @@ python_type = "str"
 default     = "development"
 description = "Logical environment whose healthy execution target may receive normal service-execution reservations."
 
+[service_config.service_execution_placement_policy]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = "environment-local-health-first"
+description = "Execution target ordering: environment-local-health-first preserves primary preference; environment-local-capacity-balanced uses physical resource pressure and allocation recency. Final admission is unchanged."
+
 [service_config.service_execution_scheduler_pool_id]
 used_by     = ["control-plane"]
 python_type = "str"

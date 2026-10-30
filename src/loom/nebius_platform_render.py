@@ -122,6 +122,7 @@ def validate_environment(config: dict[str, Any]) -> None:
             "guest_execution_target",
             "emulated_auth_execution_target",
             "execution_disk_type",
+            "execution_placement_policy",
         }
         != expected
     ):
@@ -133,6 +134,11 @@ def validate_environment(config: dict[str, Any]) -> None:
         raise NebiusPlatformError(str(exc)) from exc
     if type(config.get("public_tls_bootstrap", False)) is not bool:
         raise NebiusPlatformError("public_tls_bootstrap must be a boolean")
+    placement_policy = config.get("execution_placement_policy", "environment-local-health-first")
+    if not isinstance(placement_policy, str) or placement_policy not in {
+        "environment-local-health-first", "environment-local-capacity-balanced",
+    }:
+        raise NebiusPlatformError("unsupported execution_placement_policy")
     disk_type = config.get("execution_disk_type", "NETWORK_SSD")
     if not isinstance(disk_type, str) or disk_type not in EXECUTION_DISK_STORAGE_QUOTAS:
         raise NebiusPlatformError("execution_disk_type must be NETWORK_SSD or NETWORK_SSD_NON_REPLICATED")
@@ -417,8 +423,7 @@ def _regional_config(config: dict[str, Any], target: dict[str, Any]) -> dict[str
     # Regional node groups retain their independently owned SSD templates.
     # The primary build disk selection must not change their quota class.
     result.pop("execution_disk_type", None)
-    # Native image builds remain in the primary region, even when execution
-    # targets are configured elsewhere.
+    # Regional builders opt in independently; never inherit the primary loop.
     result.pop("task_image_builder", None)
     # Primary guest siblings and its root policy do not grant a remote target
     # either capability. Regional pod execution opts into its own exact policy.
@@ -450,7 +455,7 @@ def _validate_regions(config: dict[str, Any]) -> None:
     for target in regions:
         if (
             not isinstance(target, dict)
-            or set(target) - {"execution_resource_quota", "task_identity_policy"} != _REGIONAL_FIELDS
+            or set(target) - {"execution_resource_quota", "task_identity_policy", "task_image_builder"} != _REGIONAL_FIELDS
         ):
             raise NebiusPlatformError("regional execution target has missing or unknown fields")
         validate_environment(_regional_config(config, target))
@@ -938,12 +943,15 @@ def _execution_quota(config: dict[str, Any], documents: list[dict[str, Any]]) ->
     return hard
 
 
-def _task_image_builder_settings(config: dict[str, Any], *, service_image: str) -> Any:
+def _task_image_builder_settings(
+    config: dict[str, Any], *, service_image: str, storage_config: dict[str, Any] | None = None,
+) -> Any:
     from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
 
     supplied = config.get("task_image_builder")
     if supplied is None:
         return None
+    storage = storage_config if storage_config is not None else config
     allowed = {
         "registry_repository",
         "cache_bucket",
@@ -991,11 +999,11 @@ def _task_image_builder_settings(config: dict[str, Any], *, service_image: str) 
         return NativeTaskImageSettings(
             namespace=config["execution_namespace"] + "-build",
             service_image=service_image,
-            storage_endpoint=config["storage_endpoint"],
-            storage_region=config["region"],
+            storage_endpoint=storage["storage_endpoint"],
+            storage_region=storage["region"],
             # Ordinary catalog/task uploads live in the canonical artifacts
             # bucket. The separate source bucket stores execution input packs.
-            source_bucket=config["buckets"]["artifacts"],
+            source_bucket=storage["buckets"]["artifacts"],
             cache_secret_name="loom-task-build-cache" if cache else None,
             **{"archive_secret_name": "loom-task-build-source", **supplied, "cache_bucket": cache},
         )
@@ -1105,10 +1113,13 @@ def _task_image_builder_documents(config: dict[str, Any], settings: Any) -> list
 
 
 def _execution_documents(
-    config: dict[str, Any], images: dict[str, str], repo_root: Path
+    config: dict[str, Any], images: dict[str, str], repo_root: Path,
+    *, builder_storage_config: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     ns, ex = config["namespace"], config["execution_namespace"]
-    builder = _task_image_builder_settings(config, service_image=images["service"])
+    builder = _task_image_builder_settings(
+        config, service_image=images["service"], storage_config=builder_storage_config,
+    )
     # Reuse the existing least-privilege execution pod and collector definitions.
     execution_docs = []
     replacements = {
@@ -1263,7 +1274,9 @@ def _regional_documents(
         remote.extend(identity_policy_documents(target["execution_namespace"], target["target_id"]))
     ns, tid = config["execution_namespace"], target["target_id"]
     identities = target["service_account_ids"]
-    for doc in _execution_documents(regional, images, repo_root):
+    # All regions consume the same global materializations and canonical source,
+    # cache and archive storage. Only the build namespace/compute is regional.
+    for doc in _execution_documents(regional, images, repo_root, builder_storage_config=config):
         kind, name = doc["kind"], doc["metadata"]["name"]
         if kind in {"Deployment", "CronJob", "ConfigMap"} or (
             kind == "ServiceAccount" and name != "loom-execution-attempt"
@@ -1352,7 +1365,8 @@ def _regional_documents(
             ]
             remote.append(doc)
         elif kind == "ResourceQuota":
-            doc["spec"]["hard"] = _execution_quota(regional, [])
+            if doc["metadata"]["namespace"] == target["execution_namespace"]:
+                doc["spec"]["hard"] = _execution_quota(regional, [])
             remote.append(doc)
         elif kind == "NetworkPolicy":
             # Remote tasks use the public TLS Gateway, never a primary-cluster Pod IP.
@@ -1543,7 +1557,7 @@ def _build_platform(
             "schema_version": "loom.execution-topology.v1",
             "logical_pool_id": "nebius-cpu",
             "execution_class_id": execution_class.class_id,
-            "placement_policy": "environment-local-health-first",
+            "placement_policy": config.get("execution_placement_policy", "environment-local-health-first"),
             "targets": [target],
         },
     }
@@ -1801,6 +1815,9 @@ def _build_platform(
                 {
                     "LOOM_CP_LLM_GATEWAY_URL": f"http://loom-llm-gateway.{ns}.svc:9100",
                     "LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENABLED": "true",
+                    "LOOM_CP_SERVICE_EXECUTION_PLACEMENT_POLICY": config.get(
+                        "execution_placement_policy", "environment-local-health-first"
+                    ),
                     "LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENVIRONMENT": config["environment"],
                     "LOOM_CP_SERVICE_EXECUTION_SCHEDULER_POOL_ID": "nebius-cpu",
                     "LOOM_CP_SERVICE_EXECUTION_SCHEDULER_MAX_DEADLINE_SEC": config.get(

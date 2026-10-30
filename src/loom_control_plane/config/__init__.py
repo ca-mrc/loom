@@ -6,10 +6,11 @@ here.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, get_args
 
 from pydantic import computed_field, model_validator
 
+from loom.execution_contract import ExecutionPlacementPolicy
 from loom.nebius_pool_settings import PoolRuntimeSettings
 from loom_control_plane.config._generated import ControlPlaneSettings as _BaseSettings
 
@@ -28,6 +29,8 @@ class ControlPlaneSettings(_BaseSettings):
 
     @model_validator(mode="after")
     def _global_pool_binding(self) -> ControlPlaneSettings:
+        if self.service_execution_placement_policy not in get_args(ExecutionPlacementPolicy):
+            raise ValueError("unsupported service execution placement policy")
         pool = self.global_pool
         if pool is not None and (pool.environment != self.service_execution_scheduler_environment
                 or pool.logical_pool_id != self.service_execution_scheduler_pool_id):

@@ -312,6 +312,12 @@ def secret_requirements(
                 walk(doc, namespace)
     # Build Jobs are created on demand, so their mounted Secrets do not appear
     # in the static Deployment. Check their names/keys before enabling the loop.
+    result.update(_build_secret_requirements(config))
+    return result
+
+
+def _build_secret_requirements(config: dict[str, Any]) -> dict[tuple[str, str], set[str]]:
+    result: dict[tuple[str, str], set[str]] = {}
     builder = config.get("task_image_builder")
     if builder is not None:
         namespace = config["execution_namespace"] + "-build"
@@ -322,6 +328,17 @@ def secret_requirements(
         if builder.get("archive_secret_name"):
             result[namespace, builder["archive_secret_name"]] = {"access-key", "secret-key"}
     return result
+
+
+def _verify_secret_keys(kube: Kubectl, requirements: dict[tuple[str, str], set[str]]) -> None:
+    for (namespace, secret), required in sorted(requirements.items()):
+        # Only populated key names cross the operator boundary, never values.
+        observed = kube.run(
+            "get", "secret", secret, "-n", namespace, "-o",
+            r'go-template={{range $key,$value := .data}}{{if $value}}{{$key}}{{"\n"}}{{end}}{{end}}',
+        )
+        if not observed or not required <= set(observed.splitlines()):
+            raise DeploymentError(f"required secret keys missing: {namespace}/{secret}")
 
 
 class Kubectl:
@@ -550,7 +567,16 @@ def install_regional_task_identity_policy(
     expected = identity_policy_documents(target["execution_namespace"], target_id)
     if policies != expected:
         raise DeploymentError("regional identity policy differs from the target-bound contract")
-    namespaces = [doc for doc in documents if doc["kind"] == "Namespace"]
+    all_namespaces = [doc for doc in documents if doc["kind"] == "Namespace"]
+    expected_namespaces = {target["execution_namespace"]}
+    if target.get("task_image_builder") is not None:
+        expected_namespaces.add(target["execution_namespace"] + "-build")
+    if (len(all_namespaces) != len(expected_namespaces)
+            or {doc["metadata"]["name"] for doc in all_namespaces} != expected_namespaces
+            or any(doc["metadata"].get("labels", {}).get("pod-security.kubernetes.io/enforce") != "privileged"
+                   for doc in all_namespaces if doc["metadata"]["name"] != target["execution_namespace"])):
+        raise DeploymentError("regional namespace differs from its explicit execution/build scope")
+    namespaces = [doc for doc in all_namespaces if doc["metadata"]["name"] == target["execution_namespace"]]
     if (len(namespaces) != 1 or namespaces[0]["metadata"]["name"] != target["execution_namespace"]
             or namespaces[0]["metadata"].get("labels", {}).get("pod-security.kubernetes.io/enforce") != "baseline"):
         raise DeploymentError("regional execution namespace differs from its explicit identity policy")
@@ -594,28 +620,39 @@ def preflight_regional_rollout(
         policies = [row for row in documents if row["kind"] in {"ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"}]
         if policies != expected_policies:
             raise DeploymentError("regional identity policy differs from the target-bound contract")
+        execution_namespace = target["execution_namespace"]
+        build_namespace = execution_namespace + "-build" if target.get("task_image_builder") is not None else None
+        namespaces = {execution_namespace}
+        if build_namespace:
+            namespaces.add(build_namespace)
         for row in documents:
             kind, metadata = row["kind"], row["metadata"]
             if (kind not in resources
-                    or (kind == "Namespace" and metadata["name"] != target["execution_namespace"])
-                    or (kind not in cluster_kinds and metadata.get("namespace") != target["execution_namespace"])):
+                    or (kind == "Namespace" and metadata["name"] not in namespaces)
+                    or (kind not in cluster_kinds and metadata.get("namespace") not in namespaces)):
                 raise DeploymentError("regional render escapes its configured execution scope")
+            if kind == "Namespace" and metadata["name"] == build_namespace:
+                if metadata.get("labels", {}).get("pod-security.kubernetes.io/enforce") != "privileged":
+                    raise DeploymentError("regional build namespace differs from its isolated build contract")
             if kind in {"ClusterRole", "ClusterRoleBinding"} and metadata["name"] not in {
                 target["execution_namespace"] + "-collector", target["execution_namespace"] + "-actuator-usage",
                 target["target_id"] + "-gateway-tokenreview",
             }:
                 raise DeploymentError("regional cluster role differs from its configured target")
-        for kind in sorted({row["kind"] for row in documents}):
+        scopes = {(row["kind"], row["metadata"].get("namespace")) for row in documents}
+        for kind, namespace in sorted(scopes):
             for verb in ("get", "create", "patch"):
                 command = ["auth", "can-i", verb, resources[kind]]
                 if kind not in cluster_kinds:
-                    command.extend(["-n", target["execution_namespace"]])
+                    assert namespace is not None
+                    command.extend(["-n", namespace])
                 try:
                     allowed = remote.run(*command) == "yes"
                 except DeploymentError:
                     allowed = False
                 if not allowed:
                     raise DeploymentError("regional operator lacks required namespace or admission-policy permission")
+        _verify_secret_keys(remote, _build_secret_requirements(target))
         result[target["target_id"]] = remote, documents
     return result
 
@@ -809,19 +846,7 @@ def preflight(
 def _platform_prerequisites(kube: Kubectl, manifest: dict[str, Any], config: dict[str, Any],
         files: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     """Common checks only; the caller must qualify its standalone/shared mode."""
-    for (namespace, secret), required in sorted(secret_requirements(files, config).items()):
-        # Return only names of populated keys, never secret values.
-        observed = kube.run(
-            "get",
-            "secret",
-            secret,
-            "-n",
-            namespace,
-            "-o",
-            r'go-template={{range $key,$value := .data}}{{if $value}}{{$key}}{{"\n"}}{{end}}{{end}}',
-        )
-        if not observed or not required <= set(observed.splitlines()):
-            raise DeploymentError(f"required secret keys missing: {namespace}/{secret}")
+    _verify_secret_keys(kube, secret_requirements(files, config))
     ns = config["namespace"]
     database = kube.get("statefulset", "loom-postgres", ns)
     pvc = kube.get("pvc", "data-loom-postgres-0", ns)
