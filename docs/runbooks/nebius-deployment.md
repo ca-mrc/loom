@@ -3004,6 +3004,21 @@ owner-only and out of Git/artifacts. Plan and apply verify the retained context
 mapping, existing resource names and namespace UID; this installer cannot
 bootstrap a new target, namespace, resource identity or Kubernetes grant.
 
+Also include the already installed policy-bootstrap ServiceAccount in `resources`:
+`{"kind":"ServiceAccount","name":"loom-execution-policy-probe"}`.
+The guarded policy installer applies it with the existing Namespace before the
+admission probes; it is not part of the main regional render. A scope containing
+only rendered identities therefore passes preflight but rejects this bootstrap
+apply with exit 126. Confirm the ServiceAccount already exists before including
+it; a missing identity requires separate bootstrap qualification. The Pod probe
+still has only the fixed server-dry-run allowance, so do not add Pod authority.
+
+Correct a retained scope through the supported installer under a new reviewed
+merged revision, preserving the previous revision's immutable scope and wrapper
+backup. If the failed attempt already holds a rollout guard, use its original
+candidate-bound recovery procedure after the corrected installation; do not clear
+the guard or start an ordinary newer-candidate rollout first.
+
 The extension preserves the original wrapper, its completion/retirement/shared
 input grants and file mode. Primary commands continue through that wrapper.
 Full context discovery returns only the configured regional cluster names and
