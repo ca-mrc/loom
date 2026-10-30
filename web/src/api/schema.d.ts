@@ -2050,6 +2050,25 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/provider-connections/{connection_id}/request-pool": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Request Pool */
+        get: operations["get_request_pool_api_v1_provider_connections__connection_id__request_pool_get"];
+        /** Put Request Pool */
+        put: operations["put_request_pool_api_v1_provider_connections__connection_id__request_pool_put"];
+        post?: never;
+        /** Disable Request Pool */
+        delete: operations["disable_request_pool_api_v1_provider_connections__connection_id__request_pool_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/provider-connections/{connection_id}/shares": {
         parameters: {
             query?: never;
@@ -6015,6 +6034,40 @@ export interface components {
              */
             vla_interface_version: "behavior_b1k_websocket_v1";
         };
+        /** PoolMemberConfig */
+        PoolMemberConfig: {
+            /**
+             * Connection Id
+             * Format: uuid
+             */
+            connection_id: string;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /** Quota Group */
+            quota_group: string;
+        };
+        /** PoolMemberResponse */
+        PoolMemberResponse: {
+            /**
+             * Connection Id
+             * Format: uuid
+             */
+            connection_id: string;
+            /** Cooldown Until */
+            cooldown_until: string | null;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /** Ordinal */
+            ordinal: number;
+            /** Quota Group */
+            quota_group: string;
+        };
         /** PostBatchesDryRunResponse */
         PostBatchesDryRunResponse: {
             /** Accepted */
@@ -6535,6 +6588,46 @@ export interface components {
              * @constant
              */
             wire_api: "messages";
+        };
+        /** RequestPoolConfig */
+        RequestPoolConfig: {
+            /**
+             * Attempt Timeout Sec
+             * @default 20
+             */
+            attempt_timeout_sec: number;
+            /**
+             * Cooldown Sec
+             * @default 30
+             */
+            cooldown_sec: number;
+            /**
+             * Equivalent Models
+             * @constant
+             */
+            equivalent_models: true;
+            /** Members */
+            members: components["schemas"]["PoolMemberConfig"][];
+            /** Required Models */
+            required_models: string[];
+        };
+        /** RequestPoolResponse */
+        RequestPoolResponse: {
+            /** Attempt Timeout Sec */
+            attempt_timeout_sec: number;
+            /**
+             * Connection Id
+             * Format: uuid
+             */
+            connection_id: string;
+            /** Cooldown Sec */
+            cooldown_sec: number;
+            /** Enabled */
+            enabled: boolean;
+            /** Members */
+            members: components["schemas"]["PoolMemberResponse"][];
+            /** Required Models */
+            required_models: string[];
         };
         /** RequestedExecutionSelection */
         RequestedExecutionSelection: {
@@ -13526,6 +13619,111 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProviderModelCacheEntry"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_request_pool_api_v1_provider_connections__connection_id__request_pool_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                connection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RequestPoolResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    put_request_pool_api_v1_provider_connections__connection_id__request_pool_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-loom-admin-actor"?: string | null;
+                authorization?: string | null;
+            };
+            path: {
+                connection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RequestPoolConfig"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RequestPoolResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    disable_request_pool_api_v1_provider_connections__connection_id__request_pool_delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-loom-admin-actor"?: string | null;
+                authorization?: string | null;
+            };
+            path: {
+                connection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RequestPoolResponse"];
                 };
             };
             /** @description Validation Error */
