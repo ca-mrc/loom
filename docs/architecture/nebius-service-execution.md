@@ -1064,6 +1064,18 @@ idle deployment; upgrade waits at most five seconds for the table lock and rolls
 back atomically if busy. Downgrade refuses busy writers immediately and removes
 only projections and indexes.
 
+### Reconciliation snapshots and concurrent creation
+
+Namespace inventory and database leases are separate snapshots. Full
+reconciliation captures the owning target's open lease identities before listing
+Jobs. A lease created or bound to a different generation/Job UID during that list
+is ineligible for an absence event in this pass. For an eligible lease missing
+from the list, reconciliation confirms absence by reading its exact Job name;
+read failures and foreign/replaced UIDs remain drift and never become
+`JobMissing`. A genuinely absent Job still follows the existing failure or
+cleanup path. This prevents concurrent create delivery from transiently fencing
+a live runtime's task-input request without weakening broker generation checks.
+
 ### End-to-end throughput qualification
 
 Command-handler concurrency is one local knob. Qualify the whole pipeline with
