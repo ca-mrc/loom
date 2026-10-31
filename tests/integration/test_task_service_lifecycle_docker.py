@@ -281,7 +281,7 @@ async def test_real_sigterm_unwinds_verifier_and_stops_retained_service(service_
     await _export_workspace_archive(agent, PurePosixPath("/app"), workspace / ".loom/workspace.tar")
     assert (await agent.exec("sleep 300 >/dev/null 2>&1 & echo $! > /tmp/retained.pid")).return_code == 0
     child = """
-import asyncio, json, os
+import asyncio, json, os, time
 from pathlib import Path
 from loom import service_execution_sandbox_task as module
 from loom.driver.service_sandbox import ServiceSandboxDriver
@@ -297,19 +297,28 @@ def connect(role, task, trial):
                                   dynamic_network_policy=False, mounted_fs=False, resource_modes=frozenset({'limit'})),
         network_policy=NoNetwork())
 module.sandbox_driver = connect
-asyncio.run(module.run_verifier(root / 'workspace', TaskConfig.model_validate_json(os.environ['LOOM_TEST_TASK']),
-                               TrialConfig.model_validate_json(os.environ['LOOM_TEST_TRIAL'])))
+task = TaskConfig.model_validate_json(os.environ['LOOM_TEST_TASK'])
+trial = TrialConfig.model_validate_json(os.environ['LOOM_TEST_TRIAL'])
+async def run():
+    print('verifier-phase-ready', flush=True)
+    os.environ['LOOM_EXECUTION_PHASE_DEADLINE'] = str(time.time() + float(os.environ['LOOM_TEST_PHASE_SECONDS']))
+    await module.run_verifier(root / 'workspace', task, trial)
+asyncio.run(run())
 """
     import json
-    import time
 
     process = await asyncio.create_subprocess_exec(sys.executable, "-c", child, env={
         **os.environ, "LOOM_TEST_ROOT": str(tmp_path), "LOOM_TEST_TASK": json.dumps(raw),
         "LOOM_TEST_TRIAL": trial.model_dump_json(),
-        "LOOM_EXECUTION_PHASE_DEADLINE": str(time.time() + (60 if termination == "signal" else 1.5)),
+        "LOOM_TEST_PHASE_SECONDS": "60" if termination == "signal" else "1.5",
         "LOOM_EXECUTION_TERMINATION_GRACE_SECONDS": "5",
     }, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
+        # Fresh Python imports are bootstrap, not the verifier phase under test.
+        # Arm the unchanged phase deadline and marker probe after that boundary.
+        assert process.stdout is not None
+        ready = await asyncio.wait_for(process.stdout.readline(), timeout=10)
+        assert ready == b"verifier-phase-ready\n", ready
         for _ in range(100):
             if (await verifier.exec("test -e /tmp/verifier-entered")).return_code == 0:
                 break
