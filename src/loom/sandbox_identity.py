@@ -9,9 +9,10 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # Installation needs ownership changes and maintainer scripts that drop UID.
+# SETPCAP lets native graders drop the bounding set before running untrusted code.
 # These are supplied only to explicitly root private containers, never the Pod
 # or trusted controller. Host/device/network administration remains forbidden.
-ROOT_INSTALL_CAPABILITIES = ("CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID", "KILL")
+ROOT_INSTALL_CAPABILITIES = ("CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID", "KILL", "SETPCAP")
 _HOME = re.compile(r"^/(?:[-A-Za-z0-9._]+/)*[-A-Za-z0-9._]+$")
 _PROTECTED = ("/proc", "/sys", "/dev", "/run", "/loom", "/tests", "/verifier", "/solution")
 _GUEST_AGENT_HOME = "/home/agent"
