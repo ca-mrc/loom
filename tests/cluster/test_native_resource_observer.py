@@ -113,6 +113,12 @@ def test_rendered_node_observer_collects_real_cri_and_storage_with_restricted_re
         runtime["hostPath"]["path"] = "/run/k3s/containerd/containerd.sock"
         assert not any(pod_spec.get(key) for key in ("hostPID", "hostIPC", "hostNetwork"))
         observer_container, = pod_spec["containers"]
+        # The SDK's original in-cluster origin must be unusable: an auth-hook
+        # reset cannot silently succeed through the Service's DNAT path.
+        observer_container["env"].extend([
+            {"name": "KUBERNETES_SERVICE_HOST", "value": "127.0.0.2"},
+            {"name": "KUBERNETES_SERVICE_PORT", "value": "443"},
+        ])
         assert observer_container["securityContext"]["privileged"] is False
         assert observer_container["securityContext"]["capabilities"] == {"drop": ["ALL"], "add": ["DAC_READ_SEARCH"]}
         assert all(m["readOnly"] for m in observer_container["volumeMounts"])

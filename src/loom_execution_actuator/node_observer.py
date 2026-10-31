@@ -343,6 +343,26 @@ def _quiet_transport_logs() -> None:
         transport.propagate = False
 
 
+def _preserve_api_origin(configuration: Any, endpoint: str | None) -> None:
+    if endpoint is None:
+        return
+    configuration.host = endpoint
+    refresh = configuration.refresh_api_key_hook
+    if refresh is None:
+        return
+
+    def refresh_with_origin(current: Any) -> None:
+        try:
+            refresh(current)
+        finally:
+            # The SDK restores its service origin and replaces this hook on
+            # every refresh. Keep token/CA handling, then restore both bindings.
+            current.host = endpoint
+            current.refresh_api_key_hook = refresh_with_origin
+
+    configuration.refresh_api_key_hook = refresh_with_origin
+
+
 def main() -> None:
     from kubernetes import client, config
 
@@ -351,8 +371,7 @@ def main() -> None:
     settings = ObserverSettings()
     config.load_incluster_config()
     configuration = client.Configuration.get_default_copy()
-    if settings.kubernetes_endpoint:
-        configuration.host = settings.kubernetes_endpoint
+    _preserve_api_origin(configuration, settings.kubernetes_endpoint)
     api_client = client.ApiClient(configuration)
     observer = NodeResourceObserver(settings, client.CoreV1Api(api_client))
     try:

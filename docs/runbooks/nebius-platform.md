@@ -1743,6 +1743,10 @@ fallback to a less trusted source. ConfigMaps contain numeric observations and
 bounded Loom Pod identities from the configured execution namespace, never CRI
 configuration, host paths, file contents or statistics from unrelated namespaces. They are at most 700 KiB and are garbage-collected with their Node.
 Only the exact lease namespace and Pod UID reach the durable resource ledger.
+The producer preserves its configured API origin across the Kubernetes client's
+authentication refresh. The original projected token/CA loader still refreshes
+credentials and its errors still propagate; it cannot silently reset requests to
+the SDK's default Service origin outside the configured API egress policy.
 Observer API egress is restricted to its configured endpoint: an IP endpoint uses
 explicit API CIDRs; a DNS endpoint uses exact Cilium FQDN and DNS rules. DNS
 peers are confined to kube-system CoreDNS Pods with `k8s-app` equal to `coredns`

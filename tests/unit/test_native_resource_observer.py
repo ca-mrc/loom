@@ -337,3 +337,81 @@ def test_creation_epoch_and_actual_start_are_independently_qualified(fault):
     with pytest.raises(ObservationError, match="identity"):
         observer.collect_once(now=NOW)
     assert not core.records
+
+
+@pytest.mark.parametrize("explicit_origin", [None, "https://observer-api.test:6443"])
+def test_incluster_api_requests_keep_the_selected_origin_through_repeated_token_refresh(
+    tmp_path, monkeypatch, explicit_origin,
+):
+    from kubernetes import client, config
+    from kubernetes.config.incluster_config import InClusterConfigLoader
+
+    from loom_execution_actuator import node_observer
+
+    token, ca = tmp_path / "token", tmp_path / "ca.crt"
+    token.write_text("fixture-token-0")
+    ca.write_text("fixture-ca")
+    environ = {"KUBERNETES_SERVICE_HOST": "127.0.0.2", "KUBERNETES_SERVICE_PORT": "443"}
+    loader = InClusterConfigLoader(str(token), str(ca), environ=environ)
+    monkeypatch.setattr(client.Configuration, "_default", None)
+    monkeypatch.setattr(config, "load_incluster_config", loader.load_and_set)
+    monkeypatch.setattr(node_observer, "ObserverSettings", lambda: settings(kubernetes_endpoint=explicit_origin))
+    monkeypatch.setattr(node_observer, "_quiet_transport_logs", lambda: None)
+    requests = []
+
+    def request(api, method, url, **kwargs):
+        requests.append((url, kwargs["headers"]["authorization"],
+            api.configuration.ssl_ca_cert, api.configuration.verify_ssl))
+        return S(status=200, getheaders=lambda: {})
+
+    monkeypatch.setattr(client.ApiClient, "request", request)
+
+    def collect(observer):
+        api = observer.core.api_client
+        for index in range(3):
+            if index:
+                token.write_text("fixture-token-" + str(index))
+                loader.token_expires_at = datetime.now() - timedelta(minutes=1)
+            api.call_api("/api/v1/nodes/node-1", "GET", auth_settings=["BearerToken"],
+                _preload_content=False, _return_http_data_only=True)
+            # The real loader replaces its hook even without a token rotation.
+            api.configuration.auth_settings()
+        raise SystemExit
+
+    monkeypatch.setattr(node_observer.NodeResourceObserver, "collect_once", collect)
+    with pytest.raises(SystemExit):
+        node_observer.main()
+    expected = explicit_origin or "https://127.0.0.2:443"
+    assert requests == [(expected + "/api/v1/nodes/node-1", "bearer fixture-token-" + str(index),
+        str(ca), True) for index in range(3)]
+    assert environ == {"KUBERNETES_SERVICE_HOST": "127.0.0.2", "KUBERNETES_SERVICE_PORT": "443"}
+
+
+def test_incluster_refresh_errors_propagate_and_the_origin_hook_survives(tmp_path):
+    from kubernetes import client
+    from kubernetes.config.config_exception import ConfigException
+    from kubernetes.config.incluster_config import InClusterConfigLoader
+
+    from loom_execution_actuator.node_observer import _preserve_api_origin
+
+    token, ca = tmp_path / "token", tmp_path / "ca.crt"
+    token.write_text("fixture-token")
+    ca.write_text("fixture-ca")
+    loader = InClusterConfigLoader(str(token), str(ca), environ={
+        "KUBERNETES_SERVICE_HOST": "127.0.0.2", "KUBERNETES_SERVICE_PORT": "443"})
+    configuration = client.Configuration()
+    loader.load_and_set(configuration)
+    endpoint = settings(kubernetes_endpoint="https://observer-api.test:6443").kubernetes_endpoint
+    _preserve_api_origin(configuration, endpoint)
+    wrapped_refresh = configuration.refresh_api_key_hook
+    token.write_text("")
+    loader.token_expires_at = datetime.now() - timedelta(minutes=1)
+    with pytest.raises(ConfigException):
+        configuration.auth_settings()
+    assert configuration.host == endpoint
+    assert configuration.refresh_api_key_hook is wrapped_refresh
+    assert configuration.ssl_ca_cert == str(ca) and configuration.verify_ssl is True
+    token.write_text("fixture-refreshed-token")
+    assert configuration.auth_settings()["BearerToken"]["value"] == "bearer fixture-refreshed-token"
+    assert configuration.host == endpoint
+    assert configuration.refresh_api_key_hook is wrapped_refresh
