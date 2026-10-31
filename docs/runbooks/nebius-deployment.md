@@ -2966,6 +2966,30 @@ Install it once from reviewed merged source on the operator host with
 This preserves the previous gateway wrapper and its existing grants, installs
 only the completion reader, and makes no Kubernetes or recovery-state changes.
 
+For the first native resource observer installation, a normal administrator SSH
+identity may be needed to create the observation namespaces and policies. That
+identity can enter a normal shell, where the completion command is not a PATH
+executable. Keep the existing restricted gateway identity for this read-only
+completion RPC, while ordinary kubectl commands use the administrator identity:
+
+```sh
+# Retain the configured SSH target and known-hosts file for the same operator host.
+export LOOM_DEPLOY_SSH_KEY_FILE=/private/operator/admin-deploy-key
+export LOOM_DEPLOY_COMPLETION_SSH_KEY_FILE=/private/operator/existing-gateway-key
+python3 -m scripts.ops.nebius_idle_rollout check \
+  --candidate MERGED_COMMIT --kubeconfig /private/operator/kubeconfig \
+  --expected-cluster-id CLUSTER_ID --namespace PLATFORM_NAMESPACE
+```
+
+After the check is ready, use the same identities for the normal published-candidate
+rollout. `LOOM_DEPLOY_COMPLETION_SSH_KEY_FILE` changes only the identity used by
+`loom-nebius-legacy-pool-completion-v1`; the target, host verification, fixed
+command, anchored receipt checks and live workload UID checks are unchanged.
+Without this optional variable, completion reads use `LOOM_DEPLOY_SSH_KEY_FILE`
+as before. A failed completion read still blocks rollout; it never retries with
+the administrator identity or substitutes another receipt. Use the existing
+restricted key by path; do not copy credentials into logs, artifacts or Git.
+
 The reader returns only operation identity, legacy outcome and workload UIDs
 from the existing anchored completion. Missing, incomplete, global or mismatched
 completion cannot authorize an ordinary upgrade. The deployer reads each

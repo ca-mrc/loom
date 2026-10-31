@@ -450,11 +450,13 @@ class Kubectl:
                 return read_completion(operation)
             if not re.fullmatch(r"[a-zA-Z0-9_.-]+@[a-zA-Z0-9_.-]+", target):
                 raise ValueError
+            completion_key = (os.environ.get("LOOM_DEPLOY_COMPLETION_SSH_KEY_FILE")
+                              or os.environ["LOOM_DEPLOY_SSH_KEY_FILE"])
             command = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
                 "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15",
                 "-o", "ServerAliveCountMax=3", "-o", "IdentitiesOnly=yes",
                 "-o", "UserKnownHostsFile=" + os.environ["LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"],
-                "-i", os.environ["LOOM_DEPLOY_SSH_KEY_FILE"], target,
+                "-i", completion_key, target,
                 shlex.join(["loom-nebius-legacy-pool-completion-v1", operation])]
             result = subprocess.run(command, capture_output=True, text=True, timeout=90, check=False)
             if result.returncode or len(result.stdout) > 512 * 1024:
