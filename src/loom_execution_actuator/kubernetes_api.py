@@ -27,6 +27,7 @@ from loom_execution_actuator.contracts import (
     NormalizedJobState,
 )
 from loom_execution_actuator.pool_execution_observation import qualify_execution_observation
+from loom_execution_actuator.resource_observations import read_resource_observation
 
 _LEASE_LABEL = "loom.openai.com/lease-id"
 _GENERATION_LABEL = "loom.openai.com/generation"
@@ -378,7 +379,15 @@ class InClusterKubernetesJobApi:
         client_module: Any | None = None,
         batch_api: Any | None = None,
         core_api: Any | None = None,
+        resource_observation_namespace: str | None = None,
+        resource_observation_execution_namespace: str | None = None,
+        resource_observation_max_age_seconds: float = 60,
     ) -> None:
+        if resource_observation_namespace is not None and resource_observation_execution_namespace is None:
+            raise ValueError("resource observation execution namespace is required")
+        self._resource_observation_namespace = resource_observation_namespace
+        self._resource_observation_execution_namespace = resource_observation_execution_namespace
+        self._resource_observation_max_age_seconds = resource_observation_max_age_seconds
         self._api_client: Any | None = None
         self._credentials: NebiusKubernetesCredentials | None = None
         try:
@@ -407,10 +416,18 @@ class InClusterKubernetesJobApi:
             self._core = client.CoreV1Api()
 
     async def resource_summary(self, *, node_name: str, expected_node_uid: str | None = None) -> dict[str, Any]:
-        """Read verified kubelet statistics with nodes/stats, never nodes/proxy."""
+        """Read the configured verified source, without proxy or trust fallback."""
 
         def read() -> dict[str, Any]:
             try:
+                if self._resource_observation_namespace is not None:
+                    assert self._resource_observation_execution_namespace is not None
+                    return read_resource_observation(
+                        self._core, node_name=node_name, expected_node_uid=expected_node_uid,
+                        namespace=self._resource_observation_namespace,
+                        execution_namespace=self._resource_observation_execution_namespace,
+                        max_age_seconds=self._resource_observation_max_age_seconds,
+                    )
                 return read_kubelet_summary(
                     self._core, node_name=node_name, expected_node_uid=expected_node_uid,
                 )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +26,7 @@ from loom_execution_actuator.contracts import ActuatorContractError, KubernetesJ
 class ResourceSample:
     counters: ResourceCounters
     started_at: datetime | None = None
+    observed_at: datetime | None = None
 
 
 def _started(value: Any) -> datetime | None:
@@ -75,13 +76,17 @@ def pod_samples(
                 ),
             ),
             _started(container.get("startTime")),
+            min((stamp for kind in ("cpu", "memory", "rootfs", "logs")
+                 if (stamp := _started((container.get(kind) or {}).get("time"))) is not None),
+                default=None),
         )
     samples["pod"] = ResourceSample(
         ResourceCounters(
             ephemeral_storage_sampled_max_bytes=_integer(
                 (pod.get("ephemeral-storage") or {}).get("usedBytes")
             )
-        )
+        ),
+        observed_at=_started((pod.get("ephemeral-storage") or {}).get("time")),
     )
     return samples
 
@@ -95,6 +100,7 @@ async def persist_native_usage(
     now: datetime,
     terminal: bool,
     diagnostic: str | None = None,
+    source: Literal["kubelet_summary", "native_node_observer"] = "kubelet_summary",
 ) -> None:
     """The actuator's DB transaction owns authority; no new public write surface."""
     current = await session.scalar(
@@ -157,8 +163,9 @@ async def persist_native_usage(
         epoch = started_at.isoformat() if started_at else "unknown"
 
         # Existing execution-key format is a stable dedup identity, not an integrity gate.
+        source_key = "" if source == "kubelet_summary" else ":" + source
         key = hashlib.sha256(
-            f"{current.id}:{current.resource_generation}:{pod_uid}:{name}:{epoch}".encode()
+            f"{current.id}:{current.resource_generation}:{pod_uid}:{name}:{epoch}{source_key}".encode()
         ).hexdigest()
         row = await session.scalar(
             select(TrialResourceUsage).where(
@@ -169,6 +176,7 @@ async def persist_native_usage(
         )
         counters = sample.counters
         has_values = any(value is not None for value in counters.model_dump().values())
+        observed_at = sample.observed_at or now
         if row is None:
             older = (
                 await session.scalars(
@@ -187,14 +195,15 @@ async def persist_native_usage(
                     getattr(prior, field) is not None for field in ResourceCounters.model_fields
                 )
                 first_observation = prior.container_started_at is None and not prior_has_counters
-                prior.terminal_reason = (
-                    "first_container_observation" if first_observation else "container_restarted"
-                )
-                prior.diagnostic_code = (
-                    "prestart_sample_unavailable"
-                    if first_observation
-                    else "container_incarnation_changed"
-                )
+                source_changed = prior.source != source
+                prior.terminal_reason = ("observation_source_changed" if source_changed else
+                    "first_container_observation" if first_observation else "container_restarted")
+                if prior.diagnostic_code != "counter_reset_without_new_incarnation":
+                    prior.diagnostic_code = (
+                        "observation_source_changed" if source_changed else "prestart_sample_unavailable"
+                        if first_observation
+                        else "container_incarnation_changed"
+                    )
                 prior.completeness = "partial" if prior_has_counters else "unavailable"
             report = TrialResourceUsageReport(
                 trial_id=current.trial_id,
@@ -211,11 +220,11 @@ async def persist_native_usage(
                 image_digest=image_refs[name].rsplit("@", 1)[-1] if name in image_refs else None,
                 container_started_at=started_at,
                 architecture=current.workload_requirements_json.get("cpu_architecture"),
-                source="kubelet_summary",
+                source=source,
                 observation_seq=0,
-                first_observed_at=now,
-                last_observed_at=now,
-                finalized_at=now if terminal else None,
+                first_observed_at=observed_at if has_values else now,
+                last_observed_at=observed_at if has_values else now,
+                finalized_at=max(now, observed_at) if terminal else None,
                 terminal_reason=observation.normalized_state.value if terminal else None,
                 completeness="partial" if has_values or not terminal else "unavailable",
                 diagnostic_code=diagnostic or "sampled_maxima_not_kernel_peaks",
@@ -235,21 +244,26 @@ async def persist_native_usage(
             continue
         if row.finalized_at is not None:
             continue  # Terminal delivery is idempotent, late stale samples cannot rewrite it.
+        had_values = any(getattr(row, field) is not None for field in ResourceCounters.model_fields)
         if (
             counters.cpu_usage_usec is not None
             and row.cpu_usage_usec is not None
             and counters.cpu_usage_usec < row.cpu_usage_usec
+            and observed_at >= row.last_observed_at
         ):
             row.diagnostic_code = "counter_reset_without_new_incarnation"
         elif row.diagnostic_code != "counter_reset_without_new_incarnation":
             # Keep the latest collection failure, or clear it on real recovery.
             # Counter resets still preclude an exact whole-incarnation total.
-            if diagnostic or has_values:
+            if diagnostic or (has_values and (not had_values or observed_at >= row.last_observed_at)):
                 row.diagnostic_code = diagnostic or "sampled_maxima_not_kernel_peaks"
         if has_values:
             for field, value in counters.model_dump().items():
                 previous = getattr(row, field)
                 if value is not None:
+                    if (field == "memory_current_bytes" and had_values
+                            and observed_at < row.last_observed_at):
+                        continue
                     setattr(
                         row,
                         field,
@@ -258,7 +272,11 @@ async def persist_native_usage(
                         else max(previous, value),
                     )
             row.observation_seq += 1
-            row.last_observed_at = max(row.last_observed_at, now)
+            if had_values:
+                row.first_observed_at = min(row.first_observed_at, observed_at)
+                row.last_observed_at = max(row.last_observed_at, observed_at)
+            else:
+                row.first_observed_at = row.last_observed_at = observed_at
         if terminal:
             row.finalized_at = max(now, row.last_observed_at)
             row.terminal_reason = observation.normalized_state.value

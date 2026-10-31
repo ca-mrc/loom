@@ -544,6 +544,7 @@ def test_combined_preflight_through_installed_wrapper_and_native_kubectl(regiona
     try:
         endpoint = f"https://127.0.0.1:{server.server_port}"
         target["kubernetes_api_server"] = endpoint
+        target["resource_observer_api_cidrs"] = ["192.0.2.20/32"]
         documents = build_regional_execution(config, candidate, repo_root=Path(__file__).resolve().parents[2])[target["target_id"]]
         state["documents"] = documents
         region = scope["regions"][0]
@@ -588,7 +589,7 @@ def test_combined_preflight_through_installed_wrapper_and_native_kubectl(regiona
         monkeypatch.setattr(deploy.subprocess, "run", ssh)
         selected = deploy.preflight_regional_rollout(deploy.Kubectl(Path(scope["kubeconfig"])), config, render)
         assert list(selected) == [target["target_id"]]
-        assert {args[args.index("-n") + 1] for args in ssh_commands if "auth" in args and "serviceaccounts" in args} == {target["execution_namespace"], target["execution_namespace"] + "-build"}
+        assert {args[args.index("-n") + 1] for args in ssh_commands if "auth" in args and "serviceaccounts" in args} == {target["execution_namespace"], target["execution_namespace"] + "-build", target["execution_namespace"] + "-observations"}
         assert any(output == "access-key\nsecret-key\n" for output in ssh_outputs)
         remote = selected[target["target_id"]][0]
         for args in [("get", "secret", "loom-task-build-source", "-n", target["execution_namespace"] + "-build", "-o", "json"),
@@ -623,3 +624,42 @@ def test_combined_preflight_through_installed_wrapper_and_native_kubectl(regiona
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def _observer_scope(scope, native):
+    namespace = scope["regions"][0]["namespace"] + "-observations"
+    uid = "22222222-2222-2222-2222-222222222222"
+    region = scope["regions"][0]
+    region["namespace_uids"][namespace] = uid
+    region["resources"].extend([
+        {"kind": "Namespace", "name": namespace, "namespace": None},
+        {"kind": "DaemonSet", "name": gateway.OBSERVER_NAME, "namespace": namespace},
+        {"kind": "CiliumNetworkPolicy", "name": gateway.OBSERVER_NAME, "namespace": namespace},
+    ])
+    native.namespace_uids[namespace] = uid
+    return namespace
+
+
+def test_observer_scope_accepts_only_exact_daemonset_and_policy(scope, native):
+    namespace = _observer_scope(scope, native)
+    gateway.validate_scope(scope)
+    for kind, version in [("DaemonSet", "apps/v1"), ("CiliumNetworkPolicy", "cilium.io/v2")]:
+        payload = json.dumps({"apiVersion": version, "kind": kind, "metadata": {"name": gateway.OBSERVER_NAME, "namespace": namespace}}).encode()
+        assert gateway.handle(scope, regional(scope, "apply", "-f", "-"), stdin=payload)[0] == 0
+        foreign = json.loads(payload)
+        foreign["metadata"]["name"] = "foreign-observer"
+        with pytest.raises(gateway.ScopeError, match="resource identities"):
+            gateway.handle(scope, regional(scope, "apply", "-f", "-"), stdin=json.dumps(foreign).encode())
+    escaped = copy.deepcopy(scope)
+    escaped["regions"][0]["resources"][-2]["namespace"] = "loom-west-execution"
+    with pytest.raises(gateway.ScopeError, match="exact dedicated observer"):
+        gateway.validate_scope(escaped)
+
+
+def test_observer_readiness_wait_and_read_have_exact_scoped_commands(scope, native):
+    namespace = _observer_scope(scope, native)
+    for args in [("rollout", "status", "daemonset/" + gateway.OBSERVER_NAME, "-n", namespace, "--timeout=300s"),
+                 ("get", "daemonset", gateway.OBSERVER_NAME, "-n", namespace, "--ignore-not-found", "-o", "json")]:
+        assert gateway.handle(scope, regional(scope, *args))[0] == 0
+    with pytest.raises(gateway.ScopeError):
+        gateway.handle(scope, regional(scope, "rollout", "status", "daemonset/foreign", "-n", namespace, "--timeout=300s"))

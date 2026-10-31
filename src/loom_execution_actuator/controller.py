@@ -4,7 +4,7 @@ import asyncio
 import logging
 from collections import defaultdict
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from sqlalchemy import select
@@ -53,6 +53,7 @@ from loom_execution_actuator.pool_execution_resources import PoolExecutionResour
 from loom_execution_actuator.pool_outbox import PoolHandoffError
 from loom_execution_actuator.renderer import ExecutionTargetRuntime, render_execution_job
 from loom_execution_actuator.resource_diagnostics import resource_sample_diagnostic
+from loom_execution_actuator.resource_observations import validate_cached_resource_observation
 from loom_execution_actuator.resource_usage import ResourceSample, persist_native_usage, pod_samples
 
 _LOG = logging.getLogger(__name__)
@@ -100,6 +101,7 @@ class ExecutionActuator:
         command_lease_seconds: int = 60,
         delete_grace_seconds: int = 30,
         pool_resources: PoolExecutionResources | None = None,
+        resource_usage_source: Literal["kubelet_summary", "native_node_observer"] = "kubelet_summary",
     ) -> None:
         if not controller_id or len(controller_id) > 120:
             raise ValueError("invalid controller_id")
@@ -113,6 +115,7 @@ class ExecutionActuator:
         self._command_limit = command_limit
         self._command_lease_seconds = command_lease_seconds
         self._delete_grace_seconds = delete_grace_seconds
+        self._resource_usage_source = resource_usage_source
         self._watch_resource_version: str | None = None
         self._usage_cache: dict[str, tuple[datetime, dict[str, Any] | None, str | None]] = {}
         if pool_resources is not None and (pool_resources.target_id != target.target_id
@@ -253,6 +256,14 @@ class ExecutionActuator:
             summary, diagnostic = cached[1:]
         if summary is None:
             return {}, diagnostic or "kubelet_sample_unavailable"
+        if self._resource_usage_source == "native_node_observer":
+            try:
+                validate_cached_resource_observation(
+                    summary, node_name=node, execution_namespace=observation.namespace, now=now,
+                )
+            except ValueError as error:
+                RESOURCE_USAGE_ERRORS_TOTAL.labels(operation="collect").inc()
+                return {}, resource_sample_diagnostic(error)
         try:
             samples = pod_samples(
                 summary, namespace=observation.namespace, pod_uid=observation.pod_uid
@@ -261,6 +272,13 @@ class ExecutionActuator:
             RESOURCE_USAGE_ERRORS_TOTAL.labels(operation="parse").inc()
             _LOG.warning("Malformed native resource sample for lease %s", observation.lease_id)
             return {}, "kubelet_sample_malformed"
+        if self._resource_usage_source == "native_node_observer" and samples and not any(
+            value is not None
+            for sample in samples.values()
+            for value in sample.counters.model_dump().values()
+        ):
+            RESOURCE_USAGE_ERRORS_TOTAL.labels(operation="collect").inc()
+            return {}, "native_observation_counters_unavailable"
         return samples, None if samples else "pod_stats_unavailable"
 
     async def _persist_usage(
@@ -286,6 +304,7 @@ class ExecutionActuator:
                     now=now,
                     terminal=terminal,
                     diagnostic=diagnostic,
+                    source=self._resource_usage_source,
                 )
                 await session.flush()
         except Exception:

@@ -11,6 +11,9 @@ from loom_execution_actuator.contracts import KubernetesApiError
 
 _UNAVAILABLE = "kubelet_sample_unavailable"
 _READER_ERRORS = {
+    "native_observation_identity": "native_observation_identity",
+    "native_observation_stale": "native_observation_stale",
+    "native_observation_malformed": "native_observation_malformed",
     "unqualified kubelet node": "kubelet_node_identity",
     "unqualified expected kubelet node identity": "kubelet_node_identity",
     "unqualified kubelet node identity": "kubelet_node_identity",

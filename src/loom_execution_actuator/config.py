@@ -17,6 +17,10 @@ class ExecutionActuatorSettings(BaseSettings):
     kubernetes_endpoint: str | None = None
     kubernetes_ca_file: Path | None = None
     kubernetes_nebius_credentials_file: Path | None = None
+    resource_observation_namespace: str | None = Field(
+        default=None, max_length=63, pattern=r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$",
+    )
+    resource_observation_max_age_seconds: float = Field(default=60, ge=15, le=120)
 
     @model_validator(mode="after")
     def _remote_kubernetes_complete(self) -> "ExecutionActuatorSettings":

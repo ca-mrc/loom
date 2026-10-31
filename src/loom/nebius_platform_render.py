@@ -146,6 +146,7 @@ def validate_environment(config: dict[str, Any]) -> None:
             "execution_placement_policy",
             "execution_command_concurrency",
             "postgres_settings",
+            "resource_observer_api_cidrs",
         }
         != expected
     ):
@@ -273,6 +274,13 @@ def validate_environment(config: dict[str, Any]) -> None:
         or api.path not in ("", "/")
     ):
         raise NebiusPlatformError("kubernetes_api_server must be an HTTPS control plane origin")
+    from loom.nebius_resource_observer_render import api_egress, observation_namespace
+
+    try:
+        observation_namespace(config["execution_namespace"])
+        api_egress(config)
+    except ValueError as exc:
+        raise NebiusPlatformError(str(exc)) from None
     region = config.get("region", "")
     if not isinstance(region, str) or not re.fullmatch(r"[a-z]+-[a-z]+[0-9]", region):
         raise NebiusPlatformError("region is invalid")
@@ -447,6 +455,7 @@ def _regional_config(config: dict[str, Any], target: dict[str, Any]) -> dict[str
     result = dict(config)
     result.pop("regional_execution_targets", None)
     result.pop("execution_resource_quota", None)
+    result.pop("resource_observer_api_cidrs", None)
     # Regional node groups retain their independently owned SSD templates.
     # The primary build disk selection must not change their quota class.
     result.pop("execution_disk_type", None)
@@ -482,7 +491,7 @@ def _validate_regions(config: dict[str, Any]) -> None:
     for target in regions:
         if (
             not isinstance(target, dict)
-            or set(target) - {"execution_resource_quota", "task_identity_policy", "task_image_builder"} != _REGIONAL_FIELDS
+            or set(target) - {"execution_resource_quota", "task_identity_policy", "task_image_builder", "resource_observer_api_cidrs"} != _REGIONAL_FIELDS
         ):
             raise NebiusPlatformError("regional execution target has missing or unknown fields")
         validate_environment(_regional_config(config, target))
@@ -1202,6 +1211,7 @@ def _execution_documents(
                         "LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY": config.get(
                             "execution_command_concurrency", 1,
                         ),
+                        "LOOM_EXECUTION_ACTUATOR_RESOURCE_OBSERVATION_NAMESPACE": ex + "-observations",
                     }))
                 if builder is not None:
                     pod["containers"][0].setdefault("env", []).extend(
@@ -1290,6 +1300,9 @@ def _execution_documents(
                 if entry["name"] == "LOOM_EXECUTION_ACTUATOR_TARGET_ID":
                     entry["value"] = guest_id
         execution_docs.append(guest)
+    from loom.nebius_resource_observer_render import observer_documents
+
+    execution_docs.extend(observer_documents(config, images["execution_actuator"]))
     return execution_docs
 
 
@@ -1308,6 +1321,11 @@ def _regional_documents(
     # cache and archive storage. Only the build namespace/compute is regional.
     for doc in _execution_documents(regional, images, repo_root, builder_storage_config=config):
         kind, name = doc["kind"], doc["metadata"]["name"]
+        if doc["metadata"].get("labels", {}).get("app.kubernetes.io/name") == "loom-native-resource-observer":
+            if kind == "RoleBinding" and name.endswith("-reader"):
+                doc["subjects"] = [{"kind": "User", "apiGroup": "rbac.authorization.k8s.io", "name": identities["actuator"]}]
+            remote.append(doc)
+            continue
         if kind in {"Deployment", "CronJob", "ConfigMap"} or (
             kind == "ServiceAccount" and name != "loom-execution-attempt"
         ):
