@@ -2989,25 +2989,19 @@ async def refresh_service_execution_metrics(
     now: datetime | None = None,
 ) -> None:
     current_time = now or datetime.now(UTC)
+    # These are independent gauges. Joining every historical command to its
+    # lease expands the input and forces DISTINCT for unrelated cleanup state.
+    pending_commands = ServiceExecutionCommand.state.in_(["pending", "leased"])
     pending, cleanup, oldest = (
-        await session.execute(
-            select(
-                func.count(ServiceExecutionCommand.id).filter(
-                    ServiceExecutionCommand.state.in_(["pending", "leased"])
-                ),
-                func.count(func.distinct(ServiceExecutionLease.id)).filter(
-                    ServiceExecutionLease.cleanup_state.in_(["pending", "in_progress", "blocked"])
-                ),
-                func.min(ServiceExecutionCommand.created_at).filter(
-                    ServiceExecutionCommand.state.in_(["pending", "leased"])
-                ),
-            )
-            .select_from(ServiceExecutionLease)
-            .outerjoin(
-                ServiceExecutionCommand,
-                ServiceExecutionCommand.lease_id == ServiceExecutionLease.id,
-            )
-        )
+        await session.execute(select(
+            select(func.count(ServiceExecutionCommand.id))
+            .where(pending_commands).scalar_subquery(),
+            select(func.count(ServiceExecutionLease.id)).where(
+                ServiceExecutionLease.cleanup_state.in_(["pending", "in_progress", "blocked"]),
+            ).scalar_subquery(),
+            select(func.min(ServiceExecutionCommand.created_at))
+            .where(pending_commands).scalar_subquery(),
+        ))
     ).one()
     SERVICE_EXECUTION_COMMAND_BACKLOG.set(int(pending or 0))
     SERVICE_EXECUTION_CLEANUP_DEBT.set(int(cleanup or 0))

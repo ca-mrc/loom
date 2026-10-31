@@ -3584,6 +3584,54 @@ async def test_serialized_claims_prioritize_cleanup_generation_and_fence_stale_w
         await engine.dispose()
 
 
+async def test_execution_metrics_count_commands_and_cleanup_leases_independently(
+    postgres_url: str,
+) -> None:
+    from loom_control_plane.metrics import (
+        SERVICE_EXECUTION_CLEANUP_DEBT,
+        SERVICE_EXECUTION_COMMAND_BACKLOG,
+        SERVICE_EXECUTION_RECONCILE_LAG_SECONDS,
+    )
+    from loom_control_plane.service_execution import refresh_service_execution_metrics
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            leases = []
+            for _ in range(3):
+                trial, target = await _seed_ready_trial(session, now=now)
+                leases.append(await _reserve(session, trial_id=trial, target=target, now=now))
+            for lease in leases[:2]:
+                await enqueue_execution_transition(
+                    session, lease_id=lease.id, expected_generation=1,
+                    desired_state="cancel", now=now,
+                )
+            first = await claim_execution_commands(
+                session, consumer_id="metrics", target_id=target.target_id,
+                limit=1, lease_seconds=5, now=now,
+            )
+            assert len(first) == 1
+            await acknowledge_execution_command(
+                session, command_id=first[0].id, consumer_id="metrics",
+                acknowledgement={"created": True}, now=now,
+            )
+            oldest = await session.scalar(select(func.min(ServiceExecutionCommand.created_at)).where(
+                ServiceExecutionCommand.state.in_(["pending", "leased"]),
+            ))
+            assert oldest is not None
+            measured_at = now + timedelta(minutes=1)
+            await refresh_service_execution_metrics(session, now=measured_at)
+            assert SERVICE_EXECUTION_COMMAND_BACKLOG._value.get() == 4
+            assert SERVICE_EXECUTION_CLEANUP_DEBT._value.get() == 2
+            assert SERVICE_EXECUTION_RECONCILE_LAG_SECONDS._value.get() == pytest.approx(
+                (measured_at - oldest).total_seconds(),
+            )
+    finally:
+        await engine.dispose()
+
+
 async def test_command_redelivery_and_acknowledgement_are_replay_safe(
     postgres_url: str,
 ) -> None:
