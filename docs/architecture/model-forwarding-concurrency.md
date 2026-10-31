@@ -61,8 +61,11 @@ also do not establish a shared Loom key allowance. Deferred harnesses are not en
 These tests hold responses at an isolated loopback upstream until the requested
 in-flight count has arrived. Connection-establishment ramping only avoids the
 host's listen backlog; it does not release held responses. The fixtures never
-call paid inference providers. Test-process file-descriptor capacity is recorded
-separately from model transport policy.
+call paid inference providers. Native test containers explicitly allow 8192 file
+descriptors: the generator holds both 1200 client and 1200 upstream sockets, so
+an inherited CI soft limit of 1024 cannot exercise the transport. The runner
+checks this socket headroom before starting. This allowance changes neither
+host settings nor model transport policy; effective process limits are recorded.
 
 ```bash
 PYTHONPATH=src:packages/loom-launcher pytest -q \

@@ -26,6 +26,11 @@ ROOT = Path(__file__).resolve().parents[2]
 ENVOY_IMAGE = "envoyproxy/envoy:v1.30-latest"
 PYTHON_IMAGE = "python:3.11-slim"
 CONNECTION_IDS = [str(UUID(int=value)) for value in (1, 2, 3)]
+# The synthetic generator owns both 1200 outbound and 1200 upstream sockets.
+# Docker daemon defaults can inherit soft nofile=1024 from a CI service. Keep
+# this allowance inside the disposable containers, including cancel/reconnect
+# headroom; it changes no host, product or provider concurrency policy.
+_FIXTURE_NOFILE = 8192
 _CHECKED_IMAGES: set[str] = set()
 
 _RUNNER = r"""import asyncio,collections,errno,http.client,json,resource,ssl,time
@@ -36,6 +41,7 @@ CIDS=CFG['connection_ids'];COUNT=CFG['requests'];INGRESS=CFG.get('hop')=='ingres
 STATE={'active':0,'arrived':0,'peak':0,'header_leaks':0,'auth_errors':0,'per_cid':collections.Counter(),'total_requests':0,'status_requests':collections.Counter()}
 CLIENT={'connected':0,'sent':0,'completed':0,'errors':collections.Counter()}
 CLIENT_FD_LIMITS=resource.getrlimit(resource.RLIMIT_NOFILE)
+assert CLIENT_FD_LIMITS[0]==resource.RLIM_INFINITY or CLIENT_FD_LIMITS[0]>=2*COUNT+128, 'native fixture needs client and upstream socket headroom; launch with its explicit nofile allowance'
 RELEASE=asyncio.Event()
 CLIENT_SSL=ssl.create_default_context(cafile='/fixture/cert.pem') if TLS or INGRESS else None
 
@@ -381,9 +387,11 @@ def native_envoy_case(scheme: str, *, baseline: bool, requests: int = 1200, rend
         mount = f"type=bind,source={directory},target=/fixture,readonly"
         try:
             _run(["docker", "run", "-d", "--pull=never", "--network", "none", "--name", name,
+                  "--ulimit", f"nofile={_FIXTURE_NOFILE}:{_FIXTURE_NOFILE}",
                   "--mount", mount, ENVOY_IMAGE, "--concurrency", "1", "--disable-hot-restart",
                   "-c", "/fixture/bootstrap.json", "--log-level", "error"], timeout=30)
             output = _run(["docker", "run", "--rm", "--pull=never", "--network", "container:" + name,
+                           "--ulimit", f"nofile={_FIXTURE_NOFILE}:{_FIXTURE_NOFILE}",
                            "--mount", mount, PYTHON_IMAGE, "python", "/fixture/runner.py"])
             result = json.loads(output)
             # Preserve bounded diagnostics before finally removes the container;
@@ -505,11 +513,14 @@ def native_ingress_case(config: dict[str, Any], *, protocol: str, renderer_env: 
         mount = f"type=bind,source={directory},target=/fixture,readonly"
         try:
             _run(["docker", "run", "-d", "--pull=never", "--network", "none", "--name", caddy_name,
+                  "--ulimit", f"nofile={_FIXTURE_NOFILE}:{_FIXTURE_NOFILE}",
                   "--mount", mount, caddy_image, "caddy", "run", "--config", "/fixture/caddy.json"], timeout=30)
             _run(["docker", "run", "-d", "--pull=never", "--network", "container:" + caddy_name,
-                  "--name", traefik_name, "--mount", mount, traefik_image,
+                  "--name", traefik_name, "--ulimit", f"nofile={_FIXTURE_NOFILE}:{_FIXTURE_NOFILE}",
+                  "--mount", mount, traefik_image,
                   "--configFile=/fixture/traefik.json"], timeout=30)
             result = _run(["docker", "run", "--rm", "--pull=never", "--network", "container:" + caddy_name,
+                           "--ulimit", f"nofile={_FIXTURE_NOFILE}:{_FIXTURE_NOFILE}",
                            "--mount", mount, "--env", "PYTHONPATH=/fixture/vendor", PYTHON_IMAGE, "python", "/fixture/runner.py"])
             return json.loads(result)
         except Exception as error:
