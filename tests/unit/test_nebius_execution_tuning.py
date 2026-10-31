@@ -248,3 +248,35 @@ def test_operator_cli_stages_postgres_without_live_restart(regional_inputs, monk
         tuning.main()
     assert error.value.code == 1
     assert kube.cm['metadata']['resourceVersion'] == version
+
+
+def test_dormant_actuators_keep_configuration_without_requiring_a_pod(regional_inputs):
+    config, candidate, _ = regional_inputs
+
+    class DormantKube(FakeKube):
+        def run(self, *args, **kwargs):
+            if args[0] == 'exec' and 'deployment/dormant-actuator' in args:
+                raise RuntimeError('cannot exec a deployment with zero replicas')
+            return super().run(*args, **kwargs)
+
+    kube = DormantKube(regional_inputs)
+    active = next(row for key, row in kube.objects.items()
+                  if key[0] == 'deployment' and 'LOOM_EXECUTION_ACTUATOR_TARGET_ID' in tuning._env(row))
+    dormant = deepcopy(active)
+    dormant['metadata']['name'] = 'dormant-actuator'
+    dormant['spec']['replicas'] = 0
+    dormant['status'] = {'readyReplicas': 0}
+    key = ('deployment', config['execution_namespace'], 'dormant-actuator')
+    kube.objects[key] = dormant
+    before = tuning.inspect(kube, config['namespace'])
+    assert next(row for row in before['controllers'] if row['name'] == 'dormant-actuator')[
+        'command_concurrency'] is None
+    result = tuning.apply(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+                          command_concurrency=2)
+    observed = next(row for row in result['controllers'] if row['name'] == 'dormant-actuator')
+    assert observed['replicas'] == observed['ready_replicas'] == 0
+    assert observed['command_concurrency'] is None
+    assert observed['configured_command_concurrency'] == 2
+    assert tuning._env(kube.objects[key])['LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY'] == '2'
+    assert 'dormant-actuator' not in result['restarted_controllers']
+    assert not any(args[:3] == ('rollout', 'status', 'deployment/dormant-actuator') for args in kube.calls)

@@ -64,6 +64,12 @@ def _deployments(kube: Kubectl, namespace: str) -> list[dict]:
 
 def _runtime(kube: Kubectl, controller: dict) -> dict:
     name, ns = controller["metadata"]["name"], controller["metadata"]["namespace"]
+    if controller["spec"].get("replicas", 1) == 0:
+        if name == "loom-control-plane":
+            raise DeploymentError("control-plane has no running replicas")
+        return {"command_concurrency": None, "configured_command_concurrency": int(
+            _env(controller).get("LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY", "1"),
+        )}
     if name == "loom-control-plane":
         script = ("import json; from loom_control_plane.config import ControlPlaneSettings; "
                   "s=ControlPlaneSettings(); "
@@ -164,7 +170,8 @@ def apply(
     if not re.fullmatch(r"[0-9a-f]{40}", expected_candidate) or profile["candidate_sha"] != expected_candidate:
         raise DeploymentError("tuning candidate differs from the installed platform")
     if any(_runtime(kube, row).get("command_concurrency") is None
-           for row in controllers if row["metadata"]["name"] != "loom-control-plane"):
+           for row in controllers if row["metadata"]["name"] != "loom-control-plane"
+           and row["spec"].get("replicas", 1) > 0):
         raise DeploymentError("installed actuator lacks tuning support; deploy the combined candidate first")
     if placement_policy is command_concurrency is None and not create_rates:
         raise DeploymentError("at least one tuning value is required")
@@ -220,7 +227,8 @@ def apply(
             name, ns = controller["metadata"]["name"], controller["metadata"]["namespace"]
             kube.run("set", "env", "deployment/" + name, "-n", ns,
                      *(key + "=" + value for key, value in changes.items()))
-            restarted.append((name, ns))
+            if controller["spec"].get("replicas", 1) > 0:
+                restarted.append((name, ns))
     for name, ns in restarted:
         kube.run("rollout", "status", "deployment/" + name, "-n", ns, "--timeout=300s", timeout=330)
     result = inspect(kube, namespace)
@@ -235,7 +243,8 @@ def apply(
         if controller["name"] == "loom-control-plane":
             if controller["placement_policy"] != result["persisted"]["placement_policy"]:
                 raise DeploymentError("saved and live placement differ")
-        elif controller["command_concurrency"] != result["persisted"]["command_concurrency"]:
+        elif (controller["command_concurrency"] if controller["replicas"] > 0
+              else controller["configured_command_concurrency"]) != result["persisted"]["command_concurrency"]:
             raise DeploymentError("saved and live command concurrency differ")
     result["restarted_controllers"] = [name for name, _ in restarted]
     result["task_jobs_replaced"] = False

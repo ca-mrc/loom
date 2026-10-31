@@ -1676,3 +1676,5 @@ compute deletion; cancellation does not permit new model calls or automatic
 attempts. Missing output is shown as unavailable, not perpetually pending.
 Cancelled/unscored output remains ineligible for training delivery; successful
 supplemental attempts continue through the existing family selection rules.
+
+A scaled-to-zero standby actuator retains the concurrency setting in its Deployment without being started for tuning. Inspection reports its configured value separately from the unavailable runtime value; active controllers must still pass runtime and readiness checks.
