@@ -17,7 +17,7 @@ if __package__ in {None, ""}:
 
 from scripts.ops.deploy_nebius_platform import DeploymentError, Kubectl  # noqa: E402
 
-from loom.nebius_platform_render import validate_environment  # noqa: E402
+from loom.nebius_platform_render import postgres_settings, validate_environment  # noqa: E402
 
 _API = '''import json,os,sys,tomllib,urllib.request,urllib.error
 from pathlib import Path
@@ -87,6 +87,38 @@ def _read(kube: Kubectl, namespace: str) -> tuple[dict, dict, dict, list[dict]]:
     if not cp or not actuators:
         raise DeploymentError("execution controllers unavailable")
     return cm, config, profile, [cp, *actuators]
+
+
+def stage_postgres(
+    kube: Kubectl, namespace: str, *, expected_candidate: str, settings: dict[str, int],
+) -> dict[str, Any]:
+    """Save restart-requiring settings for the next normal maintenance rollout."""
+    cm, config, profile, _ = _read(kube, namespace)
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_candidate) or profile["candidate_sha"] != expected_candidate:
+        raise DeploymentError("database settings candidate differs from installed platform")
+    if not settings:
+        raise DeploymentError("at least one Postgres setting is required")
+    held = kube.run(
+        "exec", "-n", namespace, "statefulset/loom-postgres", "--", "psql", "-X", "-qAt",
+        "-U", "postgres", "-d", "loom", "-v", "ON_ERROR_STOP=1", "-c",
+        "BEGIN READ ONLY; SELECT count(*) FROM nebius_rollout_guard; ROLLBACK;",
+    )
+    if held.strip() != "0":
+        raise DeploymentError("a version rollout owns the platform; wait for its normal completion")
+    updated = deepcopy(config)
+    updated["postgres_settings"] = {**postgres_settings(config), **settings}
+    validate_environment(updated)
+    if updated != config:
+        kube.run("patch", "configmap", "loom-platform-config", "-n", namespace, "--type=json", "-p",
+                 json.dumps([
+                     {"op": "test", "path": "/metadata/resourceVersion", "value": cm["metadata"]["resourceVersion"]},
+                     {"op": "replace", "path": "/data/environment.json", "value": json.dumps(updated)},
+                 ]))
+    saved = json.loads(kube.get("configmap", "loom-platform-config", namespace)["data"]["environment.json"])
+    if saved.get("postgres_settings") != updated["postgres_settings"]:
+        raise DeploymentError("saved Postgres settings differ")
+    return {"candidate_sha": profile["candidate_sha"], "postgres_settings": saved["postgres_settings"],
+            "database_restarted": False, "effective_on_next_deployment": True}
 
 
 def inspect(kube: Kubectl, namespace: str) -> dict[str, Any]:
@@ -212,17 +244,29 @@ def apply(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("inspect", "apply"))
+    parser.add_argument("operation", choices=("inspect", "apply", "stage-postgres"))
     parser.add_argument("--kubeconfig", type=Path, required=True)
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--expected-candidate")
     parser.add_argument("--placement-policy", choices=("environment-local-health-first", "environment-local-capacity-balanced"))
     parser.add_argument("--command-concurrency", type=int, choices=range(1, 9))
     parser.add_argument("--create-rate", action="append", default=[], metavar="TARGET=PER_MINUTE")
+    for name in ("cpu-request-millis", "cpu-limit-millis", "memory-request-mib", "memory-limit-mib", "shared-buffers-mib"):
+        parser.add_argument("--postgres-" + name, type=int)
     args = parser.parse_args()
     try:
         kube = Kubectl(args.kubeconfig)
-        if args.operation == "inspect":
+        database_settings = {name: getattr(args, "postgres_" + name) for name in (
+            "cpu_request_millis", "cpu_limit_millis", "memory_request_mib", "memory_limit_mib", "shared_buffers_mib",
+        ) if getattr(args, "postgres_" + name) is not None}
+        if args.operation == "stage-postgres":
+            if args.placement_policy is not None or args.command_concurrency is not None or args.create_rate:
+                raise DeploymentError("stage database settings separately from ordinary live tuning")
+            result = stage_postgres(kube, args.namespace, expected_candidate=args.expected_candidate or "",
+                                    settings=database_settings)
+        elif database_settings:
+            raise DeploymentError("Postgres settings require stage-postgres and a normal maintenance deployment")
+        elif args.operation == "inspect":
             result = inspect(kube, args.namespace)
         else:
             rates = {}

@@ -990,6 +990,29 @@ A partial update remains failed with desired values retained; repeating the
 same tuning command safely finishes convergence. Rollback uses the same command
 with the previous setting and preserves in-flight work.
 
+Database resources and startup cache are separately persisted in
+`postgres_settings`: `cpu_request_millis`, `cpu_limit_millis`,
+`memory_request_mib`, `memory_limit_mib`, and `shared_buffers_mib`. Omitting the
+object preserves legacy resource defaults and does not override the server's
+existing shared-buffer setting. The selected starting point for #2730 is
+1000/3000 millicores, 1024/2048 MiB and 512 MiB shared buffers. Other service
+resources, `max_connections` and `work_mem` stay unchanged.
+
+```sh
+python scripts/ops/nebius_execution_tuning.py stage-postgres --kubeconfig "$KUBECONFIG" --namespace "$NAMESPACE" --expected-candidate "$CURRENT_CANDIDATE" --postgres-cpu-request-millis 1000 --postgres-cpu-limit-millis 3000 --postgres-memory-request-mib 1024 --postgres-memory-limit-mib 2048 --postgres-shared-buffers-mib 512
+```
+
+`stage-postgres` only saves and reads back desired configuration. It does not
+patch/restart the database or other controllers. Stage it before the initial
+maintenance rollout becomes idle; that normal rollout applies resources and
+`shared_buffers` together. The PostgreSQL [resource configuration reference](https://www.postgresql.org/docs/16/runtime-config-resource.html)
+requires server startup for `shared_buffers` and describes 25% as a common
+starting point, with workload-dependent benefit. Verify restart/connection
+recovery, cgroup CPU throttling and memory/cache counters, buffer reads/hits,
+query latency and batch throughput; the percentage is not an acceptance gate.
+Ordinary placement/concurrency/rate tuning preserves these database settings
+and never applies a database restart.
+
 A code-version deployment still follows normal idle rollout/backup/recovery.
 For owner-authorized maintenance, cancel through the ordinary batch API,
 retain completed results, wait for execution/build cleanup and deploy before

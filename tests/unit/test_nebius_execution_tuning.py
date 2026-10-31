@@ -202,3 +202,49 @@ def test_operator_cli_applies_and_reads_back_each_independent_knob(
     assert result['persisted']['placement_policy'] == 'environment-local-capacity-balanced'
     assert result['persisted']['command_concurrency'] == 2
     assert result['persisted']['create_rates'][target] == result['live_create_rates'][target] == 27
+
+
+def test_postgres_staging_does_not_restart_database_and_survives_later_deploy(regional_inputs):
+    config, candidate, profile = regional_inputs
+    kube = FakeKube(regional_inputs)
+    original_database = deepcopy(kube.objects['statefulset', config['namespace'], 'loom-postgres'])
+    settings = {'cpu_request_millis': 1000, 'cpu_limit_millis': 3000,
+                'memory_request_mib': 1024, 'memory_limit_mib': 2048, 'shared_buffers_mib': 512}
+    result = tuning.stage_postgres(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+                                  settings=settings)
+    assert result['database_restarted'] is False and result['effective_on_next_deployment'] is True
+    assert kube.objects['statefulset', config['namespace'], 'loom-postgres'] == original_database
+    assert not any(args[0] in {'set', 'rollout'} for args in kube.calls)
+    tuning.apply(kube, config['namespace'], expected_candidate=candidate['candidate_sha'], command_concurrency=2)
+    saved = json.loads(kube.cm['data']['environment.json'])
+    assert saved['postgres_settings'] == settings
+    next_candidate, next_profile = deepcopy(candidate), deepcopy(profile)
+    next_candidate['candidate_sha'] = next_profile['candidate_sha'] = 'e' * 40
+    files = build_platform(saved, next_candidate, next_profile, {}, repo_root=ROOT)
+    pg = next(row for row in files['20-database.yaml'] if row['kind'] == 'StatefulSet')
+    container = pg['spec']['template']['spec']['containers'][0]
+    assert container['resources']['requests'] == {'cpu': '1', 'memory': '1Gi'}
+    assert container['resources']['limits'] == {'cpu': '3', 'memory': '2Gi'}
+    assert 'shared_buffers=512MB' in container['args']
+
+
+def test_operator_cli_stages_postgres_without_live_restart(regional_inputs, monkeypatch, capsys):
+    config, candidate, _ = regional_inputs
+    kube = FakeKube(regional_inputs)
+    monkeypatch.setattr(tuning, 'Kubectl', lambda path: kube)
+    common = ['execution-tuning', 'stage-postgres', '--kubeconfig', '/operator/config',
+              '--namespace', config['namespace'], '--expected-candidate', candidate['candidate_sha'],
+              '--postgres-cpu-request-millis', '1000', '--postgres-cpu-limit-millis', '3000',
+              '--postgres-memory-request-mib', '1024', '--postgres-memory-limit-mib', '2048',
+              '--postgres-shared-buffers-mib', '512']
+    monkeypatch.setattr('sys.argv', common)
+    tuning.main()
+    assert json.loads(capsys.readouterr().out)['postgres_settings']['shared_buffers_mib'] == 512
+    assert not any(args[0] in {'set', 'rollout'} for args in kube.calls)
+    version = kube.cm['metadata']['resourceVersion']
+    common[1] = 'apply'
+    monkeypatch.setattr('sys.argv', common)
+    with pytest.raises(SystemExit) as error:
+        tuning.main()
+    assert error.value.code == 1
+    assert kube.cm['metadata']['resourceVersion'] == version
