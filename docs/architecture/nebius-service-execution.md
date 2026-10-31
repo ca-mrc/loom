@@ -1056,6 +1056,9 @@ original `native_build` JSON remains the write authority; existing writers updat
 the projections automatically. This prevents empty queues from repeatedly
 decompressing historical Job/claim manifests, including while holding the shared
 capacity lock. Timestamp text and archive predicate semantics are preserved.
+The schema-only projections are excluded from ordinary ORM SELECT/RETURNING.
+Audited retained pool schemas keep their original JSON predicates on single-image
+claim/ownership lookups; no schema probing or permissive fallback is introduced.
 Migration 0186 backfills all projections in one table rewrite during the normal
 idle deployment; it waits at most five seconds for the table lock and rolls back
 atomically if busy. Downgrade removes only projections and indexes.
