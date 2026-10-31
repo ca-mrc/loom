@@ -172,8 +172,11 @@ from tests.support.minio_tls import minio_tls  # noqa: E402,F401
 
 
 async def test_non_harbor_cli_uses_versioned_sources_and_atomic_alias_cas(
-    postgres_url, tmp_path, minio_tls,  # noqa: F811
+    isolated_migration_postgres_url, tmp_path, minio_tls,  # noqa: F811
 ):
+    # The CLI creates durable alias/source-journal rows. Own their database so
+    # unrelated application fixtures cannot delete the retained profile beneath them.
+    postgres_url = isolated_migration_postgres_url
     import tomli_w
 
     from loom_cli.benchmark_types import AdapterBenchmarkEntry, PreparedAdapterBenchmark

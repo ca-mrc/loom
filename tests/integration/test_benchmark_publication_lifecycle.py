@@ -186,7 +186,7 @@ async def test_first_registration_can_pin_an_empty_registry_placeholder(
         assert await session.scalar(select(Task.id).where(Task.benchmark_id == profile)) == profile + "/sample"
 
 
-async def test_cli_migration_roundtrip_retains_live_event_schema_and_accepted_catalog(
+async def test_cli_migration_roundtrip_retains_preceding_schema_and_accepted_catalog(
     publication_sessions, postgres_url,
 ):
     import asyncio
@@ -212,6 +212,9 @@ async def test_cli_migration_roundtrip_retains_live_event_schema_and_accepted_ca
         async with publication_sessions() as session:
             assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0183"
             assert await session.scalar(text("SELECT to_regclass('public.service_execution_live_events')")) is not None
+            for table in ("provider_request_pools", "provider_request_pool_members"):
+                assert await session.scalar(text(f"SELECT to_regclass('public.{table}')")) is not None
+            assert await session.scalar(text("SELECT count(*) FROM information_schema.columns WHERE table_name='task_image_materializations' AND column_name='preparation_revision'")) == 1
             assert await session.scalar(text("SELECT column_default FROM information_schema.columns WHERE table_name='benchmarks' AND column_name='execution_state'")) == "'runnable'::text"
             row = await session.get(Benchmark, profile)
             assert row.execution_state == "runnable"
@@ -221,5 +224,8 @@ async def test_cli_migration_roundtrip_retains_live_event_schema_and_accepted_ca
     async with publication_sessions() as session:
         assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0184"
         assert await session.scalar(text("SELECT to_regclass('public.service_execution_live_events')")) is not None
+        for table in ("provider_request_pools", "provider_request_pool_members"):
+            assert await session.scalar(text(f"SELECT to_regclass('public.{table}')")) is not None
+        assert await session.scalar(text("SELECT count(*) FROM information_schema.columns WHERE table_name='task_image_materializations' AND column_name='preparation_revision'")) == 1
         assert await session.scalar(text("SELECT column_default FROM information_schema.columns WHERE table_name='benchmarks' AND column_name='execution_state'")) == "'pending'::text"
         assert (await session.get(Benchmark, profile)).execution_state == "runnable"

@@ -169,7 +169,7 @@ async def test_successor_revocation_requires_exact_installed_revision_and_scope(
             select(Token.revoked_at).where(Token.type == 'pool_machine')))
 
 
-@pytest.mark.parametrize('revision', ['0174', '0175', '0182', '0199', "0176'; COMMIT; --", None])
+@pytest.mark.parametrize('revision', ['0174', '0175', '0185', '0199', "0176'; COMMIT; --", None])
 def test_manager_revision_rejects_unqualified_observations_and_writes(revision):
     value, _ = installation()
     spec = PoolInstallation.model_validate(value)
