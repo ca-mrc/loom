@@ -1150,7 +1150,7 @@ def _task_image_builder_documents(config: dict[str, Any], settings: Any) -> list
 
 def _execution_documents(
     config: dict[str, Any], images: dict[str, str], repo_root: Path,
-    *, builder_storage_config: dict[str, Any] | None = None,
+    *, builder_storage_config: dict[str, Any] | None = None, resource_observations: bool = True,
 ) -> list[dict[str, Any]]:
     ns, ex = config["namespace"], config["execution_namespace"]
     builder = _task_image_builder_settings(
@@ -1206,13 +1206,15 @@ def _execution_documents(
             if doc["kind"] == "Deployment":
                 pod = doc["spec"]["template"]["spec"]
                 if filename == "nebius-execution-actuator.yaml":
-                    pod["containers"][0].setdefault("env", []).extend(_env({
+                    environment = {
                         "LOOM_ENV": config["environment"], "LOOM_NAMESPACE": ns,
                         "LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY": config.get(
                             "execution_command_concurrency", 1,
                         ),
-                        "LOOM_EXECUTION_ACTUATOR_RESOURCE_OBSERVATION_NAMESPACE": ex + "-observations",
-                    }))
+                    }
+                    if resource_observations:
+                        environment["LOOM_EXECUTION_ACTUATOR_RESOURCE_OBSERVATION_NAMESPACE"] = ex + "-observations"
+                    pod["containers"][0].setdefault("env", []).extend(_env(environment))
                 if builder is not None:
                     pod["containers"][0].setdefault("env", []).extend(
                         _env(
@@ -1300,9 +1302,10 @@ def _execution_documents(
                 if entry["name"] == "LOOM_EXECUTION_ACTUATOR_TARGET_ID":
                     entry["value"] = guest_id
         execution_docs.append(guest)
-    from loom.nebius_resource_observer_render import observer_documents
+    if resource_observations:
+        from loom.nebius_resource_observer_render import observer_documents
 
-    execution_docs.extend(observer_documents(config, images["execution_actuator"]))
+        execution_docs.extend(observer_documents(config, images["execution_actuator"]))
     return execution_docs
 
 

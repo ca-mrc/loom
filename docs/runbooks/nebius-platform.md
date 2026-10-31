@@ -1718,8 +1718,14 @@ on creating a new Namespace in a code-only release remains: first shared
 installation needs the separately authorized namespace/bootstrap preparation.
 This change does not activate a closed shared pool.
 
-The Nebius platform render enables node-local observations for each execution
-region. A `loom-native-resource-observer` DaemonSet runs only on execution nodes
+The closed, scoped environment-runtime compositor selects its existing reader
+contract explicitly: it omits both the observer resources and the actuator's
+observation-namespace setting. Its namespace and read-only RBAC scope therefore
+stay coherent. Complete primary and regional platform renders keep the observer
+enabled; source selection does not change in response to a failed sample.
+
+The complete Nebius platform render enables node-local observations for each
+execution region. A `loom-native-resource-observer` DaemonSet runs only on execution nodes
 in a separate `<execution-namespace>-observations` namespace. Every fifteen
 seconds it publishes a bounded `node-<NodeUID>` ConfigMap through the verified
 Kubernetes API. The actuator reads that snapshot with its normal regional API

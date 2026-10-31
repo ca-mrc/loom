@@ -110,6 +110,8 @@ def test_runtime_is_scoped_closed_and_consumable_without_staging_history(runtime
             if component == 'control_plane':
                 assert settings.service_execution_scheduler_enabled is True
             else:
+                assert 'LOOM_EXECUTION_ACTUATOR_RESOURCE_OBSERVATION_NAMESPACE' not in env(workloads['actuator'])
+                assert settings.resource_observation_namespace is None
                 assert settings.task_image_builder.namespace == 'build-red'
                 assert settings.node_selector == runtime_request['profiles'].execution[0].runtime.node_selector
     source = json.loads(env(workloads['service'])['LOOM_SVC_POOL_SUBMISSION_SOURCE_JSON']['value'])
