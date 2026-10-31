@@ -40,8 +40,17 @@ async def restore_rows(session, fixture):
         assert table.replace("_", "").isalnum()
         rows = [{**LEGACY_COLUMN_DEFAULTS.get(table, {}), **row} for row in rows]
         await session.execute(text(f'DELETE FROM "{table}"'))
+        # PostgreSQL maintains generated projections from the frozen source
+        # fields. Match the existing historical-capacity loader: never insert
+        # synthetic NULLs or rewrite captured evidence to supply derived data.
+        columns = (await session.scalars(text(
+            "SELECT attname FROM pg_attribute WHERE attrelid=to_regclass(:relation) "
+            "AND attnum > 0 AND NOT attisdropped AND attgenerated='' ORDER BY attnum"
+        ), {"relation": table})).all()
+        projection = ", ".join('"' + column + '"' for column in columns)
         await session.execute(text(
-            f'INSERT INTO "{table}" SELECT * FROM json_populate_recordset(NULL::"{table}", :rows)'
+            f'INSERT INTO "{table}" ({projection}) SELECT {projection} '
+            f'FROM json_populate_recordset(NULL::"{table}", :rows)'
         ), {"rows": json.dumps(rows)})
     await session.execute(text("SET LOCAL session_replication_role = origin"))
 

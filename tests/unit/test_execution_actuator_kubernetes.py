@@ -606,6 +606,7 @@ def test_actuator_manifest_is_namespace_scoped_and_active_for_development() -> N
             "resources": ["pods"],
             "verbs": ["get", "list", "watch"],
         },
+        {"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]},
     ]
     assert not (
         {"secrets", "configmaps", "serviceaccounts"}

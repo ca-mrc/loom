@@ -1060,8 +1060,9 @@ The schema-only projections are excluded from ordinary ORM SELECT/RETURNING.
 Audited retained pool schemas keep their original JSON predicates on single-image
 claim/ownership lookups; no schema probing or permissive fallback is introduced.
 Migration 0186 backfills all projections in one table rewrite during the normal
-idle deployment; it waits at most five seconds for the table lock and rolls back
-atomically if busy. Downgrade removes only projections and indexes.
+idle deployment; upgrade waits at most five seconds for the table lock and rolls
+back atomically if busy. Downgrade refuses busy writers immediately and removes
+only projections and indexes.
 
 ### End-to-end throughput qualification
 
@@ -1132,7 +1133,9 @@ handler concurrency. No fixed percentage improvement is an acceptance gate.
 
 The observed projection records Job/Pod UIDs, Kubernetes resourceVersion,
 node, scheduling/start/termination timestamps, last reconciliation, and
-bounded normalized failure detail. Pending, unschedulable, image-pull backoff,
+bounded normalized failure detail. The primary and regional actuator namespace
+Roles grant `get pods/log` for the existing bounded, scrubbed failure snippets.
+Pending, unschedulable, image-pull backoff,
 running, succeeded, failed, OOM-killed, evicted, node-lost, active-deadline,
 terminating, missing, and deleted states have explicit mappings. A stuck Job
 remains visible as observed failure/debt; the actuator never fabricates a Loom

@@ -35,12 +35,12 @@ _INDEXES = {
 }
 
 
-def _lock() -> None:
+def _lock(*, nowait: bool = False) -> None:
     # Protected rollout is idle, but background readers can still be finishing.
     # Wait briefly for this single table; never block indefinitely or take other
     # application locks first. A timeout rolls the migration back atomically.
     op.execute("SET LOCAL lock_timeout = '5s'")
-    op.execute(f"LOCK TABLE {_TABLE} IN ACCESS EXCLUSIVE MODE")
+    op.execute(f"LOCK TABLE {_TABLE} IN ACCESS EXCLUSIVE MODE" + (" NOWAIT" if nowait else ""))
 
 
 def upgrade() -> None:
@@ -57,7 +57,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    _lock()
+    # Preserve the retained-authority downgrade contract: fail immediately on
+    # an ordinary writer rather than queueing an exclusive lock in front of it.
+    _lock(nowait=True)
     for name in _INDEXES:
         op.drop_index(name, table_name=_TABLE)
     op.execute(f"ALTER TABLE {_TABLE} " + ", ".join(f"DROP COLUMN {name}" for name in _COLUMNS))
