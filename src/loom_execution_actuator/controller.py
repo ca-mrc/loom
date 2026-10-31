@@ -52,6 +52,7 @@ from loom_execution_actuator.pool_client import PoolRequestUnconfirmedError
 from loom_execution_actuator.pool_execution_resources import PoolExecutionResources
 from loom_execution_actuator.pool_outbox import PoolHandoffError
 from loom_execution_actuator.renderer import ExecutionTargetRuntime, render_execution_job
+from loom_execution_actuator.resource_diagnostics import resource_sample_diagnostic
 from loom_execution_actuator.resource_usage import ResourceSample, persist_native_usage, pod_samples
 
 _LOG = logging.getLogger(__name__)
@@ -113,7 +114,7 @@ class ExecutionActuator:
         self._command_lease_seconds = command_lease_seconds
         self._delete_grace_seconds = delete_grace_seconds
         self._watch_resource_version: str | None = None
-        self._usage_cache: dict[str, tuple[datetime, dict[str, Any] | None]] = {}
+        self._usage_cache: dict[str, tuple[datetime, dict[str, Any] | None, str | None]] = {}
         if pool_resources is not None and (pool_resources.target_id != target.target_id
                 or pool_resources.namespace.name != target.namespace
                 or cast(object, pool_resources.kubernetes) is not kubernetes):
@@ -230,12 +231,15 @@ class ExecutionActuator:
             return {}, "kubelet_sample_unavailable"
         cached = self._usage_cache.get(node)
         if cached is None or (now - cached[0]).total_seconds() >= 15:
+            diagnostic = None
             try:
                 summary = await reader(node_name=node)
-            except Exception:
+            except Exception as error:
+                diagnostic = resource_sample_diagnostic(error)
                 RESOURCE_USAGE_ERRORS_TOTAL.labels(operation="collect").inc()
                 _LOG.warning(
-                    "Native resource sample unavailable for lease %s", observation.lease_id
+                    "Native resource sample unavailable for lease %s (%s)",
+                    observation.lease_id, diagnostic,
                 )
                 summary = None
             # Bound retention to active nodes; no durable raw node or foreign Pod data.
@@ -244,11 +248,11 @@ class ExecutionActuator:
                 for key, item in self._usage_cache.items()
                 if (now - item[0]).total_seconds() < 60
             }
-            self._usage_cache[node] = (now, summary)
+            self._usage_cache[node] = (now, summary, diagnostic)
         else:
-            summary = cached[1]
+            summary, diagnostic = cached[1:]
         if summary is None:
-            return {}, "kubelet_sample_unavailable"
+            return {}, diagnostic or "kubelet_sample_unavailable"
         try:
             samples = pod_samples(
                 summary, namespace=observation.namespace, pod_uid=observation.pod_uid

@@ -241,6 +241,11 @@ async def persist_native_usage(
             and counters.cpu_usage_usec < row.cpu_usage_usec
         ):
             row.diagnostic_code = "counter_reset_without_new_incarnation"
+        elif row.diagnostic_code != "counter_reset_without_new_incarnation":
+            # Keep the latest collection failure, or clear it on real recovery.
+            # Counter resets still preclude an exact whole-incarnation total.
+            if diagnostic or has_values:
+                row.diagnostic_code = diagnostic or "sampled_maxima_not_kernel_peaks"
         if has_values:
             for field, value in counters.model_dump().items():
                 previous = getattr(row, field)
@@ -259,5 +264,3 @@ async def persist_native_usage(
             row.terminal_reason = observation.normalized_state.value
             known = any(getattr(row, field) is not None for field in ResourceCounters.model_fields)
             row.completeness = "partial" if known else "unavailable"
-            if diagnostic:
-                row.diagnostic_code = diagnostic

@@ -1728,6 +1728,18 @@ not establish installed sample availability. Clusters with a separate kubelet CA
 can operate without detailed samples; do not disable certificate checks to fill
 the gap or treat a static current-node CA snapshot as renewable autoscaling trust.
 
+For default Nebius MK8s, the supported-source constraint recorded in
+[#2595](https://github.com/ca-mrc/loom/issues/2595#issuecomment-6303599835)
+is stronger than a missing local CA setting: there is no supported kubelet
+serving-CA distribution, guaranteed SAN/address contract or serving-certificate
+rotation mechanism. Do not invent a trust bundle from a failed handshake.
+Provider OS monitoring used for node I/O admission is a separate node-level
+source; it does not establish Pod UID or container-incarnation observations.
+The aggregated Kubernetes resource-metrics API also cannot replace cumulative
+CPU, container filesystem or Pod ephemeral-storage accounting. Restoring detailed
+Trial usage needs a supported source with those identities and field semantics;
+a CA setting, network rule or successful API request alone is insufficient.
+
 Decode the HTTP JSON directly, preserving cumulative CPU, sampled memory and
 filesystem/container statistics. Reject a summary for another node or a body
 larger than 16 MiB. Disposable real-kubelet coverage proves summary access while
@@ -1759,7 +1771,17 @@ with guessed usage, and resource requests remain unchanged.
 
 Collection/parsing/persistence faults increment
 `loom_execution_actuator_resource_usage_errors_total` and emit a lease-scoped,
-secret-safe warning. Usage writes use a savepoint so telemetry failure cannot
+secret-safe warning. Collection failures retain bounded diagnostic codes through
+the node cache and durable usage rows: `tls_api`/`tls_kubelet` (optionally with
+`_verify_N`, where N is 0 through 255), `kubelet_connect_timeout`,
+`kubelet_read_timeout`, API/kubelet `unauthenticated`/`forbidden`/`not_found`, and
+`kubelet_sample_malformed`. Unknown failures remain `kubelet_sample_unavailable`;
+exception messages, endpoints, response bodies and credentials are never retained.
+A successful later observation clears a previous collection-failure diagnostic
+for the container row receiving actual counters; a counter reset without a new
+incarnation remains a distinct accounting limitation. Missing or failed terminal
+samples can still record their own diagnostic while retaining earlier counters.
+Usage writes use a savepoint so telemetry failure cannot
 roll back primary lifecycle observations or prevent cleanup. A persistence
 failure can therefore leave missing/unfinalized usage; operators must not treat
 absence of usage as zero consumption or evidence sufficient to reduce requests.
