@@ -6996,3 +6996,67 @@ async def test_actuator_rolling_concurrency_handoff_keeps_lease_command_order(
         if delivery is not None:
             await asyncio.gather(delivery, return_exceptions=True)
         await engine.dispose()
+
+
+@pytest.mark.parametrize("case", ["concurrent_create", "stale_inventory", "read_error", "foreign_uid", "really_missing", "stale_cleanup"])
+async def test_reconcile_confirms_absence_without_fencing_concurrent_create(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch, case: str,
+) -> None:
+    """A namespace snapshot must not fence a Job created during that snapshot."""
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    kubernetes = _FakeKubernetesJobApi()
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await session.commit()
+        actuator = ExecutionActuator(
+            sessions=sessions, kubernetes=kubernetes,
+            target=ExecutionTargetRuntime(target_id=target.target_id, namespace=target.namespace_name),
+            controller_id="inventory-race",
+        )
+        if case != "concurrent_create":
+            assert await actuator.run_commands_once(now=now) == 1
+
+        async def stale_list(**kwargs: Any) -> KubernetesJobInventory:
+            if case == "concurrent_create":
+                # The list snapshot was taken before this concurrent delivery
+                # committed the new Job UID to the database.
+                assert await actuator.run_commands_once(now=now) == 1
+            return KubernetesJobInventory(())
+
+        monkeypatch.setattr(kubernetes, "list_jobs", stale_list)
+        if case == "stale_cleanup":
+            async with sessions() as session:
+                await enqueue_execution_transition(
+                    session, lease_id=lease.id, expected_generation=1,
+                    desired_state="cancel", now=now,
+                )
+                await session.commit()
+        if case == "really_missing":
+            kubernetes.jobs.clear()
+        elif case == "read_error":
+            async def failed_read(**kwargs: Any) -> None:
+                raise KubernetesApiError("read unavailable", status_code=503)
+            monkeypatch.setattr(kubernetes, "get_job", failed_read)
+        elif case == "foreign_uid":
+            kubernetes.jobs[lease.job_name] = kubernetes.jobs[lease.job_name].model_copy(
+                update={"job_uid": "foreign-replacement"},
+            )
+        await actuator.reconcile_full_once(now=now + timedelta(seconds=1))
+        async with sessions() as session:
+            current = await session.get(ServiceExecutionLease, lease.id)
+            assert current is not None
+            assert current.observed_state == ("failed" if case == "really_missing" else "creating")
+            missing_events = await session.scalar(select(func.count()).select_from(ServiceExecutionEvent).where(
+                ServiceExecutionEvent.lease_id == lease.id,
+                ServiceExecutionEvent.payload_json["reason"].as_string() == "JobMissing",
+            ))
+            assert missing_events == (1 if case == "really_missing" else 0)
+            assert current.generation == (2 if case == "stale_cleanup" else 1)
+            assert (current.revoked_at is not None) == (case == "stale_cleanup")
+        assert kubernetes.delete_count == (1 if case == "stale_cleanup" else 0)
+    finally:
+        await engine.dispose()

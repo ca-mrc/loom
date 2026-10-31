@@ -641,6 +641,20 @@ class ExecutionActuator:
         current_time = now or datetime.now(UTC)
         if self._pool_resources is not None:
             return await self._reconcile_pool(now=current_time)
+        # A successful list is authoritative only for identities known before
+        # that snapshot. Command delivery/watch may bind a newly created Job
+        # while the list is in flight; the later lease query must not turn that
+        # newer identity into a false JobMissing event (and fence its input).
+        async with self._sessions() as session:
+            absence_identities = {
+                row.id: (row.generation, row.resource_generation, row.job_uid)
+                for row in (await session.execute(
+                    select(ServiceExecutionLease.id, ServiceExecutionLease.generation,
+                           ServiceExecutionLease.resource_generation, ServiceExecutionLease.job_uid)
+                    .where(ServiceExecutionLease.target_id == self._target.target_id,
+                           ServiceExecutionLease.deleted_at.is_(None))
+                )).all()
+            }
         try:
             with KUBERNETES_API_SECONDS.labels(operation="list").time():
                 inventory = await self._kubernetes.list_jobs(
@@ -724,7 +738,28 @@ class ExecutionActuator:
                 # An unstarted create is not missing. Cleanup can converge without
                 # a recorded UID only when the namespace inventory is authoritative.
                 continue
+            if absence_identities.get(lease.id) != (
+                lease.generation, lease.resource_generation, lease.job_uid,
+            ):
+                continue
             drift += 1
+            try:
+                # Confirm negative inventory results using the exact name.
+                # API errors and foreign/replaced UIDs are drift, not absence.
+                confirmed = await self._get(lease)
+                if confirmed is not None:
+                    self._validate_observation(lease, confirmed)
+                    if lease.desired_state in _CLEANUP_DESIRED_STATES:
+                        await self._delete(
+                            lease, confirmed, now=current_time,
+                            cancel_immediately=lease.desired_state == "cancel",
+                        )
+                    else:
+                        await self._persist_observation(lease, confirmed, now=current_time, source="reconcile")
+                        drift -= 1
+                    continue
+            except (ActuatorContractError, KubernetesApiError, ServiceExecutionConflict):
+                continue
             missing = self._missing_job_observation(
                 lease,
                 normalized_state=(
