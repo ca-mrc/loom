@@ -130,16 +130,19 @@ def observer_documents(config: dict[str, Any], image: str, *,
                         {"name": "volumes", "hostPath": {"path": "/var/lib/kubelet/pods", "type": "Directory"}}],
         }},
     }))
+    network_egress = api_egress(config)
     docs.append(obj("NetworkPolicy", NAME, spec={"podSelector": {"matchLabels": dict(LABELS)},
-                "policyTypes": ["Ingress", "Egress"], "ingress": [], "egress": api_egress(config)}))
-    if not api_egress(config):
+                "policyTypes": ["Ingress", "Egress"], "ingress": [], "egress": network_egress}))
+    try:
+        ip_address(urlsplit(config["kubernetes_api_server"]).hostname or "")
+    except ValueError:
         hostname = urlsplit(config["kubernetes_api_server"]).hostname
         port = urlsplit(config["kubernetes_api_server"]).port or 443
         docs.append({"apiVersion": "cilium.io/v2", "kind": "CiliumNetworkPolicy",
             "metadata": {"name": NAME, "namespace": namespace, "labels": dict(LABELS)},
             "spec": {"endpointSelector": {"matchLabels": dict(LABELS)}, "egress": [
-                {"toFQDNs": [{"matchName": hostname}],
-                 "toPorts": [{"ports": [{"port": str(port), "protocol": "TCP"}]}]},
+                *([] if network_egress else [{"toFQDNs": [{"matchName": hostname}],
+                 "toPorts": [{"ports": [{"port": str(port), "protocol": "TCP"}]}]}]),
                 {"toEndpoints": [{"matchLabels": {"k8s:io.kubernetes.pod.namespace": "kube-system",
                                                     "k8s:k8s-app": "kube-dns"}}],
                  "toPorts": [{"ports": [{"port": "53", "protocol": "ANY"}],

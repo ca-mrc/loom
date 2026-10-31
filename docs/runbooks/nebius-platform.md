@@ -1711,6 +1711,13 @@ minimal-harness and real trajectory acceptance in #1550/#1538/#1766.
 
 ### Native Trial resource observations
 
+The normal rollout deploys the fixed observer resources under the existing
+idle guard and mandatory backup. Retained shared delivery uses the same typed
+resource paths, candidate binding and Pod default checks. Its existing prohibition
+on creating a new Namespace in a code-only release remains: first shared
+installation needs the separately authorized namespace/bootstrap preparation.
+This change does not activate a closed shared pool.
+
 The Nebius platform render enables node-local observations for each execution
 region. A `loom-native-resource-observer` DaemonSet runs only on execution nodes
 in a separate `<execution-namespace>-observations` namespace. Every fifteen
@@ -1727,9 +1734,13 @@ container incarnation, original sample times and a maximum sixty-second age.
 Cached reads recheck freshness rather than renewing the source timestamp. Invalid,
 ambiguous or stale snapshots remain unavailable; there is no automatic
 fallback to a less trusted source. ConfigMaps contain numeric observations and
-bounded identities, never CRI configuration, host paths, file contents or foreign
-Pod data. They are at most 700 KiB and are garbage-collected with their Node.
+bounded Loom Pod identities from the configured execution namespace, never CRI
+configuration, host paths, file contents or statistics from unrelated namespaces. They are at most 700 KiB and are garbage-collected with their Node.
 Only the exact lease namespace and Pod UID reach the durable resource ledger.
+Observer API egress is restricted to its configured endpoint: an IP endpoint uses
+explicit API CIDRs; a DNS endpoint uses exact Cilium FQDN and DNS rules. When
+explicit API CIDRs accompany a DNS endpoint, only the exact DNS query is added;
+the CIDRs remain the API-traffic authority.
 
 The observer is a new trusted node component. Its helper has no listener and
 calls only CRI status/statistics over the local Unix socket. Running containers

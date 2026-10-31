@@ -183,7 +183,7 @@ def _qualified_defaulted(desired: dict[str, Any], observed: dict[str, Any]) -> d
                 or actual.get("publishNotReadyAddresses", False) != wanted.get("publishNotReadyAddresses", False)
                 or any(port.get("nodePort", 0) for port in actual.get("ports", []))):
             raise ManagementStageError("management defaulting changed private Service exposure")
-    if kind in {"Deployment", "StatefulSet", "Job", "CronJob"}:
+    if kind in {"Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"}:
         actual_spec, wanted_spec = observed["spec"], desired["spec"]
         if kind == "CronJob":
             actual_spec, wanted_spec = actual_spec["jobTemplate"]["spec"], wanted_spec["jobTemplate"]["spec"]
@@ -209,7 +209,7 @@ def _canonical_quantities(document: dict[str, Any], *, detached: bool = False) -
     # Only callers passing their own fresh snapshot may skip another full copy.
     result = document if detached else copy.deepcopy(document)
     kind = result.get("kind")
-    if kind not in {"Deployment", "StatefulSet", "Job", "CronJob"}:
+    if kind not in {"Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"}:
         return result
     spec = result["spec"]
     if kind == "CronJob":

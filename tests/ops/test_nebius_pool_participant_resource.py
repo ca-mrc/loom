@@ -30,6 +30,27 @@ def module():
     return importlib.import_module(name)
 
 
+@pytest.mark.parametrize('kind,version,plural', [
+    ('DaemonSet', 'apps/v1', 'daemonsets'),
+    ('CiliumNetworkPolicy', 'cilium.io/v2', 'ciliumnetworkpolicies'),
+])
+@pytest.mark.parametrize('damage', [None, 'api-version', 'missing-namespace'])
+def test_observer_resource_paths_are_version_and_namespace_bound(kind, version, plural, damage):
+    document = {'apiVersion': version, 'kind': kind,
+        'metadata': {'name': 'loom-native-resource-observer', 'namespace': 'execution-observations'}}
+    if damage == 'api-version':
+        document['apiVersion'] = 'arbitrary.io/v1'
+    elif damage == 'missing-namespace':
+        del document['metadata']['namespace']
+    if damage:
+        with pytest.raises(ValueError):
+            module()._resource_path(document)
+    else:
+        assert module()._resource_path(document) == (
+            '/apis/' + version + '/namespaces/execution-observations/' + plural
+            + '/loom-native-resource-observer')
+
+
 @pytest.fixture
 def connection(operation_inputs):
     for row in operation_inputs['current']:
@@ -62,6 +83,7 @@ def connection(operation_inputs):
                 'ConfigMap': '/api/v1/namespaces/' + retained.inputs.config['namespace'] + '/configmaps/',
                 'Service': '/api/v1/namespaces/' + retained.inputs.config['namespace'] + '/services/',
                 'Deployment': '/apis/apps/v1/namespaces/' + retained.inputs.config['namespace'] + '/deployments/',
+                'DaemonSet': '/apis/apps/v1/namespaces/' + state.rows[key]['metadata'].get('namespace', retained.inputs.config['namespace']) + '/daemonsets/',
                 'StatefulSet': '/apis/apps/v1/namespaces/' + retained.inputs.config['namespace'] + '/statefulsets/',
                 'PersistentVolumeClaim': '/api/v1/namespaces/' + retained.inputs.config['namespace'] + '/persistentvolumeclaims/',
                 'ValidatingAdmissionPolicy': '/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies/',
@@ -395,3 +417,15 @@ def test_original_cannot_already_contain_this_release_write_marker(operation_inp
         module().HTTPSParticipantResourceAPI(retained=retained, key=key,
             api_server=retained.inputs.config['kubernetes_api_server'], ssl_context=ssl.create_default_context(),
             qualify_resource=lambda *_: None)
+
+
+def test_observer_daemonset_dry_run_rejects_added_host_network_before_write(connection):
+    state, connect = connection
+    observer = next(row for row in state.retained.release.files['60-execution.yaml']
+        if row['kind'] == 'DaemonSet')
+    key = _key(observer)
+    state.failure = 'unsafe-default'
+    with connect(key) as api:
+        with pytest.raises(ValueError, match='participant resource update'):
+            advance(state, api, key)
+    assert state.writes == []

@@ -107,3 +107,19 @@ def test_explicit_unrestricted_api_cidr_is_rejected(platform_inputs):
     config["resource_observer_api_cidrs"] = ["0.0.0.0/0"]
     with pytest.raises(NebiusPlatformError, match="unrestricted"):
         build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
+def test_dns_endpoint_with_explicit_api_cidrs_retains_exact_dns_queries(platform_inputs):
+    config, candidate, profile = platform_inputs
+    config["resource_observer_api_cidrs"] = ["192.0.2.10/32"]
+    docs = _all(build_platform(config, candidate, profile, {}, repo_root=ROOT))
+    namespace = config["execution_namespace"] + "-observations"
+    generic = next(d for d in docs if d["kind"] == "NetworkPolicy" and d["metadata"].get("namespace") == namespace)
+    assert generic["spec"]["egress"] == [{"to": [{"ipBlock": {"cidr": "192.0.2.10/32"}}],
+        "ports": [{"protocol": "TCP", "port": 443}]}]
+    policy, = [d for d in docs if d["kind"] == "CiliumNetworkPolicy"]
+    assert len(policy["spec"]["egress"]) == 1
+    dns = policy["spec"]["egress"][0]
+    assert dns["toPorts"][0]["rules"] == {"dns": [{"matchName": "api.cluster.test"}]}
+    assert dns["toEndpoints"] == [{"matchLabels": {"k8s:io.kubernetes.pod.namespace": "kube-system", "k8s:k8s-app": "kube-dns"}}]
+    assert not any("toFQDNs" in rule for rule in policy["spec"]["egress"])
