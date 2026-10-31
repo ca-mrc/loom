@@ -6049,8 +6049,10 @@ async def test_actuator_refuses_uid_reuse_and_never_deletes_foreign_scope(
         await engine.dispose()
 
 
+@pytest.mark.parametrize("reconcile_first", [False, True])
 async def test_actuator_records_unavailable_before_accepting_an_already_absent_job(
     postgres_url: str,
+    reconcile_first: bool,
 ) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -6084,13 +6086,83 @@ async def test_actuator_records_unavailable_before_accepting_an_already_absent_j
             )
             await session.commit()
 
+        if reconcile_first:
+            await actuator.reconcile_full_once(now=now + timedelta(seconds=1))
         assert await actuator.run_commands_once(now=now + timedelta(seconds=1)) == 1
         async with sessions() as session:
+            cancel = await session.scalar(select(ServiceExecutionCommand).where(
+                ServiceExecutionCommand.lease_id == lease.id,
+                ServiceExecutionCommand.command_type == "cancel",
+            ))
+            assert cancel is not None and cancel.state == "acknowledged"
             closed = await session.get(ServiceExecutionLease, lease.id)
             assert closed is not None
             assert closed.observed_state == "deleted"
             assert closed.output_commit_state == "unavailable"
             assert closed.output_unavailable_reason == "operator_cancelled"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("legacy_first", [False, True])
+async def test_missing_job_diagnostic_variants_replay_without_rewriting_history(
+    postgres_url: str, legacy_first: bool,
+) -> None:
+    from loom_control_plane.service_execution import record_kubernetes_observation
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    kubernetes = _FakeKubernetesJobApi()
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await session.commit()
+        actuator = ExecutionActuator(
+            sessions=sessions, kubernetes=kubernetes,
+            target=ExecutionTargetRuntime(
+                target_id=target.target_id, namespace=target.namespace_name,
+            ),
+            controller_id="diagnostic-replay",
+        )
+        await actuator.run_commands_once(now=now)
+        async with sessions() as session:
+            await enqueue_execution_transition(
+                session, lease_id=lease.id, expected_generation=1,
+                desired_state="cancel", now=now + timedelta(seconds=1),
+            )
+            await session.commit()
+            lease = await session.get(ServiceExecutionLease, lease.id)
+            assert lease is not None
+            session.expunge(lease)
+        current = actuator._missing_job_observation(
+            lease, normalized_state=NormalizedJobState.DELETED,
+        )
+        legacy = current.model_copy(update={"reason": None, "message": None})
+        first, second = (legacy, current) if legacy_first else (current, legacy)
+        await actuator._persist_observation(lease, first, now=now + timedelta(seconds=2))
+        async with sessions() as session:
+            event, duplicate = await record_kubernetes_observation(
+                session, lease_id=lease.id, generation=lease.generation,
+                payload=second.event_payload(), observed_at=now + timedelta(seconds=3),
+            )
+            assert duplicate is True
+            assert event.payload_json == first.event_payload()
+            await session.commit()
+        for changed in (
+            {"message": "different diagnostic"},
+            {"resource_generation": lease.resource_generation + 1},
+            {"node_name": "different-node"},
+            {"terminated_at": now.isoformat()},
+        ):
+            async with sessions() as session:
+                with pytest.raises(ServiceExecutionConflict, match="replay changed"):
+                    await record_kubernetes_observation(
+                        session, lease_id=lease.id, generation=lease.generation,
+                        payload={**second.event_payload(), **changed},
+                        observed_at=now + timedelta(seconds=4),
+                    )
     finally:
         await engine.dispose()
 

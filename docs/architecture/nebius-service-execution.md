@@ -603,6 +603,13 @@ operator recovery and diagnostics.
 Command consumers use bounded delivery leases;
 an expired claim redelivers the same command and idempotency key. Exact event
 and acknowledgement replay is accepted, while changed replay is rejected.
+Synthetic missing-Job observations from command delivery and inventory
+reconciliation use the same `JobMissing` diagnostics. Historical absent-resource
+observations encoded with null diagnostics remain replay-compatible only when
+all other payload fields match, neither observation contains a Pod UID or
+resource version, and both diagnostics are one of those two known encodings.
+The retained event is unchanged; identity or other payload drift still fails
+normal replay consistency checks.
 Event arrival may be out of order: all valid events are retained, but only a
 higher event ordinal may advance the current projection.
 

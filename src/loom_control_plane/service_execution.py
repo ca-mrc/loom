@@ -2349,6 +2349,29 @@ async def record_execution_event(
     return event, False
 
 
+def _equivalent_missing_job_diagnostics(
+    previous: dict[str, Any], incoming: dict[str, Any],
+) -> bool:
+    """Accept only the two historical encodings of one synthetic absence."""
+    diagnostics = {
+        (None, None),
+        ("JobMissing", "expected exact Kubernetes Job was not listed"),
+    }
+    for payload in (previous, incoming):
+        if (
+            payload.get("normalized_state") not in {"deleted", "missing"}
+            or (payload.get("reason"), payload.get("message")) not in diagnostics
+            or any(payload.get(key) is not None for key in (
+                "pod_uid", "resource_version", "pod_resource_version",
+            ))
+        ):
+            return False
+    return (
+        {key: value for key, value in previous.items() if key not in {"reason", "message"}}
+        == {key: value for key, value in incoming.items() if key not in {"reason", "message"}}
+    )
+
+
 async def record_kubernetes_observation(
     session: AsyncSession,
     *,
@@ -2394,6 +2417,11 @@ async def record_kubernetes_observation(
     ).scalar_one_or_none()
     if existing is not None:
         ordinal = existing.ordinal
+        previous = await _resolve_execution_event_payload(session, existing)
+        if _equivalent_missing_job_diagnostics(previous, payload):
+            # Replay the exact retained payload through the unchanged consistency
+            # guard. Do not rewrite history or accept other diagnostic changes.
+            payload = previous
     else:
         ordinal = lease.last_event_ordinal + 1
     return await record_execution_event(

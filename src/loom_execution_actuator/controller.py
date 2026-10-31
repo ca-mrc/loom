@@ -129,6 +129,24 @@ class ExecutionActuator:
             await self._process_command(command, now=current_time)
         return len(commands)
 
+    def _missing_job_observation(
+        self, lease: ServiceExecutionLease, *, normalized_state: NormalizedJobState,
+    ) -> KubernetesJobObservation:
+        # Command and inventory paths must describe the same absent resource.
+        # Diagnostic differences are payload differences under the same event key.
+        return KubernetesJobObservation(
+            namespace=self._target.namespace,
+            job_name=lease.job_name,
+            lease_id=str(lease.id),
+            resource_generation=lease.resource_generation,
+            target_id=self._target.target_id,
+            execution_unit_key=str(lease.execution_unit_key),
+            normalized_state=normalized_state,
+            job_uid=lease.job_uid,
+            reason="JobMissing",
+            message="expected exact Kubernetes Job was not listed",
+        )
+
     async def _lease(self, lease_id: UUID) -> ServiceExecutionLease:
         async with self._sessions() as session:
             lease = await session.get(ServiceExecutionLease, lease_id)
@@ -514,15 +532,8 @@ class ExecutionActuator:
                 elif self._pool_resources is not None:
                     await self._cleanup_pool(lease, now=now)
                 else:
-                    observation = KubernetesJobObservation(
-                        namespace=self._target.namespace,
-                        job_name=lease.job_name,
-                        lease_id=str(lease.id),
-                        resource_generation=lease.resource_generation,
-                        target_id=self._target.target_id,
-                        execution_unit_key=str(lease.execution_unit_key),
-                        normalized_state=NormalizedJobState.DELETED,
-                        job_uid=lease.job_uid,
+                    observation = self._missing_job_observation(
+                        lease, normalized_state=NormalizedJobState.DELETED,
                     )
                     await self._persist_observation(lease, observation, now=now)
             elif command.command_type in {"start", "finalize"}:
@@ -641,21 +652,13 @@ class ExecutionActuator:
                 # a recorded UID only when the namespace inventory is authoritative.
                 continue
             drift += 1
-            missing = KubernetesJobObservation(
-                namespace=self._target.namespace,
-                job_name=lease.job_name,
-                lease_id=str(lease.id),
-                resource_generation=lease.resource_generation,
-                target_id=self._target.target_id,
-                execution_unit_key=str(lease.execution_unit_key),
+            missing = self._missing_job_observation(
+                lease,
                 normalized_state=(
                     NormalizedJobState.DELETED
                     if lease.desired_state in _CLEANUP_DESIRED_STATES
                     else NormalizedJobState.MISSING
                 ),
-                job_uid=lease.job_uid,
-                reason="JobMissing",
-                message="expected exact Kubernetes Job was not listed",
             )
             try:
                 await self._persist_observation(lease, missing, now=current_time)
