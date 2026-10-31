@@ -52,6 +52,9 @@ def test_projection_backfill_updates_and_rollback_keep_json_authority(projection
         assert row["native_archive_checked_at"] is None
         assert row["native_archive_has_images"] is True
         assert row["native_archive_has_intents"] is True
+        assert c.scalar(text("SELECT count(*) FROM pg_attribute WHERE attrelid="
+            "'task_image_materialization_attempts'::regclass AND attnotnull "
+            "AND attname IN ('native_archive_has_images','native_archive_has_intents')")) == 2
     # Older image writers only update JSON; no dual-write or repair step exists.
     changed = {**native, "capacity_released_at": None, "image_archives": None,
                "archive_cleanup_checked_at": "2026-10-31T12:00:00+00:00", "configmap": {}}

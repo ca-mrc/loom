@@ -49,6 +49,7 @@ def upgrade() -> None:
     # maintains every projection thereafter, including updates by older images.
     op.execute(f"ALTER TABLE {_TABLE} " + ", ".join(
         f"ADD COLUMN {name} {kind} GENERATED ALWAYS AS ({expression}) STORED"
+        + (" NOT NULL" if kind == "boolean" else "")
         for name, (kind, expression) in _COLUMNS.items()
     ))
     for name, (columns, predicate) in _INDEXES.items():
