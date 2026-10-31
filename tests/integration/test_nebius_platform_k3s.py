@@ -137,13 +137,35 @@ def test_complete_platform_resources_and_pods_pass_server_admission(
     container = _start_k3s()
     try:
         _load_client(container)
+        if any(doc["kind"] == "CiliumNetworkPolicy" for doc in documents):
+            # Use Cilium's complete pinned structural schema; this validates
+            # admission only and installs no Cilium workloads or dataplane.
+            crd = (Path(__file__).resolve().parents[1] / "fixtures" / "cilium"
+                   / "v1.18.12" / "ciliumnetworkpolicies.yaml")
+            subprocess.run(
+                ["docker", "cp", str(crd),
+                 container.get_wrapped_container().id + ":/tmp/ciliumnetworkpolicies.yaml"],
+                check=True, capture_output=True,
+            )
+            # create avoids the client-side last-applied annotation size limit
+            # of this complete upstream schema.
+            result = container.exec([
+                "kubectl", "create", "--validate=strict", "-f",
+                "/tmp/ciliumnetworkpolicies.yaml",
+            ])
+            assert result.exit_code == 0, result.output.decode()
+            result = container.exec([
+                "kubectl", "wait", "--for=condition=Established", "--timeout=30s",
+                "customresourcedefinition/ciliumnetworkpolicies.cilium.io",
+            ])
+            assert result.exit_code == 0, result.output.decode()
         # These prerequisites have no workloads or cloud effects. Kubernetes
         # Pod admission checks ServiceAccount existence even on dry-run.
         prerequisites = [doc for doc in documents if doc["kind"] in {"Namespace", "ServiceAccount"}]
         resources = [doc for doc in documents if doc["kind"] != "Namespace"]
         pod_documents = []
         for doc in documents:
-            if doc["kind"] in {"Deployment", "StatefulSet", "Job"}:
+            if doc["kind"] in {"Deployment", "StatefulSet", "DaemonSet", "Job"}:
                 template = doc["spec"]["template"]
             elif doc["kind"] == "CronJob":
                 template = doc["spec"]["jobTemplate"]["spec"]["template"]

@@ -64,6 +64,32 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
                                 reason="requires an explicitly disposable Kubernetes API")
 
 
+def _safe_exception_chain(error: BaseException) -> list[dict[str, object]]:
+    """Retain bounded types/locations/codes, including a suppressed context."""
+    chain: list[dict[str, object]] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen and len(chain) < 6:
+        seen.add(id(current))
+        frames = []
+        trace = current.__traceback__
+        while trace is not None:
+            frames.append({'file': Path(trace.tb_frame.f_code.co_filename).name, 'line': trace.tb_lineno})
+            frames = frames[-4:]
+            trace = trace.tb_next
+        entry: dict[str, object] = {'type': type(current).__name__, 'traceback': frames}
+        for field in ('errno', 'returncode', 'status', 'verify_code'):
+            try:
+                value = getattr(current, field, None)
+            except Exception:
+                continue
+            if type(value) is int:
+                entry[field] = value
+        chain.append(entry)
+        current = current.__cause__ if current.__cause__ is not None else current.__context__
+    return chain
+
+
 def _prepare_fixture_image(image, directory, mirror_limited=None):
     # Host-side OCI transport preserves original bytes without requiring the
     # nested node's resolver for application images. Classic Docker save can
@@ -543,6 +569,10 @@ server.socket=context.wrap_socket(server.socket,server_side=True); server.serve_
     except BaseException as error:
         phase("failed")
         error.add_note("phase timeline: " + " ".join(phases))
+        try:
+            error.add_note("safe exception chain: " + json.dumps(_safe_exception_chain(error)))
+        except Exception:
+            pass  # A diagnostic must not replace the original failure.
         try:
             node = container.get_wrapped_container()
             node.reload()
