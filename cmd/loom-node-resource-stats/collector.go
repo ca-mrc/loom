@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	grpcstatus "google.golang.org/grpc/status"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
@@ -55,7 +57,7 @@ type memoryStats struct {
 	Usage uint64 `json:"usageBytes"`
 }
 
-func collect(ctx context.Context, req request, client statsRuntime, opts options, now func() time.Time) summary {
+func collect(ctx context.Context, req request, client statsRuntime, opts options, now func() time.Time) (summary, error) {
 	result := summary{Pods: make([]podStats, 0, len(req.Pods))}
 	for _, pod := range req.Pods {
 		item := podStats{PodRef: podReference{pod.UID, req.Namespace, pod.Name}, Containers: []containerStats{}}
@@ -70,6 +72,9 @@ func collect(ctx context.Context, req request, client statsRuntime, opts options
 				break
 			}
 			statusReply, err := client.ContainerStatus(ctx, &runtime.ContainerStatusRequest{ContainerId: container.ID})
+			if grpcstatus.Code(err) == codes.DeadlineExceeded {
+				return result, context.DeadlineExceeded
+			}
 			if err != nil || statusReply == nil || statusReply.Status == nil {
 				diagnostics["container_status_unavailable"] = true
 				complete = false
@@ -106,11 +111,17 @@ func collect(ctx context.Context, req request, client statsRuntime, opts options
 				reply, err := client.ListContainerStats(ctx, &runtime.ListContainerStatsRequest{
 					Filter: &runtime.ContainerStatsFilter{Id: container.ID},
 				})
+				if grpcstatus.Code(err) == codes.DeadlineExceeded {
+					return result, context.DeadlineExceeded
+				}
 				if err == nil && reply != nil && len(reply.Stats) == 1 {
 					stats = reply.Stats[0]
 				}
 			} else {
 				reply, err := client.ContainerStats(ctx, &runtime.ContainerStatsRequest{ContainerId: container.ID})
+				if grpcstatus.Code(err) == codes.DeadlineExceeded {
+					return result, context.DeadlineExceeded
+				}
 				if err == nil && reply != nil {
 					stats = reply.Stats
 				}
@@ -210,7 +221,7 @@ func collect(ctx context.Context, req request, client statsRuntime, opts options
 			break
 		}
 	}
-	return result
+	return result, nil
 }
 
 func boundLabels(labels map[string]string, namespace string, pod podRequest) bool {

@@ -30,16 +30,21 @@ func labels() map[string]string {
 
 type fakeRuntime struct {
 	runtime.UnimplementedRuntimeServiceServer
-	created time.Time
-	started time.Time
-	stamp   time.Time
-	calls   []string
-	mutex   sync.Mutex
-	damage  string
-	delay   time.Duration
+	created   time.Time
+	started   time.Time
+	stamp     time.Time
+	calls     []string
+	mutex     sync.Mutex
+	damage    string
+	delay     time.Duration
+	rpcMethod string
+	rpcCode   codes.Code
 }
 
 func (f *fakeRuntime) ContainerStatus(ctx context.Context, in *runtime.ContainerStatusRequest) (*runtime.ContainerStatusResponse, error) {
+	if f.rpcMethod == "ContainerStatus" {
+		return nil, status.Error(f.rpcCode, "private RPC details")
+	}
 	f.mutex.Lock()
 	f.calls = append(f.calls, "status")
 	f.mutex.Unlock()
@@ -86,6 +91,9 @@ func (f *fakeRuntime) ContainerStatus(ctx context.Context, in *runtime.Container
 	return reply, nil
 }
 func (f *fakeRuntime) ContainerStats(ctx context.Context, in *runtime.ContainerStatsRequest) (*runtime.ContainerStatsResponse, error) {
+	if f.rpcMethod == "ContainerStats" {
+		return nil, status.Error(f.rpcCode, "private RPC details")
+	}
 	f.mutex.Lock()
 	f.calls = append(f.calls, "stats")
 	f.mutex.Unlock()
@@ -333,6 +341,37 @@ func TestRequestBoundariesRejectBeforeAnyRuntimeAccess(t *testing.T) {
 	}
 }
 
+func TestTypedRPCDeadlineCannotReturnSuccessfulPartialObservation(t *testing.T) {
+	for _, method := range []string{"ContainerStatus", "ContainerStats", "ListContainerStats"} {
+		for _, code := range []codes.Code{codes.DeadlineExceeded, codes.Unavailable} {
+			t.Run(method+"/"+code.String(), func(t *testing.T) {
+				f := &fakeRuntime{started: time.Now().Add(-time.Minute), stamp: time.Now(), rpcMethod: method, rpcCode: code}
+				if method == "ListContainerStats" {
+					f.damage = "exited"
+				}
+				opts := fixture(t)
+				opts.runtimeEndpoint = startFake(t, f)
+				ctx := context.Background()
+				var output bytes.Buffer
+				got := run(ctx, opts, strings.NewReader(requestJSON(f.started)), &output)
+				if ctx.Err() != nil {
+					t.Fatal("test context expired instead of exercising the typed RPC error")
+				}
+				if code == codes.DeadlineExceeded {
+					if got == 0 || output.String() != "{\"error\":\"observation_deadline\"}\n" {
+						t.Fatalf("RPC deadline returned partial success: %d %s", got, output.String())
+					}
+				} else if got != 0 || strings.Contains(output.String(), "observation_deadline") || !strings.Contains(output.String(), "unavailable") {
+					t.Fatalf("ordinary unavailability lost partial observation: %d %s", got, output.String())
+				}
+				if strings.Contains(output.String(), "private") {
+					t.Fatal("raw RPC details exposed")
+				}
+			})
+		}
+	}
+}
+
 func TestRuntimeAndBlockedInputRespectParentDeadline(t *testing.T) {
 	f := &fakeRuntime{started: time.Now().Add(-time.Minute), stamp: time.Now(), delay: time.Second}
 	opts := fixture(t)
@@ -424,6 +463,9 @@ func TestFilesystemTimesPreserveOldestCRIConstituent(t *testing.T) {
 }
 
 func (f *fakeRuntime) ListContainerStats(ctx context.Context, in *runtime.ListContainerStatsRequest) (*runtime.ListContainerStatsResponse, error) {
+	if f.rpcMethod == "ListContainerStats" {
+		return nil, status.Error(f.rpcCode, "private RPC details")
+	}
 	f.mutex.Lock()
 	f.calls = append(f.calls, "liststats")
 	f.mutex.Unlock()

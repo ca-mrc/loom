@@ -60,6 +60,11 @@ func run(parent context.Context, opts options, input io.Reader, output io.Writer
 	case <-ctx.Done():
 		result.code = "observation_deadline"
 	}
+	// A finished observation can become selectable beside cancellation. The
+	// deadline remains authoritative even if the local timer has not run yet.
+	if deadline, ok := ctx.Deadline(); ctx.Err() != nil || (ok && !time.Now().Before(deadline)) {
+		result = outcome{code: "observation_deadline"}
+	}
 	return writeOutcome(output, result)
 }
 
@@ -107,8 +112,8 @@ func observe(ctx context.Context, opts options, input io.Reader) outcome {
 		return outcome{code: "runtime_unavailable"}
 	}
 	defer client.Close()
-	summary := collect(ctx, req, runtime.NewRuntimeServiceClient(client), opts, time.Now)
-	if ctx.Err() != nil {
+	summary, err := collect(ctx, req, runtime.NewRuntimeServiceClient(client), opts, time.Now)
+	if err != nil || ctx.Err() != nil {
 		return outcome{code: "observation_deadline"}
 	}
 	var body bytes.Buffer
