@@ -113,3 +113,49 @@ def test_ssh_probe_uses_fixed_command_and_rejects_untrusted_projection(monkeypat
     with pytest.raises(DeploymentError, match="completion unavailable"):
         kube.legacy_pool_completion("../../private")
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("completion_key", [None, "/private/completion-key"])
+def test_completion_identity_is_independent_of_admin_kubectl(monkeypatch, tmp_path, completion_key):
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_TARGET", "operator@gateway.test")
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE", "/private/known-hosts")
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_KEY_FILE", "/private/admin-key")
+    monkeypatch.delenv("LOOM_DEPLOY_COMPLETION_SSH_KEY_FILE", raising=False)
+    if completion_key is not None:
+        monkeypatch.setenv("LOOM_DEPLOY_COMPLETION_SSH_KEY_FILE", completion_key)
+    calls = []
+    projection = {"operation_id": OPERATION, "outcome": "legacy", "workloads": {KEY: UID}}
+
+    def run(command, **kwargs):
+        calls.append(command)
+        body = json.dumps(projection) if command[-1].startswith("loom-nebius-legacy-pool-completion-v1 ") else "{}"
+        return subprocess.CompletedProcess(command, 0, body, "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    kube = Kubectl(tmp_path / "unused")
+    assert kube.legacy_pool_completion(OPERATION) == projection
+    assert kube.run("get", "namespace", "platform", "-o", "json") == "{}"
+    assert calls[0][calls[0].index("-i") + 1] == (completion_key or "/private/admin-key")
+    assert calls[1][calls[1].index("-i") + 1] == "/private/admin-key"
+    assert calls[0][-2:] == ["operator@gateway.test", "loom-nebius-legacy-pool-completion-v1 " + OPERATION]
+    for command in calls:
+        assert command[-2] == "operator@gateway.test"
+        assert "UserKnownHostsFile=/private/known-hosts" in command
+
+
+def test_completion_identity_failure_never_retries_admin_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_TARGET", "operator@gateway.test")
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE", "/private/known-hosts")
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_KEY_FILE", "/private/admin-key")
+    monkeypatch.setenv("LOOM_DEPLOY_COMPLETION_SSH_KEY_FILE", "/private/completion-key")
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 127, "", "private remote failure")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(DeploymentError, match=r"^legacy pool completion unavailable; preserve protected recovery$"):
+        Kubectl(tmp_path / "unused").legacy_pool_completion(OPERATION)
+    assert len(calls) == 1
+    assert calls[0][calls[0].index("-i") + 1] == "/private/completion-key"
