@@ -146,9 +146,9 @@ async def test_bound_cleanup_uses_normal_delete_and_exact_absence(
     isolated_migration_postgres_url, boundary, monkeypatch
 ):
     # This recovery entrypoint deliberately supports installed 0175/0176 only.
-    # Use a real isolated 0176 database without downgrading shared current-head tests.
+    # Prepare terminal history using current admission at its required head,
+    # then retain that history in a real isolated 0176 database for recovery.
     postgres_url = isolated_migration_postgres_url
-    await asyncio.to_thread(retain_pool_schema, postgres_url)
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(UTC)
@@ -161,7 +161,9 @@ async def test_bound_cleanup_uses_normal_delete_and_exact_absence(
             now,
             failed=boundary == "qualified_failed",
         )
+        await asyncio.to_thread(retain_pool_schema, postgres_url)
         async with sessions() as session:
+            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0176"
             binding = await capture_cleanup_binding(session, team_id=team_id, lease_id=lease_id)
             request = TerminalCleanupRecoveryRequest(
                 **binding.model_dump(),
@@ -407,15 +409,16 @@ async def test_complete_cleanup_worker_on_real_installed_0175(
     from loom_control_plane.terminal_archive_recovery import archive_sessions
     from tests.integration.test_service_execution_spool_materialization import _config
 
-    # Use the isolated migration database, then apply the actual 0176 downgrade.
-    # The installed schema has no baseline_session_id column; no marker spoof.
-    await asyncio.to_thread(command.downgrade, _config(isolated_migration_postgres_url), "0175")
+    # Seed retained history at current admission's required head, then apply
+    # the real downgrade. Recovery must see no baseline_session_id column.
     engine = create_async_engine(isolated_migration_postgres_url)
     sessions = archive_sessions(engine, legacy_baseline=True)
     now = datetime.now(UTC)
     kube = ReadbackKubernetes()
     kube.guard_sessions = sessions
     try:
+        lease_id, team_id, trial_id, target, command_id = await _seed_cleanup(sessions, now)
+        await asyncio.to_thread(command.downgrade, _config(isolated_migration_postgres_url), "0175")
         async with engine.connect() as connection:
             assert (
                 await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0175"
@@ -426,7 +429,6 @@ async def test_complete_cleanup_worker_on_real_installed_0175(
                     "WHERE table_name='llm_calls' AND column_name='baseline_session_id')"
                 )
             )
-        lease_id, team_id, trial_id, target, command_id = await _seed_cleanup(sessions, now)
         async with sessions() as session:
             binding = await capture_cleanup_binding(session, team_id=team_id, lease_id=lease_id)
             request = TerminalCleanupRecoveryRequest(
