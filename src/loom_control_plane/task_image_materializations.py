@@ -382,8 +382,8 @@ async def claim_task_image_materialization(
             # cleanup before a successor can claim this materialization.
             ~exists().where(
                 TaskImageMaterializationAttempt.materialization_id == TaskImageMaterialization.id,
-                TaskImageMaterializationAttempt.native_build["capacity_reserved_at"].astext.is_not(None),
-                TaskImageMaterializationAttempt.native_build["capacity_released_at"].astext.is_(None),
+                TaskImageMaterializationAttempt.native_capacity_reserved_at.is_not(None),
+                TaskImageMaterializationAttempt.native_capacity_released_at.is_(None),
             ),
             # Global ownership is committed in the outbox before native_build
             # is observed and never uses the legacy capacity reservation field.

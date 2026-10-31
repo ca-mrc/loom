@@ -93,7 +93,7 @@ async def load_placement(
     builds = (await session.scalars(select(TaskImageMaterializationAttempt).where(
         TaskImageMaterializationAttempt.materialization_id.in_(by_image),
         TaskImageMaterializationAttempt.native_build.is_not(None),
-        TaskImageMaterializationAttempt.native_build["target_id"].as_string() == observation.target_id,
+        TaskImageMaterializationAttempt.native_capacity_target_id == observation.target_id,
     ))).all() if by_image else []
     for build in builds:
         native = build.native_build or {}

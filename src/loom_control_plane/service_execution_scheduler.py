@@ -49,6 +49,7 @@ from loom.task_image_materialization import (
 from loom.verifier_runtime import apply_legacy_verifier_default
 from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
 from loom_control_plane.execution_resource_allocation import allocate_target_resources
+from loom_control_plane.metrics import SERVICE_EXECUTION_RESERVATION_SECONDS
 from loom_control_plane.service_execution import (
     ServiceExecutionConflict,
     ServiceExecutionParentTerminalError,
@@ -586,6 +587,7 @@ async def reserve_next_verifier_executions(
     placement_policy: ExecutionPlacementPolicy = "environment-local-health-first",
     now: datetime | None = None,
     limit: int = 32,
+    parent_lease_id: UUID | None = None,
 ) -> list[ServiceExecutionLease]:
     """Reserve the deferred verifier of each attempt whose pod has released capacity.
 
@@ -595,7 +597,10 @@ async def reserve_next_verifier_executions(
     """
 
     current_time = (now or datetime.now(UTC)).astimezone(UTC)
-    candidates = (await session.execute(verifier_candidates(pool_id).limit(limit))).all()
+    query = verifier_candidates(pool_id)
+    if parent_lease_id is not None:
+        query = query.where(ServiceExecutionLease.id == parent_lease_id)
+    candidates = (await session.execute(query.limit(limit))).all()
     reserved: list[ServiceExecutionLease] = []
     for parent, trial in candidates:
         try:
@@ -757,26 +762,24 @@ async def run_service_execution_scheduler_loop(
         # consuming CancelledError. Preserve shutdown at each work boundary.
         return task is not None and task.cancelling() > 0
 
+    async def reserve_attempt() -> bool:
+        with SERVICE_EXECUTION_RESERVATION_SECONDS.labels(role="attempt").time():
+            async with session_factory() as session:
+                lease = await reserve_next_service_execution(
+                    session, environment=environment, pool_id=pool_id,
+                    image_admission_keyring=image_admission_keyring,
+                    maximum_deadline_seconds=maximum_deadline_seconds,
+                    placement_policy=placement_policy,
+                )
+                await session.commit()
+        if lease is not None:
+            _LOG.info("service_execution_reserved", extra={
+                "target_id": lease.target_id, "pool_id": lease.selected_pool_id,
+            })
+        return lease is not None
+
     while not cancellation_requested():
         try:
-            # Each verifier needs new physical capacity after parent cleanup.
-            # Global selection must never enter the local provisioning writer.
-            if global_selector is None:
-                async with session_factory() as session:
-                    verifiers = await reserve_next_verifier_executions(
-                        session,
-                        pool_id=pool_id,
-                        image_admission_keyring=image_admission_keyring,
-                        maximum_deadline_seconds=maximum_deadline_seconds,
-                        placement_policy=placement_policy,
-                    )
-                    await session.commit()
-                if cancellation_requested():
-                    return
-                for verifier in verifiers:
-                    _LOG.info("service_execution_verifier_reserved", extra={
-                        "trial_id": str(verifier.trial_id), "parent_lease_id": str(verifier.parent_lease_id),
-                    })
             if global_selector is not None:
                 # A selection is not a lease. Empty/failed global selection never
                 # falls through to the environment-local capacity writer.
@@ -788,20 +791,41 @@ async def run_service_execution_scheduler_loop(
                 await asyncio.sleep(interval_seconds)
                 continue
             async with session_factory() as session:
-                lease = await reserve_next_service_execution(
-                    session,
-                    environment=environment,
-                    pool_id=pool_id,
-                    image_admission_keyring=image_admission_keyring,
-                    maximum_deadline_seconds=maximum_deadline_seconds,
-                    placement_policy=placement_policy,
-                )
+                # Select a bounded fair handoff wave, then release its row
+                # locks. Recheck each parent in its own reservation transaction.
+                # Never hold capacity authority while compiling the next child.
+                parents = (await session.scalars(verifier_candidates(pool_id)
+                    .with_only_columns(ServiceExecutionLease.id).limit(32))).all()
                 await session.commit()
-            if lease is not None:
-                _LOG.info(
-                    "service_execution_reserved",
-                    extra={"target_id": lease.target_id, "pool_id": lease.selected_pool_id},
-                )
+            if cancellation_requested():
+                return
+            processed = checked_attempt = False
+            for parent_id in parents:
+                with SERVICE_EXECUTION_RESERVATION_SECONDS.labels(role="verifier").time():
+                    async with session_factory() as session:
+                        verifiers = await reserve_next_verifier_executions(
+                            session, pool_id=pool_id, image_admission_keyring=image_admission_keyring,
+                            maximum_deadline_seconds=maximum_deadline_seconds,
+                            placement_policy=placement_policy, limit=1, parent_lease_id=parent_id,
+                        )
+                        await session.commit()
+                if cancellation_requested():
+                    return
+                for verifier in verifiers:
+                    _LOG.info("service_execution_verifier_reserved", extra={
+                        "trial_id": str(verifier.trial_id), "parent_lease_id": str(verifier.parent_lease_id),
+                    })
+                if verifiers:
+                    processed = True
+                    # A busy verifier backlog cannot monopolize the scheduler
+                    # before new attempts get their admission opportunity.
+                    processed = await reserve_attempt() or processed
+                    checked_attempt = True
+                    if cancellation_requested():
+                        return
+            if not checked_attempt:
+                processed = await reserve_attempt() or processed
+            if processed:
                 continue
         except asyncio.CancelledError:
             return

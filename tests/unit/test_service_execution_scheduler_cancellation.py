@@ -12,6 +12,7 @@ from loom_control_plane import service_execution_scheduler as scheduler
 
 
 @pytest.mark.parametrize(("cancel_at", "global_mode", "selected"), [
+    ("parent_selection_commit", False, False),
     ("verifier_commit", False, False),
     ("selection", True, False),
     ("selection", True, True),
@@ -51,7 +52,7 @@ async def test_scheduler_stops_when_readiness_consumes_cancellation(
         def __init__(self):
             nonlocal sessions
             sessions += 1
-            self.name = "verifier_commit" if sessions % 2 or global_mode else "local_commit"
+            self.name = ("parent_selection_commit", "verifier_commit", "local_commit")[(sessions - 1) % 3]
 
         async def __aenter__(self):
             return self
@@ -61,6 +62,10 @@ async def test_scheduler_stops_when_readiness_consumes_cancellation(
 
         async def commit(self):
             await step(self.name)
+
+        async def scalars(self, _query):
+            operations.append("select_verifier_parents")
+            return SimpleNamespace(all=lambda: ["parent-id"])
 
     class Selector:
         async def select_next(self):
@@ -88,7 +93,9 @@ async def test_scheduler_stops_when_readiness_consumes_cancellation(
         done, _ = await asyncio.wait({task}, timeout=0.15)
         assert injected
         assert task in done, f"scheduler kept running after cancellation: {operations[:12]}"
-        assert operations.count("reserve_verifiers") == (0 if global_mode else 1)
+        assert operations.count("reserve_verifiers") == (
+            0 if global_mode or cancel_at == "parent_selection_commit" else 1
+        )
         if global_mode:
             assert sessions == 0 and "reserve_local" not in operations
         if cancel_at == "verifier_commit":

@@ -17,6 +17,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Computed,
     Date,
     Float,
     ForeignKey,
@@ -2043,6 +2044,15 @@ class TaskImageMaterializationAttempt(Base):
             "attempt_number",
             "lease_epoch",
         ),
+        Index("task_image_attempts_native_active_idx", "id", postgresql_where=text(
+            "native_capacity_reserved_at IS NOT NULL AND native_capacity_released_at IS NULL")),
+        Index("task_image_attempts_native_recent_idx", "native_capacity_reserved_at", postgresql_where=text(
+            "native_capacity_reserved_at IS NOT NULL")),
+        Index("task_image_attempts_native_target_idx", "native_capacity_target_id",
+              "native_capacity_released_at", "native_capacity_reserved_at", postgresql_where=text(
+                  "native_capacity_target_id IS NOT NULL")),
+        Index("task_image_attempts_native_archive_due_idx", "native_archive_checked_at", "id", postgresql_where=text(
+            "native_capacity_released_at IS NOT NULL AND native_archive_has_intents IS TRUE")),
     )
 
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -2057,6 +2067,22 @@ class TaskImageMaterializationAttempt(Base):
     # Native Job identity, requested resources and observed lifecycle belong to
     # this existing attempt; retries never overwrite an older attempt's record.
     native_build: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # Database-derived projections keep empty admission/retention polls from
+    # decompressing historical Job manifests. JSON remains the only write source.
+    # Text timestamps deliberately preserve existing legacy comparison semantics.
+    native_capacity_target_id: Mapped[str | None] = mapped_column(
+        Text, Computed("native_build->>'target_id'", persisted=True))
+    native_capacity_reserved_at: Mapped[str | None] = mapped_column(
+        Text, Computed("native_build->>'capacity_reserved_at'", persisted=True))
+    native_capacity_released_at: Mapped[str | None] = mapped_column(
+        Text, Computed("native_build->>'capacity_released_at'", persisted=True))
+    native_archive_checked_at: Mapped[str | None] = mapped_column(
+        Text, Computed("native_build->>'archive_cleanup_checked_at'", persisted=True))
+    native_archive_has_images: Mapped[bool] = mapped_column(
+        Boolean, Computed("(native_build->>'image_archives') IS NOT NULL", persisted=True))
+    native_archive_has_intents: Mapped[bool] = mapped_column(Boolean, Computed(
+        "COALESCE((native_build #>> '{configmap,data,claim.json}') LIKE '%\"archive_write_intents\"%', false)",
+        persisted=True))
     grant_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     session_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     session_generation: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

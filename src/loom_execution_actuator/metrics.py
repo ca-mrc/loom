@@ -13,6 +13,16 @@ COMMAND_PROCESS_SECONDS = Histogram(
     "Command handler duration including API and persistence work.",
     labelnames=("command_type",),
 )
+COMMAND_CAPACITY_REVALIDATION_SECONDS = Histogram(
+    "loom_execution_actuator_capacity_revalidation_seconds",
+    "Pre-create capacity revalidation transaction, including lock wait and commit.",
+    buckets=(.01, .05, .1, .5, 1, 2, 5, 10, 20, 60),
+)
+TERMINAL_OBSERVATION_DELAY_SECONDS = Histogram(
+    "loom_execution_actuator_terminal_observation_delay_seconds",
+    "Delay from execution-container termination to its first persisted observation.",
+    labelnames=("source",), buckets=(.01, .1, .5, 1, 2, 5, 10, 15, 30, 60),
+)
 
 KUBERNETES_API_SECONDS = Histogram(
     "loom_execution_actuator_kubernetes_api_seconds",

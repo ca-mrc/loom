@@ -696,7 +696,7 @@ def retain_pool_schema(postgres_url: str, revision: str = "0176") -> None:
     Run the real downgrade rather than relabeling a current-head database. This
     must only be used by historical pool tests on their isolated databases.
     """
-    if revision not in {"0175", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185"}:
+    if revision not in {"0175", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186"}:
         raise ValueError("unsupported retained pool test revision")
     repo_root = Path(__file__).resolve().parents[2]
     cfg = AlembicConfig(str(repo_root / "database" / "migrations" / "alembic.ini"))

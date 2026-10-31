@@ -84,7 +84,7 @@ class PoolBuildSelector:
             NebiusPoolBuildOutbox.phase.not_in(("cancelled", "released")))
         legacy = exists().where(TaskImageMaterializationAttempt.materialization_id == row.id,
             TaskImageMaterializationAttempt.native_build.is_not(None),
-            TaskImageMaterializationAttempt.native_build["capacity_released_at"].as_string().is_(None))
+            TaskImageMaterializationAttempt.native_capacity_released_at.is_(None))
         async with self.outbox.sessions() as session:
             if not await admission_open(session):
                 return None

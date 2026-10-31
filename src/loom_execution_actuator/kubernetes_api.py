@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import threading
+from collections.abc import Awaitable, Callable
+from concurrent.futures import Future
 from datetime import UTC, datetime
 from typing import Any
 
@@ -444,9 +447,11 @@ class InClusterKubernetesJobApi:
             if self._credentials is not None:
                 await self._credentials.close()
 
-    def _observe(self, namespace: str, job: Any) -> KubernetesJobObservation:
+    def _observe(self, namespace: str, job: Any, *, deleted: bool = False) -> KubernetesJobObservation:
         pods = self._pods_for_job(namespace, job.metadata.name)
         observed = _normalize(job, pods)
+        if deleted and not pods:
+            return observed.model_copy(update={"normalized_state": NormalizedJobState.DELETED})
         if observed.normalized_state != NormalizedJobState.FAILED:
             return observed
         pod = _newest_pod(pods)
@@ -660,12 +665,22 @@ class InClusterKubernetesJobApi:
         label_selector: str,
         resource_version: str | None,
         timeout_seconds: int,
+        on_observation: Callable[[KubernetesJobObservation], Awaitable[None]] | None = None,
     ) -> tuple[KubernetesJobObservation, ...]:
-        def watch_once() -> tuple[KubernetesJobObservation, ...]:
-            try:
-                from kubernetes import watch
+        from kubernetes import watch
 
-                stream = watch.Watch()
+        loop = asyncio.get_running_loop()
+        stream = watch.Watch()
+        stopped = threading.Event()
+        pending: Future[None] | None = None
+
+        async def deliver(observation: KubernetesJobObservation) -> None:
+            assert on_observation is not None
+            await on_observation(observation)
+
+        def watch_once() -> tuple[KubernetesJobObservation, ...]:
+            nonlocal pending
+            try:
                 observations: list[KubernetesJobObservation] = []
                 for event in stream.stream(
                     self._batch.list_namespaced_job,
@@ -674,15 +689,40 @@ class InClusterKubernetesJobApi:
                     resource_version=resource_version,
                     timeout_seconds=timeout_seconds,
                 ):
+                    if stopped.is_set():
+                        break
                     job = event["object"]
-                    observations.append(self._observe(namespace, job))
+                    # A tombstone alone must not release resources while a
+                    # dependent Pod still exists. _observe lists those Pods.
+                    observation = self._observe(namespace, job, deleted=event["type"] == "DELETED")
+                    if on_observation is None:
+                        observations.append(observation)
+                    else:
+                        # Persist each event immediately on the owning event loop.
+                        # Waiting for the callback bounds memory and applies
+                        # backpressure without buffering an entire watch window.
+                        pending = asyncio.run_coroutine_threadsafe(deliver(observation), loop)
+                        if stopped.is_set():
+                            pending.cancel()
+                        pending.result()
+                        pending = None
                 return tuple(observations)
             except Exception as exc:
+                if stopped.is_set():
+                    return ()
                 if getattr(exc, "status", None) == 410:
                     raise self._translate(exc, "watch resource version expired") from exc
                 raise self._translate(exc, "watch") from exc
+            finally:
+                stream.stop()
 
-        return await asyncio.to_thread(watch_once)
+        try:
+            return await asyncio.to_thread(watch_once)
+        finally:
+            stopped.set()
+            stream.stop()
+            if pending is not None:
+                pending.cancel()
 
 
 __all__ = ["InClusterKubernetesJobApi"]

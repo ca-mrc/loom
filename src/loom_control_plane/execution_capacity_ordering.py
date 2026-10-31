@@ -140,8 +140,8 @@ async def order_targets_by_capacity(
         ).group_by(ExecutionProvisioningAuthorization.target_id))).all()}
     # Include released historical builds for idle-region rotation. The normal
     # active-reservation reader intentionally trims that history for rate limits.
-    native = TaskImageMaterializationAttempt.native_build
-    native_target, reserved = native["target_id"].astext, native["capacity_reserved_at"].astext
+    native_target = TaskImageMaterializationAttempt.native_capacity_target_id
+    reserved = TaskImageMaterializationAttempt.native_capacity_reserved_at
     valid_time = case((func.pg_input_is_valid(reserved, "timestamptz"), cast(reserved, DateTime(timezone=True))))
     for target_id, last in (await session.execute(select(native_target, func.max(valid_time))
             .where(native_target.in_(member_ids)).group_by(native_target))).all():

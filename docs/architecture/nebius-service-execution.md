@@ -948,6 +948,22 @@ replicas are safe because only one holds a durable command delivery lease and
 all observations are idempotent by resourceVersion, UID, state, lease, and
 generation.
 
+Watch consumers persist each observation as it arrives, with backpressure on
+the owning event loop; the watch timeout is a reconnect bound, not an event
+delivery batch interval. A Job `DELETED` event confirms absence only after the
+adapter finds no dependent Pods. The controller validates its exact UID and
+reuses the command/reconciliation absence payload. Historical retained event
+payloads remain unchanged. Full reconciliation remains the repair path, reading
+unreleased leases plus identities actually present in inventory rather than
+deserializing every completed lease on every pass.
+
+Local separate-verifier scheduling commits each child reservation before
+compiling the next. A successful verifier admission is followed by an attempt
+admission opportunity. The bounded parent wave is rechecked under row locks in
+each transaction; the global capacity lock, budget checks, idempotency and
+output/cleanup prerequisites remain authoritative. Global-pool selection never
+enters this local reservation writer.
+
 `execution_command_concurrency` is a deployment-owned integer from 1 through 8
 (default 1), rendered as `LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY` for primary
 and regional actuators. Values above 1 enable bounded parallel command delivery
@@ -1033,6 +1049,79 @@ retain completed results, wait for execution/build cleanup and deploy before
 submitting exactly the remaining tasks. Subsequent ordinary tuning does not
 cancel batches, re-submit Trials, release active leases or replace task Pods;
 controller restarts recover durable commands through normal fencing/reclaim.
+
+Native build admission, region ordering, outstanding-build selection and archive
+polling read database-generated compact metadata with partial indexes. The
+original `native_build` JSON remains the write authority; existing writers update
+the projections automatically. This prevents empty queues from repeatedly
+decompressing historical Job/claim manifests, including while holding the shared
+capacity lock. Timestamp text and archive predicate semantics are preserved.
+Migration 0186 backfills all projections in one table rewrite during the normal
+idle deployment; it waits at most five seconds for the table lock and rolls back
+atomically if busy. Downgrade removes only projections and indexes.
+
+### End-to-end throughput qualification
+
+Command-handler concurrency is one local knob. Qualify the whole pipeline with
+the same real Oracle task revisions, reference solutions, order, repeat count,
+verifier mode and declared resources before and after a fixed code deployment.
+Blank-solve negative controls establish platform correctness, not reference
+Oracle throughput. Keep the node/resource ceilings, placement, delivery
+concurrency, creation limits and database configuration equal for a code-only
+comparison. Record actual node-minutes and allocated per-container resources;
+different autoscaling or cache conditions must remain visible in the result.
+
+Capture the old candidate's baseline before deploying the change. Measure fixed
+elapsed windows from batch acceptance (for example 300 and 600 seconds), then
+let both batches finish naturally. Do not cancel at a window boundary, replace
+failed cases, or roll controllers/tune limits inside a comparison window.
+Report canonical-result completions, fully-cleaned completions and positive
+Oracle rewards separately, together with failures, cancellations, retries,
+actual running Pod occupancy and full-batch makespan. Missing Pod termination
+timestamps are marked as unknown intervals; deletion bounds their occupancy
+estimate. Failed Trials count toward terminal/drained makespan, never success. A `running` Trial may be
+waiting for cleanup or verifier handoff and is not proof of a running Pod.
+If a queue drains early, the fixed-window count is a bounded-workload result,
+not a measurement of maximum sustainable saturation.
+
+Use `scripts/ops/nebius_execution_throughput.py` on read-only snapshots:
+
+```sh
+python scripts/ops/nebius_execution_throughput.py --before before.json --after after.json --window-seconds 300 --window-seconds 600 --output comparison.json
+```
+
+Snapshots contain `controls.expected_tasks` (task ID to intended repetitions),
+`controls.task_revisions`, the remaining fixed configuration in `controls`,
+`observed_at`, `candidate`, `batch.id`/`batch.submitted_at`, and `trials`/`leases`.
+Trials include identity, task, state, numeric reward, attempt count and finish
+time. Leases include identity, Trial ID, task revision, Pod start/termination,
+materialization state/commit time and cleanup state/deletion time. Repetitions
+count as separate Trials; retries never create extra completion counts. The
+report rejects mismatched controls/revisions and duplicate identities, and
+marks windows not yet observed instead of inventing a zero throughput value.
+Canonical completion waits for committed materialization; full cleanup also
+waits for every associated lease's deletion. Numeric zero is a valid platform
+result and is distinct from a positive Oracle reward.
+
+Use persisted phase timestamps for image-ready admission, scheduling/init,
+execution, output commit, cleanup, verifier handoff and canonical publication.
+Publication and physical cleanup can overlap, so do not add them blindly into
+one serial latency. Additional bounded histograms isolate provisioning lock
+wait (`loom_execution_capacity_lock_wait_seconds`), one scheduler reservation
+transaction (`loom_service_execution_reservation_seconds`), pre-create capacity
+revalidation (`loom_execution_actuator_capacity_revalidation_seconds`) and
+first observed termination delay
+(`loom_execution_actuator_terminal_observation_delay_seconds`). No task IDs
+appear in these metric labels.
+
+Creation limits cover physical-owner build/execution traffic. Two owners at
+20 creates/min provide at most 40 creates/min: an attempt plus a separate
+verifier consumes two creates per Trial, whereas an in-attempt verifier does
+not. Once structural waits are removed, use measured limit rejections,
+arrival/completion rates and free physical capacity to decide whether this
+budget is the next bottleneck. Change it through the persistent tuning API;
+record a new measurement phase rather than attributing the change to code or
+handler concurrency. No fixed percentage improvement is an acceptance gate.
 
 The observed projection records Job/Pod UIDs, Kubernetes resourceVersion,
 node, scheduling/start/termination timestamps, last reconciliation, and

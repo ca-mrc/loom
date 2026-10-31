@@ -126,14 +126,13 @@ class NativeImageArchiveRetention:
             candidates = list(await session.scalars(select(TaskImageMaterializationAttempt.id).join(
                 TaskImageMaterialization, TaskImageMaterialization.id == TaskImageMaterializationAttempt.materialization_id,
             ).where(
-                TaskImageMaterializationAttempt.native_build["capacity_released_at"].as_string().is_not(None),
+                TaskImageMaterializationAttempt.native_capacity_released_at.is_not(None),
                 or_(TaskImageMaterialization.state == "retired",
-                    TaskImageMaterializationAttempt.native_build["image_archives"].as_string().is_(None)),
-                or_(TaskImageMaterializationAttempt.native_build["archive_cleanup_checked_at"].as_string().is_(None),
-                    TaskImageMaterializationAttempt.native_build["archive_cleanup_checked_at"].as_string()
+                    TaskImageMaterializationAttempt.native_archive_has_images.is_(False)),
+                or_(TaskImageMaterializationAttempt.native_archive_checked_at.is_(None),
+                    TaskImageMaterializationAttempt.native_archive_checked_at
                     < (datetime.now(UTC) - timedelta(hours=1)).isoformat()),
-                TaskImageMaterializationAttempt.native_build["configmap"]["data"]["claim.json"].as_string().contains(
-                    '"archive_write_intents"'),
+                TaskImageMaterializationAttempt.native_archive_has_intents.is_(True),
             ).order_by(TaskImageMaterializationAttempt.claimed_at).limit(32)))
         for attempt_id in candidates:
             if await self._reconcile(attempt_id):

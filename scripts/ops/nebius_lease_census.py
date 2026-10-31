@@ -197,9 +197,10 @@ def _validate_remote(value: object) -> dict[str, Any]:
     # 0180 adds preview storage, 0181 extends image preparation identity and
     # 0182 adds llm_calls projections and 0183 adds provider request pools;
     # 0184 changes only the benchmark insert default; 0185 extends only the
-    # native resource observation source CHECK. None changes the fixed
+    # native resource observation source CHECK; 0186 adds generated native-build
+    # metadata and indexes. None changes the fixed
     # lease/command/trial read columns.
-    if value.get("schema_head") not in {"0175", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185"}:
+    if value.get("schema_head") not in {"0175", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186"}:
         raise DeploymentError("unsupported installed schema")
     count = value.get("active_count")
     leases = value.get("leases")
