@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -28,7 +28,12 @@ from loom.task_bundle_source_storage import (
     S3TaskBundleVersionInventory,
     write_task_bundle_source_object,
 )
+from loom.trajectory.immutable_object import ImmutableObjectVersion
 from loom.trajectory.storage import ObjectStore
+
+
+class SourceObjectReader(Protocol):
+    async def get_registered_object(self, version: ImmutableObjectVersion) -> bytes: ...
 
 
 class ExactSourceDeleter(Protocol):
@@ -97,6 +102,45 @@ class TaskBundleSourcePublisher:
                 await record_task_bundle_write(
                     session, intent_id=intent.id, receipt=receipt, now=self._clock()
                 )
+        return ticket
+
+    async def prepare_copy(
+        self, spec: TaskBundleSourceSpecV1, *, source_spec: TaskBundleSourceSpecV1,
+        source_store: SourceObjectReader, source_versions: Mapping[str, str],
+    ) -> TaskBundleUpload:
+        """Transfer a registered inventory into destination-local versions.
+
+        The source's logical content identity is reused; source VersionIds are
+        never copied. Each destination write uses the ordinary durable journal
+        and existing transfer integrity boundary, outside catalog locks.
+        """
+        if spec.model_dump(exclude={"bucket"}) != source_spec.model_dump(exclude={"bucket"}):
+            raise ValueError("destination source copy must retain the exact content/config identity")
+        authored = {source_spec.data_prefix + item.path: item for item in source_spec.manifest.files}
+        if not set(authored).issubset(source_versions):
+            raise ValueError("source_unavailable: exact registered source versions are required")
+        now = self._clock()
+        async with _source_transaction(self._sessions) as session:
+            ticket = await begin_task_bundle_upload(
+                session, spec=spec, upload_id=uuid4(), now=now,
+                expires_at=now + self._upload_lifetime,
+            )
+        if ticket.available:
+            return ticket
+        for planned in ticket.intents:
+            async with _source_transaction(self._sessions) as session:
+                intent = await issue_task_bundle_write(session, intent_id=planned.id, now=self._clock())
+            body = spec.transport_bodies.get(intent.object_key)
+            if body is None:
+                item = authored[intent.object_key]
+                body = await source_store.get_registered_object(ImmutableObjectVersion(
+                    bucket=source_spec.bucket, object_key=intent.object_key,
+                    version_id=source_versions[intent.object_key],
+                    content_sha256=item.sha256, size_bytes=item.size_bytes,
+                ))
+            receipt = await write_task_bundle_source_object(self._store, intent, body)
+            async with _source_transaction(self._sessions) as session:
+                await record_task_bundle_write(session, intent_id=intent.id, receipt=receipt, now=self._clock())
         return ticket
 
 

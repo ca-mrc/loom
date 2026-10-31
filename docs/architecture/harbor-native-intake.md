@@ -84,10 +84,10 @@ existing journal's recovery/retirement records; they do not activate a partial
 catalog.
 
 After publication, an operator can admit the exact native profile with
-`loom datasets activate-native --harbor-source DESCRIPTOR.json --db-url DATABASE_URL`
-(or the existing `LOOM_DB_URL` / `LOOM_SVC_DB_URL` environment setting). This checks
+`loom datasets activate --profile PROFILE --harbor-source DESCRIPTOR.json`
+with the existing `LOOM_DB_URL` environment setting. This checks
 the pinned origin, complete source count, exact subset identities when present,
-all canonical task configurations and shared hosted-runtime compatibility, and
+all canonical task configurations, structural import/execution contracts, and
 the existing journal's available immutable sources in one transaction. A failed
 check leaves the profile pending. The operation reuses registered source versions;
 it does not reupload bundles or add a second object integrity chain.
@@ -97,8 +97,12 @@ selectors and execution preflight. It preserves unqualified labels and runtime
 verification metadata: successful Oracle/model runs and result/export readback
 remain separate acceptance. Identical native reimports retain prior admission;
 changed task content returns to pending. Historical native profiles cannot be
-reactivated or republished. TB2.1 continues to require its existing audited
-`datasets activate` flow.
+reactivated or republished. TB2.1 uses the same owner with its reviewed fresh
+package/workspace/verifier validator. `activate-native` and the old positional
+TB2.1 command are compatibility wrappers; see [catalog lifecycle and wrapper
+removal criteria](benchmark-onboarding-pipeline.md). Exact H100/architecture
+requirements are retained and checked by selected-target preflight, independently
+of catalog admission. An admitted profile does not authorize unsupported hardware.
 
 Native preparation derives the per-task `oracle_eligible` marker from a regular,
 nonempty `solution/solve.sh`. Missing, empty, directory and symlink entries stay

@@ -186,3 +186,26 @@ async def test_catalog_hides_historical_profiles_but_direct_read_remains_availab
     assert catalog["items"][0]["physical_profile"] == ACTIVE_PROFILE
     assert historical["physical_profile"] == HISTORICAL_PROFILE
     assert historical["execution_state"] == "historical"
+
+
+@pytest.mark.parametrize("task_filter", [
+    {"benchmark_id": PUBLIC_ALIAS},
+    {"benchmark_id": ACTIVE_PROFILE},
+    {"subset_kind": "explicit", "task_ids": [ACTIVE_TASK_ID]},
+])
+async def test_pending_profile_cannot_be_selected_through_any_selector(
+    session: AsyncSession, task_filter: dict[str, object],
+) -> None:
+    await seed_alias(session, PUBLIC_ALIAS, ACTIVE_PROFILE)
+    profile = await session.get(Benchmark, ACTIVE_PROFILE)
+    profile.execution_state = "pending"
+    await session.commit()
+
+    with pytest.raises(HTTPException) as failure:
+        await resolve_task_filter_with_diagnostics(session, task_filter)
+
+    assert failure.value.status_code == 409
+    assert failure.value.detail["reason"] == "benchmark_not_runnable"
+    assert failure.value.detail["benchmark_profile"] == ACTIVE_PROFILE
+    frozen = await resolve_benchmark_selectors(session, [PUBLIC_ALIAS], require_runnable=False)
+    assert frozen.physical_ids == (ACTIVE_PROFILE,)

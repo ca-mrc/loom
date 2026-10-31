@@ -995,7 +995,7 @@ def test_idempotent_resubmission_preserves_original_task_image_revision(
 
 
 @pytest.mark.parametrize("task_id", ["hello", "dockerfile-any"])
-def test_arm_submission_returns_400_without_creating_work(
+def test_arm_submission_returns_409_without_creating_work(
     app, seed_team, postgres_url: str, task_id: str,
 ):  # type: ignore[no-untyped-def]
     team_id, raw = seed_team
@@ -1012,32 +1012,36 @@ def test_arm_submission_returns_400_without_creating_work(
                 "/trials", headers={"Authorization": f"Bearer {raw}"},
                 json={"task_id": task_id, "config": {"agent_name": "oracle", "agent_model": None}},
             )
-        assert response.status_code == 400, response.text
-        assert "x86_64 only" in response.json()["detail"]
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["reason"] == "unsupported_cpu_architecture"
         with sessionmaker(engine)() as session:
-            assert session.scalar(select(func.count()).select_from(Trial)) == 0
-            assert session.scalar(select(func.count()).select_from(TaskImageMaterialization)) == 0
+            assert session.scalar(select(func.count()).select_from(Trial).where(Trial.team_id == team_id)) == 0
+            assert session.scalar(select(func.count()).select_from(TaskImageMaterialization).where(TaskImageMaterialization.task_id == task_id)) == 0
             assert session.get(TeamQuota, team_id).in_flight_count == 0
     finally:
         engine.dispose()
 
 
-def test_historical_arm_idempotent_submission_remains_readable(
-    app, seed_team, postgres_url: str,
+@pytest.mark.parametrize("hardware", ["arm64", "exact_h100"])
+def test_historical_hardware_idempotent_submission_remains_readable(
+    app, seed_team, postgres_url: str, hardware: str,
 ):  # type: ignore[no-untyped-def]
     team_id, raw = seed_team
     trial_id = uuid4()
-    key = f"historical-arm-{trial_id}"
+    key = f"historical-{hardware}-{trial_id}"
     engine = create_engine(postgres_url)
     try:
         with sessionmaker(engine)() as session:
             task = session.get(Task, "hello")
             config = dict(task.config)
-            config["environment"] = {**config["environment"], "cpu_arch": "arm64"}
+            config["environment"] = {
+                **config["environment"],
+                **({"cpu_arch": "arm64"} if hardware == "arm64" else {"gpus": 1, "gpu_types": ["H100"]}),
+            }
             task.config = config
             session.add(Trial(id=trial_id, team_id=team_id, task_id=task.id,
                               idempotency_key=key, state="succeeded", config={}, result={"status": "succeeded"},
-                              requires_caps={"cpu_arch": "arm64"}))
+                              requires_caps={"cpu_arch": "arm64" if hardware == "arm64" else "x86_64"}))
             session.commit()
         with TestClient(app, raise_server_exceptions=False) as client:
             response = client.post(
@@ -1048,8 +1052,8 @@ def test_historical_arm_idempotent_submission_remains_readable(
         assert response.json()["trial_id"] == str(trial_id)
         assert response.json()["state"] == "succeeded"
         with sessionmaker(engine)() as session:
-            assert session.scalar(select(func.count()).select_from(Trial)) == 1
-            assert session.scalar(select(func.count()).select_from(TaskImageMaterialization)) == 0
+            assert session.scalar(select(func.count()).select_from(Trial).where(Trial.team_id == team_id)) == 1
+            assert session.scalar(select(func.count()).select_from(TaskImageMaterialization).where(TaskImageMaterialization.task_id == "hello")) == 0
     finally:
         engine.dispose()
 
@@ -1107,4 +1111,59 @@ def test_direct_trial_rejects_mainland_proxy_for_static_binding(app, seed_team, 
         with sessions() as session, session.begin():
             session.execute(delete(Trial).where(Trial.batch_id == batch_id))
             session.execute(delete(Batch).where(Batch.id == batch_id))
+        engine.dispose()
+
+
+@pytest.mark.parametrize("hardware", ["exact_h100", "arm64"])
+def test_direct_cp_admitted_profile_hardware_matches_shared_preflight(
+    app, seed_team, postgres_url: str, hardware: str,
+):  # type: ignore[no-untyped-def]
+    """An admitted profile cannot grant absent hardware through direct CP."""
+    from loom.db.schema import LlmCall
+
+    team_id, raw = seed_team
+    profile_id = "cp-hardware-" + uuid4().hex
+    task_id = profile_id + "/task"
+    reason = "task_requirements_unsupported" if hardware == "exact_h100" else "unsupported_cpu_architecture"
+    field_reason = "exact_gpu_model_runtime_unavailable" if hardware == "exact_h100" else reason
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            session.add(Benchmark(
+                id=profile_id, display_name="Admitted hardware fixture", execution_state="runnable",
+                upstream_kind="json", upstream_locator="fixture:hardware", upstream_revision="1",
+                license_spdx="MIT", license_url="", splits=["test"],
+            ))
+            session.flush()
+            environment = {"os": "linux", "docker_image": "alpine"}
+            environment.update(
+                {"gpus": 1, "gpu_types": ["H100"]} if hardware == "exact_h100" else {"cpu_arch": "arm64"},
+            )
+            session.add(Task(id=task_id, benchmark_id=profile_id, checksum="e" * 64, config={
+                "schema_version": "1", "task": {"id": task_id, "name": "Hardware fixture"},
+                "environment": environment, "agent": {"name": "oracle"},
+                "verifier": {"name": "pytest"}, "steps": [{"name": "main"}],
+            }))
+            session.commit()
+            before = tuple(session.scalar(select(func.count()).select_from(table)) for table in (Trial, LlmCall))
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(
+                "/trials", headers={"Authorization": f"Bearer {raw}"},
+                json={"task_id": task_id, "config": {"agent_name": "oracle", "agent_model": None}},
+            )
+        assert response.status_code == 409, response.text
+        detail = response.json()["detail"]
+        assert detail["reason"] == reason
+        assert detail["task_ids"] == [task_id]
+        assert any(field_reason in value for value in detail["rejection_reasons"][task_id])
+        with sessionmaker(engine)() as session:
+            assert tuple(session.scalar(select(func.count()).select_from(table)) for table in (Trial, LlmCall)) == before
+            assert session.get(Benchmark, profile_id).execution_state == "runnable"
+            assert session.get(TeamQuota, team_id).in_flight_count == 0
+    finally:
+        with sessionmaker(engine)() as session:
+            session.execute(delete(Trial).where(Trial.task_id == task_id))
+            session.execute(delete(Task).where(Task.id == task_id))
+            session.execute(delete(Benchmark).where(Benchmark.id == profile_id))
+            session.commit()
         engine.dispose()

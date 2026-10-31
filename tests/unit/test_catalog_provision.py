@@ -359,7 +359,7 @@ async def test_tb21_catalog_drift_fails_before_target_object_copy() -> None:
         {("target-bucket", f"{profile_id}/task/task.toml"): b"activated"},
     )
 
-    with pytest.raises(ValueError, match=r"immutable TB2.1 profile drift"):
+    with pytest.raises(ValueError, match=r"immutable catalog profile drift"):
         await provision_ready_benchmark_catalog(
             source_catalog=FakeCatalog(
                 CatalogRows(benchmarks=[benchmark], tasks=[source_task]),
@@ -712,3 +712,23 @@ async def test_provision_ready_catalog_preserves_existing_agent_rows_on_second_r
     by_name = {row.name: row for row in target.rows.agents}
     assert "stale" not in by_name["oracle"].spec
     assert by_name["oracle"].spec["catalog_provenance"]["provisioned_by"] == ("staging-provision")
+
+
+def test_arbitrary_catalog_copy_does_not_inherit_admission_or_qualification() -> None:
+    profile = BenchmarkRow(
+        id="arbitrary-new-json@7", display_name="New format", upstream_kind="json",
+        upstream_locator="https://example.test/tasks.json", upstream_revision="release-7",
+        license_spdx="MIT", license_url="", splits=["test"], series=None, imported_by=None,
+        execution_state="runnable", profile_provenance={
+            "runtime_verified": True, "qualification": {"state": "verified"},
+            "source_task_count": 1,
+        },
+    )
+    task = TaskRow(
+        id=profile.id + "/one", checksum="a" * 64, config=_valid_task_config(profile.id + "/one"),
+        source="s3://source-bucket/profile/one/", license="MIT", benchmark_id=profile.id, tags={},
+    )
+    copied = catalog_provision._ready_catalog_rows(CatalogRows([profile], [task]), target_bucket="target-bucket")
+    assert copied.benchmarks[0].execution_state == "pending"
+    assert copied.benchmarks[0].profile_provenance == {"source_task_count": 1}
+    assert copied.tasks[0].source == "s3://target-bucket/profile/one/"

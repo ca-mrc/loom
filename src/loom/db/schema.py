@@ -3009,8 +3009,8 @@ class Benchmark(Base):
     execution_state: Mapped[str] = mapped_column(
         Text,
         nullable=False,
-        server_default=text("'runnable'"),
-        default="runnable",
+        server_default=text("'pending'"),
+        default="pending",
     )
     profile_provenance: Mapped[dict[str, Any]] = mapped_column(
         JSONB,

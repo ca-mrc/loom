@@ -61,6 +61,7 @@ async def tags_setup(
         # Seed a small AIME-style benchmark: 4 tasks across years +
         # exams so the discovery endpoint has multiple keys.
         s.execute(insert(Benchmark).values(
+            execution_state="runnable",
             id="aime-22",
             display_name="AIME (AIMO validation)",
             upstream_kind="huggingface",
@@ -90,6 +91,7 @@ async def tags_setup(
             ))
         # An untagged benchmark so the empty-tags path is exercised.
         s.execute(insert(Benchmark).values(
+            execution_state="runnable",
             id="humaneval", display_name="HumanEval",
             upstream_kind="huggingface",
             upstream_locator="openai/openai_humaneval",

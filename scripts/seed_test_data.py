@@ -7,7 +7,7 @@ Two modes:
   rows.
 - `--mode dev` — what `loom service up` calls: team/worker/builder tokens +
   every shipped benchmark adapter registered from HF Hub so the SPA dropdown
-  is populated and submittable out of the box, plus a checked-in, network-free
+  is populated with pending metadata, plus a checked-in, network-free
   25-SLB + 3-SkillFlow family-runs smoke slate. Skips the hello-world Task
   + card-e2e RateCard. The family-runs rows are deterministic upserts.
 
@@ -16,8 +16,8 @@ Default register path (`hf://`): dev mode walks every adapter in
 `loom_benchmark_tool.register_cmd.run_register` for each. Manifests
 (~tens of KB each) come from `{HF_ORG}/loom-benchmark-{slug}` on HF
 Hub; task rows land with `source = "hf://..."`. Workers pull bundle
-bytes on trial claim — no MinIO upload, no upstream conversion. This
-is "registered = instantly available". Per-benchmark errors (benchmark
+bytes on trial claim — no MinIO upload, no upstream conversion. Registration preserves pending catalog state; canonical datasets activation
+validates source facts before new submissions. Per-benchmark errors (benchmark
 not yet published) are logged + skipped.
 
 Air-gapped / local-import path: pass `--local-import` to run the older
@@ -219,8 +219,10 @@ def _seed_benchmarks_from_entrypoints(s: Session) -> int:
     """Register every entry-point-discovered BenchmarkAdapter as a
     Benchmark row. Idempotent — re-seeding only inserts missing rows.
 
-    Returns the count of rows actually inserted (0 if the table was
-    already populated).
+    Returns the count of inserted/backfilled rows. Existing rows are never
+    renamed, retired or deleted. An old empty stub whose ID collides with a
+    public alias requires explicit operator adoption after checking references;
+    rerunning this seed does not authorize that migration.
     """
     # Imported lazily so test-mode runs without `loom-benchmarks`
     # installed don't crash. Real callers (loom service up, dev stack)
@@ -229,7 +231,10 @@ def _seed_benchmarks_from_entrypoints(s: Session) -> int:
 
     inserted = 0
     updated = 0
-    for slug, adapter in sorted(REGISTRY.items()):
+    for _slug, adapter in sorted(REGISTRY.items()):
+        # Entry-point keys are discovery selectors and may be public aliases.
+        # Catalog rows always use the reviewed adapter's physical identity.
+        physical_id = adapter.name
         upstream = adapter.upstream_source
         # PR-1 series/tags: pull `series` off the adapter so freshly
         # seeded rows group correctly in the SPA dropdown. Adapters
@@ -237,7 +242,7 @@ def _seed_benchmarks_from_entrypoints(s: Session) -> int:
         adapter_series = getattr(adapter, "series", None)
         existing = s.execute(
             select(Benchmark.id, Benchmark.series)
-            .where(Benchmark.id == slug),
+            .where(Benchmark.id == physical_id),
         ).first()
         if existing is not None:
             # Backfill `series` on rows seeded before PR-1 — otherwise
@@ -246,20 +251,19 @@ def _seed_benchmarks_from_entrypoints(s: Session) -> int:
             if existing[1] is None and adapter_series is not None:
                 s.execute(
                     Benchmark.__table__.update()  # type: ignore[attr-defined]
-                    .where(Benchmark.id == slug)
+                    .where(Benchmark.id == physical_id)
                     .values(series=adapter_series),
                 )
                 updated += 1
             continue
         s.execute(insert(Benchmark).values(
-            id=slug,
-            display_name=getattr(adapter, "display_name", slug),
+            id=physical_id,
+            display_name=getattr(adapter, "display_name", physical_id),
             upstream_kind=upstream.kind,
             upstream_locator=upstream.locator,
-            # `revision` is optional on the adapter; the DB column is
-            # NOT NULL so we substitute "main" for adapters that don't
-            # pin a specific revision.
-            upstream_revision=upstream.revision or "main",
+            # A metadata placeholder cannot invent a remote revision pin.
+            # Publication supplies the actual resolved source facts later.
+            upstream_revision=upstream.revision or "",
             license_spdx=getattr(adapter, "license_spdx", "UNKNOWN"),
             license_url=getattr(adapter, "license_url", ""),
             splits=list(getattr(adapter, "splits", ())) or ["test"],

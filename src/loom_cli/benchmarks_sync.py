@@ -21,10 +21,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom.benchmark_publication import prepare_profile_publication
 from loom.config.benchmarks import (
     BenchmarksConfig,
     LocalBenchmarkEntry,
@@ -195,6 +196,7 @@ async def _sync_local(
         )
         return
 
+    prepared_tasks = _prepare_local_tasks(entry, source_dir=source_dir, task_tomls=task_tomls)
     desired = dict(
         id=entry.id,
         display_name=entry.display_name,
@@ -220,82 +222,80 @@ async def _sync_local(
 
     plan.add(kind="local", id=entry.id, action=action, reason=reason)
 
-    if not dry_run and action != "SKIP":
-        await session.execute(
-            pg_insert(Benchmark).values(**desired).on_conflict_do_update(
-                index_elements=["id"],
-                set_={k: v for k, v in desired.items() if k != "id"},
-            ),
+    async with session.begin_nested():
+        if not dry_run:
+            identity = {**desired, "profile_provenance": existing.profile_provenance or {} if existing else {}}
+            desired["execution_state"] = await prepare_profile_publication(
+                session, profile_id=entry.id, profile_identity=identity, tasks=prepared_tasks,
+            )
+        if not dry_run and action != "SKIP":
+            await session.execute(
+                pg_insert(Benchmark).values(**desired).on_conflict_do_update(
+                    index_elements=["id"],
+                    set_={k: v for k, v in desired.items() if k != "id"},
+                ),
+            )
+
+        plan.tasks[entry.id] = await _sync_local_tasks(
+            prepared_tasks=prepared_tasks, session=session, dry_run=dry_run,
         )
+    if not dry_run:
         await session.commit()
 
-    plan.tasks[entry.id] = await _sync_local_tasks(
-        entry,
-        source_dir=source_dir,
-        task_tomls=task_tomls,
-        session=session,
-        dry_run=dry_run,
-    )
 
-
-async def _sync_local_tasks(
-    entry: LocalBenchmarkEntry,
-    *,
-    source_dir: Path,
-    task_tomls: list[Path],
-    session: AsyncSession,
-    dry_run: bool,
-) -> TaskCounts:
-    """SELECT-first then UPSERT only when checksum differs.
-
-    Unchanged Task rows are not rewritten, but Dockerfile prerequisites refresh
-    their references and recover retirement even on unchanged syncs. One commit
-    at the end of the loop avoids per-task commits. Dry-run writes neither.
-    """
-    inserted = updated = unchanged = 0
-    did_write = False
+def _prepare_local_tasks(
+    entry: LocalBenchmarkEntry, *, source_dir: Path, task_tomls: list[Path],
+) -> list[dict[str, Any]]:
+    """Read/validate/hash all local bytes before the catalog-lock transaction."""
+    rows = []
     for task_toml in task_tomls:
         bundle_dir = task_toml.parent
         rel = bundle_dir.relative_to(source_dir)
         task_id = entry.id if rel == Path(".") else f"{entry.id}/{rel.as_posix()}"
-        source = _fixture_source(entry, rel)
-
         try:
-            with task_toml.open("rb") as f:
-                raw_cfg: dict[str, Any] = tomllib.load(f)
-            TaskConfig.model_validate(raw_cfg)
+            with task_toml.open("rb") as file:
+                config: dict[str, Any] = tomllib.load(file)
+            TaskConfig.model_validate(config)
+            config["task"] = {**config["task"], "id": task_id}
         except Exception as exc:
             raise SyncError(
                 f"invalid task.toml at {task_toml}: {exc}. Fix the file "
                 "or remove the bundle to unblock sync.",
             ) from exc
+        rows.append({
+            "id": task_id, "checksum": task_checksum(bundle_dir), "config": config,
+            "source": _fixture_source(entry, rel), "source_provenance": {},
+            "license": entry.license_spdx, "benchmark_id": entry.id,
+        })
+    return rows
 
-        checksum = task_checksum(bundle_dir)
+
+async def _sync_local_tasks(
+    *,
+    prepared_tasks: list[dict[str, Any]],
+    session: AsyncSession,
+    dry_run: bool,
+) -> TaskCounts:
+    """Apply prepared task facts inside the caller's final catalog transaction.
+
+    Unchanged rows retain identity while image prerequisites may recover their
+    retired references. All file parsing and hashing happened before row locks.
+    """
+    inserted = updated = unchanged = 0
+    for desired in sorted(prepared_tasks, key=lambda row: row["id"]):
+        task_id = desired["id"]
         existing = await _get_task(session, task_id, lock=not dry_run)
         if existing is None:
             inserted += 1
-        elif (
-            existing.checksum != checksum
-            or existing.benchmark_id != entry.id
-            or existing.license != entry.license_spdx
-        ):
+        elif any(getattr(existing, key) != value for key, value in desired.items()):
             updated += 1
         else:
             unchanged += 1
             if not dry_run and existing is not None:
-                images = await ensure_task_image_materializations(session, task_row=existing)
-                did_write = did_write or bool(images)
+                await ensure_task_image_materializations(session, task_row=existing)
             continue
 
         if not dry_run:
-            desired = dict(
-                id=task_id,
-                checksum=checksum,
-                config=raw_cfg,
-                source=source,
-                license=entry.license_spdx,
-                benchmark_id=entry.id,
-            )
             task_row = (
                 await session.execute(
                     pg_insert(TaskRow)
@@ -303,11 +303,7 @@ async def _sync_local_tasks(
                     .on_conflict_do_update(
                         index_elements=["id"],
                         set_={
-                            "checksum": checksum,
-                            "config": raw_cfg,
-                            "source": desired["source"],
-                            "license": entry.license_spdx,
-                            "benchmark_id": entry.id,
+                            key: value for key, value in desired.items() if key != "id"
                         },
                     )
                     .returning(TaskRow)
@@ -315,9 +311,6 @@ async def _sync_local_tasks(
                 )
             ).scalar_one()
             await ensure_task_image_materializations(session, task_row=task_row)
-            did_write = True
-    if did_write:
-        await session.commit()
     return TaskCounts(
         inserted=inserted,
         updated=updated,
@@ -400,7 +393,14 @@ async def _sync_remap(
         splits=entry.splits if entry.splits is not None else list(base.splits),
         imported_by=SYNC_IMPORTED_BY,
     )
+    if not dry_run:
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:profile_id))"),
+            {"profile_id": entry.id},
+        )
     existing = await _get_benchmark(session, entry.id)
+    if existing is not None:
+        desired["upstream_revision"] = existing.upstream_revision
     if existing is None:
         action: PlanAction = "INSERT"
         reason = "new"
@@ -413,6 +413,15 @@ async def _sync_remap(
 
     plan.add(kind="remap", id=entry.id, action=action, reason=reason)
 
+    if not dry_run:
+        current_tasks = list(await session.scalars(
+            select(TaskRow).where(TaskRow.benchmark_id == entry.id).order_by(TaskRow.id),
+        ))
+        desired["execution_state"] = await prepare_profile_publication(
+            session, profile_id=entry.id,
+            profile_identity={**desired, "profile_provenance": existing.profile_provenance or {} if existing else {}},
+            tasks=current_tasks,
+        )
     if not dry_run and action != "SKIP":
         await session.execute(
             pg_insert(Benchmark).values(**desired).on_conflict_do_update(
@@ -420,6 +429,7 @@ async def _sync_remap(
                 set_={k: v for k, v in desired.items() if k != "id"},
             ),
         )
+    if not dry_run:
         await session.commit()
 
 

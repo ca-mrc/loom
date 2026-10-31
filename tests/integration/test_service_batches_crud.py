@@ -407,10 +407,15 @@ async def test_post_batch_materializes_count(
                 "name": "MIT slate",
                 "description": "all MIT-licensed tasks",
                 "purpose": "evaluation",
-                "task_filter": {"license": "MIT"},
+                "task_filter": {
+                    "license": "MIT",
+                    "task_ids": [*[f"local/mit-{i}" for i in range(3)],
+                                 *[f"local/apache-{i}" for i in range(2)]],
+                },
                 "trial_config": {"agent": {"name": "oracle"}},
             },
         )
+        assert r.status_code == 201, r.text
         detail = await ac.get(
             f"/api/v1/batches/{r.json()['batch_id']}",
             headers={"Authorization": f"Bearer {raw}"},
@@ -602,6 +607,7 @@ async def test_post_batch_unions_benchmark_and_task_set_filters(
     with sync_engine.begin() as conn:
         conn.execute(
             insert(Benchmark).values(
+                execution_state="runnable",
                 id="humaneval",
                 display_name="HumanEval",
                 upstream_kind="huggingface",
@@ -1591,6 +1597,7 @@ async def test_post_batch_generates_concise_identity_when_name_omitted(
             [
                 {
                     "id": "humaneval",
+                    "execution_state": "runnable",
                     "display_name": "HumanEval",
                     "upstream_kind": "fixture",
                     "upstream_locator": "fixture://humaneval",
@@ -1601,6 +1608,7 @@ async def test_post_batch_generates_concise_identity_when_name_omitted(
                 },
                 {
                     "id": "mbpp",
+                    "execution_state": "runnable",
                     "display_name": "MBPP",
                     "upstream_kind": "fixture",
                     "upstream_locator": "fixture://mbpp",
@@ -2213,6 +2221,7 @@ async def test_post_rejects_unsupported_ui_benchmark_filter(
     with sl() as s:
         s.execute(
             insert(Benchmark).values(
+                execution_state="runnable",
                 id="osworld",
                 display_name="OSWorld",
                 upstream_kind="git",
@@ -2252,8 +2261,8 @@ async def test_post_rejects_unsupported_ui_benchmark_filter(
             },
         )
 
-    assert r.status_code == 400
-    assert "zero tasks" in r.json()["detail"]
+    assert r.status_code == 409
+    assert r.json()["detail"]["reason"] == "unsupported_runtime"
 
 
 async def test_post_rejects_non_v1_builtin_benchmark_filter(
@@ -2266,6 +2275,7 @@ async def test_post_rejects_non_v1_builtin_benchmark_filter(
     with sl() as s:
         s.execute(
             insert(Benchmark).values(
+                execution_state="runnable",
                 id="browsecomp",
                 display_name="BrowseComp",
                 upstream_kind="huggingface",
@@ -2305,8 +2315,8 @@ async def test_post_rejects_non_v1_builtin_benchmark_filter(
             },
         )
 
-    assert r.status_code == 400
-    assert "zero tasks" in r.json()["detail"]
+    assert r.status_code == 409
+    assert r.json()["detail"]["reason"] == "not_v1_supported"
 
 
 async def test_post_rejects_invalid_task_config(
@@ -3755,6 +3765,7 @@ async def test_get_batch_detail_includes_per_benchmark_rollup(
             [
                 {
                     "id": "humaneval-420",
+                    "execution_state": "runnable",
                     "display_name": "HumanEval 420",
                     "upstream_kind": "local",
                     "upstream_locator": "fixture",
@@ -3765,6 +3776,7 @@ async def test_get_batch_detail_includes_per_benchmark_rollup(
                 },
                 {
                     "id": "mbpp-420",
+                    "execution_state": "runnable",
                     "display_name": "MBPP 420",
                     "upstream_kind": "local",
                     "upstream_locator": "fixture",
@@ -6395,4 +6407,96 @@ async def test_execution_selection_dry_run_resolves_or_rejects_without_writing(
             s.execute(delete(ServiceExecutionClass).where(
                 ServiceExecutionClass.id == NEBIUS_CPU_EXECUTION_CLASS_V1.class_id))
             s.commit()
+        sync_engine.dispose()
+
+
+@pytest.mark.parametrize("hardware", ["exact_h100", "arm64"])
+async def test_admitted_profile_hardware_rejects_all_member_execution_selectors(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+    hardware: str,
+) -> None:
+    """Admission permits qualification attempts but cannot grant absent hardware."""
+    from loom.db.schema import BenchmarkAlias
+
+    app, raw, _team_id = camp_setup
+    profile_id = f"arbitrary-source@{hardware}"
+    alias = f"arbitrary-source-{hardware}"
+    task_id = f"{profile_id}/task"
+    safe_task_id = f"{profile_id}/a-safe-task"
+    config = _valid_task_config(task_id)
+    config["environment"].update(
+        {"gpus": 1, "gpu_types": ["H100"]} if hardware == "exact_h100" else {"cpu_arch": "arm64"},
+    )
+    reason = "task_requirements_unsupported" if hardware == "exact_h100" else "unsupported_cpu_architecture"
+    field_reason = "exact_gpu_model_runtime_unavailable" if hardware == "exact_h100" else reason
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as session:
+        session.execute(insert(Benchmark).values(
+            id=profile_id, display_name="Hardware example", execution_state="runnable",
+            upstream_kind="json", upstream_locator="example.json", upstream_revision="1",
+            license_spdx="MIT", license_url="", splits=["test"],
+        ))
+        session.execute(insert(BenchmarkAlias).values(alias=alias, benchmark_id=profile_id))
+        session.execute(insert(Task).values(
+            id=task_id, benchmark_id=profile_id, config=config, checksum="b" * 64, source=None,
+        ))
+        session.execute(insert(Task).values(
+            id=safe_task_id, benchmark_id=profile_id, config=_valid_task_config(safe_task_id),
+            checksum="c" * 64, source=None,
+        ))
+        session.commit()
+        before = tuple(session.scalar(select(func.count()).select_from(table)) for table in (Batch, Trial, LlmCall))
+    headers = {"Authorization": f"Bearer {raw}"}
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://svc") as client:
+            catalog = await client.get(f"/api/v1/benchmarks/{alias}", headers=headers)
+            assert catalog.status_code == 200
+            assert catalog.json()["catalog_admission_state"] == "admitted"
+            assert catalog.json()["target_compatibility_state"] == "incompatible"
+            assert catalog.json()["blocker_reason"] == reason
+            assert catalog.json()["qualification_state"] == "unknown"
+            # A selected supported subset is not rejected because an unselected
+            # sibling has a different hardware contract.
+            supported_subset = await client.post(
+                "/api/v1/tasks/count", headers=headers,
+                json={"task_filter": {"benchmark_id": alias, "subset_kind": "first_n", "n": 1}},
+            )
+            assert supported_subset.status_code == 200, supported_subset.text
+            assert supported_subset.json()["count"] == 1
+            for task_filter in (
+                {"benchmark_id": profile_id},
+                {"benchmark_id": alias},
+                {"task_ids": [task_id], "subset_kind": "explicit"},
+            ):
+                counted = await client.post("/api/v1/tasks/count", headers=headers, json={"task_filter": task_filter})
+                assert counted.status_code == 409, counted.text
+                assert counted.json()["detail"]["reason"] == reason
+                for endpoint in ("/api/v1/batches/dry-run", "/api/v1/batches"):
+                    response = await client.post(endpoint, headers=headers, json={
+                        "name": "unsupported-hardware", "purpose": "evaluation",
+                        "task_filter": task_filter, "trial_config": {"agent_name": "oracle", "agent_model": None},
+                        "backend": "docker", "budget_policy": "none",
+                    })
+                    assert response.status_code == 409, response.text
+                    assert response.json()["detail"]["reason"] == reason
+                    assert any(field_reason in text for text in response.json()["detail"]["rejection_reasons"][task_id])
+        from loom_service.task_filter import resolve_task_filter
+
+        async with app.state.session_factory() as session:
+            frozen_selection = await resolve_task_filter(
+                session, {"task_ids": [task_id], "subset_kind": "explicit"},
+                team_id=_team_id, require_runnable=False,
+            )
+            assert frozen_selection == [task_id]
+        with sl() as session:
+            after = tuple(session.scalar(select(func.count()).select_from(table)) for table in (Batch, Trial, LlmCall))
+            assert after == before
+    finally:
+        with sl() as session:
+            session.execute(delete(BenchmarkAlias).where(BenchmarkAlias.alias == alias))
+            session.execute(delete(Task).where(Task.id.in_([task_id, safe_task_id])))
+            session.execute(delete(Benchmark).where(Benchmark.id == profile_id))
+            session.commit()
         sync_engine.dispose()

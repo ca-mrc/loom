@@ -10,7 +10,7 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 from loom_benchmark_terminal_bench_2.upstream import load_tb21_lock
-from sqlalchemy import create_engine, delete, select
+from sqlalchemy import create_engine, delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -18,7 +18,7 @@ from loom.db.schema import Benchmark, BenchmarkAlias, Team, Trial
 from loom.db.schema import Task as TaskRow
 from loom.models.task import TaskConfig
 from loom.trajectory.storage import FakeObjectStore
-from loom_benchmark_tool.audit_cmd import AuditResult, activate_tb21_alias
+from loom_benchmark_tool.audit_cmd import activate_tb21_alias
 from loom_benchmark_tool.manifest import TB21_AGENT_WORKSPACE_POLICY
 from loom_benchmark_tool.register_cmd import run_register
 from loom_cli.catalog_provision import (
@@ -266,7 +266,7 @@ async def test_catalog_provision_rejects_tb21_physical_profile_drift(
         ],
     )
 
-    with pytest.raises(ValueError, match=r"immutable TB2\.1 profile drift"):
+    with pytest.raises(ValueError, match=r"immutable catalog profile drift"):
         await PostgresCatalogStore(postgres_url).upsert_rows(rows)
 
     db.expire_all()
@@ -378,109 +378,142 @@ async def test_reregister_drift_cannot_change_task_referenced_by_queued_trial(
     assert queued_after.task_id == TASK_ID
 
 
-async def test_activation_writes_alias_only_after_exact_isolated_audit(
-    db: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    await db.execute(
-        Benchmark.__table__.insert().values(
-            id=PROFILE,
-            display_name="Terminal-Bench 2.1 (Harbor rev 6)",
-            upstream_kind="harbor-package",
-            upstream_locator="terminal-bench/terminal-bench-2-1",
-            upstream_revision="6",
-            license_spdx="Apache-2.0",
-            license_url="https://example.test/license",
-            splits=["test"],
-            execution_state="pending",
-        ),
+async def _persist_auditable_profile(db: AsyncSession, tmp_path):
+    from tests.unit.test_tb21_manifest_provenance import _tb21_audit_fixture
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    fixture, object_store, rows, _bundles = _tb21_audit_fixture(tmp_path)
+    benchmark = fixture._benchmark
+    values = dict(
+        id=benchmark.id, display_name=benchmark.display_name, series=benchmark.series,
+        upstream_kind=benchmark.upstream_kind, upstream_locator=benchmark.upstream_locator,
+        upstream_revision=benchmark.upstream_revision, license_spdx="Apache-2.0",
+        license_url="https://example.test/license", splits=["test"], execution_state="pending",
+        profile_provenance=benchmark.profile_provenance,
     )
+    existing = await db.get(Benchmark, PROFILE)
+    if existing is None:
+        db.add(Benchmark(**values))
+    else:
+        # A disposable metadata seed is adopted by this real-byte audit fixture;
+        # production seeding itself never mutates physical identity or grants.
+        assert existing.execution_state == "pending"
+        for key, value in values.items():
+            setattr(existing, key, value)
+    await db.flush()
+    for row in rows:
+        db.add(TaskRow(
+            id=row.id, benchmark_id=PROFILE, checksum=row.checksum, config=row.config,
+            source=row.source, source_provenance=row.source_provenance,
+        ))
     await db.commit()
+    return object_store
 
-    object_store = object()
 
-    async def fresh_audit(
-        _session: object, *, object_store: object, **_kwargs: object
-    ) -> AuditResult:
-        assert object_store is object_store_ref
-        return AuditResult(
-            profile=PROFILE,
-            verified_bundles=89,
-            private_workspace_isolation=True,
-            snapshot_id="sha256:" + "c" * 64,
-        )
+async def test_activation_writes_alias_only_after_exact_isolated_audit(
+    db: AsyncSession, tmp_path,
+) -> None:
+    from loom_benchmark_tool.audit_cmd import audit_tb21_profile
 
-    object_store_ref = object_store
-    monkeypatch.setattr("loom_benchmark_tool.audit_cmd.audit_tb21_profile", fresh_audit)
-    await activate_tb21_alias(
-        db,
-        object_store=object_store,  # type: ignore[arg-type]
-        audit_evidence=AuditResult(
-            profile=PROFILE,
-            verified_bundles=89,
-            private_workspace_isolation=True,
-            snapshot_id="sha256:" + "c" * 64,
-        ),
-    )
-
-    alias = (
-        await db.execute(
-            select(BenchmarkAlias).where(BenchmarkAlias.alias == "terminal-bench-2"),
-        )
-    ).scalar_one()
+    object_store = await _persist_auditable_profile(db, tmp_path)
+    async with db.begin():
+        current = await audit_tb21_profile(db, object_store=object_store)
+    await activate_tb21_alias(db, object_store=object_store, audit_evidence=current)
+    alias = await db.get(BenchmarkAlias, "terminal-bench-2")
     assert alias.benchmark_id == PROFILE
     benchmark = await db.get(Benchmark, PROFILE)
-    assert benchmark is not None
     assert benchmark.execution_state == "runnable"
-    assert benchmark.profile_provenance["activation_audit"]["snapshot_id"] == ("sha256:" + "c" * 64)
+    assert benchmark.profile_provenance["activation_audit"]["snapshot_id"] == current.snapshot_id
 
 
 async def test_reactivation_refreshes_alias_activated_at(
-    db: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
+    db: AsyncSession, tmp_path,
 ) -> None:
+    from loom_benchmark_tool.audit_cmd import audit_tb21_profile
+
+    object_store = await _persist_auditable_profile(db, tmp_path)
     old_activated_at = datetime(2000, 1, 1, tzinfo=UTC)
-    db.add(
-        Benchmark(
-            id=PROFILE,
-            display_name="Terminal-Bench 2.1",
-            upstream_kind="harbor-package",
-            upstream_locator="terminal-bench/terminal-bench-2-1",
-            upstream_revision="6",
-            license_spdx="Apache-2.0",
-            license_url="https://example.test/license",
-            splits=["test"],
-            execution_state="runnable",
-            profile_provenance={},
-        )
-    )
-    db.add(
-        BenchmarkAlias(
-            alias="terminal-bench-2",
-            benchmark_id=PROFILE,
-            activated_at=old_activated_at,
-        )
-    )
-    await db.commit()
-
-    current = AuditResult(
-        profile=PROFILE,
-        verified_bundles=89,
-        private_workspace_isolation=True,
-        snapshot_id="sha256:" + "c" * 64,
-    )
-
-    async def fresh_audit(*_args: object, **_kwargs: object) -> AuditResult:
-        return current
-
-    monkeypatch.setattr("loom_benchmark_tool.audit_cmd.audit_tb21_profile", fresh_audit)
-    await activate_tb21_alias(
-        db,
-        object_store=object(),  # type: ignore[arg-type]
-        audit_evidence=current,
-    )
-
+    async with db.begin():
+        db.add(BenchmarkAlias(alias="terminal-bench-2", benchmark_id=PROFILE,
+                              activated_at=old_activated_at))
+        current = await audit_tb21_profile(db, object_store=object_store)
+    await activate_tb21_alias(db, object_store=object_store, audit_evidence=current)
     db.expire_all()
     alias = await db.get(BenchmarkAlias, "terminal-bench-2")
-    assert alias is not None
     assert alias.activated_at > old_activated_at
+
+
+async def test_legacy_audit_snapshot_rechecked_after_slow_audit(db: AsyncSession, tmp_path) -> None:
+    from loom.benchmark_admission import BenchmarkAdmissionError, admit_benchmark_profile
+    from loom.benchmark_admission_legacy import prepare_validation
+    from loom_benchmark_tool.audit_cmd import audit_tb21_profile
+
+    object_store = await _persist_auditable_profile(db, tmp_path)
+    async with db.begin():
+        current = await audit_tb21_profile(db, object_store=object_store)
+        spec, validation, _ = await prepare_validation(
+            db, object_store=object_store, audit_evidence=current,
+        )
+    async with db.begin():
+        task = await db.get(TaskRow, TASK_ID)
+        changed = copy.deepcopy(task.config)
+        changed["task"]["name"] = "Changed after audit"
+        task.config = changed
+    with pytest.raises(BenchmarkAdmissionError, match="adapter_snapshot_drift"):
+        async with db.begin():
+            await admit_benchmark_profile(db, spec=spec, validation=validation)
+    assert (await db.get(Benchmark, PROFILE)).execution_state == "pending"
+    assert await db.get(BenchmarkAlias, "terminal-bench-2") is None
+
+
+async def test_canonical_and_legacy_cli_share_reviewed_audit_and_alias_contract(
+    db: AsyncSession, postgres_url, tmp_path, monkeypatch, capsys,
+) -> None:
+    import asyncio
+    import json
+
+    from loom.benchmark_admission_legacy import profile_spec
+    from loom_benchmark_tool.audit_cmd import audit_tb21_profile
+    from loom_cli.datasets_cmd import dispatch
+
+    object_store = await _persist_auditable_profile(db, tmp_path / "bundles")
+    async with db.begin():
+        current = await audit_tb21_profile(db, object_store=object_store)
+    evidence = tmp_path / "audit.json"
+    evidence.write_text(json.dumps(current.to_dict()))
+    descriptor = tmp_path / "profile.json"
+    descriptor.write_text(profile_spec().model_dump_json())
+    monkeypatch.setattr("loom.trajectory.storage.MinioObjectStore", lambda **kwargs: object_store)
+    common = ["--profile", PROFILE, "--audit-json", str(evidence), "--db-url", postgres_url,
+              "--minio-endpoint", "http://fixture", "--minio-access-key", "test",
+              "--minio-secret-key", "test"]
+    assert await asyncio.to_thread(dispatch, ["activate", "terminal-bench-2", *common]) == 0
+    assert await asyncio.to_thread(dispatch, [
+        "activate", "--descriptor", str(descriptor), "--alias", "terminal-bench-2",
+        "--expected-current", PROFILE, *common,
+    ]) == 0
+    db.expire_all()
+    assert (await db.get(Benchmark, PROFILE)).execution_state == "runnable"
+    assert (await db.get(BenchmarkAlias, "terminal-bench-2")).benchmark_id == PROFILE
+    assert capsys.readouterr().out.count("89 tasks admitted; runtime qualification unchanged") == 2
+
+
+async def test_neutral_descriptor_cannot_skip_legacy_private_input_audit(
+    db: AsyncSession, postgres_url, tmp_path, capsys,
+) -> None:
+    import asyncio
+
+    from loom.benchmark_admission_legacy import profile_spec
+    from loom_cli.datasets_cmd import dispatch
+
+    await _persist_auditable_profile(db, tmp_path / "bundles")
+    descriptor = tmp_path / "profile.json"
+    descriptor.write_text(profile_spec().model_copy(update={"validation_contract": "canonical.v1"}).model_dump_json())
+    assert await asyncio.to_thread(dispatch, [
+        "activate", "--descriptor", str(descriptor), "--profile", PROFILE,
+        "--db-url", postgres_url,
+    ]) == 1
+    assert "validation_contract_mismatch" in capsys.readouterr().err
+    db.expire_all()
+    assert (await db.get(Benchmark, PROFILE)).execution_state == "pending"
+    assert await db.get(BenchmarkAlias, "terminal-bench-2") is None

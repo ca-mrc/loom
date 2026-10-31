@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom.catalog_policy import CURRENTLY_UNSUPPORTED_BENCHMARK_IDS, catalog_support_policy
 from loom.db.schema import Benchmark, BenchmarkAlias
 
 
@@ -58,6 +59,18 @@ async def reject_non_runnable_benchmark_profiles(
     if unavailable is not None:
         profile_id, execution_state = unavailable
         raise benchmark_not_runnable_error(str(profile_id), str(execution_state))
+    unsupported_profiles = sorted(set(requested_profiles) & CURRENTLY_UNSUPPORTED_BENCHMARK_IDS)
+    if unsupported_profiles:
+        profile_id = await session.scalar(
+            select(Benchmark.id).where(Benchmark.id.in_(unsupported_profiles)).order_by(Benchmark.id),
+        )
+        if profile_id is not None:
+            policy = catalog_support_policy(str(profile_id))
+            raise HTTPException(status_code=409, detail={
+                "reason": policy.state,
+                "benchmark_profile": str(profile_id),
+                "message": policy.message,
+            })
 
 
 async def resolve_benchmark_selectors(

@@ -35,10 +35,15 @@ class ExternalProvider:
         return identity
 
 
-async def test_worker_loop_recovers_database_outage_and_resumes_durable_work(environment_registry):
-    from sqlalchemy import text
+async def test_worker_loop_recovers_database_outage_and_resumes_durable_work(environment_registry, monkeypatch):
+    from sqlalchemy import func, select, text
+    from sqlalchemy.exc import SQLAlchemyError
     from sqlalchemy.ext.asyncio import create_async_engine
 
+    from loom.db.nebius_environment_schema import (
+        NebiusEnvironmentOperation,
+        NebiusEnvironmentResource,
+    )
     from loom_service.environment_management.worker import EnvironmentWorker
 
     registry, factory, (alice, _), prepare = environment_registry
@@ -48,21 +53,52 @@ async def test_worker_loop_recovers_database_outage_and_resumes_durable_work(env
     assert url.database.startswith("loom_migration_")
     admin = create_async_engine(url.set(database="postgres"), isolation_level="AUTOCOMMIT")
     database = admin.dialect.identifier_preparer.quote(url.database)
-    worker = EnvironmentWorker(registry, ExternalProvider())
+    outage_observed = asyncio.Event()
+    original_poll = registry.runnable_operations
+
+    async def observe_poll(**kwargs):
+        try:
+            return await original_poll(**kwargs)
+        except (SQLAlchemyError, OSError):
+            outage_observed.set()
+            raise
+
+    monkeypatch.setattr(registry, "runnable_operations", observe_poll)
+    provider = ExternalProvider()
+    worker = EnvironmentWorker(registry, provider)
     task = None
     try:
         async with admin.connect() as connection:
             await connection.execute(text(f"ALTER DATABASE {database} ALLOW_CONNECTIONS false"))
         await engine.dispose()
         task = asyncio.create_task(worker.run(poll_seconds=1))
-        await asyncio.sleep(0.2)
+        # healthy starts False; wait for an actual rejected poll before
+        # restoring the DB so this exercises the intended pre-claim outage.
+        await asyncio.wait_for(outage_observed.wait(), timeout=10)
         assert not task.done(), "database outage permanently killed the operation worker"
         assert worker.healthy is False
         async with admin.connect() as connection:
             await connection.execute(text(f"ALTER DATABASE {database} ALLOW_CONNECTIONS true"))
-        async with asyncio.timeout(10):
-            while (await registry.get_operation(operation.operation_id, principal=alice)).phase != "completed":
-                await asyncio.sleep(0.1)
+        try:
+            async with asyncio.timeout(10):
+                while (await registry.get_operation(operation.operation_id, principal=alice)).phase != "completed":
+                    await asyncio.sleep(0.1)
+        except TimeoutError:
+            details = f"provider_steps={len(provider.resources)}, healthy={worker.healthy}"
+            try:
+                async with asyncio.timeout(1):
+                    async with factory() as session:
+                        row = await session.get(NebiusEnvironmentOperation, operation.operation_id)
+                        pending = await session.scalar(select(func.count()).select_from(NebiusEnvironmentResource).where(
+                            NebiusEnvironmentResource.operation_id == operation.operation_id,
+                            NebiusEnvironmentResource.phase == "planned",
+                        ))
+                        details += (f", phase={row.phase}, epoch={row.runner_epoch}, "
+                                    f"leased={row.lease_expires_at is not None}, pending={pending}")
+            except Exception as error:
+                # Diagnostics must not hide the original timeout or print a DSN.
+                details += f", state_unavailable={type(error).__name__}"
+            pytest.fail("worker recovery timed out: " + details)
         assert worker.healthy is True
     finally:
         if task is not None:

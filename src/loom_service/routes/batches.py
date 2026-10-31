@@ -1204,20 +1204,6 @@ async def _create_batch_record(
             ).inc()
             raise
 
-    for conn_id, model_id in sorted(codex_models, key=str):
-        await refresh_codex_model_preflight(
-            request.app.state.session_factory,
-            provider_connection_id=conn_id,
-            provider_model_id=model_id,
-        )
-    for conn_id, model_id, context in provider_model_checks:
-        await reject_if_known_failed_provider_model(
-            s,
-            provider_connection_id=conn_id,
-            provider_model_id=model_id,
-            context=context,
-        )
-
     if payload.provider_connection_id is not None:
         provider_connection = (
             await s.execute(
@@ -1446,6 +1432,23 @@ async def _create_batch_record(
             reason="agent_task_incompat",
             status_code=exc.status_code,
             detail=str(exc.detail),
+        )
+
+    # Generation probes have their own committed cache transaction. Resolve
+    # catalog facts and the selected execution target before those side effects,
+    # including for dry-run requests that cannot select the requested workload.
+    for conn_id, model_id in sorted(codex_models, key=str):
+        await refresh_codex_model_preflight(
+            request.app.state.session_factory,
+            provider_connection_id=conn_id,
+            provider_model_id=model_id,
+        )
+    for conn_id, model_id, context in provider_model_checks:
+        await reject_if_known_failed_provider_model(
+            s,
+            provider_connection_id=conn_id,
+            provider_model_id=model_id,
+            context=context,
         )
 
     if dry_run:
@@ -1834,7 +1837,7 @@ async def dry_run_batch(
     sc: SessionAndCtx,
     payload: _CreateBatch,
 ) -> dict[str, Any]:
-    """Run batch admission and resolve every axis without writing anything."""
+    """Run admission without creating a Batch or Trial; provider probes may cache evidence."""
     s, ctx = sc
     require_scope(ctx, "submit")
     require_submitting_user(ctx)

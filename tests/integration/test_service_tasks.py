@@ -82,6 +82,7 @@ async def tasks_setup(
         )
         s.execute(
             insert(Benchmark).values(
+                execution_state="runnable",
                 id="humaneval",
                 display_name="HumanEval",
                 upstream_kind="huggingface",
@@ -612,6 +613,7 @@ async def test_count_excludes_unsupported_ui_benchmarks(
     with sl() as s:
         s.execute(
             insert(Benchmark).values(
+                execution_state="runnable",
                 id="osworld",
                 display_name="OSWorld",
                 upstream_kind="git",
@@ -651,8 +653,8 @@ async def test_count_excludes_unsupported_ui_benchmarks(
             json={"task_filter": {}},
         )
 
-    assert osworld_count.status_code == 200
-    assert osworld_count.json() == {"count": 0}
+    assert osworld_count.status_code == 409
+    assert osworld_count.json()["detail"]["reason"] == "unsupported_runtime"
     assert all_count.status_code == 200
     assert all_count.json() == {"count": 3}
 
@@ -667,6 +669,7 @@ async def test_count_excludes_non_v1_builtin_benchmarks(
     with sl() as s:
         s.execute(
             insert(Benchmark).values(
+                execution_state="runnable",
                 id="browsecomp",
                 display_name="BrowseComp",
                 upstream_kind="huggingface",
@@ -706,8 +709,8 @@ async def test_count_excludes_non_v1_builtin_benchmarks(
             json={"task_filter": {}},
         )
 
-    assert browsecomp_count.status_code == 200
-    assert browsecomp_count.json() == {"count": 0}
+    assert browsecomp_count.status_code == 409
+    assert browsecomp_count.json()["detail"]["reason"] == "not_v1_supported"
     assert all_count.status_code == 200
     assert all_count.json() == {"count": 3}
 

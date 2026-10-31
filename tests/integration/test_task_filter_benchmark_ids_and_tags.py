@@ -28,6 +28,7 @@ async def session(
     sl = sessionmaker(sync_engine)
     with sl() as s:
         s.execute(insert(Benchmark).values(
+            execution_state="runnable",
             id="aime-24", display_name="AIME 2024",
             upstream_kind="huggingface",
             upstream_locator="x", upstream_revision="main",
@@ -35,6 +36,7 @@ async def session(
             splits=["train"], series="aime",
         ))
         s.execute(insert(Benchmark).values(
+            execution_state="runnable",
             id="aime-25", display_name="AIME 2025",
             upstream_kind="huggingface",
             upstream_locator="y", upstream_revision="main",

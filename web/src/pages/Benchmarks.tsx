@@ -47,6 +47,11 @@ interface BenchmarkRow {
   readiness_message?: string | null;
   selectable?: boolean;
   blocker_reason?: string | null;
+  catalog_admission_state?: string;
+  target_compatibility_state?: string;
+  qualification_state?: string;
+  qualification_scope?: string[];
+  support_policy_state?: string;
 }
 
 function readinessLabel(row: BenchmarkRow): string {
@@ -217,6 +222,16 @@ export default function Benchmarks(): JSX.Element {
                         <p className="leading-relaxed text-slate-500">
                           {readinessMessage(b)}
                         </p>
+                        {b.catalog_admission_state ? (
+                          <dl className="grid grid-cols-[auto_1fr] gap-x-2 text-[11px]">
+                            <dt>Catalog</dt><dd>{b.catalog_admission_state}</dd>
+                            <dt>Target compatibility</dt><dd>{b.target_compatibility_state ?? "unknown"}</dd>
+                            <dt>Runtime qualification</dt><dd>{b.qualification_state ?? "unknown"}</dd>
+                            {b.qualification_scope?.length ? (
+                              <><dt>Qualified tasks</dt><dd>{b.qualification_scope.join(", ")}</dd></>
+                            ) : null}
+                          </dl>
+                        ) : null}
                         {readinessCounts(b) ? (
                           <p className="font-mono text-[11px] text-slate-600">
                             {readinessCounts(b)}

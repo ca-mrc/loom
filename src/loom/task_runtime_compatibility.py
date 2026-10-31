@@ -4,14 +4,47 @@ from __future__ import annotations
 
 from typing import Literal
 
+from loom.execution_architecture import execution_cpu_arch
 from loom.models.task import TaskConfig
+
+
+def task_hardware_rejections(task: TaskConfig) -> tuple[str, ...]:
+    """Known unsupported hardware contracts, independent of queue capacity.
+
+    No selected-target evidence is invented: this only rejects contracts the
+    current runtime cannot satisfy on any execution target. Transient capacity
+    and quota remain with the existing selected-backend admission.
+    """
+    reasons = list(_exact_accelerator_rejections(task))
+    environments = [("environment", task.environment)]
+    if task.verifier.environment is not None:
+        environments.append(("verifier.environment", task.verifier.environment))
+    for path, environment in environments:
+        try:
+            execution_cpu_arch(environment.cpu_arch)
+        except ValueError:
+            reasons.append(f"{path}.cpu_arch: unsupported_cpu_architecture")
+    return tuple(reasons)
+
+
+def _exact_accelerator_rejections(task: TaskConfig) -> tuple[str, ...]:
+    environments = [("environment", task.environment)]
+    if task.verifier.environment is not None:
+        environments.append(("verifier.environment", task.verifier.environment))
+    return tuple(
+        f"{path}.gpu_types: exact_gpu_model_runtime_unavailable"
+        for path, environment in environments if environment.gpu_types
+    )
 
 
 def task_runtime_rejections(
     task: TaskConfig, *, agent_name: str | None = None,
     runtime: Literal["hosted", "legacy"] = "hosted",
+    check_target_capabilities: bool = True,
 ) -> tuple[str, ...]:
     reasons = [f"{issue.path}:{issue.line}: {issue.code}" for issue in task.import_blockers]
+    if check_target_capabilities:
+        reasons.extend(_exact_accelerator_rejections(task))
     if runtime == "hosted" and task.verifier.environment is not None:
         from loom.models.trial import TrialConfig
         from loom.verifier_runtime import independent_verifier_rejections
@@ -23,8 +56,6 @@ def task_runtime_rejections(
     if task.verifier.environment is not None:
         environments.append(("verifier.environment", task.verifier.environment))
     for path, env in environments:
-        if env.gpu_types:
-            reasons.append(f"{path}.gpu_types: exact_gpu_model_runtime_unavailable")
         if env.compose_files and env.single_service_compose is None:
             if runtime == "legacy" or path != "environment" or env.native_compose is None:
                 reasons.append(f"{path}.compose_files: native_compose_runtime_unavailable")

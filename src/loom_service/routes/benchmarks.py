@@ -57,6 +57,7 @@ def _readiness_for_benchmark(
             upstream_kind=b.upstream_kind,
             upstream_locator=b.upstream_locator,
             upstream_revision=b.upstream_revision,
+            execution_state=b.execution_state,
         ),
         tasks=tasks,
         registry_names=registry_names,

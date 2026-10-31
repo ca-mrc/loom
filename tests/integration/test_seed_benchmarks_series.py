@@ -27,7 +27,7 @@ from loom.db.schema import Benchmark
 def session(postgres_url: str):
     engine = create_engine(postgres_url, future=True)
     sl = sessionmaker(engine)
-    registry_ids = tuple(REGISTRY)
+    registry_ids = tuple(sorted({*REGISTRY, *(adapter.name for adapter in REGISTRY.values())}))
     with sl() as s:
         s.execute(delete(Benchmark).where(Benchmark.id.in_(registry_ids)))
         s.commit()

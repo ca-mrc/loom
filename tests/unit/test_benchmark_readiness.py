@@ -190,3 +190,96 @@ def test_arm_catalog_stays_visible_with_explicit_unsupported_diagnostic() -> Non
     display = readiness_display_fields(item)
     assert display["selectable"] is False
     assert "x86_64 only" in display["readiness_message"]
+
+
+def test_pending_and_historical_profiles_never_project_as_ready() -> None:
+    from dataclasses import replace
+
+    from loom.benchmark_readiness import readiness_display_fields
+
+    for state, reason in (("pending", "benchmark_not_runnable"), ("historical", "benchmark_retired")):
+        item = build_readiness_item(
+            replace(_benchmark(), execution_state=state),
+            tasks=[TaskAuditSource(
+                id="fake-bench/task-001", config=_valid_task_config(), source=None,
+            )],
+            registry_names={"fake-bench"},
+        )
+        assert item.blocker_reason == reason
+        assert item.catalog_admission_state == state
+        assert item.license_allowed_task_count == 0
+        assert readiness_display_fields(item)["selectable"] is False
+
+
+def test_admission_does_not_claim_target_or_runtime_qualification() -> None:
+    from dataclasses import replace
+
+    from loom.benchmark_readiness import readiness_display_fields
+
+    item = build_readiness_item(
+        replace(_benchmark("arbitrary-new-adapter"), execution_state="runnable"),
+        tasks=[TaskAuditSource(
+            id="arbitrary-new-adapter/task-001",
+            config=_valid_task_config("arbitrary-new-adapter/task-001"), source=None,
+        )],
+        registry_names={"arbitrary-new-adapter"},
+    )
+    fields = readiness_display_fields(item)
+    assert fields["selectable"] is True
+    assert fields["catalog_admission_state"] == "admitted"
+    assert fields["target_compatibility_state"] == "unknown"
+    assert fields["qualification_state"] == "unknown"
+    assert fields["qualification_scope"] == []
+    assert fields["support_policy_state"] == "supported"
+
+
+def test_exact_accelerator_is_incompatible_without_changing_admission() -> None:
+    from dataclasses import replace
+
+    config = _valid_task_config()
+    config["environment"]["gpu_types"] = ["H100"]
+    config["environment"]["gpus"] = 1
+    item = build_readiness_item(
+        replace(_benchmark(), execution_state="runnable"),
+        tasks=[TaskAuditSource(id="fake-bench/task-001", config=config, source=None)],
+        registry_names={"fake-bench"},
+    )
+    assert item.catalog_admission_state == "admitted"
+    assert item.target_compatibility_state == "incompatible"
+    assert item.blocker_reason == "task_requirements_unsupported"
+    assert item.qualification_state == "unknown"
+    assert any("exact_gpu_model_runtime_unavailable" in reason for reason in item.runtime_blockers)
+
+
+def test_reviewed_support_policy_cannot_be_overridden_by_task_metadata() -> None:
+    from loom.catalog_policy import catalog_support_policy
+
+    config = _valid_task_config("gaia/task-001")
+    config["metadata"] = {"support_policy": "supported", "verified": True}
+    item = build_readiness_item(
+        _benchmark("gaia"),
+        tasks=[TaskAuditSource(id="gaia/task-001", config=config, source=None)],
+        registry_names={"gaia"},
+    )
+    assert catalog_support_policy("gaia").state == "deferred_support"
+    assert item.blocker_reason == "deferred_support"
+    assert item.qualification_state == "unknown"
+
+
+def test_verifier_hardware_uses_same_target_rejection_as_agent_hardware() -> None:
+    from dataclasses import replace
+
+    config = _valid_task_config()
+    config["verifier"].update({
+        "env_mode": "separate",
+        "environment": {"os": "linux", "docker_image": "python:3.12-slim", "cpu_arch": "arm64"},
+    })
+    item = build_readiness_item(
+        replace(_benchmark(), execution_state="runnable"),
+        tasks=[TaskAuditSource(id="fake-bench/task-001", config=config, source=None)],
+        registry_names={"fake-bench"},
+    )
+    assert item.catalog_admission_state == "admitted"
+    assert item.target_compatibility_state == "incompatible"
+    assert item.blocker_reason == "unsupported_cpu_architecture"
+    assert any("verifier.environment.cpu_arch" in reason for reason in item.runtime_blockers)

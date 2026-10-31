@@ -27,7 +27,6 @@ from loom.db.schema import (
 from loom.db.schema import Task as TaskRow
 from loom.db.schema import Trial as TrialRow
 from loom.db.task_set_visibility import visible_tasks
-from loom.execution_architecture import execution_cpu_arch
 from loom.llm_call_ledger import serialize_llm_call
 from loom.models.cancellation import CancellationRequest
 from loom.models.task import TaskConfig, normalize_steps
@@ -59,6 +58,7 @@ from loom_service.session_auth import (
     verify_session_cookie,
 )
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
+from loom_service.task_filter import reject_unsupported_task_hardware
 
 router = APIRouter()
 
@@ -351,6 +351,8 @@ async def submit_trial(
                 session,
                 [task_row.benchmark_id],
             )
+        if task_row is not None:
+            await reject_unsupported_task_hardware(session, [task_row.id])
     if task_row is None:
         raise HTTPException(status_code=404, detail="task not found")
 
@@ -363,10 +365,6 @@ async def submit_trial(
             status_code=400,
             detail=f"invalid task config for {task_id}: {exc}",
         ) from exc
-    try:
-        execution_cpu_arch(task_config.environment.cpu_arch)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     # Snapshot deployment RetryPolicy defaults into the trial payload at submit
     # time when the submitter didn't set an explicit `retry` block (#401). Persisting
     # the resolved policy keeps clone/re-run reproducible after an operator retunes

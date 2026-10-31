@@ -20,6 +20,7 @@ from sqlalchemy import ColumnElement, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from loom.benchmark_publication import prepare_profile_publication
 from loom.config.benchmarks import LocalBenchmarkEntry
 from loom.db.schema import Benchmark
 from loom.db.schema import Task as TaskRow
@@ -188,6 +189,9 @@ async def publish_local_benchmark(
                     # from #369); the DB row's `config` JSONB carries
                     # the Loom-schema form so the worker validates.
                     raw_cfg = normalize_terminal_bench_task_toml(raw_cfg, task_id=task_id)
+                    # Persist the catalog execution identity while retaining
+                    # authored task.toml bytes in the immutable source bundle.
+                    raw_cfg["task"]["id"] = task_id
                     if profile == NEBIUS_TERMINUS_PROFILE:
                         # #1996: adapt staged verifier + Loom config after
                         # normalize so TB absolute verifier paths are corrected
@@ -270,6 +274,15 @@ async def publish_local_benchmark(
 
             # Register only after every upload/preflight succeeded. Reuse the
             # historical physical-profile lock rather than bypassing activation.
+            identity = {
+                "upstream_kind": prepared_adapter.manifest["upstream_kind"] if prepared_adapter else S3_FOLDER_KIND,
+                "upstream_locator": prepared_adapter.manifest["upstream_locator"] if prepared_adapter else source_prefix,
+                "upstream_revision": prepared_adapter.manifest.get("upstream_revision", "") if prepared_adapter else "",
+                "profile_provenance": prepared_adapter.manifest.get("benchmark_profile_provenance", {}) if prepared_adapter else {},
+            }
+            state = await prepare_profile_publication(
+                session, profile_id=entry.id, profile_identity=identity, tasks=prepared_rows,
+            )
             exact_existing = False
             if entry.id == "terminal-bench-2@tb2.1-r6":
                 from loom_benchmark_tool.register_cmd import (
@@ -291,6 +304,7 @@ async def publish_local_benchmark(
                 await _upsert_benchmark(
                     session, entry=entry, source_prefix=source_prefix, imported_by=imported_by,
                     adapter_manifest=prepared_adapter.manifest if prepared_adapter else None,
+                    publication_state=state,
                 )
                 for values in prepared_rows:
                     existing = await _get_task(session, values["id"])
@@ -335,6 +349,7 @@ async def _upsert_benchmark(
     source_prefix: str,
     imported_by: str | None,
     adapter_manifest: dict[str, Any] | None = None,
+    publication_state: str | None = None,
 ) -> None:
     origin = None
     values: dict[str, Any] = dict(
@@ -355,11 +370,25 @@ async def _upsert_benchmark(
         values["splits"] = adapter_manifest["splits"]
         values["profile_provenance"] = adapter_manifest["benchmark_profile_provenance"]
         origin = values["profile_provenance"].get("upstream_origin")
-        if origin is not None:
-            # Import and conversion never establish executable or full-profile qualification.
-            values["execution_state"] = "pending"
-        if entry.id == "terminal-bench-2@tb2.1-r6":
-            values["execution_state"] = "pending"
+    if publication_state is None:
+        from loom.benchmark_admission import publication_execution_state
+        from loom.benchmark_publication import lock_profile_selector
+        await lock_profile_selector(session, entry.id)
+        existing = await session.scalar(select(Benchmark).where(Benchmark.id == entry.id).with_for_update())
+        publication_state = publication_execution_state(
+            existing.execution_state if existing else None, execution_changed=False,
+        )
+    values["execution_state"] = publication_state
+    if publication_state == "runnable" and "profile_provenance" in values:
+        existing = await session.get(Benchmark, entry.id)
+        if existing is not None:
+            # Preserve observations on identical execution facts; descriptions
+            # from a new publication cannot erase accepted evidence.
+            from loom.benchmark_publication import execution_profile_provenance
+            semantic = execution_profile_provenance(existing.profile_provenance or {})
+            observations = {key: value for key, value in (existing.profile_provenance or {}).items()
+                            if key not in semantic}
+            values["profile_provenance"] = {**values["profile_provenance"], **observations}
     statement = pg_insert(Benchmark).values(id=entry.id, **values)
     # PostgreSQL evaluates this predicate against the conflicting row under its
     # own lock, including concurrent first imports. A prior SELECT cannot bind

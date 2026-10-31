@@ -162,10 +162,9 @@ async def test_local_sync_creates_rows(
                 assert t.source == f"fixture://{t.id}"
                 assert t.license == "MIT"
                 assert t.benchmark_id == "team-evals"
-                # config is the raw tomllib dict — must include task table
-                assert t.config["task"]["id"] in {
-                    "alpha", "beta", "gamma",
-                }
+                # Authored files retain their local names; catalog configs
+                # carry the qualified execution identity for shared admission.
+                assert t.config["task"]["id"] == t.id
                 assert len(t.checksum) == 64  # sha256 hex
     finally:
         async with factory() as session:

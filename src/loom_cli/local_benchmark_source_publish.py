@@ -18,7 +18,8 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from loom.db.schema import Benchmark, Task
+from loom.benchmark_publication import prepare_profile_publication
+from loom.db.schema import Task
 from loom.models.task import TaskConfig
 from loom.nebius_terminus_ingest import (
     NEBIUS_TERMINUS_PROFILE,
@@ -127,7 +128,7 @@ async def publish_versioned_local_benchmark(
                     )
                     authored.write_text(tomli_w.dumps(adapted_document))
                 registration = prepare_task_bundle_registration(
-                    staged, task_id=task_id,
+                    staged, task_id=task_id, check_target_architecture=False,
                 )
                 spec = TaskBundleSourceSpecV1.from_registration(registration, bucket=bucket)
                 if adapt_stats is not None:
@@ -145,47 +146,40 @@ async def publish_versioned_local_benchmark(
         # Serialize a whole benchmark before any task/image/source lock. Upload
         # failures above leave only recovery records, never a partial catalog.
         async with sessions.begin() as session:
-            # Admission belongs to the exact catalog snapshot. Lock the parent
-            # before comparing rows, so concurrent activation/reimport cannot
-            # retain admission for changed input or revive a historical profile.
-            previous = await session.scalar(
-                select(Benchmark).where(Benchmark.id == entry.id).with_for_update(),
-            ) if native_origin is not None else None
-            if previous is not None and previous.execution_state == "historical":
-                raise ValueError("cannot republish a historical native benchmark")
-            retain_admission = bool(
-                previous is not None and previous.execution_state == "runnable"
-                and isinstance(result, PreparedAdapterBenchmark)
-                and previous.profile_provenance == result.manifest["benchmark_profile_provenance"]
+            values_by_id = {
+                task_id: dict(
+                    id=task_id, checksum=spec.manifest.task_checksum,
+                    config=spec.task_config, source=spec.source_uri,
+                    source_provenance={**adapter_tasks.get(task_id, {}).get("source_provenance", {}), **spec.provenance},
+                    license=entry.license_spdx, benchmark_id=entry.id,
+                    **({"tags": adapter_tasks[task_id]["tags"]} if task_id in adapter_tasks else {}),
+                ) for task_id, (spec, _) in prepared.items()
+            }
+            manifest = result.manifest if isinstance(result, PreparedAdapterBenchmark) else None
+            identity = {
+                "upstream_kind": manifest["upstream_kind"] if manifest else "s3-folder",
+                "upstream_locator": manifest["upstream_locator"] if manifest else source_prefix,
+                "upstream_revision": manifest.get("upstream_revision", "") if manifest else "",
+                "profile_provenance": manifest.get("benchmark_profile_provenance", {}) if manifest else {},
+            }
+            state = await prepare_profile_publication(
+                session, profile_id=entry.id, profile_identity=identity,
+                tasks=list(values_by_id.values()),
             )
-            previous_ids = set(await session.scalars(
-                select(Task.id).where(Task.benchmark_id == entry.id),
-            )) if retain_admission else set()
-            retain_admission = retain_admission and previous_ids == set(prepared)
             await _upsert_benchmark(
                 session, entry=entry, source_prefix=source_prefix, imported_by=imported_by,
-                adapter_manifest=result.manifest if isinstance(result, PreparedAdapterBenchmark) else None,
+                adapter_manifest=manifest, publication_state=state,
             )
             tasks = []
-            for task_id, (spec, _) in sorted(prepared.items()):
+            for task_id in sorted(prepared):
                 existing = await session.scalar(
                     select(Task).where(Task.id == task_id).with_for_update(),
                 )
-                values = dict(
-                    checksum=spec.manifest.task_checksum,
-                    config=spec.task_config,
-                    source=spec.source_uri,
-                    source_provenance={**adapter_tasks.get(task_id, {}).get("source_provenance", {}), **spec.provenance},
-                    license=entry.license_spdx,
-                    benchmark_id=entry.id,
-                    **({"tags": adapter_tasks[task_id]["tags"]} if task_id in adapter_tasks else {}),
-                )
+                values = {key: value for key, value in values_by_id[task_id].items() if key != "id"}
                 if existing is None:
                     inserted += 1
-                    retain_admission = False
                 elif any(getattr(existing, key) != value for key, value in values.items()):
                     updated += 1
-                    retain_admission = False
                 else:
                     unchanged += 1
                 task = (
@@ -201,12 +195,6 @@ async def publish_versioned_local_benchmark(
                 uploads={task_id: ticket for task_id, (_, ticket) in prepared.items()},
                 now=datetime.now(UTC),
             )
-            if retain_admission:
-                # The upsert deliberately defaults every native publication to
-                # pending. Restore only the already-admitted identical snapshot.
-                benchmark = await session.get(Benchmark, entry.id, populate_existing=True)
-                assert benchmark is not None
-                benchmark.execution_state = "runnable"
     finally:
         await engine.dispose()
     return LocalBenchmarkPublishStats(

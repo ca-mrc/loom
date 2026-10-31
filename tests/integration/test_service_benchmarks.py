@@ -95,6 +95,7 @@ async def benchmarks_setup(
         ):
             s.execute(
                 insert(Benchmark).values(
+                    execution_state="runnable",
                     id=bid,
                     display_name=dn,
                     upstream_kind="huggingface",
@@ -322,6 +323,7 @@ async def test_list_benchmarks_keeps_non_v1_builtin_visible_but_disabled(
     with sl() as s:
         s.execute(
             insert(Benchmark).values(
+                    execution_state="runnable",
                 id="browsecomp",
                 display_name="BrowseComp",
                 upstream_kind="huggingface",
@@ -396,6 +398,7 @@ async def test_list_benchmarks_hides_sample_tasks_local_benchmark(
     with sl() as s:
         s.execute(
             insert(Benchmark).values(
+                    execution_state="runnable",
                 id="sample-tasks",
                 display_name="Sample Tasks",
                 upstream_kind="local-folder",
@@ -746,3 +749,34 @@ async def test_unauthenticated_401(
     ) as ac:
         r = await ac.get("/api/v1/benchmarks")
     assert r.status_code == 401
+
+
+async def test_explicit_deferred_selection_matches_catalog_reason(
+    benchmarks_setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    app, raw = benchmarks_setup
+    sync_engine = create_engine(postgres_url)
+    with sessionmaker(sync_engine)() as session:
+        session.execute(insert(Task).values(
+            id="gaia/task-001", benchmark_id="gaia",
+            config=_valid_task_config("gaia/task-001"),
+            checksum="d" * 64, source=None,
+        ))
+        session.commit()
+    sync_engine.dispose()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as client:
+        headers = {"Authorization": f"Bearer {raw}"}
+        catalog = await client.get("/api/v1/benchmarks/gaia", headers=headers)
+        assert catalog.status_code == 200
+        assert catalog.json()["blocker_reason"] == "deferred_support"
+        for task_filter in (
+            {"benchmark_id": "gaia"},
+            {"task_ids": ["gaia/task-001"], "subset_kind": "explicit"},
+        ):
+            response = await client.post(
+                "/api/v1/tasks/count", json={"task_filter": task_filter}, headers=headers,
+            )
+            assert response.status_code == 409
+            assert response.json()["detail"]["reason"] == "deferred_support"

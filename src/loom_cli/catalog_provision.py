@@ -11,34 +11,50 @@ tokens, runs, or fixture artifacts.
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
-from typing import Any, Protocol, TypeVar
+from datetime import UTC, datetime
+from typing import Any, Protocol, TypeVar, cast
 
 from botocore.exceptions import ClientError
 from pydantic import ValidationError
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from loom.benchmark_publication import execution_profile_provenance, prepare_profile_publication
 from loom.benchmark_readiness import (
     BenchmarkAuditSource,
     TaskAuditSource,
     build_readiness_item,
 )
 from loom.db.schema import Agent as AgentModel
-from loom.db.schema import Benchmark
+from loom.db.schema import (
+    Benchmark,
+    TaskBundleSource,
+    TaskBundleSourceIncarnation,
+    TaskBundleSourceReference,
+    TaskBundleSourceVersion,
+    TaskBundleSourceWrite,
+)
 from loom.db.schema import Task as TaskModel
 from loom.models.task import TaskConfig
+from loom.task_bundle_catalog import publish_task_bundle_catalog
+from loom.task_bundle_source import TaskBundleSourceSpecV1
+from loom.task_bundle_source_journal import TaskBundleUpload
+from loom.task_bundle_source_publisher import SourceObjectReader, TaskBundleSourcePublisher
 from loom.task_image_materialization import ensure_task_image_materializations
+from loom.trajectory.immutable_object import ImmutableObjectVersion, read_verified_object_version
+from loom.trajectory.storage import ObjectStore
 from loom_benchmark_tool.db_url import normalize_db_url
 from loom_service.agent_catalog import AgentEntry, list_agents
 
 POSTGRES_CATALOG_UPSERT_BATCH_SIZE = 1000
 AGENT_CATALOG_VERSION = "service-catalog-v2"
 AGENT_CATALOG_SPEC_SCHEMA_VERSION = 2
-TB21_PROFILE_ID = "terminal-bench-2@tb2.1-r6"
 _WORKSPACE_EXEC_BENCHMARK_STEMS = (
     "skillflow",
     "skilllearnbench",
@@ -74,7 +90,7 @@ class BenchmarkRow:
     splits: list[str]
     series: str | None
     imported_by: str | None
-    execution_state: str = "runnable"
+    execution_state: str = "pending"
     profile_provenance: dict[str, Any] = field(default_factory=dict)
 
 
@@ -88,6 +104,8 @@ class TaskRow:
     benchmark_id: str | None
     tags: dict[str, str]
     source_provenance: dict[str, Any] = field(default_factory=dict)
+    registered_source_spec: dict[str, Any] | None = None
+    registered_source_versions: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -137,183 +155,53 @@ class CatalogObjectStore(Protocol):
 
 
 def _immutable_profile_provenance(value: dict[str, Any]) -> dict[str, Any]:
-    return {key: item for key, item in value.items() if key != "activation_audit"}
+    return execution_profile_provenance(value)
 
 
-def _stable_runtime_tags(value: dict[str, str]) -> dict[str, str]:
-    return {key: item for key, item in value.items() if key != "runtime_source_mirrored_at"}
-
-
-def _tb21_benchmark_identity(row: BenchmarkRow | Benchmark) -> dict[str, Any]:
+def _profile_identity(row: BenchmarkRow | Benchmark) -> dict[str, Any]:
     return {
-        "display_name": row.display_name,
-        "upstream_kind": row.upstream_kind,
-        "upstream_locator": row.upstream_locator,
+        "upstream_kind": row.upstream_kind, "upstream_locator": row.upstream_locator,
         "upstream_revision": row.upstream_revision,
-        "license_spdx": row.license_spdx,
-        "license_url": row.license_url,
-        "splits": list(row.splits),
-        "series": row.series,
-        "profile_provenance": _immutable_profile_provenance(
-            dict(row.profile_provenance or {}),
-        ),
+        "profile_provenance": _immutable_profile_provenance(dict(row.profile_provenance or {})),
     }
 
 
-def _tb21_task_identity(row: TaskRow | TaskModel) -> dict[str, Any]:
-    return {
-        "checksum": row.checksum,
-        "config": row.config,
-        "source": row.source,
-        "license": row.license,
-        "benchmark_id": row.benchmark_id,
-        "tags": _stable_runtime_tags(dict(row.tags or {})),
-        "source_provenance": dict(row.source_provenance or {}),
-    }
+def _task_identity(row: TaskRow | TaskModel) -> dict[str, Any]:
+    return {key: getattr(row, key) for key in (
+        "checksum", "config", "source", "benchmark_id", "source_provenance",
+    )}
 
 
-def _tb21_profile_drift(
-    *,
-    existing_benchmark: BenchmarkRow | Benchmark,
-    existing_tasks: Iterable[TaskRow | TaskModel],
-    incoming_benchmark: BenchmarkRow,
-    incoming_tasks: Iterable[TaskRow],
-) -> list[str]:
-    drift: list[str] = []
-    if _tb21_benchmark_identity(existing_benchmark) != _tb21_benchmark_identity(
-        incoming_benchmark,
-    ):
-        drift.append("benchmark identity/provenance")
-
-    existing_by_id = {row.id: row for row in existing_tasks}
-    incoming_by_id = {row.id: row for row in incoming_tasks}
-    if set(existing_by_id) != set(incoming_by_id):
-        drift.append("task set")
-    for task_id in sorted(set(existing_by_id) & set(incoming_by_id)):
-        if _tb21_task_identity(existing_by_id[task_id]) != _tb21_task_identity(
-            incoming_by_id[task_id],
-        ):
-            drift.append(f"task {task_id}")
-    return drift
+def _assert_catalog_rows_absent_or_exact(*, existing: CatalogRows, incoming: CatalogRows) -> None:
+    """Reject any physical-profile drift before copying destination bytes."""
+    existing_by_id = {row.id: row for row in existing.benchmarks}
+    existing_tasks = {row.id: row for row in existing.tasks}
+    for profile in incoming.benchmarks:
+        old = existing_by_id.get(profile.id)
+        new_tasks = {row.id: row for row in incoming.tasks if row.benchmark_id == profile.id}
+        if old is None:
+            if set(new_tasks) & set(existing_tasks):
+                raise ValueError("immutable catalog task identity collision during provisioning")
+            continue
+        if old.execution_state == "historical":
+            raise ValueError("historical profiles cannot be restored; use a new physical profile")
+        old_tasks = {key: row for key, row in existing_tasks.items() if row.benchmark_id == profile.id}
+        if (_profile_identity(old) != _profile_identity(profile)
+            or set(old_tasks) != set(new_tasks)
+            or any(_task_identity(old_tasks[key]) != _task_identity(row) for key, row in new_tasks.items())):
+            raise ValueError("immutable catalog profile drift during provisioning; use a new physical profile")
 
 
-def _assert_tb21_catalog_rows_absent_or_exact(
-    *,
-    existing: CatalogRows,
-    incoming: CatalogRows,
-) -> None:
-    """Fail before object copying if target TB2.1 differs from the restore."""
-
-    incoming_benchmark = next(
-        (row for row in incoming.benchmarks if row.id == TB21_PROFILE_ID),
-        None,
-    )
-    if incoming_benchmark is None:
-        return
-    incoming_tasks = [row for row in incoming.tasks if row.benchmark_id == TB21_PROFILE_ID]
-    existing_benchmark = next(
-        (row for row in existing.benchmarks if row.id == TB21_PROFILE_ID),
-        None,
-    )
-    if existing_benchmark is None:
-        incoming_task_ids = {row.id for row in incoming_tasks}
-        if any(row.id in incoming_task_ids for row in existing.tasks):
-            raise ValueError(
-                "immutable TB2.1 task ID collision during catalog provisioning",
-            )
-        return
-
-    drift = _tb21_profile_drift(
-        existing_benchmark=existing_benchmark,
-        existing_tasks=(row for row in existing.tasks if row.benchmark_id == TB21_PROFILE_ID),
-        incoming_benchmark=incoming_benchmark,
-        incoming_tasks=incoming_tasks,
-    )
-    if drift:
-        raise ValueError(
-            "immutable TB2.1 profile drift during catalog provisioning in "
-            f"{', '.join(drift)}; register a new physical profile instead",
-        )
-
-
-def _tb21_fail_closed_restore_rows(
-    *,
-    existing: CatalogRows,
-    incoming: CatalogRows,
-) -> CatalogRows | None:
-    """Build the minimal pre-copy write that disables an existing profile."""
-
-    existing_benchmark = next(
-        (row for row in existing.benchmarks if row.id == TB21_PROFILE_ID),
-        None,
-    )
-    incoming_benchmark = next(
-        (row for row in incoming.benchmarks if row.id == TB21_PROFILE_ID),
-        None,
-    )
-    if existing_benchmark is None or incoming_benchmark is None:
+def _fail_closed_restore_rows(*, existing: CatalogRows, incoming: CatalogRows) -> CatalogRows | None:
+    """Disable affected destination selectors before any storage changes."""
+    incoming_by_id = {row.id: row for row in incoming.benchmarks}
+    affected = {row.id for row in existing.benchmarks if row.id in incoming_by_id}
+    if not affected:
         return None
     return CatalogRows(
-        benchmarks=[incoming_benchmark],
-        tasks=[row for row in existing.tasks if row.benchmark_id == TB21_PROFILE_ID],
+        benchmarks=[incoming_by_id[key] for key in sorted(affected)],
+        tasks=[row for row in existing.tasks if row.benchmark_id in affected],
     )
-
-
-async def _assert_tb21_target_is_absent_or_exact(
-    session: AsyncSession,
-    *,
-    rows: CatalogRows,
-) -> None:
-    """Prevent generic catalog restore from rewriting the immutable TB2.1 ID."""
-
-    incoming_benchmark = next(
-        (row for row in rows.benchmarks if row.id == TB21_PROFILE_ID),
-        None,
-    )
-    if incoming_benchmark is None:
-        return
-    await session.execute(
-        text("SELECT pg_advisory_xact_lock(hashtext(:profile_id))"),
-        {"profile_id": TB21_PROFILE_ID},
-    )
-    incoming_tasks = sorted(
-        (row for row in rows.tasks if row.benchmark_id == TB21_PROFILE_ID),
-        key=lambda row: row.id,
-    )
-    existing_benchmark = await session.scalar(
-        select(Benchmark).where(Benchmark.id == TB21_PROFILE_ID).with_for_update(),
-    )
-    if existing_benchmark is None:
-        colliding = await session.scalar(
-            select(TaskModel.id).where(TaskModel.id.in_([row.id for row in incoming_tasks])),
-        )
-        if colliding is not None:
-            raise ValueError(
-                "immutable TB2.1 task ID collision during catalog provisioning",
-            )
-        return
-
-    existing_tasks = list(
-        (
-            await session.scalars(
-                select(TaskModel)
-                .where(TaskModel.benchmark_id == TB21_PROFILE_ID)
-                .order_by(TaskModel.id)
-                .with_for_update(),
-            )
-        ).all()
-    )
-    drift = _tb21_profile_drift(
-        existing_benchmark=existing_benchmark,
-        existing_tasks=existing_tasks,
-        incoming_benchmark=incoming_benchmark,
-        incoming_tasks=incoming_tasks,
-    )
-    if drift:
-        raise ValueError(
-            "immutable TB2.1 profile drift during catalog provisioning in "
-            f"{', '.join(drift)}; register a new physical profile instead",
-        )
 
 
 class PostgresCatalogStore:
@@ -334,6 +222,34 @@ class PostgresCatalogStore:
                         )
                     ).all(),
                 )
+                # Logical immutable source facts are portable; available-store
+                # incarnations and their physical versions are deliberately not.
+                source_specs = {
+                    (row.source_uri, owner): dict(row.spec_json)
+                    for row, owner in (await session.execute(
+                        select(TaskBundleSource, TaskBundleSourceReference.owner_id)
+                        .join(TaskBundleSourceIncarnation)
+                        .join(TaskBundleSourceReference, TaskBundleSourceReference.source_id == TaskBundleSource.id)
+                        .where(TaskBundleSourceIncarnation.state == "available")
+                        .where(TaskBundleSourceReference.kind == "catalog")
+                    )).all()
+                }
+                source_versions: dict[tuple[str, str], dict[str, str]] = {}
+                receipts = (await session.execute(
+                    select(TaskBundleSource.source_uri, TaskBundleSourceReference.owner_id,
+                           TaskBundleSourceWrite.object_key, TaskBundleSourceVersion.version_id)
+                    .join(TaskBundleSourceIncarnation, TaskBundleSourceIncarnation.source_id == TaskBundleSource.id)
+                    .join(TaskBundleSourceWrite, TaskBundleSourceWrite.incarnation_id == TaskBundleSourceIncarnation.id)
+                    .join(TaskBundleSourceVersion, TaskBundleSourceVersion.write_id == TaskBundleSourceWrite.id)
+                    .join(TaskBundleSourceReference, TaskBundleSourceReference.source_id == TaskBundleSource.id)
+                    .where(TaskBundleSourceIncarnation.state == "available",
+                           TaskBundleSourceVersion.state == "available",
+                           TaskBundleSourceReference.kind == "catalog")
+                    .order_by(TaskBundleSourceVersion.observed_at.desc(), TaskBundleSourceVersion.version_id)
+                )).all()
+                for uri, owner, key, version_id in receipts:
+                    source_versions.setdefault((uri, owner), {}).setdefault(key, version_id)
+
         finally:
             await engine.dispose()
 
@@ -374,12 +290,17 @@ class PostgresCatalogStore:
                     benchmark_id=row.benchmark_id,
                     tags=dict(row.tags or {}),
                     source_provenance=dict(row.source_provenance or {}),
+                    registered_source_spec=source_specs.get((row.source, row.id)) if row.source else None,
+                    registered_source_versions=source_versions.get((row.source, row.id), {}) if row.source else {},
                 )
                 for row in task_rows
             ],
         )
 
-    async def upsert_rows(self, rows: CatalogRows) -> None:
+    async def upsert_rows(
+        self, rows: CatalogRows, *, uploads: dict[str, TaskBundleUpload] | None = None,
+        preserve_profiles: frozenset[str] = frozenset(),
+    ) -> None:
         if not rows.agents and not rows.benchmarks and not rows.tasks:
             return
 
@@ -387,7 +308,27 @@ class PostgresCatalogStore:
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with session_factory() as session:
-                await _assert_tb21_target_is_absent_or_exact(session, rows=rows)
+                from loom.benchmark_admission import invalidate_benchmark_profile
+
+                states: dict[str, str] = {}
+                provenances: dict[str, dict[str, Any]] = {}
+                # Destination registration and admission are local authorities.
+                # Never inherit a lifecycle/qualification claim from the source.
+                for profile in sorted(rows.benchmarks, key=lambda row: row.id):
+                    local_state = await prepare_profile_publication(
+                        session, profile_id=profile.id, profile_identity=_profile_identity(profile),
+                        tasks=[dict(id=row.id, **_task_identity(row)) for row in rows.tasks if row.benchmark_id == profile.id],
+                        reject_semantic_changes=True,
+                    )
+                    existing_profile = await session.get(Benchmark, profile.id)
+                    preserve = existing_profile is not None and profile.id in preserve_profiles
+                    if existing_profile is not None and not preserve:
+                        await invalidate_benchmark_profile(session, profile.id)
+                    states[profile.id] = local_state if preserve else "pending"
+                    incoming_provenance = _immutable_profile_provenance(profile.profile_provenance)
+                    if preserve and existing_profile is not None:
+                        incoming_provenance = {**existing_profile.profile_provenance, **incoming_provenance}
+                    provenances[profile.id] = incoming_provenance
                 if rows.benchmarks:
                     for bench_batch in _batched(
                         rows.benchmarks,
@@ -405,8 +346,8 @@ class PostgresCatalogStore:
                                 "splits": row.splits,
                                 "series": row.series,
                                 "imported_by": row.imported_by,
-                                "execution_state": row.execution_state,
-                                "profile_provenance": row.profile_provenance,
+                                "execution_state": states[row.id],
+                                "profile_provenance": provenances[row.id],
                             }
                             for row in bench_batch
                         ]
@@ -468,6 +409,7 @@ class PostgresCatalogStore:
                             ):
                                 raise ValueError("catalog cannot overwrite a published agent version")
 
+                registered_tasks = []
                 if rows.tasks:
                     for task_batch in _batched(
                         sorted(rows.tasks, key=lambda row: row.id),
@@ -512,8 +454,14 @@ class PostgresCatalogStore:
                             .all()
                         )
                         for task_row in sorted(stored_tasks, key=lambda row: row.id):
-                            if task_row.config:
+                            if uploads is not None and task_row.id in uploads:
+                                registered_tasks.append(task_row)
+                            elif task_row.config:
                                 await ensure_task_image_materializations(session, task_row=task_row)
+                if registered_tasks:
+                    await publish_task_bundle_catalog(
+                        session, tasks=registered_tasks, uploads=uploads or {}, now=datetime.now(UTC),
+                    )
                 await session.commit()
         finally:
             await engine.dispose()
@@ -600,6 +548,15 @@ class Boto3CatalogObjectStore:
 
         return await asyncio.to_thread(_do)
 
+    async def get_registered_object(self, version: ImmutableObjectVersion) -> bytes:
+        def _do() -> bytes:
+            output = io.BytesIO()
+            read_verified_object_version(
+                self._client, version, max_bytes=version.size_bytes, destination=output,
+            )
+            return output.getvalue()
+        return await asyncio.to_thread(_do)
+
     async def put_object(self, *, bucket: str, key: str, body: bytes) -> None:
         def _do() -> None:
             self._client.put_object(Bucket=bucket, Key=key, Body=body)
@@ -615,6 +572,7 @@ async def provision_ready_benchmark_catalog(
     target_objects: CatalogObjectStore,
     target_bucket: str,
     imported_by: str | None = None,
+    target_source_store: ObjectStore | None = None,
 ) -> ProvisionStats:
     source_rows = await source_catalog.load_rows()
     ready_rows = _ready_catalog_rows(source_rows, target_bucket=target_bucket)
@@ -632,28 +590,99 @@ async def provision_ready_benchmark_catalog(
     )
 
     target_rows = await target_catalog.load_rows()
-    _assert_tb21_catalog_rows_absent_or_exact(
+    _assert_catalog_rows_absent_or_exact(
         existing=target_rows,
         incoming=ready_rows,
     )
-    fail_closed_rows = _tb21_fail_closed_restore_rows(
+    # An exact destination profile already retained by its own available
+    # journal needs no reactivation. Raw legacy copies still require their
+    # existing fresh-audit boundary before any public selector can run.
+    target_tasks = {row.id: row for row in target_rows.tasks}
+    preserve_profiles = frozenset(
+        profile.id for profile in target_rows.benchmarks
+        if profile.id in {row.id for row in ready_rows.benchmarks}
+        and any(row.benchmark_id == profile.id for row in ready_rows.tasks)
+        and all(
+            row.id in target_tasks and target_tasks[row.id].registered_source_spec is not None
+            for row in ready_rows.tasks if row.benchmark_id == profile.id
+        )
+    )
+    fail_closed_rows = _fail_closed_restore_rows(
         existing=target_rows,
-        incoming=ready_rows,
+        incoming=replace(ready_rows, benchmarks=[
+            row for row in ready_rows.benchmarks if row.id not in preserve_profiles
+        ]),
     )
     if fail_closed_rows is not None:
-        # Never inspect or replace target bytes while the existing physical
-        # profile is runnable. A fresh target-local audit is required after
-        # the complete object copy and final catalog upsert.
+        # Any affected destination profile must be pending before object copy;
+        # a fresh target-local admission follows the complete catalog restore.
         await target_catalog.upsert_rows(fail_closed_rows)
     await target_objects.ensure_bucket(target_bucket)
+    source_registered = {
+        row.id: row for row in object_copy_rows.tasks if row.registered_source_spec is not None
+    }
+    if any(row.source_provenance.get("bundle_content_manifest_sha256")
+           and row.id not in source_registered for row in object_copy_rows.tasks):
+        raise ValueError("source_unavailable: catalog references an unavailable registered source")
+    uploads: dict[str, TaskBundleUpload] = {}
+    registered_uploaded = registered_skipped = registered_bytes = 0
+    if source_registered:
+        if not callable(getattr(source_objects, "get_registered_object", None)):
+            raise ValueError("source_exact_version_reader_required: registered versions must be read exactly")
+        if target_source_store is None or not isinstance(target_catalog, PostgresCatalogStore):
+            raise ValueError("destination_source_authority_required: versioned destination publisher is required")
+        engine = create_async_engine(target_catalog.db_url, isolation_level="READ COMMITTED")
+        try:
+            publisher = TaskBundleSourcePublisher(
+                async_sessionmaker(engine, expire_on_commit=False), target_source_store,
+            )
+            target_by_id = {row.id: row for row in ready_rows.tasks}
+            for task_id, row in sorted(source_registered.items()):
+                source_spec = TaskBundleSourceSpecV1.model_validate_json(json.dumps(row.registered_source_spec))
+                if (source_spec.source_uri != row.source or source_spec.catalog_task_id != row.id
+                    or source_spec.task_config != row.config
+                    or source_spec.manifest.task_checksum != row.checksum.removeprefix("sha256:")):
+                    raise ValueError("source_snapshot_drift: registered catalog copy differs from source authority")
+                spec = TaskBundleSourceSpecV1.model_validate({**source_spec.model_dump(), "bucket": target_bucket})
+                ticket = await publisher.prepare_copy(
+                    spec, source_spec=source_spec, source_store=cast(SourceObjectReader, source_objects),
+                    source_versions=row.registered_source_versions,
+                )
+                uploads[task_id] = ticket
+                if ticket.available:
+                    registered_skipped += len(spec.objects)
+                else:
+                    registered_uploaded += len(ticket.intents)
+                    registered_bytes += sum(item.size_bytes for item in ticket.intents)
+                target_by_id[task_id] = replace(
+                    target_by_id[task_id], source=spec.source_uri,
+                    source_provenance={**row.source_provenance, **spec.provenance},
+                    registered_source_spec=spec.model_dump(mode="json"),
+                )
+            ready_rows = replace(ready_rows, tasks=[target_by_id[row.id] for row in ready_rows.tasks])
+        finally:
+            await engine.dispose()
+    # Journaled inventories include transport objects outside bundle prefixes;
+    # the publisher above transfers them exactly once. Legacy layouts retain
+    # their existing copy/audit boundary and remain pending until validated.
     stats = await _copy_s3_bundle_objects(
-        rows=object_copy_rows,
-        source_objects=source_objects,
-        target_objects=target_objects,
-        target_bucket=target_bucket,
+        rows=replace(object_copy_rows, tasks=[row for row in object_copy_rows.tasks if row.id not in source_registered]),
+        source_objects=source_objects, target_objects=target_objects, target_bucket=target_bucket,
+    )
+    stats = replace(
+        stats, ready_tasks=len(ready_rows.tasks),
+        source_objects=stats.source_objects + registered_uploaded + registered_skipped,
+        target_objects_uploaded=stats.target_objects_uploaded + registered_uploaded,
+        target_objects_skipped=stats.target_objects_skipped + registered_skipped,
+        bytes_uploaded=stats.bytes_uploaded + registered_bytes,
     )
     if stats.target_objects_missing == 0:
-        await target_catalog.upsert_rows(ready_rows)
+        if uploads and isinstance(target_catalog, PostgresCatalogStore):
+            await target_catalog.upsert_rows(
+                ready_rows, uploads=uploads, preserve_profiles=preserve_profiles,
+            )
+        else:
+            await target_catalog.upsert_rows(ready_rows)
     return stats
 
 
@@ -685,16 +714,15 @@ def _ready_catalog_rows(rows: CatalogRows, *, target_bucket: str) -> CatalogRows
         )
         if readiness.readiness_state != "runnable":
             continue
-        if benchmark.id == TB21_PROFILE_ID:
-            # Activation evidence is environment-local: copied object bytes
-            # must receive a fresh target audit before any selector can run.
-            benchmark = replace(
-                benchmark,
-                execution_state="pending",
-                profile_provenance=_immutable_profile_provenance(
-                    benchmark.profile_provenance,
-                ),
-            )
+        if benchmark.execution_state == "historical":
+            continue
+        # Source-store versions and qualification are not portable. The
+        # destination's shared admission checks its actual registered sources
+        # and capability contract before a selector can execute.
+        benchmark = replace(
+            benchmark, execution_state="pending",
+            profile_provenance=_immutable_profile_provenance(benchmark.profile_provenance),
+        )
         ready_benchmarks.append(benchmark)
         ready_tasks.extend(
             _rewrite_s3_task_source(task, target_bucket=target_bucket)
@@ -828,7 +856,15 @@ def _rewrite_s3_task_source(task: TaskRow, *, target_bucket: str) -> TaskRow:
     if parsed is None:
         return task
     _source_bucket, prefix = parsed
-    return replace(task, source=f"s3://{target_bucket}/{prefix}")
+    provenance = dict(task.source_provenance)
+    service_input = provenance.get("service_execution_input")
+    if isinstance(service_input, dict):
+        service_input = dict(service_input)
+        parsed_manifest = _parse_s3_uri(service_input.get("manifest_uri"))
+        if parsed_manifest is not None:
+            service_input["manifest_uri"] = f"s3://{target_bucket}/{parsed_manifest[1]}"
+        provenance["service_execution_input"] = service_input
+    return replace(task, source=f"s3://{target_bucket}/{prefix}", source_provenance=provenance)
 
 
 def _parse_s3_uri(source: str | None) -> tuple[str, str] | None:
