@@ -10,7 +10,7 @@ from typing import Annotated, Any, Literal, cast
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from pydantic import Field
+from pydantic import Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import HTTPConnection
 from starlette.responses import Response, StreamingResponse
@@ -35,6 +35,7 @@ from loom_control_plane.service_execution_output import (
     ServiceExecutionOutputCommitV1,
     ServiceExecutionOutputPrepareV1,
     ServiceExecutionPeerV1,
+    ServiceExecutionSmallFilesV1,
     ServiceExecutionTokenRequestV1,
     VerifiedExecutionPod,
     authorize_service_execution_peer,
@@ -628,6 +629,31 @@ async def complete_service_execution_output_file(
                     upload_token=upload_token,
                 ),
             )
+        except ServiceExecutionBrokerError as exc:
+            raise _broker_http(exc) from exc
+        except ArtifactCommitError as exc:
+            raise _artifact_http(exc) from exc
+
+
+@router.post("/outputs/{session_id}/small-files")
+async def upload_service_execution_small_files(
+    session_id: UUID, request: Request, upload_token: UploadTokenHeader,
+) -> dict[str, Any]:
+    # Bound bytes before JSON/base64 parsing, including chunked requests.
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > 2 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="small_file_batch_too_large")
+        body.extend(chunk)
+    try:
+        payload = ServiceExecutionSmallFilesV1.model_validate_json(body)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail="small_file_batch_invalid") from exc
+    async with _observed_output(request, payload, "small_files", session_id=session_id) as lease:
+        try:
+            return cast(dict[str, Any], await request.app.state.service_execution_output_service.small_files(
+                lease=lease, session_id=session_id, request=payload, upload_token=upload_token,
+            ))
         except ServiceExecutionBrokerError as exc:
             raise _broker_http(exc) from exc
         except ArtifactCommitError as exc:

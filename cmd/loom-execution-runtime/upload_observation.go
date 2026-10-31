@@ -56,6 +56,8 @@ func (b *workloadBroker) observeOutputHTTP(request *http.Request) *outputHTTPObs
 		operation = "prepare"
 	case len(parts) == 2 && parts[1] == "commit":
 		operation, session = "commit", observationUUID(parts[0])
+	case len(parts) == 2 && parts[1] == "small-files":
+		operation, session = "small_files", observationUUID(parts[0])
 	case len(parts) == 4 && parts[1] == "files" && parts[3] == "complete":
 		operation, session = "complete", observationUUID(parts[0])
 		file, _ = strconv.Atoi(parts[2])

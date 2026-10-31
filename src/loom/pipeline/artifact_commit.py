@@ -44,6 +44,9 @@ MAX_APPLICATION_BUFFER_BYTES = 64 * MiB
 MAX_MULTIPART_PARTS = 9_990
 MAX_PART_BYTES = 5 * GiB
 UPLOAD_TOKEN_TTL = timedelta(minutes=15)
+SMALL_FILE_MAX_BYTES = 256 * 1024
+SMALL_FILE_BATCH_MAX_BYTES = MiB
+SMALL_FILE_BATCH_MAX_FILES = 16
 
 ARTIFACT_PARTS = Counter(
     "loom_pipeline_artifact_parts_total",
@@ -521,6 +524,7 @@ class _SessionState:
     committed: CommittedArtifactsV1 | None = None
     checkpoint_envelope_json: dict[str, Any] | None = None
     checkpoint_envelope_digest: str | None = None
+    version: int = 0
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -532,6 +536,7 @@ class ArtifactCommitRepositoryV1(Protocol):
     async def add(self, session: _SessionState) -> None: ...
     async def get(self, session_id: UUID) -> _SessionState: ...
     async def save(self, session: _SessionState) -> None: ...
+    async def save_file(self, session: _SessionState, *, file_index: int) -> None: ...
     async def active(self) -> Iterable[_SessionState]: ...
 
 
@@ -562,6 +567,17 @@ class InMemoryArtifactCommitRepository:
 
     async def save(self, session: _SessionState) -> None:
         self.sessions[session.id] = session
+
+    async def save_file(self, session: _SessionState, *, file_index: int) -> None:
+        current = await self.get(session.id)
+        if current.state not in {"uploading", "uploaded"}:
+            raise ArtifactCommitError("session_not_uploading")
+        current.files[file_index] = session.files[file_index]
+        if all(item.verified is not None for item in current.files):
+            current.state = "uploaded"
+            current.actual_total_bytes = sum(item.verified.size_bytes for item in current.files if item.verified)
+        current.updated_at = session.updated_at
+        session.state, session.actual_total_bytes = current.state, current.actual_total_bytes
 
     async def active(self) -> Iterable[_SessionState]:
         return self.sessions.values()
@@ -849,6 +865,15 @@ class ArtifactCommitService:
         auth: UploadAuthV1,
     ) -> PartReceiptV1:
         session = await self._authorized(session_id, auth)
+        return await self._write_part(
+            session=session, file_index=file_index, part_number=part_number,
+            content_length=content_length, content_sha256=content_sha256, body=body,
+        )
+
+    async def _write_part(
+        self, *, session: _SessionState, file_index: int, part_number: int,
+        content_length: int, content_sha256: str, body: AsyncIterator[bytes],
+    ) -> PartReceiptV1:
         if session.state != "uploading" or not 0 <= file_index < len(session.files):
             raise ArtifactCommitError("session_not_uploading")
         file_state = session.files[file_index]
@@ -882,6 +907,7 @@ class ArtifactCommitService:
                 digest.update(chunk)
                 yield bytes(chunk)
 
+        created_upload = file_state.upload is None
         if file_state.upload is None:
             file_state.upload = await self._store.create_multipart_upload(
                 bucket=self._bucket,
@@ -906,7 +932,15 @@ class ArtifactCommitService:
         file_state.receipts[part_number] = receipt
         ARTIFACT_PARTS.labels(session.producer.commit_kind).inc()
         session.updated_at = self._now()
-        await self._repository.save(session)
+        try:
+            await self._repository.save_file(session, file_index=file_index)
+        except ArtifactCommitError:
+            # A rejected new upload was never attached by the repository. Do
+            # not leave it behind on a concurrent-file conflict or abort. An
+            # ambiguous database/network error is deliberately not handled here.
+            if created_upload:
+                await self._store.abort_multipart_upload(file_state.upload)
+            raise
         if (
             part_number == 1
             and self._multipart_fault_hook is not None
@@ -956,20 +990,25 @@ class ArtifactCommitService:
         auth: UploadAuthV1,
     ) -> VerifiedFileV1:
         session = await self._authorized(session_id, auth)
+        return await self._complete_file(session=session, file_index=file_index, ordered_parts=ordered_parts)
+
+    async def _complete_file(
+        self, *, session: _SessionState, file_index: int, ordered_parts: list[PartReceiptV1],
+    ) -> VerifiedFileV1:
+        if session.state == "aborted":
+            raise ArtifactCommitError("session_not_uploading")
         if not 0 <= file_index < len(session.files):
             raise ArtifactCommitError("file_not_found")
         file_state = session.files[file_index]
         if file_state.verified is not None:
             if ordered_parts != list(file_state.receipts.values()):
                 raise ArtifactCommitError("file_completion_conflict")
-            if all(item.verified is not None for item in session.files):
-                session.state = "uploaded"
-                session.actual_total_bytes = sum(
-                    item.verified.size_bytes for item in session.files if item.verified
-                )
+            if session.state in {"uploading", "uploaded"}:
                 session.updated_at = self._now()
-                await self._repository.save(session)
+                await self._repository.save_file(session, file_index=file_index)
             return file_state.verified
+        if session.state != "uploading":
+            raise ArtifactCommitError("session_not_uploading")
         expected = [file_state.receipts[index] for index in range(1, len(file_state.receipts) + 1)]
         if ordered_parts != expected or file_state.upload is None:
             raise ArtifactCommitError("part_receipt_drift")
@@ -1001,8 +1040,72 @@ class ArtifactCommitService:
                 item.verified.size_bytes for item in session.files if item.verified
             )
         session.updated_at = self._now()
-        await self._repository.save(session)
+        await self._repository.save_file(session, file_index=file_index)
         return file_state.verified
+
+    async def write_small_files(
+        self, *, session_id: UUID, files: Sequence[tuple[int, bytes]], auth: UploadAuthV1,
+    ) -> list[VerifiedFileV1]:
+        """One authorization/snapshot per bounded batch; retain durable file steps.
+
+        A response may be lost after any file. Replaying the exact payload skips
+        completed files and resumes multipart receipts, without publishing the
+        session. Large files continue through the streaming multipart protocol.
+        """
+        if (
+            not 1 <= len(files) <= SMALL_FILE_BATCH_MAX_FILES
+            or len({index for index, _ in files}) != len(files)
+            or sum(len(body) for _, body in files) > SMALL_FILE_BATCH_MAX_BYTES
+            or any(len(body) > SMALL_FILE_MAX_BYTES for _, body in files)
+        ):
+            raise ArtifactCommitError("small_file_batch_invalid")
+        session = await self._authorized(session_id, auth)
+        if not isinstance(session.producer, ServiceExecutionOutputProducerV1):
+            raise ArtifactCommitError("commit_kind_mismatch")
+        if session.state not in {"uploading", "uploaded"}:
+            raise ArtifactCommitError("session_not_uploading")
+        for index, body in files:
+            if not 0 <= index < len(session.files):
+                raise ArtifactCommitError("file_not_found")
+            plan = session.files[index].plan
+            if plan.producer != "service":
+                raise ArtifactCommitError("small_file_batch_invalid")
+            if (
+                plan.expected_size != len(body)
+                or plan.expected_sha256 is None
+                or len(body) > plan.expected_max_bytes
+            ):
+                raise ArtifactCommitError("part_digest_mismatch")
+        result = []
+        for index, payload in files:
+            file_state = session.files[index]
+            previous = file_state.receipts.get(1)
+            known_digest = (
+                file_state.verified.sha256 if file_state.verified is not None
+                else previous.sha256 if previous is not None else None
+            )
+            # A persisted receipt bypasses streaming on replay. Validate its
+            # supplied bytes here; fresh parts use the existing streaming hash.
+            if known_digest is not None and known_digest != digest_bytes(payload):
+                raise ArtifactCommitError("part_digest_mismatch")
+            if file_state.verified is not None:
+                # SQL loading can recover a lost multipart-completion response;
+                # persist that verified recovery before skipping the file.
+                await self._repository.save_file(session, file_index=index)
+                result.append(file_state.verified)
+                continue
+
+            async def stream_body(payload: bytes = payload) -> AsyncIterator[bytes]:
+                yield payload
+
+            expected_digest = file_state.plan.expected_sha256
+            assert expected_digest is not None
+            receipt = await self._write_part(
+                session=session, file_index=index, part_number=1,
+                content_length=len(payload), content_sha256=expected_digest, body=stream_body(),
+            )
+            result.append(await self._complete_file(session=session, file_index=index, ordered_parts=[receipt]))
+        return result
 
     async def read_verified_file(
         self,

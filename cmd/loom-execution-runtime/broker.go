@@ -110,10 +110,28 @@ type uploadPlanFile struct {
 }
 
 type uploadGrant struct {
-	UploadSessionID string           `json:"upload_session_id"`
-	UploadToken     string           `json:"upload_token"`
-	TokenExpiresAt  time.Time        `json:"token_expires_at"`
-	Files           []uploadPlanFile `json:"files"`
+	UploadSessionID string                `json:"upload_session_id"`
+	UploadToken     string                `json:"upload_token"`
+	TokenExpiresAt  time.Time             `json:"token_expires_at"`
+	Files           []uploadPlanFile      `json:"files"`
+	SmallFileBatch  *smallFileBatchLimits `json:"small_file_batch,omitempty"`
+}
+
+type smallFileBatchLimits struct {
+	MaxFiles      int   `json:"max_files"`
+	MaxTotalBytes int64 `json:"max_total_bytes"`
+	MaxFileBytes  int64 `json:"max_file_bytes"`
+}
+
+type smallOutputFile struct {
+	FileIndex int    `json:"file_index"`
+	Content   []byte `json:"content_base64"`
+}
+
+type verifiedOutputFile struct {
+	FileIndex int    `json:"file_index"`
+	SizeBytes int64  `json:"size_bytes"`
+	SHA256    string `json:"sha256"`
 }
 
 type partReceipt struct {
@@ -788,6 +806,88 @@ func retryOperationIf(ctx context.Context, operation func() error, retryable fun
 	return last
 }
 
+func (b *workloadBroker) uploadSmallOutputFiles(ctx context.Context, grant uploadGrant, root string, files []outputFile) (map[int]bool, error) {
+	completed := make(map[int]bool)
+	limits := grant.SmallFileBatch
+	if limits == nil {
+		return completed, nil // An older broker keeps the streaming protocol.
+	}
+	maxFiles := min(limits.MaxFiles, 16)
+	maxTotal := min(limits.MaxTotalBytes, int64(1024*1024))
+	maxFile := min(limits.MaxFileBytes, int64(256*1024), maxTotal)
+	if maxFiles < 1 || maxTotal < 1 || maxFile < 1 {
+		return nil, fmt.Errorf("invalid small-file upload limits")
+	}
+	batch := []smallOutputFile{}
+	var batchBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		payload := struct {
+			workloadIdentity
+			SchemaVersion string            `json:"schema_version"`
+			Files         []smallOutputFile `json:"files"`
+		}{b.identity, "loom.service-execution-small-files.v1", batch}
+		var result struct {
+			Files []verifiedOutputFile `json:"files"`
+		}
+		if err := retryOperation(ctx, func() error {
+			return b.doJSON(ctx, http.MethodPost, b.endpoint(fmt.Sprintf("/outputs/%s/small-files", grant.UploadSessionID)), payload,
+				map[string]string{"X-Loom-Upload-Token": grant.UploadToken}, &result)
+		}); err != nil {
+			return err
+		}
+		if len(result.Files) != len(batch) {
+			return fmt.Errorf("small-file upload receipt identity drift")
+		}
+		for i, receipt := range result.Files {
+			index := batch[i].FileIndex
+			if receipt.FileIndex != index || receipt.SizeBytes != files[index].SizeBytes || receipt.SHA256 != files[index].SHA256 {
+				return fmt.Errorf("small-file upload receipt identity drift")
+			}
+			completed[index] = true
+		}
+		batch, batchBytes = nil, 0
+		return nil
+	}
+	for index, file := range files {
+		if file.SizeBytes > maxFile {
+			continue
+		}
+		if len(batch) == maxFiles || batchBytes+file.SizeBytes > maxTotal {
+			if err := flush(); err != nil {
+				return nil, err
+			}
+		}
+		input, info, err := openRegularOutputFile(filepath.Join(root, filepath.FromSlash(file.RelativePath)))
+		if err != nil {
+			return nil, err
+		}
+		body, readErr := io.ReadAll(io.LimitReader(input, file.SizeBytes+1))
+		closeErr := input.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		if info.Size() != file.SizeBytes || int64(len(body)) != file.SizeBytes {
+			return nil, fmt.Errorf("output changed after upload inventory")
+		}
+		// Encode an empty file as an empty base64 string, never JSON null.
+		if body == nil {
+			body = []byte{}
+		}
+		batch = append(batch, smallOutputFile{FileIndex: index, Content: body})
+		batchBytes += file.SizeBytes
+	}
+	if err := flush(); err != nil {
+		return nil, err
+	}
+	return completed, nil
+}
+
 func (b *workloadBroker) commitOutputs(ctx context.Context, outputRoot, requestID string) (outputCommitEvidence, error) {
 	files, err := inventoryOutputs(outputRoot)
 	if err != nil {
@@ -811,6 +911,15 @@ func (b *workloadBroker) commitOutputs(ctx context.Context, outputRoot, requestI
 	for index, file := range files {
 		if grant.Files[index].FileIndex != index || grant.Files[index].RelativePath != file.RelativePath {
 			return outputCommitEvidence{}, fmt.Errorf("output upload plan identity drift")
+		}
+	}
+	completed, err := b.uploadSmallOutputFiles(ctx, grant, outputRoot, files)
+	if err != nil {
+		return outputCommitEvidence{}, fmt.Errorf("upload small output files: %w", err)
+	}
+	for index, file := range files {
+		if completed[index] {
+			continue
 		}
 		input, info, err := openRegularOutputFile(filepath.Join(outputRoot, filepath.FromSlash(file.RelativePath)))
 		if err != nil {

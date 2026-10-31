@@ -23,9 +23,10 @@ _PROCESS_ID = str(uuid4())
 _CONTEXT: ContextVar[dict[str, str | int] | None] = ContextVar("upload_observation", default=None)
 _PARENT: ContextVar[UploadSpan | None] = ContextVar("upload_observation_parent", default=None)
 _S3_OPERATION: ContextVar[str] = ContextVar("upload_s3_operation", default="other")
-Stage = Literal["gateway", "authorization", "processing", "spool", "sdk_worker", "s3_transport", "materialization"]
+Stage = Literal["gateway", "authorization", "processing", "database_pool", "database", "spool", "sdk_worker", "s3_transport", "materialization"]
 _OPERATIONS = frozenset({
-    "prepare", "part", "complete", "commit", "materialize", "copy",
+    "prepare", "part", "complete", "small_files", "commit", "materialize", "copy",
+    "load_session", "save_session", "save_file",
     "create_multipart_upload", "resume_multipart_upload", "upload_part",
     "upload_part_stream", "complete_multipart_upload", "abort_multipart_upload",
     "put_object", "get_object", "stat_object", "stream_object",

@@ -717,8 +717,10 @@ def append_terminus_runtime_tools(
 
 def _preparation_dockerfile(
     original: str, bootstrap: HarborOfflineBootstrap, workdir: str, identity: SandboxIdentityV1,
+    *, preserve_image_defaults: bool = False,
 ) -> str:
-    original = _without_packaged_openhands_runtime(original)
+    if not preserve_image_defaults:
+        original = _without_packaged_openhands_runtime(original)
     final_base, arch, alpine, instructions = _classify_terminus_base(original)
     suse = final_base == "opensuse/leap:15.5"
     fedora = final_base == "fedora:42"
@@ -786,6 +788,10 @@ def _preparation_dockerfile(
             f"mkdir -p /tests /logs/verifier /loom/verifier && "
             f"chown -R {uid}:{gid} /tests /logs/verifier /loom/verifier"
         )
+    if preserve_image_defaults:
+        # Native image execution already owns harness roots separately. Do not
+        # alter authored users, HOME, workdir, caches or business-tree ownership.
+        identity_setup = workspace_setup = "true"
     # Authored caches may be offline task inputs (for example Poetry wheels).
     # Disable only our uv download cache; never delete the image's HOME cache.
     alpine_packages = _TERMINUS_APK_PACKAGES.union(bootstrap.apk_packages)
@@ -809,14 +815,57 @@ def _preparation_dockerfile(
         + "USER root\n"
         + "COPY --from=ghcr.io/astral-sh/uv:0.9.5 /uv /usr/local/bin/loom-nebius-uv\n"
         + preparation
-        + f"""
+        + ("" if preserve_image_defaults else f"""
 {assets}ENV HOME={home}
 # Preserve the base image PATH and agent interpreter; verifier uses its own venv.
 USER {uid}:{gid}
 WORKDIR {workdir}
-"""
+""")
+        + (assets if preserve_image_defaults else "")
         + (run(_SUSE_TMUX_STARTUP_PROBE) if suse else "")
     )
+
+
+def prepare_native_verifier_dockerfile(original: str, bootstrap: HarborOfflineBootstrap) -> str:
+    """Build-only dependencies for a proven root image; retain native defaults.
+
+    The runtime samples motivating this adapter all use image-default UID/GID
+    zero. Unknown base identities, named users and dynamic USER expressions need
+    qualification instead of silently changing the task's runtime identity.
+    Resolve final-stage inheritance, ignoring USERs from unrelated build stages.
+    """
+    compatibility = classify_terminus_image(original)
+    stages: dict[str, str | None] = {}
+    user: str | None = None
+    alias: str | None = None
+    for instruction in compatibility.instructions:
+        if instruction.keyword == "FROM":
+            words = instruction.arguments.split()
+            if words[0].startswith("--platform="):
+                words.pop(0)
+            base = words[0]
+            family = base.removeprefix("docker.io/").removeprefix("library/").split("@", 1)[0]
+            user = stages.get(base.lower()) if base.lower() in stages else (
+                "root" if family.startswith(("python:", "debian:", "ubuntu:")) else None
+            )
+            if len(words) == 3:
+                stages[words[2].lower()] = user
+        elif instruction.keyword == "USER":
+            user = instruction.arguments.strip()
+        # Update only the current alias; later stages inherit its final USER.
+        if instruction.keyword == "FROM":
+            alias = words[2].lower() if len(words) == 3 else None
+        if alias is not None:
+            stages[alias] = user
+    if user not in {"root", "0", "root:root", "0:0"}:
+        raise ValueError("native verifier preparation requires a proven image-default root user")
+    prepared = _preparation_dockerfile(
+        original, bootstrap, "/app", SandboxIdentityV1(run_as_user=0, run_as_group=0, home="/root"),
+        preserve_image_defaults=True,
+    )
+    # Restore the exact authored root spelling (including its group) after the
+    # build-only USER root, without introducing HOME or WORKDIR instructions.
+    return prepared + f"USER {user}\n"
 
 
 def prepare_nebius_terminus_image(staged: Path, environment: dict[str, Any]) -> bool:
