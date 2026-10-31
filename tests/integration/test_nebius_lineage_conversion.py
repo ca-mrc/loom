@@ -232,6 +232,16 @@ def test_conversion_preserves_history_and_reaches_dev(
             if revision not in {"0135", "0136"}:
                 for row in before["task_image_materialization_attempts"]:
                     row["native_build"] = None
+            for row in before["task_image_materialization_attempts"]:
+                # These retained native records contain identity/CPU facts,
+                # never capacity or archive metadata. 0186 must add empty
+                # projections while preserving every original field exactly.
+                native = row.get("native_build") or {}
+                assert not set(native) & {"target_id", "capacity_reserved_at", "capacity_released_at",
+                                          "archive_cleanup_checked_at", "image_archives", "configmap"}
+                row.update(native_capacity_target_id=None, native_capacity_reserved_at=None,
+                           native_capacity_released_at=None, native_archive_checked_at=None,
+                           native_archive_has_images=False, native_archive_has_intents=False)
             assert after == before
             assert (
                 connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
