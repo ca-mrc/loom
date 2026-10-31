@@ -8,7 +8,7 @@ import re
 import sys
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -36,33 +36,35 @@ except urllib.error.HTTPError as error:
 '''
 
 
-def _api(kube: Kubectl, namespace: str, method: str, path: str, body: object = None) -> dict:
+def _api(kube: Kubectl, namespace: str, method: str, path: str, body: object = None) -> dict[str, Any]:
     result = json.loads(kube.run(
         "exec", "-n", namespace, "deployment/loom-control-plane", "--", "python", "-c",
         _API, method, path, json.dumps(body),
     ))
     if "error_status" in result:
         raise DeploymentError(f"control-plane tuning request rejected: HTTP {result['error_status']}")
-    return result
+    return cast(dict[str, Any], result)
 
 
-def _owners(config: dict) -> dict[str, dict]:
+def _owners(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {config["target_id"]: config, **{
         row["target_id"]: row for row in config.get("regional_execution_targets", [])
     }}
 
 
-def _env(deployment: dict) -> dict[str, str]:
+def _env(deployment: dict[str, Any]) -> dict[str, str]:
     return {row["name"]: row["value"] for row in
             deployment["spec"]["template"]["spec"]["containers"][0].get("env", [])
             if "value" in row}
 
 
-def _deployments(kube: Kubectl, namespace: str) -> list[dict]:
-    return json.loads(kube.run("get", "deployments", "-n", namespace, "-o", "json"))["items"]
+def _deployments(kube: Kubectl, namespace: str) -> list[dict[str, Any]]:
+    return cast(list[dict[str, Any]], json.loads(
+        kube.run("get", "deployments", "-n", namespace, "-o", "json"),
+    )["items"])
 
 
-def _runtime(kube: Kubectl, controller: dict) -> dict:
+def _runtime(kube: Kubectl, controller: dict[str, Any]) -> dict[str, Any]:
     name, ns = controller["metadata"]["name"], controller["metadata"]["namespace"]
     if controller["spec"].get("replicas", 1) == 0:
         if name == "loom-control-plane":
@@ -78,10 +80,12 @@ def _runtime(kube: Kubectl, controller: dict) -> dict:
         script = ("import json; from loom_execution_actuator.config import ExecutionActuatorSettings; "
                   "s=ExecutionActuatorSettings(); "
                   "print(json.dumps({'command_concurrency':getattr(s,'command_concurrency',None)}))")
-    return json.loads(kube.run("exec", "-n", ns, "deployment/" + name, "--", "python", "-c", script))
+    return cast(dict[str, Any], json.loads(kube.run(
+        "exec", "-n", ns, "deployment/" + name, "--", "python", "-c", script,
+    )))
 
 
-def _read(kube: Kubectl, namespace: str) -> tuple[dict, dict, dict, list[dict]]:
+def _read(kube: Kubectl, namespace: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     cm = kube.get("configmap", "loom-platform-config", namespace)
     config, profile = (json.loads(cm["data"][key]) for key in ("environment.json", "profile.json"))
     validate_environment(config)
@@ -173,7 +177,7 @@ def apply(
            for row in controllers if row["metadata"]["name"] != "loom-control-plane"
            and row["spec"].get("replicas", 1) > 0):
         raise DeploymentError("installed actuator lacks tuning support; deploy the combined candidate first")
-    if placement_policy is command_concurrency is None and not create_rates:
+    if placement_policy is None and command_concurrency is None and not create_rates:
         raise DeploymentError("at least one tuning value is required")
     updated = deepcopy(config)
     if placement_policy is not None:
