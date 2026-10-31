@@ -22,11 +22,7 @@ def test_default_events_exclude_simulations_but_keep_pool_operators(event, chang
         manifest, tracked_paths=ownership._tracked_paths(ROOT), lane="nebius-pool",
         repo_root=ROOT, changed_paths=plan.test_changes, diff_paths=plan.test_diff,
     )
-    assert not any(manifest.test_owner_for_path(path).id == "nebius-shared-pool-ops" for path in paths)
-    if change == "uv.lock":
-        assert paths and all(manifest.test_owner_for_path(path).id == "nebius-pool-ops" for path in paths)
-    if change in {"uv.lock", FAST_SUCCESSOR}:
-        assert FAST_SUCCESSOR in paths
+    assert paths == ()
     assert plan.github_outputs()["shared_pool_simulations"] == "false"
 
 
@@ -40,7 +36,16 @@ def test_explicit_manual_selection_matches_every_shard_execution():
                 changed_paths=plan.test_changes, diff_paths=plan.test_diff, include_shared_pool=True)
     paths = ownership.selected_test_paths(**args)
     shared = {path for path in paths if manifest.test_owner_for_path(path).id == "nebius-shared-pool-ops"}
+    assert len(shared) == 23 and len(paths) == 129
     assert SIMULATED_SUCCESSOR in shared and FAST_SUCCESSOR in paths
+    assert all(manifest.test_owner_for_path(path).manual_only for path in paths)
+    development = {f"tests/ops/test_nebius_development_{name}.py" for name in (
+        "activation", "collector_runtime", "schema_live", "schema_jobs", "schema_resources",
+        "schema_projection", "schema_upgrade",
+    )}
+    assert {path for path in paths if not Path(path).name.startswith((
+        "test_nebius_pool_", "test_nebius_development_pool_", "test_nebius_shared_pool_",
+    ))} == development
     matrix = ownership.test_shard_matrix(**args)
     executed = [path for row in matrix for path in ownership.selected_test_paths(
         **args, shard_index=row["shard_index"], shard_count=row["shard_count"])]
@@ -61,24 +66,26 @@ def test_selector_labels_keep_full_ordinary_coverage_without_enabling_simulation
     manifest = ownership.load_manifest(ROOT / "config/component-ownership.toml")
     paths = ownership.selected_test_paths(manifest, tracked_paths=ownership._tracked_paths(ROOT),
                                           lane="nebius-pool", repo_root=ROOT)
-    assert paths and not any(manifest.test_owner_for_path(path).manual_only for path in paths)
+    assert paths == ()
 
 
 def test_candidate_default_does_not_execute_or_claim_simulations(monkeypatch):
     monkeypatch.setattr(candidate, "candidate_changes", lambda *_: ("uv.lock",))
     value = candidate.plan(ROOT, "a" * 40, read=lambda _: [])
     paths = [path for row in value["matrix"]["include"] for path in row["paths"]]
-    assert paths and not any("/test_nebius_shared_pool_" in path for path in paths)
-    assert FAST_SUCCESSOR in paths
-    assert value["reused_files"] == 0
+    assert paths == [] and value["matrix"] == {"include": []}
+    assert not value["required"]
+    assert value["required_files"] == value["missing_files"] == value["reused_files"] == 0
+    assert value["reused_runs"] == []
 
 
 def test_workflow_manual_input_is_passed_to_planner_and_execution():
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     assert workflow.get("on", workflow.get(True))["workflow_dispatch"]["inputs"]["shared_pool_simulations"]["default"] is False
     jobs = workflow["jobs"]
-    assert "shared_pool_simulations" in jobs["workflow-plan"]["outputs"]
+    assert jobs["workflow-plan"]["outputs"]["shared_pool_simulations"] == "${{ steps.plan.outputs.shared_pool_simulations || 'false' }}"
     step = next(step for step in jobs["workflow-plan"]["steps"] if step.get("id") == "plan")
+    assert step["env"]["DISPATCH_SHARED_POOL"] == "${{ github.event_name == 'workflow_dispatch' && inputs.shared_pool_simulations || false }}"
     assert "--shared-pool-simulations" in step["run"]
     assert jobs["nebius-pool"]["env"]["SHARED_POOL_SIMULATIONS"] == "${{ needs.workflow-plan.outputs.shared_pool_simulations }}"
     step = next(step for step in jobs["nebius-pool"]["steps"] if step.get("id") == "manifest")
@@ -101,13 +108,19 @@ def test_long_recovery_cases_keep_distinct_manual_jobs():
     pins = {pin.path: pin.shard_index for pin in policy.pins}
     assert pins["tests/ops/test_nebius_shared_pool_handoff_census_recovery.py"] == 19
     assert pins["tests/ops/test_nebius_shared_pool_handoff_census_preactivation_recovery.py"] == 3
-    assert {suite.id for suite in manifest.test_suites if suite.manual_only} == {"nebius-shared-pool-ops"}
+    assert {suite.id for suite in manifest.test_suites if suite.manual_only} == {
+        "nebius-pool-ops", "nebius-shared-pool-ops"}
 
 
 def test_fast_rules_stay_in_the_default_root_selection():
     manifest = ownership.load_manifest(ROOT / "config/component-ownership.toml")
     fast = {"tests/unit/test_nebius_pool_activation_record.py",
-            "tests/unit/test_nebius_shared_pool_contract_inputs.py"}
+            "tests/unit/test_nebius_shared_pool_contract_inputs.py",
+            "tests/ops/test_nebius_legacy_pool_completion.py",
+            "tests/ops/test_nebius_staging_pool_attachment.py",
+            "tests/ops/test_nebius_management_startup_inspection.py",
+            "tests/ops/test_nebius_development_schema_consumers.py",
+            "tests/ops/test_nebius_development_schema_entry.py"}
     tracked = ownership._tracked_paths(ROOT)
     assert fast <= set(tracked)
     paths = ownership.selected_test_paths(manifest, tracked_paths=tracked, lane="tests-root",

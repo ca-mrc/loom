@@ -14,11 +14,11 @@ from sqlalchemy.pool import NullPool
 
 
 @pytest.mark.integration
-def test_probe_passes_on_direct_connection(pgbouncer_stack: dict[str, str]) -> None:
+def test_probe_passes_on_direct_connection(postgres_cluster_url: str) -> None:
     """The probe must not raise when connecting directly to Postgres."""
     from database.migrations.env import _assert_direct_postgres_connection
 
-    engine = create_engine(pgbouncer_stack["direct_url"])
+    engine = create_engine(postgres_cluster_url)
     _assert_direct_postgres_connection(engine)  # no raise
     engine.dispose()
 

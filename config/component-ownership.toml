@@ -219,12 +219,6 @@ pins = [
   { path = "tests/ops/test_nebius_pool_participant_delivery_completion.py", shard_index = 3 },
   { path = "tests/ops/test_nebius_development_pool_retained_runtime_stages.py", shard_index = 11 },
 ]
-# Scheduled run 40523588535: retained (671s) shared shard 3 with installation
-# (354s), while default shard 8 took 39s. Move only the ordinary retained module;
-# explicit shared qualification keeps every original pin and census separation.
-default_pins = [
-  { path = "tests/ops/test_nebius_development_pool_retained.py", shard_index = 7 },
-]
 
 [[test_sharding]]
 lane = "integration"
@@ -1036,7 +1030,16 @@ include_paths = [
 exclude_paths = [
   "tests/unit/test_nebius_runtime_render.py",
   "tests/unit/pipeline/test_behavior_input_import.py",
-  "tests/ops/test_nebius*pool*.py",
+  "tests/ops/test_nebius_pool_*.py",
+  "tests/ops/test_nebius_development_pool_*.py",
+  "tests/ops/test_nebius_shared_pool_*.py",
+  "tests/ops/test_nebius_development_activation.py",
+  "tests/ops/test_nebius_development_collector_runtime.py",
+  "tests/ops/test_nebius_development_schema_live.py",
+  "tests/ops/test_nebius_development_schema_jobs.py",
+  "tests/ops/test_nebius_development_schema_resources.py",
+  "tests/ops/test_nebius_development_schema_projection.py",
+  "tests/ops/test_nebius_development_schema_upgrade.py",
   "tests/ops/test_ci_runner_*.py",
   "tests/ops/test_ci_unified_runner_supply.py",
 ]
@@ -1054,15 +1057,24 @@ include_paths = [
 ]
 
 [[test_suites]]
-# Pool operator lifecycle tests: ~450 of ~500 tests-root runner-minutes (Oct 14).
-# Component-local operator edits run their test consumers; shared inputs retain
-# the full suite. Candidate publication reuses exact-commit native CI coverage
-# and executes only missing affected modules.
+# Unlaunched shared/development pool lifecycle simulations retain their source
+# and existing shards for explicit manual qualification before feature launch.
+# Standalone staging and management-preflight contracts stay in tests-root.
 id = "nebius-pool-ops"
 language = "python"
 lane = "nebius-pool"
-include_paths = ["tests/ops/test_nebius*pool*.py"]
-exclude_paths = ["tests/ops/test_nebius_shared_pool_*.py"]
+include_paths = [
+  "tests/ops/test_nebius_pool_*.py",
+  "tests/ops/test_nebius_development_pool_*.py",
+  "tests/ops/test_nebius_development_activation.py",
+  "tests/ops/test_nebius_development_collector_runtime.py",
+  "tests/ops/test_nebius_development_schema_live.py",
+  "tests/ops/test_nebius_development_schema_jobs.py",
+  "tests/ops/test_nebius_development_schema_resources.py",
+  "tests/ops/test_nebius_development_schema_projection.py",
+  "tests/ops/test_nebius_development_schema_upgrade.py",
+]
+manual_only = true
 # These recovery CLIs have dedicated lifecycle/archive/idle-protection tests in
 # tests-root; they do not operate the legacy pool transition state machine.
 unaffected_paths = [

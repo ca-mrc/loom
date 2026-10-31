@@ -1,6 +1,7 @@
 import hashlib
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -80,6 +81,12 @@ def app(
     monkeypatch: pytest.MonkeyPatch, postgres_url: str,
     artifact_seed: tuple[UUID, UUID, UUID, UUID, str, str, str],
 ):
+    # Route tests keep the real lifespan; independent background workers have dedicated coverage.
+    for name in (
+        "run_crash_detector_loop", "run_metrics_refresher_loop",
+        "run_retry_exhausted_sweeper_loop", "run_live_preview_reconciler_loop",
+    ):
+        monkeypatch.setattr(f"loom_control_plane.app.{name}", AsyncMock(return_value=None))
     for k, v in {
         "LOOM_CP_DB_URL": postgres_url,
         "LOOM_CP_MINIO_ENDPOINT": "http://minio:9000",
@@ -107,6 +114,7 @@ def test_signed_url_format(app, artifact_seed):  # type: ignore[no-untyped-def]
         assert body["bucket"] == "artifacts"
 
 
+@pytest.mark.usefixtures("app")
 def test_signed_url_uses_configured_artifacts_bucket(
     monkeypatch: pytest.MonkeyPatch,
     postgres_url: str,

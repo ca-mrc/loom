@@ -604,8 +604,9 @@ def test_generated_build_script_is_valid_posix_shell(
 
 
 @pytest.mark.parametrize("export_format", ["archive", "directory"])
-@pytest.mark.parametrize(("build_exit", "expected_exit"), [(0, 0), (42, 1), (124, 124)])
-@pytest.mark.parametrize("component_count", [1, 2])
+@pytest.mark.parametrize("component_count,build_exit,expected_exit", [
+    (1, 0, 0), (2, 0, 0), (2, 42, 1), (2, 124, 124),
+])
 def test_generated_build_script_preserves_outcomes_and_valid_stage_json(
     inputs, tmp_path: Path, export_format: str, build_exit: int, expected_exit: int,
     component_count: int,

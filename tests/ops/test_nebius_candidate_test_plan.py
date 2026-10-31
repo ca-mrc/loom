@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -127,8 +128,15 @@ class PullRequestActions(Actions):
 
 @pytest.fixture
 def actions(monkeypatch):
-    # These coverage-reuse cases need the complete lane, not a component edit
-    # whose unrelated consumers are deliberately excluded by selection.
+    # Exercise coverage reuse with eligible operator tests independently of the
+    # current manual-only lifecycle policy; shared simulations stay manual.
+    manifest = planner.load_manifest(ROOT / "config/component-ownership.toml")
+    manifest = replace(manifest, test_suites=tuple(
+        replace(suite, manual_only=False) if suite.id == "nebius-pool-ops" else suite
+        for suite in manifest.test_suites
+    ))
+    monkeypatch.setattr(planner, "load_manifest", lambda _: manifest)
+    # Select the complete synthetic lane rather than a component edit.
     monkeypatch.setattr(planner, "candidate_changes", lambda *_: ("uv.lock",))
     monkeypatch.setattr(planner, "source_changes", lambda *_: ("uv.lock",))
     return Actions()
@@ -150,7 +158,8 @@ def test_candidate_keeps_unlaunched_shared_simulations_out_even_for_shared_chang
                    "scripts/ops/ci_reliability_metrics.py"):
         monkeypatch.setattr(planner, "candidate_changes", lambda *_, path=change: (path,))
         value = planner.plan(ROOT, SHA, read=lambda _: [])
-        assert not any(Path(path).name.startswith("test_nebius_shared_pool_") for path in pending(value))
+        assert value["required_files"] == value["reused_files"] == value["missing_files"] == 0
+        assert not value["required"] and pending(value) == set()
 
 
 def test_native_squash_reuses_the_actual_tested_merge_tree(actions, monkeypatch):
@@ -520,14 +529,11 @@ def test_cli_reports_safe_native_reader_failure_and_preserves_fallback(tmp_path)
     result = subprocess.run([sys.executable, str(ROOT / "scripts/ops/nebius_pool_test_plan.py"),
                              "--candidate", head], cwd=ROOT, env=env, capture_output=True, text=True, check=True)
     value = json.loads(result.stdout)
-    # The CLI only plans the checked-out HEAD. Squash-reuse lookup runs only
-    # when HEAD's changes select pool tests, which a PR merge may not.
-    expected = [{"stage": "merge_group_runs", "error": "github_cli", "http_status": 403}]
-    if value["required_files"]:
-        expected.append({"stage": "candidate_commit", "error": "github_cli", "http_status": 403})
-    assert value["evidence_errors"] == expected
-    assert value["required"] == (value["missing_files"] == value["required_files"] > 0)
-    assert value["missing_files"] == value["required_files"]
+    assert value["evidence_errors"] == [
+        {"stage": "merge_group_runs", "error": "github_cli", "http_status": 403}
+    ]
+    assert not value["required"]
+    assert value["missing_files"] == value["required_files"] == value["reused_files"] == 0
     assert "synthetic-secret" not in result.stdout + result.stderr
     assert "Authorization" not in result.stdout + result.stderr
 
@@ -584,7 +590,8 @@ print(json.dumps(out))
         text=True,
     )
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["missing_files"] == 0
+    value = json.loads(result.stdout)
+    assert value["missing_files"] == value["required_files"] == value["reused_files"] == 0
     assert "required=false\n" in output.read_text()
 
 

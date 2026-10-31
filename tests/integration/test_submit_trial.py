@@ -2,6 +2,7 @@ import hashlib
 import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -132,6 +133,12 @@ def app(
     postgres_url: str,
     seed_team: tuple[UUID, str],
 ):
+    # Route tests keep the real lifespan; independent background workers have dedicated coverage.
+    for name in (
+        "run_crash_detector_loop", "run_metrics_refresher_loop",
+        "run_retry_exhausted_sweeper_loop", "run_live_preview_reconciler_loop",
+    ):
+        monkeypatch.setattr(f"loom_control_plane.app.{name}", AsyncMock(return_value=None))
     for k, v in {
         "LOOM_ENV": "development",
         "LOOM_LOCAL_EXECUTION": "1",

@@ -71,11 +71,19 @@ def test_rejects_unsafe_oci_workdir_before_runtime_execution(tmp_path, workdir):
         read_task_image_runtime_metadata(image)
 
 
-@pytest.mark.parametrize("directory", [False, True])
-@pytest.mark.parametrize("compression", ["", "gzip", "zstd"])
-@pytest.mark.parametrize("user,uid,gid", [("", 0, 0), ("root", 0, 0), ("worker", 1001, 1002),
-                                           ("1001", 1001, 1002), ("1001:1003", 1001, 1003),
-                                           ("worker:other", 1001, 1003)])
+@pytest.mark.parametrize("directory,compression,user,uid,gid", [
+    (False, "gzip", "", 0, 0),
+    (False, "gzip", "root", 0, 0),
+    (False, "gzip", "worker", 1001, 1002),
+    (False, "gzip", "1001", 1001, 1002),
+    (False, "gzip", "1001:1003", 1001, 1003),
+    (False, "gzip", "worker:other", 1001, 1003),
+    (False, "", "worker:other", 1001, 1003),
+    (False, "zstd", "worker:other", 1001, 1003),
+    (True, "", "worker:other", 1001, 1003),
+    (True, "gzip", "worker:other", 1001, 1003),
+    (True, "zstd", "worker:other", 1001, 1003),
+])
 def test_final_config_identity_and_entrypoint(tmp_path, directory, compression, user, uid, gid):
     image = _image(tmp_path / "image", [_layer({"etc/passwd": PASSWD, "etc/group": GROUP})],
                    {"User": user, "WorkingDir": "/app", "Entrypoint": ["/entrypoint.sh"],

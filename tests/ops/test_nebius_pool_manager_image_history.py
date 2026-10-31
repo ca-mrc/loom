@@ -334,6 +334,7 @@ def test_image_chain_rejects_orphan_gapped_or_changed_evidence(image_repair_case
     if damage == "orphan_record":
         value.marker.unlink()
     elif damage == "gap":
+        value.path.rename(state / value.path.name.replace("-01.json", "-02.json"))
         value.marker.rename(anchor / value.marker.name.replace("-01.json", "-02.json"))
     elif damage == "extra":
         _atomic_json(state / "manager-image-99.json", {})

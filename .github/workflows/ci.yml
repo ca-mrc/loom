@@ -66,7 +66,7 @@ on:
   workflow_dispatch:
     inputs:
       shared_pool_simulations:
-        description: "Qualify unlaunched shared-pool handoff/recovery simulations (manual only)"
+        description: "Qualify unlaunched production/development pool lifecycle simulations (manual only)"
         required: false
         type: boolean
         default: false

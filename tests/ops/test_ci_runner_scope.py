@@ -36,6 +36,8 @@ def test_runner_controller_keeps_native_specialists_without_legacy_pool_replay()
     assert plan.selected_heavy_checks() == {"images", "cluster_smoke", "staging_smoke"}
     assert pool == ()
     assert shard_matrix(lane="nebius-pool", **selection) == ()
+    assert selected_test_paths(lane="nebius-pool", **{
+        **selection, "include_shared_pool": True}) == ()
     root = selected_test_paths(lane="tests-root", **selection)
     assert {"tests/ops/test_ci_runner_supply_static_matrix.py",
             "tests/ops/test_ci_unified_runner_supply.py",
@@ -55,16 +57,17 @@ def test_runner_scope_does_not_hide_shared_or_unknown_inputs(shared, manual):
         manifest=selection["manifest"], tracked_paths=selection["tracked_paths"],
         repo_root=ROOT, lane="nebius-pool", test_scope="nebius", include_shared_pool=manual,
     )
-    assert pool == full and pool
+    assert pool == full and bool(pool) == manual
     assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
+    assert len(pool) == (129 if manual else 0)
     assert sum("/test_nebius_shared_pool_" in path for path in pool) == (23 if manual else 0)
 
 
 @pytest.mark.parametrize("operator", ["scripts/ops/nebius_pool_activation_stage.py",
                                        "scripts/ops/nebius_shared_pool_activation.py"])
 def test_runner_change_keeps_an_actual_pool_operators_selected_consumers(operator):
-    _, expected, _ = pool_selection([operator])
-    plan, pool, _ = pool_selection([CONTROLLER, operator])
+    _, expected, _ = pool_selection([operator], manual=True)
+    plan, pool, _ = pool_selection([CONTROLLER, operator], manual=True)
     assert expected and pool == expected
     assert not plan.unowned_runtime
 

@@ -1,37 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
-from pathlib import Path
-
 import pytest
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import create_engine, text
-from testcontainers.postgres import PostgresContainer
 
 from loom.data_lifecycle_bootstrap import LifecycleBootstrapError, SqlAlchemyLifecycleBootstrap
 from loom.data_lifecycle_gc import GcScope
 
 
-def _cfg(postgres_url: str) -> Config:
-    repo_root = Path(__file__).resolve().parents[2]
-    cfg = Config(str(repo_root / "database" / "migrations" / "alembic.ini"))
-    cfg.set_main_option("sqlalchemy.url", postgres_url)
-    return cfg
-
-
-@pytest.fixture(scope="module")
-def migrated_postgres_url() -> Iterator[str]:
-    with PostgresContainer("postgres:16") as pg:
-        url = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql+psycopg://")
-        command.upgrade(_cfg(url), "head")
-        yield url
-
-
 def test_digest_approved_bootstrap_is_atomic_and_idempotent(
-    migrated_postgres_url: str,
+    isolated_migration_postgres_url: str,
 ) -> None:
-    engine = create_engine(migrated_postgres_url)
+    engine = create_engine(isolated_migration_postgres_url)
     scope = GcScope(environment="staging", namespace="loom-staging")
     try:
         bootstrap = SqlAlchemyLifecycleBootstrap(engine)

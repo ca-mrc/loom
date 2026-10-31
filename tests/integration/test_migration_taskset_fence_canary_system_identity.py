@@ -89,107 +89,98 @@ def test_pristine_system_identity_downgrade_restores_0064_and_allows_reupgrade(
         engine.dispose()
 
 
-def test_downgrade_refuses_to_delete_a_referenced_system_identity() -> None:
+def test_downgrade_refuses_to_delete_a_referenced_system_identity(
+    isolated_migration_postgres_url: str,
+) -> None:
     """Downgrade never cascades a real deployment canary's TaskSet data."""
-    with PostgresContainer("postgres:16") as pg:
-        postgres_url = pg.get_connection_url().replace(
-            "postgresql+psycopg2://",
-            "postgresql+psycopg://",
-        )
-        cfg = _cfg(postgres_url)
-        engine = create_engine(postgres_url)
-        try:
-            command.upgrade(cfg, "head")
-            with engine.begin() as conn:
-                conn.execute(
-                    text(
-                        "INSERT INTO task_sets ("
-                        "id, owning_team_id, slug, display_name, status, intents, manifest_blob_uri"
-                        ") VALUES ("
-                        "'ts/' || :team_id || '/downgrade-guard', "
-                        "CAST(:team_id AS uuid), 'downgrade-guard', 'downgrade guard', "
-                        "'ready', ARRAY['evaluation'], 's3://guard/manifest'"
-                        ")",
-                    ),
-                    {"team_id": _SYSTEM_CANARY_TEAM_ID},
-                )
+    postgres_url = isolated_migration_postgres_url
+    cfg = _cfg(postgres_url)
+    engine = create_engine(postgres_url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO task_sets ("
+                    "id, owning_team_id, slug, display_name, status, intents, manifest_blob_uri"
+                    ") VALUES ("
+                    "'ts/' || :team_id || '/downgrade-guard', "
+                    "CAST(:team_id AS uuid), 'downgrade-guard', 'downgrade guard', "
+                    "'ready', ARRAY['evaluation'], 's3://guard/manifest'"
+                    ")",
+                ),
+                {"team_id": _SYSTEM_CANARY_TEAM_ID},
+            )
 
-            with pytest.raises(Exception, match=r"cannot downgrade.*references"):
-                command.downgrade(cfg, "0064")
-        finally:
-            engine.dispose()
-
-
-def test_downgrade_refuses_to_delete_an_altered_system_identity() -> None:
-    """A paused Team or modified quota is deployment data, not migration state."""
-    with PostgresContainer("postgres:16") as pg:
-        postgres_url = pg.get_connection_url().replace(
-            "postgresql+psycopg2://",
-            "postgresql+psycopg://",
-        )
-        cfg = _cfg(postgres_url)
-        engine = create_engine(postgres_url)
-        try:
-            command.upgrade(cfg, "head")
-            with engine.begin() as conn:
-                conn.execute(
-                    text(
-                        "UPDATE teams "
-                        "SET disabled_reason = 'operator change', "
-                        "submissions_paused_at = now(), "
-                        "submissions_paused_reason = 'operator change' "
-                        "WHERE id = CAST(:team_id AS uuid)"
-                    ),
-                    {"team_id": _SYSTEM_CANARY_TEAM_ID},
-                )
-                conn.execute(
-                    text(
-                        "UPDATE team_quotas "
-                        "SET fair_share_weight = 2.0, max_attempts_ceiling = 4, "
-                        "taskset_max_count = 1, taskset_max_storage_bytes = 1, "
-                        "allow_private_endpoints = true "
-                        "WHERE team_id = CAST(:team_id AS uuid)"
-                    ),
-                    {"team_id": _SYSTEM_CANARY_TEAM_ID},
-                )
-
-            with pytest.raises(Exception, match=r"cannot downgrade.*altered"):
-                command.downgrade(cfg, "0064")
-        finally:
-            engine.dispose()
-
-
-def test_downgrade_is_reversible_when_the_system_identity_is_already_missing() -> None:
-    """A missing migration-owned Team is not adopted or treated as user data."""
-    with PostgresContainer("postgres:16") as pg:
-        postgres_url = pg.get_connection_url().replace(
-            "postgresql+psycopg2://",
-            "postgresql+psycopg://",
-        )
-        cfg = _cfg(postgres_url)
-        engine = create_engine(postgres_url)
-        try:
-            command.upgrade(cfg, "head")
-            with engine.begin() as conn:
-                conn.execute(
-                    text("DELETE FROM team_quotas WHERE team_id = CAST(:team_id AS uuid)"),
-                    {"team_id": _SYSTEM_CANARY_TEAM_ID},
-                )
-                conn.execute(
-                    text("DELETE FROM teams WHERE id = CAST(:team_id AS uuid)"),
-                    {"team_id": _SYSTEM_CANARY_TEAM_ID},
-                )
-
+        with pytest.raises(Exception, match=r"cannot downgrade.*references"):
             command.downgrade(cfg, "0064")
-            command.upgrade(cfg, "head")
-            with engine.connect() as conn:
-                team = conn.execute(
-                    text("SELECT name FROM teams WHERE id = CAST(:team_id AS uuid)"),
-                    {"team_id": _SYSTEM_CANARY_TEAM_ID},
-                ).scalar_one()
-            assert team == _SYSTEM_CANARY_TEAM_NAME
-        finally:
-            engine.dispose()
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_refuses_to_delete_an_altered_system_identity(
+    isolated_migration_postgres_url: str,
+) -> None:
+    """A paused Team or modified quota is deployment data, not migration state."""
+    postgres_url = isolated_migration_postgres_url
+    cfg = _cfg(postgres_url)
+    engine = create_engine(postgres_url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE teams "
+                    "SET disabled_reason = 'operator change', "
+                    "submissions_paused_at = now(), "
+                    "submissions_paused_reason = 'operator change' "
+                    "WHERE id = CAST(:team_id AS uuid)"
+                ),
+                {"team_id": _SYSTEM_CANARY_TEAM_ID},
+            )
+            conn.execute(
+                text(
+                    "UPDATE team_quotas "
+                    "SET fair_share_weight = 2.0, max_attempts_ceiling = 4, "
+                    "taskset_max_count = 1, taskset_max_storage_bytes = 1, "
+                    "allow_private_endpoints = true "
+                    "WHERE team_id = CAST(:team_id AS uuid)"
+                ),
+                {"team_id": _SYSTEM_CANARY_TEAM_ID},
+            )
+
+        with pytest.raises(Exception, match=r"cannot downgrade.*altered"):
+            command.downgrade(cfg, "0064")
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_is_reversible_when_the_system_identity_is_already_missing(
+    isolated_migration_postgres_url: str,
+) -> None:
+    """A missing migration-owned Team is not adopted or treated as user data."""
+    postgres_url = isolated_migration_postgres_url
+    cfg = _cfg(postgres_url)
+    engine = create_engine(postgres_url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM team_quotas WHERE team_id = CAST(:team_id AS uuid)"),
+                {"team_id": _SYSTEM_CANARY_TEAM_ID},
+            )
+            conn.execute(
+                text("DELETE FROM teams WHERE id = CAST(:team_id AS uuid)"),
+                {"team_id": _SYSTEM_CANARY_TEAM_ID},
+            )
+
+        command.downgrade(cfg, "0064")
+        command.upgrade(cfg, "head")
+        with engine.connect() as conn:
+            team = conn.execute(
+                text("SELECT name FROM teams WHERE id = CAST(:team_id AS uuid)"),
+                {"team_id": _SYSTEM_CANARY_TEAM_ID},
+            ).scalar_one()
+        assert team == _SYSTEM_CANARY_TEAM_NAME
+    finally:
+        engine.dispose()
 
 
 def test_upgrade_reserves_the_fixed_canary_team_and_quota(

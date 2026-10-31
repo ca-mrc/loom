@@ -2,6 +2,7 @@ import hashlib
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -33,6 +34,12 @@ def _set_cp_env(
     *,
     environment: str = "development",
 ) -> None:
+    # Route tests keep the real lifespan; independent background workers have dedicated coverage.
+    for name in (
+        "run_crash_detector_loop", "run_metrics_refresher_loop",
+        "run_retry_exhausted_sweeper_loop", "run_live_preview_reconciler_loop",
+    ):
+        monkeypatch.setattr(f"loom_control_plane.app.{name}", AsyncMock(return_value=None))
     for k, v in {
         "LOOM_CP_DB_URL": postgres_url,
         "LOOM_CP_MINIO_ENDPOINT": "http://minio:9000",

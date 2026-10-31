@@ -5,6 +5,7 @@ typo'd OS or non-list payload is rejected at the boundary."""
 import hashlib
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -41,6 +42,12 @@ def worker_token(postgres_url: str) -> Iterator[str]:
 
 @pytest.fixture
 def app(monkeypatch: pytest.MonkeyPatch, postgres_url: str, worker_token: str):
+    # Route tests keep the real lifespan; independent background workers have dedicated coverage.
+    for name in (
+        "run_crash_detector_loop", "run_metrics_refresher_loop",
+        "run_retry_exhausted_sweeper_loop", "run_live_preview_reconciler_loop",
+    ):
+        monkeypatch.setattr(f"loom_control_plane.app.{name}", AsyncMock(return_value=None))
     for k, v in {
         "LOOM_LOCAL_EXECUTION": "1",
         "LOOM_ENV": "development",

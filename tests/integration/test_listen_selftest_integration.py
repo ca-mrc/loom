@@ -19,10 +19,10 @@ from loom_listen.self_test import notify_round_trip
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_selftest_passes_on_direct_connection(
-    pgbouncer_stack: dict[str, str],
+    postgres_cluster_url: str,
 ) -> None:
     """notify_round_trip returns True on a direct Postgres connection."""
-    direct_dsn = pgbouncer_stack["direct_url"].replace(
+    direct_dsn = postgres_cluster_url.replace(
         "postgresql+psycopg://", "postgresql://"
     )
     conn = await psycopg.AsyncConnection.connect(

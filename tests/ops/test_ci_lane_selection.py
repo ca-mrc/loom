@@ -271,10 +271,10 @@ UNREFERENCED_POOL_TEST = "tests/ops/" + "_".join(("test_nebius_pool", "activatio
 
 @pytest.mark.parametrize(("path", "pool", "tests_root"), [
     ("src/loom/config.py", False, True),
-    ("scripts/ops/deploy_nebius_platform.py", True, True),
-    ("tests/ops/test_nebius_pool_runtime.py", True, True),
-    # A pool-only edit narrows tests-root to nothing; that must not drop the pool lane.
-    (UNREFERENCED_POOL_TEST, True, False),
+    ("scripts/ops/deploy_nebius_platform.py", False, True),
+    ("tests/ops/test_nebius_pool_runtime.py", False, True),
+    # A simulation-only edit must not opt into manual pool qualification.
+    (UNREFERENCED_POOL_TEST, False, False),
 ])
 def test_pool_suite_has_its_own_shards_so_tests_root_stays_small(tmp_path, path, pool, tests_root):
     import subprocess
@@ -351,7 +351,8 @@ def test_scheduled_workflow_shell_emits_full_plan(tmp_path):
     values = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert values["coverage_summary"] == values["integration_docker"] == values["web_checks"] == "true"
     assert values["test_changes"] == "[]"
-    assert values["nebius_pool"] == values["tests_root"] == "true"
+    assert values["nebius_pool"] == "false"
+    assert values["tests_root"] == "true"
 
 
 def test_cli_component_selection_preserves_full_and_affected_modes():

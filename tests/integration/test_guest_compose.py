@@ -165,8 +165,9 @@ async def assert_inner_commands_cancel_without_stopping_main(main, *, activation
     }
 
 
-@pytest.fixture
-def image(tmp_path):
+@pytest.fixture(scope="module")
+def image(tmp_path_factory):
+    tmp_path = tmp_path_factory.mktemp("guest-compose-image")
     raw = tmp_path / "raw.tar"
     if subprocess.run(["docker", "image", "inspect", "alpine:3.21"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
         subprocess.run(["docker", "pull", "alpine:3.21"], check=True, stdout=subprocess.DEVNULL)
