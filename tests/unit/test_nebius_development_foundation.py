@@ -30,7 +30,7 @@ def test_shared_development_renders_own_data_and_runtime_endpoints(development_i
     config, candidate, profile = development_inputs
     files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
     assert {doc["metadata"]["name"] for doc in files["00-namespaces.yaml"]} == {
-        "loom-dev", "loom-nebius-dev-execution",
+        "loom-dev", "loom-nebius-dev-execution", "loom-nebius-dev-execution-observations",
     }
     postgres = next(doc for doc in files["20-database.yaml"] if doc["kind"] == "StatefulSet")
     assert postgres["metadata"]["namespace"] == "loom-dev"
