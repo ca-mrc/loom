@@ -17,7 +17,8 @@ from datetime import UTC, datetime
 from typing import Any, Literal, TypeVar
 from uuid import UUID, uuid4
 
-from fastapi import Request
+from anyio import CancelScope
+from fastapi import HTTPException, Request
 from sqlalchemy import insert, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -116,6 +117,9 @@ class DispatchAudit:
         self.provider_connection_id = provider_connection_id
         self.purpose = purpose
 
+    async def _prepare_dispatch(self, session: AsyncSession, values: dict[str, Any]) -> None:
+        """Resolve optional transport policy in the receipt admission transaction."""
+
     async def _admit(self, attempt: int) -> UUID:
         if attempt < 1:
             raise ValueError("dispatch attempt must be positive")
@@ -143,8 +147,12 @@ class DispatchAudit:
         try:
             async with asyncio.timeout(_AUDIT_TIMEOUT_SECONDS):
                 async with self.state.session_factory() as session:
+                    await self._prepare_dispatch(session, values)
                     await session.execute(insert(GatewayDispatchReceipt).values(**values))
                     await session.commit()
+        except HTTPException:
+            # A routing policy may decline admission before any provider I/O.
+            raise
         except asyncio.CancelledError:
             logger.warning(
                 "gateway_dispatch_admission_cancelled_commit_unknown request_id=%s receipt_id=%s",
@@ -275,16 +283,18 @@ class DispatchAudit:
             except BaseException as exc:
                 # Preserve the original failure even if provider cleanup fails.
                 try:
-                    async with asyncio.timeout(_AUDIT_TIMEOUT_SECONDS):
-                        exited = True
-                        await cm.__aexit__(type(exc), exc, exc.__traceback__)
+                    with CancelScope(shield=True):
+                        async with asyncio.timeout(_AUDIT_TIMEOUT_SECONDS):
+                            exited = True
+                            await cm.__aexit__(type(exc), exc, exc.__traceback__)
                 except Exception:
                     pass
                 raise
             else:
-                async with asyncio.timeout(_AUDIT_TIMEOUT_SECONDS):
-                    exited = True
-                    await cm.__aexit__(None, None, None)
+                with CancelScope(shield=True):
+                    async with asyncio.timeout(_AUDIT_TIMEOUT_SECONDS):
+                        exited = True
+                        await cm.__aexit__(None, None, None)
         except AttemptDeadlineReachedError:
             await self._finish(
                 receipt_id,
@@ -327,8 +337,9 @@ class DispatchAudit:
             # response obtained exactly at that boundary still needs closing.
             if entered and not exited and cm is not None:
                 try:
-                    async with asyncio.timeout(_AUDIT_TIMEOUT_SECONDS):
-                        await cm.__aexit__(None, None, None)
+                    with CancelScope(shield=True):
+                        async with asyncio.timeout(_AUDIT_TIMEOUT_SECONDS):
+                            await cm.__aexit__(None, None, None)
                 except Exception:
                     logger.warning(
                         "gateway_dispatch_stream_cleanup_failed request_id=%s",
@@ -381,13 +392,17 @@ async def _persist_observation(
     assert state.session_factory is not None
     phase = "session"
     try:
-        async with asyncio.timeout(_AUDIT_TIMEOUT_SECONDS):
-            async with state.session_factory() as session:
-                phase = "execute"
-                await session.execute(statement)
-                phase = "commit"
-                await session.commit()
-                phase = "session_exit"
+        # StreamingResponse cancels its task group on disconnect. Shield
+        # level cancellation while awaiting this bounded, inline transaction;
+        # explicit repeated task.cancel() still propagates as before.
+        with CancelScope(shield=True):
+            async with asyncio.timeout(_AUDIT_TIMEOUT_SECONDS):
+                async with state.session_factory() as session:
+                    phase = "execute"
+                    await session.execute(statement)
+                    phase = "commit"
+                    await session.commit()
+                    phase = "session_exit"
     except asyncio.CancelledError:
         # A repeated cancellation may interrupt cleanup. Keep the durable
         # admitted/pending row instead of suppressing cancellation or spawning

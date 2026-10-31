@@ -110,13 +110,13 @@ def test_real_retained_schema_upgrades_preserving_identity_and_granting_new_tabl
     except module.DevelopmentSchemaDatabaseError as error:
         raise AssertionError('disposable upgrade failed qualification') from error.__context__
     assert receipt['status'] == 'complete'
-    assert receipt['revision'] == '0182'
+    assert receipt['revision'] == service_schema_head()
     assert module.read_database_upgrade(installed['url'], request) == receipt
     assert module.upgrade_database(installed['url'], request,
         application_manager_password=installed['password'] if installed['mode'] == 'shared' else None) == receipt
     with psycopg.connect(installed['url'], autocommit=True) as db:
         assert authority(db) == before
-        assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0182',)]
+        assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [(service_schema_head(),)]
         assert db.execute('SELECT name FROM teams WHERE id=%s', (installed['data'],)).fetchone() == ('retained-schema-test',)
         roles = ['loom_service'] + (['loom_control_plane', 'loom_app_runtime_' + installed['data'].hex] if installed['mode'] == 'shared' else [])
         for role in roles:
@@ -126,7 +126,19 @@ def test_real_retained_schema_upgrades_preserving_identity_and_granting_new_tabl
             for privilege in ('SELECT', 'INSERT', 'UPDATE', 'DELETE'):
                 assert db.execute("SELECT has_table_privilege(%s,'service_execution_live_events',%s)",
                     (role, privilege)).fetchone() == (True,)
+        for table in ('provider_request_pools', 'provider_request_pool_members'):
+            for role in roles:
+                for privilege in ('SELECT', 'INSERT', 'UPDATE', 'DELETE'):
+                    assert db.execute('SELECT has_table_privilege(%s,%s,%s)',
+                        (role, table, privilege)).fetchone() == (True,)
         if installed['mode'] == 'shared':
+            for table in ('provider_request_pools', 'provider_request_pool_members'):
+                for privilege in ('SELECT', 'UPDATE'):
+                    assert db.execute('SELECT has_table_privilege(%s,%s,%s)',
+                        ('loom_gateway', table, privilege)).fetchone() == (True,)
+                for role in ('loom_actuator', 'loom_app_manager_' + installed['data'].hex):
+                    assert db.execute('SELECT has_table_privilege(%s,%s,%s)',
+                        (role, table, 'SELECT,INSERT,UPDATE,DELETE')).fetchone() == (False,)
             for privilege in ('SELECT', 'INSERT'):
                 assert db.execute("SELECT has_table_privilege('loom_gateway','service_execution_live_events',%s)",
                     (privilege,)).fetchone() == (True,)
@@ -135,6 +147,36 @@ def test_real_retained_schema_upgrades_preserving_identity_and_granting_new_tabl
             for role in ('loom_actuator', 'loom_app_manager_' + installed['data'].hex):
                 assert db.execute("SELECT has_table_privilege(%s,'service_execution_live_events',"
                     "'SELECT,INSERT,UPDATE,DELETE')", (role,)).fetchone() == (False,)
+    if installed['mode'] == 'shared':
+        connection_id = uuid4()
+        with psycopg.connect(installed['url'], autocommit=True) as db:
+            db.execute("INSERT INTO provider_connections(id,team_id,provider_type,display_name,base_url,"
+                "upstream_host,encrypted_api_key_ref,created_by) VALUES(%s,%s,'custom','upgrade-test',"
+                "'https://example.invalid/v1','example.invalid','env:UPGRADE_TEST','upgrade-test')",
+                (connection_id, installed['data']))
+            db.execute("INSERT INTO provider_request_pools(connection_id,required_models) VALUES(%s,ARRAY['test'])",
+                (connection_id,))
+            db.execute("INSERT INTO provider_request_pool_members(pool_connection_id,connection_id,ordinal,quota_group) "
+                "VALUES(%s,%s,0,'test')", (connection_id, connection_id))
+        gateway_url = make_url(installed['url']).set(username='loom_gateway',
+            password=installed['password']).render_as_string(hide_password=False)
+        with psycopg.connect(gateway_url, autocommit=True) as db:
+            assert db.execute('UPDATE provider_request_pools SET next_member=next_member+1 '
+                'WHERE connection_id=%s RETURNING next_member', (connection_id,)).fetchone() == (1,)
+            assert db.execute('UPDATE provider_request_pool_members SET cooldown_until=now() '
+                'WHERE pool_connection_id=%s RETURNING cooldown_until IS NOT NULL',
+                (connection_id,)).fetchone() == (True,)
+            for table in ('provider_request_pools', 'provider_request_pool_members'):
+                for statement in (f'INSERT INTO {table} DEFAULT VALUES', f'DELETE FROM {table}'):
+                    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                        db.execute(statement)
+        for role in ('loom_actuator', 'loom_app_manager_' + installed['data'].hex):
+            restricted_url = make_url(installed['url']).set(username=role,
+                password=installed['password']).render_as_string(hide_password=False)
+            with psycopg.connect(restricted_url, autocommit=True) as db:
+                for table in ('provider_request_pools', 'provider_request_pool_members'):
+                    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                        db.execute(f'SELECT * FROM {table}')
     login = make_url(installed['url']).set(username='loom_service', password=installed['password']).render_as_string(hide_password=False)
     with psycopg.connect(login) as db:
         assert db.execute('SELECT count(*) FROM nebius_pool_lifecycle_operations').fetchone() == (0,)
@@ -147,7 +189,7 @@ def test_real_retained_schema_upgrades_preserving_identity_and_granting_new_tabl
         with psycopg.connect(manager_url, autocommit=True) as db:
             access = ApplicationDatabaseAccess(db, installed['data'])
             app, incarnation = uuid4(), uuid4()
-            role = access.grant(app, incarnation, 1, token_urlsafe(48), schema_revision='0182')
+            role = access.grant(app, incarnation, 1, token_urlsafe(48), schema_revision=service_schema_head())
             installed['roles'].append(role)
             # Normal successor application admission does not invalidate the
             # retained migration proof for fixed platform credential identities.
@@ -194,7 +236,7 @@ def test_interrupted_migration_is_never_automatically_reissued(installed, monkey
             application_manager_password=installed['password'] if installed['mode'] == 'shared' else None)
     with psycopg.connect(installed['url'], autocommit=True) as db:
         assert db.execute('SELECT version_num FROM alembic_version').fetchone() == (
-            '0182' if position == 'after' else installed['revision'],)
+            service_schema_head() if position == 'after' else installed['revision'],)
 
 
 @pytest.mark.parametrize('installed', ['shared'], indirect=True)

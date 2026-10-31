@@ -59,7 +59,7 @@ async def test_call_local_dispatches_with_correct_base_url(
         completions = FakeChatCompletions()
 
     class FakeAsyncOpenAI:
-        def __init__(self, *, base_url: str, api_key: str) -> None:
+        def __init__(self, *, base_url: str, api_key: str, http_client: Any) -> None:
             captured["base_url"] = base_url
             captured["api_key"] = api_key
             self.chat = FakeChat()
@@ -131,7 +131,7 @@ async def test_call_local_uses_configured_api_key(
     captured: dict[str, str] = {}
 
     class FakeAsyncOpenAI:
-        def __init__(self, *, base_url: str, api_key: str) -> None:
+        def __init__(self, *, base_url: str, api_key: str, http_client: Any) -> None:
             captured["api_key"] = api_key
             self.chat = type("C", (), {
                 "completions": type("CC", (), {

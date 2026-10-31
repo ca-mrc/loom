@@ -1295,3 +1295,35 @@ def test_custom_price_update_preserves_unselected_models(
     else:
         assert payload["custom_pricing"]["new-model"]["input_usd_per_1m"] == 0
         assert ("other-model" in payload["custom_pricing"]) == (edit == "model")
+
+
+@pytest.mark.parametrize("action,method", [("show", "GET"), ("config", "PUT"), ("disable", "DELETE")])
+def test_request_pool_command_uses_ids_and_settings(mock_server, tmp_path, capsys, action, method):
+    row = _make_connection()
+    path = f"/api/v1/provider-connections/{row['id']}/request-pool"
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(200, json={"items": [row]})
+    mock_server.canned[(method, path)] = httpx.Response(200, json={"enabled": method != "DELETE"})
+    args = ["providers", "pool", "openai-prod"]
+    config = {"required_models": ["student"], "equivalent_models": True, "members": []}
+    if action == "config":
+        file = tmp_path / "pool.json"
+        file.write_text(json.dumps(config))
+        args += ["--config", str(file)]
+    elif action == "disable":
+        args += ["--disable"]
+    assert main(args) == 0
+    assert mock_server[-1].method == method
+    assert mock_server[-1].url.path == path
+    if action == "config":
+        assert json.loads(mock_server[-1].content) == config
+    assert '"enabled"' in capsys.readouterr().out
+
+
+def test_request_pool_command_rejects_secret_config(mock_server, tmp_path, capsys):
+    row = _make_connection()
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(200, json={"items": [row]})
+    file = tmp_path / "pool.json"
+    file.write_text(json.dumps({"api_key": "sk-should-not-be-in-config"}))
+    assert main(["providers", "pool", "openai-prod", "--config", str(file)]) == 2
+    assert len(mock_server) == 1
+    assert "credentials" in capsys.readouterr().err

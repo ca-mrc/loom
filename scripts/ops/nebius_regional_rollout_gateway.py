@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 SCHEMA = "loom.nebius-regional-rollout-scope.v1"
 DENIED = "Regional rollout command outside the installed scope"
 LIMIT = 4 * 1024 * 1024
+SECRET_KEY_TEMPLATE = r'go-template={{range $key,$value := .data}}{{if $value}}{{$key}}{{"\n"}}{{end}}{{end}}'
 CLUSTER_KINDS = {"Namespace", "ClusterRole", "ClusterRoleBinding", "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"}
 RESOURCE_KINDS = {
     "namespaces": "Namespace", "serviceaccounts": "ServiceAccount",
@@ -55,9 +56,9 @@ def validate_scope(value: Any) -> dict[str, Any]:
         raise ScopeError("explicit existing regional targets required")
     contexts = set()
     for region in regions:
-        if not isinstance(region, dict) or set(region) != {"context", "cluster_name", "api_server", "namespace", "namespace_uid", "resources"}:
+        if not isinstance(region, dict) or set(region) != {"context", "cluster_name", "api_server", "namespace", "namespace_uids", "resources", "secret_key_reads"}:
             raise ScopeError("invalid regional target scope")
-        for key in ("context", "cluster_name", "namespace", "namespace_uid"):
+        for key in ("context", "cluster_name", "namespace"):
             if not isinstance(region[key], str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,255}", region[key]):
                 raise ScopeError("invalid regional target identity")
         if region["context"] in contexts:
@@ -66,19 +67,49 @@ def validate_scope(value: Any) -> dict[str, Any]:
         endpoint = urlsplit(region["api_server"])
         if endpoint.scheme != "https" or not endpoint.hostname or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment or endpoint.path:
             raise ScopeError("explicit HTTPS regional endpoint required")
+        namespace_uids = region["namespace_uids"]
+        if (not isinstance(namespace_uids, dict) or region["namespace"] not in namespace_uids
+                or set(namespace_uids) - {region["namespace"], region["namespace"] + "-build"}
+                or any(not isinstance(uid, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,255}", uid) for uid in namespace_uids.values())):
+            raise ScopeError("only retained execution and optional build namespace UIDs allowed")
         resources = region["resources"]
         if not isinstance(resources, list) or not resources or len(resources) > 64:
             raise ScopeError("existing regional resource identities required")
         identities = set()
         for resource in resources:
-            if not isinstance(resource, dict) or set(resource) != {"kind", "name"} or resource["kind"] not in set(RESOURCE_KINDS.values()):
+            if not isinstance(resource, dict) or set(resource) != {"kind", "name", "namespace"} or resource["kind"] not in set(RESOURCE_KINDS.values()):
                 raise ScopeError("invalid regional resource identity")
             name = resource["name"]
             if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,252}", name):
                 raise ScopeError("invalid regional resource name")
-            identities.add((resource["kind"], name))
-        if ("Namespace", region["namespace"]) not in identities or len(identities) != len(resources):
-            raise ScopeError("regional namespace must be an explicit existing resource")
+            namespace = resource["namespace"]
+            if namespace is not None and namespace not in namespace_uids:
+                raise ScopeError("regional resource namespace outside retained scope")
+            if (resource["kind"] in CLUSTER_KINDS) != (namespace is None):
+                raise ScopeError("regional resource scope differs from its API kind")
+            identities.add((resource["kind"], name, namespace))
+        if (any(("Namespace", namespace, None) not in identities for namespace in namespace_uids)
+                or any(kind == "Namespace" and name not in namespace_uids for kind, name, _ in identities)
+                or len(identities) != len(resources)):
+            raise ScopeError("regional namespaces must be explicit existing resources")
+        secrets = region["secret_key_reads"]
+        if not isinstance(secrets, list) or len(secrets) > 4:
+            raise ScopeError("explicit build secret key-name reads required")
+        seen = set()
+        for secret in secrets:
+            if not isinstance(secret, dict) or set(secret) != {"name", "namespace", "required_keys"}:
+                raise ScopeError("invalid secret key-name scope")
+            if secret["namespace"] != region["namespace"] + "-build" or secret["namespace"] not in namespace_uids:
+                raise ScopeError("secret key-name reads require the retained build namespace")
+            if not isinstance(secret["name"], str) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,252}", secret["name"]):
+                raise ScopeError("invalid secret key-name resource")
+            keys = secret["required_keys"]
+            if not isinstance(keys, list) or not keys or len(keys) > 8 or any(not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,253}", key) for key in keys):
+                raise ScopeError("explicit secret key names required")
+            identity = secret["namespace"], secret["name"]
+            if identity in seen:
+                raise ScopeError("duplicate secret key-name resource")
+            seen.add(identity)
     return value
 
 
@@ -129,8 +160,8 @@ def projected_contexts(scope: dict[str, Any], *, selected: str | None = None) ->
     return output
 
 
-def _known(region: dict[str, Any], kind: str, name: str) -> bool:
-    return {"kind": kind, "name": name} in region["resources"]
+def _known(region: dict[str, Any], kind: str, name: str, namespace: str | None = None) -> bool:
+    return {"kind": kind, "name": name, "namespace": namespace} in region["resources"]
 
 
 def _read_command(region: dict[str, Any], args: list[str]) -> bool:
@@ -147,9 +178,15 @@ def _permission_command(region: dict[str, Any], args: list[str]) -> bool:
     if len(args) not in {4, 6} or args[:2] != ["auth", "can-i"] or args[2] not in {"get", "create", "patch"}:
         return False
     kind = RESOURCE_KINDS.get(args[3])
-    if kind is None or not any(r["kind"] == kind for r in region["resources"]):
-        return False
-    return args[4:] == ([] if kind in CLUSTER_KINDS else ["-n", region["namespace"]])
+    namespace = None if kind in CLUSTER_KINDS else (args[5] if len(args) == 6 and args[4] == "-n" else None)
+    return (kind is not None and args[4:] == ([] if kind in CLUSTER_KINDS else ["-n", namespace])
+            and any(r["kind"] == kind and r["namespace"] == namespace for r in region["resources"]))
+
+
+def _secret_command(region: dict[str, Any], args: list[str]) -> dict[str, Any] | None:
+    if len(args) != 7 or args[:2] != ["get", "secret"] or args[3] != "-n" or args[5:] != ["-o", SECRET_KEY_TEMPLATE]:
+        return None
+    return next((row for row in region["secret_key_reads"] if row["name"] == args[2] and row["namespace"] == args[4]), None)
 
 
 def _manifest(scope: dict[str, Any], region: dict[str, Any], payload: bytes, *, dry_run: bool) -> None:
@@ -184,7 +221,7 @@ def _manifest(scope: dict[str, Any], region: dict[str, Any], payload: bytes, *, 
         if kind == "Pod":
             if not dry_run or name != "loom-execution-policy-probe" or metadata.get("namespace") != region["namespace"]:
                 raise ScopeError("only the existing server-dry-run policy probe is allowed")
-        elif not _known(region, kind, name) or metadata.get("namespace") != (None if kind in CLUSTER_KINDS else region["namespace"]):
+        elif not _known(region, kind, name, metadata.get("namespace")):
             raise ScopeError("regional manifest outside installed resource identities")
 
 
@@ -217,9 +254,22 @@ def handle(scope: dict[str, Any], command: str, *, stdin: bytes | None = None) -
     if apply:
         payload = sys.stdin.buffer.read(LIMIT + 1) if stdin is None else stdin
         _manifest(scope, region, payload, dry_run="--dry-run=server" in rest)
-        namespace = _json(_run(scope, ["--context", region["context"], "--request-timeout=10s", "get", "namespace", region["namespace"], "-o", "json"], timeout=15))
-        if namespace.get("metadata", {}).get("uid") != region["namespace_uid"]:
+        for name, uid in region["namespace_uids"].items():
+            namespace = _json(_run(scope, ["--context", region["context"], "--request-timeout=10s", "get", "namespace", name, "-o", "json"], timeout=15))
+            if namespace.get("metadata", {}).get("uid") != uid:
+                raise ScopeError("regional namespace identity changed")
+    elif secret := _secret_command(region, rest):
+        namespace = _json(_run(scope, ["--context", region["context"], "--request-timeout=10s", "get", "namespace", secret["namespace"], "-o", "json"], timeout=15))
+        if namespace.get("metadata", {}).get("uid") != region["namespace_uids"][secret["namespace"]]:
             raise ScopeError("regional namespace identity changed")
+        result = _run(scope, ["--context", region["context"], "--request-timeout=30s", *rest], timeout=40)
+        if result.returncode or len(result.stdout) > LIMIT:
+            return result.returncode or 126, b"", b"Regional secret key names unavailable\n"
+        # Only declared populated key names cross the boundary. Never forward
+        # arbitrary stdout/stderr from this credential-adjacent operation.
+        observed = set(result.stdout.decode().splitlines())
+        keys = sorted(observed.intersection(secret["required_keys"]))
+        return 0, ("".join(key + "\n" for key in keys)).encode(), b""
     elif _read_command(region, rest) or _permission_command(region, rest):
         payload = None
     else:

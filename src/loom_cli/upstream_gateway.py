@@ -23,10 +23,12 @@ from __future__ import annotations
 
 import hashlib
 import time
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any
 
 from loom.agent.gateway_client import GatewayCallRequest, GatewayCallResponse
+from loom.llm_http_client import create_model_http_client
 from loom.models.trajectory import ChatMessage
 from loom_cli.config import LocalProvider
 from loom_cli.rate_cards import (
@@ -311,9 +313,19 @@ class UpstreamDirectGatewayClient:
         # Use "EMPTY" as the universal placeholder when the user didn't
         # configure an api_key.
         api_key = provider.api_key or "EMPTY"
-        client = openai.AsyncOpenAI(base_url=provider.base_url, api_key=api_key)
+        client = openai.AsyncOpenAI(
+            base_url=provider.base_url, api_key=api_key,
+            http_client=create_model_http_client(timeout_sec=openai.DEFAULT_TIMEOUT, follow_redirects=True),
+        )
         self._local_clients[server_name] = client
         return client
+
+    async def aclose(self) -> None:
+        """Close cached local transports; shared run-level SDKs belong to the caller."""
+        clients, self._local_clients = self._local_clients, {}
+        async with AsyncExitStack() as stack:
+            for client in clients.values():
+                stack.push_async_callback(client.close)
 
     async def _call_local(
         self, request: GatewayCallRequest,

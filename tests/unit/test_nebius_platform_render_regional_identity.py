@@ -90,8 +90,9 @@ def test_primary_guest_siblings_are_not_projected_into_regional_pod_target(regio
 
 
 @pytest.mark.parametrize("tamper", [False, True])
+@pytest.mark.parametrize("builder", [False, True])
 def test_regional_policy_install_keeps_restricted_until_same_admission_probes(
-    regional_inputs: tuple, tmp_path: Path, tamper: bool,
+    regional_inputs: tuple, tmp_path: Path, tamper: bool, builder: bool,
 ) -> None:
     import yaml
     from scripts.ops.deploy_nebius_platform import (
@@ -102,6 +103,10 @@ def test_regional_policy_install_keeps_restricted_until_same_admission_probes(
 
     config, candidate, _profile = current_regions(regional_inputs)
     target = config["regional_execution_targets"][0]
+    if builder:
+        target["task_image_builder"] = {
+            "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
+        }
     remote = build_regional_execution(config, candidate, repo_root=ROOT)[target["target_id"]]
     if tamper:
         next(doc for doc in remote if doc["kind"] == "ValidatingAdmissionPolicy")["spec"]["failurePolicy"] = "Ignore"

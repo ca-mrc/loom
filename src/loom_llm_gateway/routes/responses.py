@@ -8,6 +8,7 @@ output_tokens_details.reasoning_tokens counter.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -18,10 +19,11 @@ from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
-from sqlalchemy import update
+from sqlalchemy import select, update
 from starlette.responses import StreamingResponse
 
 from loom.auth import AuthContext
+from loom.db.schema import PipelineProviderDispatch
 from loom.db.schema import ProviderConnection as ProviderConnectionRow
 from loom.models.types import ModelSpec
 from loom.pipeline.keys import CanonicalizationError, canonical_digest
@@ -708,12 +710,18 @@ async def _dispatch_execution_attempt_responses(
                 model=model_name,
                 wire_api="responses",
             )
+    except asyncio.CancelledError:
+        await _finish_cancelled_attempt_admission(request, ctx, provider_request_id)
+        raise
     except ProviderDispatchError as exc:
         raise _provider_dispatch_http_error(exc) from exc
 
     try:
         async with request.app.state.session_factory() as session:
             await mark_provider_dispatch_sent(session, ctx=ctx, dispatch_id=grant.dispatch_id)
+    except asyncio.CancelledError:
+        await _finish_cancelled_attempt_admission(request, ctx, provider_request_id)
+        raise
     except ProviderDispatchError as exc:
         await _release_attempt_reservation(request, ctx, grant)
         raise _provider_dispatch_http_error(exc) from exc
@@ -737,6 +745,13 @@ async def _dispatch_execution_attempt_responses(
 
         upstream_response = await _post() if deadline is None else await deadline.run(_post)
         enforce_request_attempt_deadline(request)
+    except asyncio.CancelledError:
+        # A closed caller does not prove the provider stopped inference. Keep
+        # the dispatched reservation accountable rather than releasing it.
+        await _settle_attempt_failure(
+            request, ctx, grant, outcome="uncertain", category="gateway_cancelled",
+        )
+        raise
     except AttemptDeadlineReachedError as exc:
         await _settle_attempt_failure(
             request,
@@ -826,6 +841,44 @@ async def _dispatch_execution_attempt_responses(
     except ProviderDispatchError as exc:
         raise _provider_dispatch_http_error(exc, status_code=502) from exc
     return body
+
+
+async def _finish_cancelled_attempt_admission(
+    request: Request,
+    ctx: AuthContext,
+    provider_request_id: UUID,
+) -> None:
+    """Resolve cancelled admission commits from durable state, never a guess."""
+    try:
+        async with request.app.state.session_factory() as session:
+            dispatch = await session.scalar(
+                select(PipelineProviderDispatch).where(
+                    PipelineProviderDispatch.execution_attempt_id == ctx.execution_attempt_id,
+                    PipelineProviderDispatch.provider_request_id == provider_request_id,
+                )
+            )
+        if dispatch is None or dispatch.state == "settled":
+            return
+        async with request.app.state.session_factory() as session:
+            if dispatch.state == "reserved":
+                await release_provider_dispatch_unsent(
+                    session, ctx=ctx, dispatch_id=dispatch.id,
+                )
+            elif dispatch.state == "dispatched":
+                await settle_provider_dispatch(
+                    session, ctx=ctx, dispatch_id=dispatch.id, outcome="uncertain",
+                    usage=TokenUsage(input_tokens=0, output_tokens=0),
+                    actual_cost_microusd=dispatch.reserved_cost_microusd,
+                    rate_card_hash="pipeline:conservative-reservation",
+                    request_params={}, response_digest=None,
+                    failure_category="gateway_cancelled",
+                )
+    except Exception as exc:
+        # A failed/ambiguous commit or concurrent recovery remains durable.
+        # Driver details can contain credentials; preserve only a fixed label.
+        logger.warning(
+            "provider_dispatch_cancel_cleanup_deferred error_type=%s", type(exc).__name__,
+        )
 
 
 async def _release_attempt_reservation(

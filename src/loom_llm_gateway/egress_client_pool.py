@@ -36,6 +36,17 @@ if TYPE_CHECKING:
 _CONNECTION_ID_HEADER = "x-loom-connection-id"
 
 
+def create_upstream_client(
+    *, timeout_sec: float, proxy: httpx.Proxy | None = None,
+) -> httpx.AsyncClient:
+    """Keep idle reuse bounded without limiting active provider requests."""
+    return httpx.AsyncClient(
+        timeout=timeout_sec,
+        proxy=proxy,
+        limits=httpx.Limits(max_connections=None, max_keepalive_connections=20),
+    )
+
+
 @dataclass
 class EgressClientPool:
     """Lazily-built httpx clients keyed on `connection_id`.
@@ -76,12 +87,12 @@ class EgressClientPool:
             cached = self._clients.get(key)
             if cached is not None:
                 return cached
-            client = httpx.AsyncClient(
+            client = create_upstream_client(
                 proxy=httpx.Proxy(
                     url=self.proxy_url,
                     headers={_CONNECTION_ID_HEADER: key},
                 ),
-                timeout=self.upstream_timeout_sec,
+                timeout_sec=self.upstream_timeout_sec,
             )
             self._clients[key] = client
             return client

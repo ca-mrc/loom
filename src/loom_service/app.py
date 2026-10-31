@@ -82,6 +82,7 @@ from loom_service.routes import (
     pipeline,
     platform_admins,
     provider_connections,
+    provider_request_pools,
     rate_cards,
     run_library,
     secret_store_admin,
@@ -166,7 +167,7 @@ def register_api_routes(
             tasksets.router, terminalgen_corpora.router, batches.router, delivery_exports.router,
             run_library.router, rate_cards.router, usage.router, agents.router, models.router,
             monitor.router, overview.router, pipeline.router, backends.router,
-            provider_connections.router, secret_store_admin.router,
+            provider_connections.router, provider_request_pools.router, secret_store_admin.router,
             harbor_baselines.router,
         ):
             app.include_router(workload_router, prefix="/api/v1")

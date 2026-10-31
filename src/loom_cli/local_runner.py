@@ -134,8 +134,11 @@ class LocalRunner:
             trial = Trial(ctx=ctx, state_patch=None)
             result = await trial.run()
         finally:
-            if tool_gateway is not None:
-                await tool_gateway.stop()
+            try:
+                if tool_gateway is not None:
+                    await tool_gateway.stop()
+            finally:
+                await gateway.aclose()
         try:
             atif_bytes = await self.object_store.get_object(
                 bucket="trajectories",

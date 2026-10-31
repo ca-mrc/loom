@@ -144,6 +144,11 @@
     "default": "2.0",
     "required": false
   },
+  "service_execution_placement_policy": {
+    "annotation": "<class 'str'>",
+    "default": "'environment-local-health-first'",
+    "required": false
+  },
   "service_execution_scheduler_enabled": {
     "annotation": "<class 'bool'>",
     "default": "False",

@@ -962,10 +962,47 @@ with `supports_task_identity: true` requires an exact policy on every configured
 secondary. The remote render contains that namespace's baseline PSS labels and
 its own fail-closed VAP and binding; it excludes primary guest siblings. Shared
 task-web egress, harness setup and artifact-input support retain the published
-profile's capability declarations. Native image builds remain in the primary
-region; a secondary runs the prepared agent and verifier images, not another
-builder. Read back registry-pull access and both execution phases before routing
-the bundle there.
+profile's capability declarations. By default a secondary runs prepared agent
+and verifier images. To also build there, set an explicit `task_image_builder`
+inside that secondary's `regional_execution_targets` entry; the primary builder
+configuration is never inherited:
+
+```json
+"task_image_builder": {
+  "registry_repository": "cr.eu-north1.nebius.cloud/<reviewed-registry>/task-images",
+  "cache_bucket": "<reviewed-shared-cache-bucket>",
+  "cpu_millis": 8000,
+  "memory_mib": 8192,
+  "ephemeral_storage_mib": 65536,
+  "max_concurrent": null
+}
+```
+
+The regional actuator remains hosted on the primary system node and starts its
+builder loop against the remote cluster. Build Jobs run in exactly
+`<execution_namespace>-build`, using that region's execution nodes. Source,
+cache and image archives use the primary canonical storage endpoint and region;
+images publish to the reviewed shared registry. Read back cross-region storage,
+registry push/pull and both execution phases with newly materialized images.
+This enables new image builds; it does not guarantee uncached base layers.
+
+Provision the exact remote build namespace initially with restricted PSS and
+install its existing scoped source-reader, cache-writer, archive-writer and
+registry-writer Secrets through the protected operator channel. Keep values on
+that channel; never export them into source, CI logs or an acceptance report.
+The deployment preflight checks populated Secret key names and operator access
+in both exact namespaces before enabling the loop. The normal backup-first,
+idle-guarded deployment installs the builder namespace's existing native
+privileged-PSS contract and its scoped RoleBinding for the regional actuator's
+Nebius IAM User. This does not change execution-namespace task capabilities or
+copy the image-signing authority. Arbitrary third namespaces are rejected.
+
+Builders in both regions cooperatively claim the same durable global queue.
+Claims, lease epochs and UID-fenced cleanup retain single-owner semantics: an
+unreachable in-flight Job is not stolen into another region before its cleanup
+fence completes. Other queued builds may continue in the healthy region. Both
+builds and execution phases consume the same physical region capacity and I/O
+admission budget; builder and execution maxima cannot be added together.
 
 Do not apply a private-root regional file directly to relax namespace PSS.
 Under the existing idle rollout guard and exact remote-cluster binding, the
@@ -978,12 +1015,26 @@ those checks may the operator apply the reviewed regional file. Failed probes
 leave restricted PSS and the rollout pause in place. This does not activate the
 target or qualify a runtime merely from rendered configuration.
 
-Routing already selects healthy primary capacity before trying an eligible
-secondary; it does not divide a bundle evenly between regions. An isolated
-regional canary uses the existing target health/state controls during an idle
-operator window to leave only the intended target eligible, then restores the
-reviewed primary state. Do not add a user-controlled target selector or rewrite
-immutable execution plans. The old target remains disabled.
+Routing defaults to `environment-local-health-first`, retaining primary
+preference. For unified mixed assignment, set this root environment option:
+
+```json
+"execution_placement_policy": "environment-local-capacity-balanced"
+```
+
+It orders healthy eligible targets by current dominant physical resource
+pressure (CPU, memory, ephemeral storage and Pod slots), including observed
+occupancy and unobserved execution/build reservations once across capacity-owner
+siblings. A compatible cold template lets an idle min-zero region participate;
+it grants no node-creation authority. Idle ties prefer the region with the
+oldest persisted dispatch. Final quota, provisioning, I/O, tenant and financial
+admission remain authoritative and may fall back to another eligible region.
+This is resource-based assignment, with no fixed region percentage or dedicated
+build/execution split. Independent verifiers retain the agent's region; a
+same-environment verifier retains its exact parent target. Environment, logical
+pool and residency boundaries remain in force. Do not add a user-controlled
+target selector or rewrite immutable execution plans. The old target remains
+disabled.
 
 The optional Terraform `regional_execution_targets` map in the existing platform
 root composes `modules/regional-execution`. Each entry creates exactly one MK8s

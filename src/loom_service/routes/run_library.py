@@ -58,6 +58,7 @@ from loom_service.multi_model import apply_plan_mode
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.pool_submission import submission_origin
 from loom_service.provider_connection_lookup import validate_provider_connection
+from loom_service.provider_pool_validation import provider_submission_configs
 from loom_service.public_links import public_url_for
 from loom_service.routes.object_downloads import stream_object_response
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
@@ -2322,6 +2323,11 @@ async def _derive_new_batch_routes(
             connection_id,
             team_id=team_id,
             agent_submission=True,
+            submission_configs=provider_submission_configs(
+                trial_config=trial_config,
+                combinations=routes.combinations,
+                connection_id=connection_id,
+            ),
         )
     return routes
 

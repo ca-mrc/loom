@@ -300,6 +300,9 @@ def _grant(db: psycopg.Connection[Any], selection: DevelopmentSchemaSelection) -
                 db.execute(sql.SQL('GRANT USAGE,SELECT ON SEQUENCE {} TO loom_actuator').format(sql.Identifier(*sequence.split('.'))))
             # The Gateway owns the Pod-bound append/replay preview endpoint.
             db.execute('GRANT SELECT,INSERT ON public.service_execution_live_events TO loom_gateway')
+            # 0183 adds the per-request rotation cursor and failed-member cooldown.
+            db.execute('GRANT SELECT,UPDATE ON public.provider_request_pools, '
+                'public.provider_request_pool_members TO loom_gateway')
             # 0176 introduced these Gateway-owned bearer budget/dispatch rows.
             db.execute('GRANT SELECT,UPDATE ON public.harbor_baseline_sessions TO loom_gateway; '
                 'GRANT SELECT,INSERT,UPDATE ON public.harbor_baseline_dispatches TO loom_gateway')

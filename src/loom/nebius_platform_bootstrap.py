@@ -118,6 +118,8 @@ GATEWAY_TABLES = (
     "rate_cards",
     "price_catalogs",
     "provider_connections",
+    "provider_request_pools",
+    "provider_request_pool_members",
     "provider_connection_shares",
     "execution_attempts",
     "execution_attempt_provider_budgets",
@@ -292,6 +294,8 @@ def _bootstrap_database(
                         "data_lifecycle_objects",
                         "gateway_dispatch_receipts",
                         "provider_connections",
+                        "provider_request_pools",
+                        "provider_request_pool_members",
                         "price_catalogs",
                         "provider_connection_shares",
                         "execution_classes",
@@ -320,6 +324,12 @@ def _bootstrap_database(
                         # records observations but cannot delete audit receipts.
                         cursor.execute(
                             "GRANT INSERT, UPDATE ON gateway_dispatch_receipts TO loom_gateway"
+                        )
+                        # Rotation locks/advances the configured pool and updates
+                        # cooldown/quarantine; membership creation/deletion stay management-owned.
+                        cursor.execute(
+                            "GRANT UPDATE ON provider_request_pools, "
+                            "provider_request_pool_members TO loom_gateway"
                         )
                         # Call audit lazily creates trial/event authorities and
                         # verifies existing ones; retention and deletion remain

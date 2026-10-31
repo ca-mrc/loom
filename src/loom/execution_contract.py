@@ -279,13 +279,18 @@ class ExecutionTargetV1(_StrictContract):
         return self
 
 
+ExecutionPlacementPolicy = Literal[
+    "environment-local-health-first", "environment-local-capacity-balanced",
+]
+
+
 class ExecutionTopologyV1(_StrictContract):
     """Explicit regional bindings within one pool and residency boundary."""
 
     schema_version: Literal["loom.execution-topology.v1"] = "loom.execution-topology.v1"
     logical_pool_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     execution_class_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
-    placement_policy: Literal["environment-local-health-first"]
+    placement_policy: ExecutionPlacementPolicy
     targets: tuple[ExecutionTargetV1, ...] = Field(min_length=1, max_length=64)
 
     @model_validator(mode="after")

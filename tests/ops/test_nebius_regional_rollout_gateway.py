@@ -26,13 +26,13 @@ def scope(tmp_path):
         "regions": [{
             "context": "existing-west", "cluster_name": "cluster-west",
             "api_server": "https://west.example.test", "namespace": "loom-west-execution",
-            "namespace_uid": "11111111-1111-1111-1111-111111111111",
+            "namespace_uids": {"loom-west-execution": "11111111-1111-1111-1111-111111111111"}, "secret_key_reads": [],
             "resources": [
-                {"kind": "Namespace", "name": "loom-west-execution"},
-                {"kind": "ServiceAccount", "name": "loom-execution-attempt"},
-                {"kind": "ServiceAccount", "name": "loom-execution-policy-probe"},
-                {"kind": "Role", "name": "loom-execution-attempt"},
-                {"kind": "ValidatingAdmissionPolicy", "name": "loom-west-execution-private-root-v1"},
+                {"kind": "Namespace", "name": "loom-west-execution", "namespace": None},
+                {"kind": "ServiceAccount", "name": "loom-execution-attempt", "namespace": "loom-west-execution"},
+                {"kind": "ServiceAccount", "name": "loom-execution-policy-probe", "namespace": "loom-west-execution"},
+                {"kind": "Role", "name": "loom-execution-attempt", "namespace": "loom-west-execution"},
+                {"kind": "ValidatingAdmissionPolicy", "name": "loom-west-execution-private-root-v1", "namespace": None},
             ],
         }],
     }
@@ -41,7 +41,8 @@ def scope(tmp_path):
 class FakeKubectl:
     def __init__(self, scope):
         self.calls = []
-        self.namespace_uid = scope["regions"][0]["namespace_uid"]
+        self.namespace_uid = scope["regions"][0]["namespace_uids"][scope["regions"][0]["namespace"]]
+        self.namespace_uids = copy.deepcopy(scope["regions"][0]["namespace_uids"])
         self.view = {
             "clusters": [
                 {"name": "cluster-west", "cluster": {"server": "https://west.example.test", "certificate-authority-data": "private-ca-data"}},
@@ -61,7 +62,8 @@ class FakeKubectl:
         elif "--dry-run=client" in args:
             data = json.loads(payload)
         elif "get" in args and "namespace" in args:
-            data = {"metadata": {"uid": self.namespace_uid}}
+            name = args[args.index("namespace") + 1]
+            data = {"metadata": {"uid": self.namespace_uid if name == scope["regions"][0]["namespace"] else self.namespace_uids.get(name)}}
         else:
             data = {"accepted": True}
         return subprocess.CompletedProcess(args, 0, json.dumps(data).encode(), b"")
@@ -280,7 +282,8 @@ def test_native_kubectl_parses_full_regional_multidocument_render(regional_input
     payload = yaml.safe_dump_all(documents).encode()
     region = scope["regions"][0]
     region["namespace"] = target["execution_namespace"]
-    region["resources"] = [{"kind": d["kind"], "name": d["metadata"]["name"]} for d in documents]
+    region["namespace_uids"] = {region["namespace"]: native.namespace_uid}
+    region["resources"] = [{"kind": d["kind"], "name": d["metadata"]["name"], "namespace": d["metadata"].get("namespace")} for d in documents]
     resources = {}
     for document in documents:
         resource = next(k for k, v in gateway.RESOURCE_KINDS.items() if v == document["kind"])
@@ -357,3 +360,266 @@ def test_same_kind_name_in_foreign_api_group_rejected(scope, native):
     with pytest.raises(gateway.ScopeError, match="API group"):
         gateway.handle(scope, regional(scope, "apply", "-f", "-"), stdin=json.dumps(body).encode())
     assert not any("apply" in args for args, _ in native.calls)
+
+
+def add_build_scope(scope):
+    region = scope["regions"][0]
+    build = region["namespace"] + "-build"
+    region["namespace_uids"][build] = "22222222-2222-2222-2222-222222222222"
+    region["resources"].extend([
+        {"kind": "Namespace", "name": build, "namespace": None},
+        {"kind": "ServiceAccount", "name": "loom-execution-attempt", "namespace": build},
+    ])
+    region["secret_key_reads"] = [{"name": "loom-task-build-source", "namespace": build, "required_keys": ["access-key", "secret-key"]}]
+    gateway.validate_scope(scope)
+    return build
+
+
+def test_combined_namespace_identity_and_permission_scope(scope, native):
+    build = add_build_scope(scope)
+    native.namespace_uids[build] = scope["regions"][0]["namespace_uids"][build]
+    # The same service account name is independently authorized in each scope.
+    for namespace in ("loom-west-execution", build):
+        body = {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": {"name": "loom-execution-attempt", "namespace": namespace}}
+        assert gateway.handle(scope, regional(scope, "apply", "-f", "-"), stdin=json.dumps(body).encode())[0] == 0
+        assert gateway.handle(scope, regional(scope, "auth", "can-i", "patch", "serviceaccounts", "-n", namespace))[0] == 0
+    with pytest.raises(gateway.ScopeError):
+        gateway.handle(scope, regional(scope, "auth", "can-i", "patch", "roles.rbac.authorization.k8s.io", "-n", build))
+    native.namespace_uids[build] = "replaced-build-namespace"
+    with pytest.raises(gateway.ScopeError, match="namespace identity"):
+        gateway.handle(scope, regional(scope, "apply", "-f", "-"), stdin=json.dumps(body).encode())
+
+
+def test_secret_read_only_fixed_key_names_never_values(scope, native, monkeypatch):
+    build = add_build_scope(scope)
+    native.namespace_uids[build] = scope["regions"][0]["namespace_uids"][build]
+
+    def output(scope, args, **kwargs):
+        if args[-1] == gateway.SECRET_KEY_TEMPLATE:
+            return subprocess.CompletedProcess(args, 0, b"access-key\nsecret-key\nundeclared-key\nsynthetic-private-value\n", b"synthetic-private-error")
+        return native(scope, args, **kwargs)
+
+    monkeypatch.setattr(gateway, "_run", output)
+    args = ["get", "secret", "loom-task-build-source", "-n", build, "-o", gateway.SECRET_KEY_TEMPLATE]
+    code, stdout, stderr = gateway.handle(scope, regional(scope, *args))
+    assert code == 0 and stdout == b"access-key\nsecret-key\n" and stderr == b""
+    for replacement in ["json", 'go-template={{.data}}', 'go-template={{index .data "secret-key"}}']:
+        with pytest.raises(gateway.ScopeError):
+            gateway.handle(scope, regional(scope, *args[:-1], replacement))
+    for name, namespace in [("unknown-secret", build), ("loom-task-build-source", "loom-west-execution")]:
+        with pytest.raises(gateway.ScopeError):
+            gateway.handle(scope, regional(scope, "get", "secret", name, "-n", namespace, "-o", gateway.SECRET_KEY_TEMPLATE))
+    with pytest.raises(gateway.ScopeError):
+        gateway.handle(scope, regional(scope, "auth", "can-i", "create", "secrets", "-n", build))
+    secret = {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "loom-task-build-source", "namespace": build}}
+    with pytest.raises(gateway.ScopeError):
+        gateway.handle(scope, regional(scope, "apply", "-f", "-"), stdin=json.dumps(secret).encode())
+
+
+def test_scope_rejects_additional_namespace_or_missing_namespace_identity(scope):
+    for mutation in ("foreign", "missing_build_resource"):
+        value = copy.deepcopy(scope)
+        region = value["regions"][0]
+        region["namespace_uids"]["foreign" if mutation == "foreign" else region["namespace"] + "-build"] = "22222222-2222-2222-2222-222222222222"
+        with pytest.raises(gateway.ScopeError):
+            gateway.validate_scope(value)
+
+
+def test_combined_preflight_through_installed_wrapper_and_native_kubectl(regional_inputs, scope, tmp_path, monkeypatch):
+    """Real deployer/SSH serialization, TLS discovery, native key-name template."""
+    import base64
+    import datetime
+    import http.server
+    import ipaddress
+    import shutil
+    import ssl
+    import threading
+
+    import yaml
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+    from scripts.ops import deploy_nebius_platform as deploy
+
+    from loom.nebius_platform_render import build_regional_execution
+
+    executable = shutil.which("kubectl")
+    if executable is None:
+        pytest.skip("native kubectl unavailable; run operator protocol check where installed")
+    config, candidate, _ = regional_inputs
+    target = config["regional_execution_targets"][0]
+    target["cluster_id"] = "mk8s-test"
+    target["task_image_builder"] = {
+        "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
+        "cache_bucket": "loom-shared-build-cache", "max_concurrent": 2,
+        "cpu_millis": 8000, "memory_mib": 8192, "ephemeral_storage_mib": 65536,
+        "archive_secret_name": "loom-task-image-archive-writer",
+    }
+    required = deploy._build_secret_requirements(target)
+    secret_value = base64.b64encode(b"synthetic-secret-value-never-over-ssh").decode()
+    requests = []
+    state = {"missing_build_namespace": False, "documents": []}
+    resources = {
+        "v1": [{"name": "nodes", "kind": "Node", "namespaced": False},
+               {"name": "secrets", "kind": "Secret", "namespaced": True}],
+        "authorization.k8s.io/v1": [{"name": "selfsubjectaccessreviews", "kind": "SelfSubjectAccessReview", "namespaced": False}],
+        "foreign.example.test/v1": [{"name": "roles", "kind": "Role", "namespaced": True}],
+    }
+
+    class API(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def reply(self, data, status=200):
+            body = json.dumps(data).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            path = self.path.split("?", 1)[0]
+            version = path.removeprefix("/apis/") if path.startswith("/apis/") else path.removeprefix("/api/")
+            if path == "/api":
+                self.reply({"kind": "APIVersions", "versions": ["v1"], "serverAddressByClientCIDRs": []})
+            elif path == "/apis":
+                groups = [{"name": v.split("/")[0], "versions": [{"groupVersion": v, "version": v.split("/")[1]}], "preferredVersion": {"groupVersion": v, "version": v.split("/")[1]}} for v in resources if "/" in v]
+                self.reply({"kind": "APIGroupList", "groups": groups})
+            elif version in resources:
+                self.reply({"kind": "APIResourceList", "groupVersion": version, "resources": [{**r, "singularName": "", "verbs": ["get", "create", "patch"]} for r in resources[version]]})
+            elif path == "/api/v1/nodes":
+                self.reply({"apiVersion": "v1", "kind": "NodeList", "items": [{"apiVersion": "v1", "kind": "Node", "metadata": {"name": "computeinstance-test", "labels": {"loom.nebius/node-role": "system"}}, "spec": {"providerID": "nebius://computeinstance-test"}}]})
+            elif "/secrets/" in path:
+                parts = path.split("/")
+                namespace, name = parts[4], parts[6]
+                keys = required.get((namespace, name))
+                if keys is None:
+                    self.send_error(404)
+                else:
+                    self.reply({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": name, "namespace": namespace}, "data": {key: secret_value for key in keys}})
+            else:
+                parts = path.split("/")
+                name, plural = parts[-1], parts[-2]
+                namespace = parts[parts.index("namespaces") + 1] if "namespaces" in parts and parts.index("namespaces") + 2 < len(parts) else None
+                kind = next((v for k, v in gateway.RESOURCE_KINDS.items() if k.split(".", 1)[0] == plural), None)
+                document = next((d for d in state["documents"] if d["kind"] == kind and d["metadata"]["name"] == name and d["metadata"].get("namespace") == namespace), None)
+                if document is None or (kind == "Namespace" and name.endswith("-build") and state["missing_build_namespace"]):
+                    self.send_error(404)
+                else:
+                    observed = copy.deepcopy(document)
+                    if kind == "Namespace":
+                        observed["metadata"]["uid"] = "11111111-1111-1111-1111-111111111111"
+                    self.reply(observed)
+
+        def do_POST(self):
+            # Native clients may use protobuf for this authorization request;
+            # returning JSON is supported independently of its wire encoding.
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            path = self.path.split("?", 1)[0]
+            requests.append((path, body))
+            if path == "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews":
+                self.reply({"apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectAccessReview", "spec": {}, "status": {"allowed": True}}, 201)
+            else:
+                self.send_error(403)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), API)
+    key = ec.generate_private_key(ec.SECP256R1())
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "disposable-loopback")])
+    now = datetime.datetime.now(datetime.UTC)
+    cert = (x509.CertificateBuilder().subject_name(subject).issuer_name(subject).public_key(key.public_key())
+            .serial_number(x509.random_serial_number()).not_valid_before(now - datetime.timedelta(minutes=1))
+            .not_valid_after(now + datetime.timedelta(hours=1)).add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False).sign(key, hashes.SHA256()))
+    ca, private = tmp_path / "ca.pem", tmp_path / "tls-key.pem"
+    ca.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    private.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    private.chmod(0o600)
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(ca, private)
+    server.socket = tls.wrap_socket(server.socket, server_side=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        endpoint = f"https://127.0.0.1:{server.server_port}"
+        target["kubernetes_api_server"] = endpoint
+        documents = build_regional_execution(config, candidate, repo_root=Path(__file__).resolve().parents[2])[target["target_id"]]
+        state["documents"] = documents
+        region = scope["regions"][0]
+        region.update({"cluster_name": "cluster-west-test", "api_server": endpoint, "namespace": target["execution_namespace"],
+                       "namespace_uids": {d["metadata"]["name"]: "11111111-1111-1111-1111-111111111111" for d in documents if d["kind"] == "Namespace"},
+                       "resources": [{"kind": d["kind"], "name": d["metadata"]["name"], "namespace": d["metadata"].get("namespace")} for d in documents],
+                       "secret_key_reads": [{"namespace": ns, "name": name, "required_keys": sorted(keys)} for (ns, name), keys in required.items()]})
+        scope["kubectl"] = executable
+        gateway.validate_scope(scope)
+        for document in documents:
+            version = document["apiVersion"]
+            plural = next(k.split(".", 1)[0] for k, v in gateway.RESOURCE_KINDS.items() if v == document["kind"])
+            row = {"name": plural, "kind": document["kind"], "namespaced": document["kind"] not in gateway.CLUSTER_KINDS}
+            if row not in resources.setdefault(version, []):
+                resources[version].append(row)
+        Path(scope["kubeconfig"]).write_text(json.dumps({"apiVersion": "v1", "kind": "Config", "clusters": [{"name": region["cluster_name"], "cluster": {"server": endpoint, "certificate-authority": str(ca)}}], "contexts": [{"name": "existing-west", "context": {"cluster": region["cluster_name"], "user": "synthetic"}}], "users": [{"name": "synthetic", "user": {"token": "synthetic-token-never-over-ssh"}}], "current-context": "existing-west"}))
+        tmp_path.chmod(0o700)
+        wrapper = tmp_path / "github-kubectl.py"
+        wrapper.write_text(f'import os\ntry:\n    expected = {scope["kubeconfig"]!r}\nexcept Exception:\n    raise\nos.execv({executable!r}, ["kubectl"])\n')
+        wrapper.chmod(0o600)
+        install(tmp_path, Path(gateway.__file__).read_bytes(), scope, "a" * 40, apply=True)
+        render = tmp_path / "render"
+        render.mkdir()
+        (render / (target["target_id"] + ".yaml")).write_text(yaml.safe_dump_all(documents))
+        actual_run = subprocess.run
+        ssh_outputs = []
+        ssh_commands = []
+
+        def ssh(argv, *, input, **kwargs):
+            assert argv[0] == "ssh"
+            result = actual_run([sys.executable, str(wrapper)], input=input, capture_output=True, text=True, timeout=30,
+                                env={**os.environ, "HOME": str(tmp_path), "SSH_ORIGINAL_COMMAND": argv[-1]})
+            ssh_outputs.append(result.stdout + result.stderr)
+            ssh_commands.append(shlex.split(argv[-1]))
+            if shlex.split(argv[-1])[-6:] == ["get", "nodes", "-l", "loom.nebius/platform=integration", "-o", "json"]:
+                assert result.returncode == 0, result.stderr
+            return result
+
+        monkeypatch.setenv("LOOM_DEPLOY_SSH_TARGET", "operator@gateway.example.test")
+        monkeypatch.setenv("LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE", str(tmp_path / "known_hosts"))
+        monkeypatch.setenv("LOOM_DEPLOY_SSH_KEY_FILE", str(tmp_path / "ssh-key"))
+        monkeypatch.setattr(deploy.subprocess, "run", ssh)
+        selected = deploy.preflight_regional_rollout(deploy.Kubectl(Path(scope["kubeconfig"])), config, render)
+        assert list(selected) == [target["target_id"]]
+        assert {args[args.index("-n") + 1] for args in ssh_commands if "auth" in args and "serviceaccounts" in args} == {target["execution_namespace"], target["execution_namespace"] + "-build"}
+        assert any(output == "access-key\nsecret-key\n" for output in ssh_outputs)
+        remote = selected[target["target_id"]][0]
+        for args in [("get", "secret", "loom-task-build-source", "-n", target["execution_namespace"] + "-build", "-o", "json"),
+                     ("auth", "can-i", "patch", "serviceaccounts", "-n", "foreign")]:
+            with pytest.raises(deploy.DeploymentError):
+                remote.run(*args)
+        for namespace, name, version in [(target["execution_namespace"] + "-build", "new-resource", "v1"),
+                                         ("foreign", "loom-execution-attempt", "v1"),
+                                         (target["execution_namespace"] + "-build", "loom-execution-attempt", "foreign.example.test/v1")]:
+            if version.startswith("foreign"):
+                name = next(d["metadata"]["name"] for d in documents if d["kind"] == "Role" and d["metadata"].get("namespace") == namespace)
+            body = {"apiVersion": version, "kind": "Role" if version.startswith("foreign") else "ServiceAccount", "metadata": {"name": name, "namespace": namespace}}
+            file = tmp_path / "rejected.json"
+            file.write_text(json.dumps(body))
+            with pytest.raises(deploy.DeploymentError):
+                remote.run("apply", "-f", str(file))
+        private_scope = tmp_path / "scope.json"
+        private_scope.write_text(json.dumps(scope))
+        private_scope.chmod(0o600)
+        plan_command = [sys.executable, "-m", "scripts.ops.install_nebius_regional_rollout_gateway", "--root", str(tmp_path), "--source-sha", "a" * 40, "--scope", str(private_scope)]
+        operator_env = {**os.environ, "HOME": str(tmp_path), "PYTHONPATH": "src:."}
+        before_plan = wrapper.read_bytes()
+        planned = actual_run(plan_command, capture_output=True, text=True, env=operator_env, timeout=30)
+        assert planned.returncode == 0 and json.loads(planned.stdout)["status"] == "planned", planned.stdout
+        state["missing_build_namespace"] = True
+        blocked = actual_run(plan_command, capture_output=True, text=True, env=operator_env, timeout=30)
+        assert blocked.returncode == 1 and json.loads(blocked.stdout)["status"] == "blocked"
+        assert wrapper.read_bytes() == before_plan
+        assert all(path == "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews" for path, _ in requests)
+        assert not any(secret_value in output or "synthetic-secret-value-never-over-ssh" in output or "synthetic-token-never-over-ssh" in output for output in ssh_outputs)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()

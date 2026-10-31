@@ -217,3 +217,23 @@ def test_deleted_rows_propagate_through_build_snapshot() -> None:
     cfg = build_envoy_config(snap)
     assert len(cfg.clusters) == 1
     assert cfg.clusters[0].name == ("egress-00000000-0000-0000-0000-000000000001")
+
+
+@pytest.mark.parametrize("base_url", ["https://api.openai.com/v1", "http://api.openai.com:28001/v1"])
+def test_provider_cluster_uses_protocol_maximum_active_thresholds(base_url: str) -> None:
+    cfg = build_envoy_config(build_snapshot([
+        _Row(id=_C1, resolved_egress_ips=["192.0.2.1"], base_url=base_url),
+    ]))
+    # These provider routes use DEFAULT priority. Leaving it unspecified gives
+    # Envoy 1.30 a 1024-connection/request/pending ceiling per credential CID.
+    assert all(route.route.priority == 0 for route in cfg.route_configuration.virtual_hosts[0].routes)
+    thresholds = list(cfg.clusters[0].circuit_breakers.thresholds)
+    assert len(thresholds) == 1
+    threshold = thresholds[0]
+    assert threshold.priority == 0
+    for name in ("max_connections", "max_requests", "max_pending_requests"):
+        assert threshold.HasField(name)
+        assert getattr(threshold, name).value == (1 << 32) - 1
+    assert not threshold.HasField("max_retries")
+    assert not threshold.HasField("retry_budget")
+    assert list(cfg.clusters[0].circuit_breakers.per_host_thresholds) == []

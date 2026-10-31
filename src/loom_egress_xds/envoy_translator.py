@@ -48,6 +48,10 @@ from loom_egress_xds.config_builder import ConnectionAllowlist, Snapshot
 # West provider edge.
 _CLUSTER_CONNECT_TIMEOUT_SEC = 5
 
+# Provider routes use DEFAULT priority. Envoy has no unlimited UInt32 value;
+# use its protocol maximum instead of the implicit 1024-per-CID thresholds.
+_PROVIDER_CIRCUIT_BREAKER_MAX = (1 << 32) - 1
+
 # Top-level RouteConfiguration name. Envoy's RDS request specifies
 # the route_config_name; the bootstrap (deploy/envoy/egress-proxy.
 # yaml) must reference this exact string.
@@ -121,7 +125,7 @@ def _build_cluster(entry: ConnectionAllowlist) -> Cluster:
         )
         for ip in entry.ips
     ]
-    return Cluster(
+    cluster = Cluster(
         name=cluster_name,
         connect_timeout=Duration(seconds=_CLUSTER_CONNECT_TIMEOUT_SEC),
         type=Cluster.DiscoveryType.STATIC,
@@ -131,6 +135,11 @@ def _build_cluster(entry: ConnectionAllowlist) -> Cluster:
             endpoints=[LocalityLbEndpoints(lb_endpoints=lb_endpoints)],
         ),
     )
+    threshold = cluster.circuit_breakers.thresholds.add()
+    threshold.max_connections.value = _PROVIDER_CIRCUIT_BREAKER_MAX
+    threshold.max_pending_requests.value = _PROVIDER_CIRCUIT_BREAKER_MAX
+    threshold.max_requests.value = _PROVIDER_CIRCUIT_BREAKER_MAX
+    return cluster
 
 
 def _build_route_configuration(snapshot: Snapshot) -> RouteConfiguration:

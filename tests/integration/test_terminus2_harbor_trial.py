@@ -45,6 +45,7 @@ async def test_runtime_bridges_harbor_trajectory(tmp_path: Path, monkeypatch) ->
     class _FakeTerminus2:
         def __init__(self, logs_dir, **kwargs: object) -> None:
             self._logs_dir = logs_dir
+            self._llm_call_kwargs: dict[str, object] = {}
 
         async def setup(self, env: object) -> None:
             return None

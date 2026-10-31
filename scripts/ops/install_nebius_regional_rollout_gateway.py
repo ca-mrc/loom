@@ -13,6 +13,7 @@ from typing import Any
 
 from scripts.ops.nebius_regional_rollout_gateway import (
     CLUSTER_KINDS,
+    SECRET_KEY_TEMPLATE,
     _json,
     _run,
     projected_contexts,
@@ -182,12 +183,16 @@ def main() -> int:
                 for resource in region["resources"]:
                     command = ["--context", region["context"], "--request-timeout=10s", "get", resource["kind"], resource["name"]]
                     if resource["kind"] not in CLUSTER_KINDS:
-                        command.extend(["-n", region["namespace"]])
+                        command.extend(["-n", resource["namespace"]])
                     observed = _json(_run(scope, [*command, "-o", "json"], timeout=15))
                     if observed.get("metadata", {}).get("name") != resource["name"]:
                         raise ValueError("only already installed resource identities may be refreshed")
-                    if resource["kind"] == "Namespace" and observed["metadata"].get("uid") != region["namespace_uid"]:
+                    if resource["kind"] == "Namespace" and observed["metadata"].get("uid") != region["namespace_uids"][resource["name"]]:
                         raise ValueError("retained regional namespace identity differs")
+                for secret in region["secret_key_reads"]:
+                    observed = _run(scope, ["--context", region["context"], "--request-timeout=10s", "get", "secret", secret["name"], "-n", secret["namespace"], "-o", SECRET_KEY_TEMPLATE], timeout=15)
+                    if observed.returncode or not set(secret["required_keys"]) <= set(observed.stdout.decode().splitlines()):
+                        raise ValueError("retained build secret key names unavailable")
             source = Path(__file__).with_name("nebius_regional_rollout_gateway.py").read_bytes()
             result = install(args.root, source, scope, args.source_sha, apply=args.apply)
         print(json.dumps(result, sort_keys=True))

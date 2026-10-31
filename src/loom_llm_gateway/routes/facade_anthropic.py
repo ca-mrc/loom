@@ -43,6 +43,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
+from anyio import CancelScope
 from fastapi import APIRouter, Header, HTTPException, Request
 from starlette.responses import StreamingResponse
 
@@ -471,17 +472,24 @@ async def _iter_anthropic_sse_and_record_usage(
                 break
             tracker.feed(chunk)
             yield chunk
-        tracker.finish()
-        await _record_anthropic_usage_from_stream(
-            request=request,
-            row=row,
-            ctx=ctx,
-            model=model,
-            usage_body=tracker.usage_body(),
-            request_payload=request_payload,
-        )
     finally:
-        await stream_cm.__aexit__(*sys.exc_info())
+        failure = sys.exc_info()
+        # A disconnected stream can already contain billable usage. Preserve
+        # only observed counters, and finish inline outside Starlette's level
+        # cancellation scope; never invent completion or retry streamed bytes.
+        with CancelScope(shield=True):
+            try:
+                tracker.finish()
+                await _record_anthropic_usage_from_stream(
+                    request=request,
+                    row=row,
+                    ctx=ctx,
+                    model=model,
+                    usage_body=tracker.usage_body(),
+                    request_payload=request_payload,
+                )
+            finally:
+                await stream_cm.__aexit__(*failure)
 
 
 class _AnthropicStreamUsageTracker:

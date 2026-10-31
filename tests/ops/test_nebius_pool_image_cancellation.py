@@ -192,3 +192,42 @@ def test_https_cancellation_fences_image_intent_not_completed_source_repair(imag
             anchor_dir=anchor)["status"] == "pool_successors_stopped"
         with pytest.raises(ValueError):
             switch(image_repair_case, image_api)
+
+
+@pytest.mark.parametrize('journal', ['startup-repair.json', 'manager-image-02.json'])
+def test_shutdown_rechecks_image_ancestry_after_remote_preview(image_repair_case, journal):
+    """A dry-run cannot authorize a stop after its durable ancestry changes."""
+    from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
+    from scripts.ops.nebius_pool_shutdown import stop_pool_successors
+    from scripts.ops.nebius_pool_startup_fence import fence_pool_startup
+    from tests.ops.test_nebius_pool_shutdown import ShutdownAPI
+
+    fixture = selected_image_case(image_repair_case, 'collector')
+    context, remote, state, anchor, _ = fixture
+    image_api = ImageAPI(fixture)
+    image_api.failure = ('template', 'before')
+    assert switch(fixture, image_api)['status'] == 'pending_manager_image_outcome'
+    api = ShutdownAPI((context.request, None, None, remote.startup, None, state.parent))
+    api.state = state
+    assert advance_pool_activation(request=context.request, api=api, state_dir=state,
+        anchor_dir=anchor, cancel=True)['status'] == 'pool_activation_cancelled'
+    assert fence_pool_startup(request=context.request, api=api, state_dir=state,
+        anchor_dir=anchor)['status'] == 'startup_writes_fenced'
+    path = state / journal
+    saved = path.read_bytes()
+    preview = api.preview_stop
+
+    def change_ancestry(key, before, desired):
+        result = preview(key, before, desired)
+        # Even equivalent JSON bytes invalidate the retained hash binding.
+        path.write_bytes(saved + b'\n')
+        return result
+
+    api.preview_stop = change_ancestry
+    with pytest.raises(ValueError, match='pool_shutdown_unconfirmed_preserve_evidence'):
+        stop_pool_successors(request=context.request, api=api, state_dir=state, anchor_dir=anchor)
+    assert api.stop_calls == []
+    path.write_bytes(saved)
+    api.preview_stop = preview
+    assert stop_pool_successors(request=context.request, api=api, state_dir=state,
+        anchor_dir=anchor)['status'] == 'pool_successors_stopped'

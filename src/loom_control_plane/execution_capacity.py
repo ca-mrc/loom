@@ -565,6 +565,25 @@ async def reserve_execution_provisioning(
     return row
 
 
+def native_placement_constraint(binding: Any, inventory: CapacityPlacement) -> PlacementConstraint:
+    """The same frozen native placement binding for admission and ordering hints."""
+    if isinstance(binding, dict) and binding.get("mode") == "node":
+        uid = binding.get("node_uid")
+        name = binding.get("node_name")
+        if isinstance(uid, str) and uid and isinstance(name, str) and name:
+            if any(node.uid == uid and node.name != name for node in inventory.nodes):
+                raise ExecutionProvisioningBlockedError("execution_capacity_native_io_binding_invalid")
+            return PlacementConstraint(frozenset({uid}))
+    if isinstance(binding, dict) and binding.get("mode") == "bootstrap":
+        names = binding.get("excluded_node_names")
+        if (isinstance(names, list) and all(isinstance(name, str) and name for name in names)
+                and names == sorted(set(names))):
+            return PlacementConstraint(frozenset(
+                node.uid for node in inventory.nodes if node.name and node.name not in names
+            ), allow_cold=True)
+    raise ExecutionProvisioningBlockedError("execution_capacity_native_io_binding_invalid")
+
+
 async def admit_capacity_resources(
     session: AsyncSession,
     *,
@@ -739,25 +758,8 @@ async def admit_capacity_resources(
             for row in rows
         ]
 
-    def binding_constraint(binding: Any, inventory: CapacityPlacement) -> PlacementConstraint:
-        if isinstance(binding, dict) and binding.get("mode") == "node":
-            uid = binding.get("node_uid")
-            name = binding.get("node_name")
-            if isinstance(uid, str) and uid and isinstance(name, str) and name:
-                if any(node.uid == uid and node.name != name for node in inventory.nodes):
-                    raise ExecutionProvisioningBlockedError("execution_capacity_native_io_binding_invalid")
-                return PlacementConstraint(frozenset({uid}))
-        if isinstance(binding, dict) and binding.get("mode") == "bootstrap":
-            names = binding.get("excluded_node_names")
-            if (isinstance(names, list) and all(isinstance(name, str) and name for name in names)
-                    and names == sorted(set(names))):
-                return PlacementConstraint(frozenset(
-                    node.uid for node in inventory.nodes if node.name and node.name not in names
-                ), allow_cold=True)
-        raise ExecutionProvisioningBlockedError("execution_capacity_native_io_binding_invalid")
-
     def frozen_constraints(inventory: CapacityPlacement, target_ids: frozenset[str]) -> dict[str, PlacementConstraint]:
-        return {row.demand_id: binding_constraint(row.native["io_binding"], inventory)
+        return {row.demand_id: native_placement_constraint(row.native["io_binding"], inventory)
                 for row in native_active if row.target_id in target_ids and row.native.get("io_binding") is not None}
 
     io_binding = None
@@ -791,7 +793,7 @@ async def admit_capacity_resources(
         for index, candidate in enumerate(candidates):
             bound = dict(constraints)
             if candidate is not None:
-                bound[demand_id] = binding_constraint(candidate, placement)
+                bound[demand_id] = native_placement_constraint(candidate, placement)
             try:
                 prior = plan_placement(placement, actual_demands, sample=sample, constraints=bound)
                 actual = plan_placement(placement, [*actual_demands, (demand_id, resources)],

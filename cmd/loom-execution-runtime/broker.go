@@ -41,7 +41,7 @@ type workloadBroker struct {
 	identity      workloadIdentity
 	client        *http.Client
 	mu            sync.Mutex
-	tokenMu       sync.Mutex
+	tokenRefresh  chan struct{}
 	token         string
 	expires       time.Time
 	phaseDeadline time.Time
@@ -261,38 +261,60 @@ func (b *workloadBroker) currentPhaseRole() string {
 }
 
 func (b *workloadBroker) currentToken(ctx context.Context) (string, error) {
-	// Serialize refreshes without blocking phase changes on Gateway IO.
-	b.tokenMu.Lock()
-	defer b.tokenMu.Unlock()
-	b.mu.Lock()
-	if err := ctx.Err(); err != nil {
-		b.mu.Unlock()
-		return "", err
-	}
-	if b.phaseBound && !b.phaseDeadline.After(time.Now()) {
-		b.mu.Unlock()
-		return "", context.DeadlineExceeded
-	}
-	if b.phaseBound && b.phaseRole != "agent" {
-		b.mu.Unlock()
-		return "", fmt.Errorf("model authority requires an agent phase")
-	}
-	if b.token != "" && time.Until(b.expires) > 60*time.Second {
-		token := b.token
-		b.mu.Unlock()
-		return token, nil
-	}
-	phaseContext := b.phaseContext
+	// Only a missing/expiring credential waits for its single refresh. Waiters
+	// retain their own cancellation and phase lifetime; no mutex spans Gateway IO.
+	var phaseContext context.Context
 	var deadline *time.Time
-	if !b.phaseDeadline.IsZero() {
-		if !b.phaseDeadline.After(time.Now()) {
+	for {
+		b.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			b.mu.Unlock()
+			return "", err
+		}
+		if b.phaseBound && !b.phaseDeadline.After(time.Now()) {
 			b.mu.Unlock()
 			return "", context.DeadlineExceeded
 		}
-		value := b.phaseDeadline
-		deadline = &value
+		if b.phaseBound && b.phaseRole != "agent" {
+			b.mu.Unlock()
+			return "", fmt.Errorf("model authority requires an agent phase")
+		}
+		if b.token != "" && time.Until(b.expires) > 60*time.Second {
+			token := b.token
+			b.mu.Unlock()
+			return token, nil
+		}
+		phaseContext = b.phaseContext
+		if refresh := b.tokenRefresh; refresh != nil {
+			var phaseDone <-chan struct{}
+			if phaseContext != nil {
+				phaseDone = phaseContext.Done()
+			}
+			b.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-phaseDone:
+				return "", phaseContext.Err()
+			case <-refresh:
+				continue
+			}
+		}
+		refresh := make(chan struct{})
+		b.tokenRefresh = refresh
+		defer func() {
+			b.mu.Lock()
+			b.tokenRefresh = nil
+			close(refresh)
+			b.mu.Unlock()
+		}()
+		if !b.phaseDeadline.IsZero() {
+			value := b.phaseDeadline
+			deadline = &value
+		}
+		b.mu.Unlock()
+		break
 	}
-	b.mu.Unlock()
 	var response tokenResponse
 	if err := retryOperation(ctx, func() error {
 		return b.doJSON(ctx, http.MethodPost, b.endpoint("/token"), tokenRequest{
@@ -418,7 +440,16 @@ func (b *workloadBroker) startProxy(ctx context.Context, modelLifetime ...contex
 				}
 			}
 			writer.WriteHeader(response.StatusCode)
-			_, _ = io.Copy(writer, response.Body)
+			// SSE and unknown-length model responses must reach the caller
+			// while inference is running, rather than fill net/http's buffer.
+			if response.ContentLength == -1 || strings.HasPrefix(response.Header.Get("Content-Type"), "text/event-stream") {
+				if err := http.NewResponseController(writer).Flush(); err != nil {
+					return
+				}
+				_, _ = io.Copy(modelStreamWriter{writer}, response.Body)
+			} else {
+				_, _ = io.Copy(writer, response.Body)
+			}
 		}),
 	}
 	go func() {
@@ -433,6 +464,18 @@ func (b *workloadBroker) startProxy(ctx context.Context, modelLifetime ...contex
 		defer cancel()
 		return server.Shutdown(shutdown)
 	}, nil
+}
+
+// A write error (including a failed flush after downstream cancellation)
+// stops io.Copy, then the request's defers cancel and close the upstream body.
+type modelStreamWriter struct{ writer http.ResponseWriter }
+
+func (w modelStreamWriter) Write(body []byte) (int, error) {
+	n, err := w.writer.Write(body)
+	if err == nil {
+		err = http.NewResponseController(w.writer).Flush()
+	}
+	return n, err
 }
 
 func (b *workloadBroker) serveTerminusControl(writer http.ResponseWriter, request *http.Request) {

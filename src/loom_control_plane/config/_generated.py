@@ -49,6 +49,7 @@ class ControlPlaneSettings(BaseSettings):
     service_execution_materializer_concurrency: int = 8
     service_execution_materializer_enabled: bool = True
     service_execution_materializer_interval_sec: float = 2.0
+    service_execution_placement_policy: str = "environment-local-health-first"
     service_execution_scheduler_enabled: bool = False
     service_execution_scheduler_environment: str = "development"
     service_execution_scheduler_interval_sec: float = 2.0

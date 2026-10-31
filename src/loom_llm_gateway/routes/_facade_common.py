@@ -256,6 +256,7 @@ async def resolve_facade_connection(
     *,
     supported_types: frozenset[str],
     dialect_label: str,
+    allow_request_pool: bool = False,
 ) -> ProviderConnection:
     """Lookup, ownership/share-scope, soft-delete, and dialect-type checks all in
     one helper. 404 (not 403) on cross-team to match loom_service's
@@ -301,6 +302,19 @@ async def resolve_facade_connection(
                 f"dialect-matched facade for this provider type."
             ),
         )
+    if not allow_request_pool:
+        from loom.db.schema import ProviderRequestPool
+
+        pool_enabled = await session.scalar(
+            select(ProviderRequestPool.enabled).where(
+                ProviderRequestPool.connection_id == connection_id,
+            )
+        )
+        if pool_enabled:
+            raise HTTPException(
+                status_code=400,
+                detail="request pool requires hosted Terminus2 non-streaming complete-messages Chat",
+            )
     return row
 
 
@@ -651,6 +665,7 @@ async def record_facade_failed_call(
     failure_status_code: int | None = None,
     failure_error_type: str | None = None,
     correlation: dict[str, Any] | None = None,
+    request_pool_attribution: dict[str, Any] | None = None,
 ) -> None:
     assert ctx.team_id is not None
     assert ctx.trial_id is not None
@@ -669,6 +684,7 @@ async def record_facade_failed_call(
             attempt=attempt,
             request_params=normalize_request_params(request_payload),
             failure_category=failure_category,
+            request_pool_attribution=request_pool_attribution,
             failure_status_code=failure_status_code,
             failure_error_type=failure_error_type,
             client_call_id=corr.get("client_call_id"),

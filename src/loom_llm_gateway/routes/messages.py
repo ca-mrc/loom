@@ -26,6 +26,7 @@ import sys
 from typing import Any
 
 import httpx
+from anyio import CancelScope
 from fastapi import APIRouter, Header, HTTPException, Request
 from starlette.responses import StreamingResponse
 
@@ -406,20 +407,24 @@ async def _stream_messages(
                 except StopAsyncIteration:
                     provider_completed.set()
                     break
-                yield chunk
                 buffer += chunk
                 events, buffer = _parse_sse_blocks(buffer)
                 for name, data in events:
                     _extract_stream_usage(name, data, accum)
+                yield chunk
         finally:
-            await stream_ctx.__aexit__(*sys.exc_info())
-            await _record_stream_call(
-                request=request,
-                ctx=ctx,
-                model_name=model_name,
-                accum=accum,
-                request_payload=payload,
-            )
+            failure = sys.exc_info()
+            with CancelScope(shield=True):
+                try:
+                    await stream_ctx.__aexit__(*failure)
+                finally:
+                    await _record_stream_call(
+                        request=request,
+                        ctx=ctx,
+                        model_name=model_name,
+                        accum=accum,
+                        request_payload=payload,
+                    )
 
     return StreamingResponse(event_iter(), media_type=content_type)
 
