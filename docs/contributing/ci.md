@@ -376,7 +376,7 @@ The same manual boundary includes development activation, collector runtime,
 and the schema live/jobs/resources/projection/upgrade tests. Their complete
 lifecycle scenarios remain available through the existing input. The mixed
 `test_nebius_development_schema_consumers.py` stays automatic, retaining all
-20 public SQL schema/default contracts and its successor-to-activation case;
+24 public SQL schema/default contracts and its successor-to-activation case;
 `test_nebius_development_schema_entry.py` also keeps its automatic scope and
 identity protocol coverage. These are exact file selections, not a blanket
 exclusion of development or staging tests.
@@ -526,7 +526,7 @@ selector/subprocess coverage. Root scopes still execute independently.
 Pool qualification retains its original `pins`, stable hash salt and 20-shard
 count. The obsolete automatic-only relocation of the retained development
 module is removed: both pool suites now require the same explicit manual flag.
-The manual lane has 129 modules and 3,535 collected cases; the three current staging/management boundary
+The manual lane has 129 modules and 3,537 collected cases; the three current staging/management boundary
 modules run in the ordinary root lane instead. Selection and execution still partition each
 selected file exactly once. The following measurements describe the historical
 manual layout and do not claim a new hosted speedup.
