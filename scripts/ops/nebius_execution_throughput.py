@@ -26,12 +26,28 @@ def timestamp(value: str) -> datetime:
 def _completion(trial: dict[str, Any], leases: list[dict[str, Any]]) -> tuple[datetime | None, datetime | None]:
     reward = trial.get("reward")
     if (trial["state"] != "succeeded" or not trial.get("finished_at") or not leases
-            or isinstance(reward, bool) or not isinstance(reward, (int, float)) or not math.isfinite(reward)
-            or any(lease["materialization_state"] != "committed" or not lease.get("materialization_committed_at")
-                   for lease in leases)):
+            or isinstance(reward, bool) or not isinstance(reward, (int, float)) or not math.isfinite(reward)):
+        return None, None
+    attempt = trial.get("attempt_count", 1)
+    if attempt > 1 and any("attempt" not in lease for lease in leases):
+        raise ValueError("retry snapshots must identify each lease attempt")
+    parents = [lease for lease in leases if lease.get("attempt", 1) == attempt
+               and lease.get("execution_role", "attempt") == "attempt"]
+    if len(parents) != 1:
+        raise ValueError("snapshot must identify exactly one current attempt lease")
+    parent = parents[0]
+    chain = [parent]
+    if parent.get("verifier_execution") == "separate_execution":
+        children = [lease for lease in leases if lease["id"] == trial.get("verifier_lease_id")]
+        if (len(children) != 1 or children[0].get("parent_lease_id") != parent["id"]
+                or children[0].get("execution_role") != "verifier"):
+            raise ValueError("snapshot must identify the selected verifier child")
+        chain.extend(children)
+    if any(lease["materialization_state"] != "committed" or not lease.get("materialization_committed_at")
+           for lease in chain):
         return None, None
     result = max(timestamp(trial["finished_at"]),
-                 *(timestamp(lease["materialization_committed_at"]) for lease in leases))
+                 *(timestamp(lease["materialization_committed_at"]) for lease in chain))
     if any(lease["cleanup_state"] != "complete" or not lease.get("deleted_at") for lease in leases):
         return result, None
     return result, max(result, *(timestamp(lease["deleted_at"]) for lease in leases))

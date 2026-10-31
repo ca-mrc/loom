@@ -1094,13 +1094,17 @@ Snapshots contain `controls.expected_tasks` (task ID to intended repetitions),
 `controls.task_revisions`, the remaining fixed configuration in `controls`,
 `observed_at`, `candidate`, `batch.id`/`batch.submitted_at`, and `trials`/`leases`.
 Trials include identity, task, state, numeric reward, attempt count and finish
-time. Leases include identity, Trial ID, task revision, Pod start/termination,
+time. Leases include identity, Trial ID, attempt number, execution role, parent ID,
+verifier mode, task revision, Pod start/termination,
 materialization state/commit time and cleanup state/deletion time. Repetitions
 count as separate Trials; retries never create extra completion counts. The
 report rejects mismatched controls/revisions and duplicate identities, and
 marks windows not yet observed instead of inventing a zero throughput value.
-Canonical completion waits for committed materialization; full cleanup also
-waits for every associated lease's deletion. Numeric zero is a valid platform
+Canonical completion waits for the current attempt and its selected verifier
+child to commit materialization. Failed previous attempts/verifier retries do
+not suppress or duplicate that result; the snapshot includes the selected
+verifier lease ID from the Trial result. Full cleanup still waits for every
+associated historical lease's deletion. Numeric zero is a valid platform
 result and is distinct from a positive Oracle reward.
 
 Use persisted phase timestamps for image-ready admission, scheduling/init,

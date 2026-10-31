@@ -24,11 +24,11 @@ def sample():
              "reward": 0, "attempt_count": 1},
         ],
         "leases": [
-            {"id": "l1", "trial_id": "t1", "task_revision_sha256": "revision",
+            {"id": "l1", "trial_id": "t1", "attempt": 2, "execution_role": "attempt", "task_revision_sha256": "revision",
              "materialization_state": "committed", "materialization_committed_at": stamp(65),
              "cleanup_state": "complete", "deleted_at": stamp(90),
              "pod_started_at": stamp(10), "pod_terminated_at": stamp(50)},
-            {"id": "l2", "trial_id": "t2", "task_revision_sha256": "revision",
+            {"id": "l2", "trial_id": "t2", "attempt": 1, "execution_role": "attempt", "task_revision_sha256": "revision",
              "materialization_state": "committed", "materialization_committed_at": stamp(155),
              "cleanup_state": "complete", "deleted_at": stamp(180),
              "pod_started_at": stamp(40), "pod_terminated_at": stamp(140)},
@@ -106,3 +106,39 @@ def test_failed_batch_reports_drain_without_inventing_success_or_running_pods():
     assert window["failed"] == 1
     assert window["actual_running_pods"]["average"] == (40 + 140) / 300
     assert window["actual_running_pods"]["unknown_termination_intervals"] == 1
+
+
+def test_successful_retry_counts_once_while_previous_failed_lease_still_needs_cleanup():
+    data = sample()
+    failed = deepcopy(data["leases"][0])
+    failed.update(id="old", attempt=1, materialization_state="not_started",
+                  materialization_committed_at=None, cleanup_state="pending", deleted_at=None,
+                  pod_started_at=stamp(1), pod_terminated_at=stamp(5))
+    data["leases"].append(failed)
+    result = summarize(data, [120])
+    assert result["windows"][0]["canonical_result_completions"] == 1
+    assert result["windows"][0]["fully_cleaned_completions"] == 0
+    failed.update(cleanup_state="complete", deleted_at=stamp(115))
+    result = summarize(data, [120])
+    assert result["windows"][0]["canonical_result_completions"] == 1
+    assert result["windows"][0]["fully_cleaned_completions"] == 1
+
+
+def test_separate_verifier_retry_uses_the_selected_child_and_cleans_every_lease():
+    data = sample()
+    parent = data["leases"][0]
+    parent.update(verifier_execution="separate_execution", materialization_committed_at=stamp(95))
+    data["trials"][0].update(verifier_lease_id="winner", finished_at=stamp(95))
+    failed = deepcopy(parent)
+    failed.update(id="failed-child", execution_role="verifier", parent_lease_id="l1",
+                  materialization_state="not_started", materialization_committed_at=None,
+                  deleted_at=stamp(75))
+    winner = deepcopy(parent)
+    winner.update(id="winner", execution_role="verifier", parent_lease_id="l1", deleted_at=stamp(110))
+    data["leases"].extend([failed, winner])
+    rows = summarize(data, [100, 120])["windows"]
+    assert (rows[0]["canonical_result_completions"], rows[0]["fully_cleaned_completions"]) == (1, 0)
+    assert (rows[1]["canonical_result_completions"], rows[1]["fully_cleaned_completions"]) == (1, 1)
+    winner["parent_lease_id"] = "unrelated"
+    with pytest.raises(ValueError, match="selected verifier"):
+        summarize(data, [120])
