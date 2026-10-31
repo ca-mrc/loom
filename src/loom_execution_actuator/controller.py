@@ -121,22 +121,7 @@ class ExecutionActuator:
         self._pool_resources = pool_resources
 
     async def run_commands_once(self, *, now: datetime | None = None) -> int:
-        if self._command_concurrency > 1:
-            return await self._run_concurrent_commands_once(now=now)
-        current_time = now or datetime.now(UTC)
-        async with self._sessions() as session:
-            commands = await claim_execution_commands(
-                session,
-                consumer_id=self._controller_id,
-                target_id=self._target.target_id,
-                limit=self._command_limit,
-                lease_seconds=self._command_lease_seconds,
-                now=current_time,
-            )
-            await session.commit()
-        for command in commands:
-            await self._deliver_command(command, now=now)
-        return len(commands)
+        return await self._run_concurrent_commands_once(now=now)
 
     async def _deliver_command(
         self, command: ClaimedExecutionCommand, *, now: datetime | None = None,

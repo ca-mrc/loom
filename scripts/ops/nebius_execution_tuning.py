@@ -6,10 +6,13 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import quote
+from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[2]
 if __package__ in {None, ""}:
@@ -18,6 +21,7 @@ if __package__ in {None, ""}:
 from scripts.ops.deploy_nebius_platform import DeploymentError, Kubectl  # noqa: E402
 
 from loom.nebius_platform_render import postgres_settings, validate_environment  # noqa: E402
+from loom.nebius_rollout_guard import LOCK_KEY  # noqa: E402
 
 _API = '''import json,os,sys,tomllib,urllib.request,urllib.error
 from pathlib import Path
@@ -34,6 +38,59 @@ try:
 except urllib.error.HTTPError as error:
  print(json.dumps({'error_status':error.code}))
 '''
+
+
+# Use the same transaction lock and singleton as ordinary rollout acquisition.
+# Active work is allowed for tuning; admission pauses briefly, never cancelled.
+_TUNING_ACQUIRE_SQL = f"""
+WITH mutex AS (SELECT pg_try_advisory_xact_lock({LOCK_KEY}) AS acquired)
+INSERT INTO nebius_rollout_guard(id, owner, candidate_sha)
+SELECT 1, :owner, :candidate WHERE (SELECT acquired FROM mutex)
+ON CONFLICT (id) DO NOTHING RETURNING id
+"""
+_TUNING_RELEASE_SQL = """
+DELETE FROM nebius_rollout_guard
+WHERE id = 1 AND owner = :owner AND candidate_sha = :candidate RETURNING id
+"""
+_GUARD = '''import asyncio,json,sys
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession,create_async_engine
+from loom_control_plane.config import ControlPlaneSettings
+async def main():
+ settings=ControlPlaneSettings()
+ engine=create_async_engine(settings.db_engine_url,connect_args=settings.db_engine_connect_args)
+ try:
+  async with AsyncSession(engine) as session,session.begin():
+   value=await session.scalar(text(sys.argv[1]),{'owner':sys.argv[2],'candidate':sys.argv[3]})
+  print(json.dumps({'ok':value is not None}))
+ finally:await engine.dispose()
+try:asyncio.run(main())
+except Exception:
+ print('Tuning guard unavailable; retained guard ownership must be inspected',file=sys.stderr)
+ raise SystemExit(1)
+'''
+
+
+@contextmanager
+def _tuning_guard(kube: Kubectl, namespace: str, candidate: str) -> Iterator[None]:
+    if not re.fullmatch(r"[0-9a-f]{40}", candidate):
+        raise DeploymentError("invalid tuning candidate")
+    owner = "execution-tuning-" + uuid4().hex
+    print(f"Execution tuning guard: owner={owner} candidate={candidate}", file=sys.stderr)
+
+    def execute(query: str) -> bool:
+        return bool(json.loads(kube.run(
+            "exec", "-n", namespace, "deployment/loom-control-plane", "--", "python", "-c",
+            _GUARD, query, owner, candidate,
+        ))["ok"])
+
+    if not execute(_TUNING_ACQUIRE_SQL):
+        raise DeploymentError("a version rollout owns the platform, or another tuning operation is active")
+    try:
+        yield
+    finally:
+        if not execute(_TUNING_RELEASE_SQL):
+            raise DeploymentError("tuning guard release unconfirmed; inspect its exact retained owner")
 
 
 def _api(kube: Kubectl, namespace: str, method: str, path: str, body: object = None) -> dict[str, Any]:
@@ -99,7 +156,7 @@ def _read(kube: Kubectl, namespace: str) -> tuple[dict[str, Any], dict[str, Any]
     return cm, config, profile, [cp, *actuators]
 
 
-def stage_postgres(
+def _stage_postgres_locked(
     kube: Kubectl, namespace: str, *, expected_candidate: str, settings: dict[str, int],
 ) -> dict[str, Any]:
     """Save restart-requiring settings for the next normal maintenance rollout."""
@@ -108,13 +165,6 @@ def stage_postgres(
         raise DeploymentError("database settings candidate differs from installed platform")
     if not settings:
         raise DeploymentError("at least one Postgres setting is required")
-    held = kube.run(
-        "exec", "-n", namespace, "statefulset/loom-postgres", "--", "psql", "-X", "-qAt",
-        "-U", "postgres", "-d", "loom", "-v", "ON_ERROR_STOP=1", "-c",
-        "BEGIN READ ONLY; SELECT count(*) FROM nebius_rollout_guard; ROLLBACK;",
-    )
-    if held.strip() != "0":
-        raise DeploymentError("a version rollout owns the platform; wait for its normal completion")
     updated = deepcopy(config)
     updated["postgres_settings"] = {**postgres_settings(config), **settings}
     validate_environment(updated)
@@ -153,7 +203,7 @@ def inspect(kube: Kubectl, namespace: str) -> dict[str, Any]:
     }
 
 
-def apply(
+def _apply_locked(
     kube: Kubectl, namespace: str, *, expected_candidate: str,
     placement_policy: str | None = None, command_concurrency: int | None = None,
     create_rates: dict[str, int] | None = None,
@@ -164,13 +214,6 @@ def apply(
     values to converge and read back; never rewrite batches or execution leases.
     """
     cm, config, profile, controllers = _read(kube, namespace)
-    held = kube.run(
-        "exec", "-n", namespace, "statefulset/loom-postgres", "--", "psql", "-X", "-qAt",
-        "-U", "postgres", "-d", "loom", "-v", "ON_ERROR_STOP=1", "-c",
-        "BEGIN READ ONLY; SELECT count(*) FROM nebius_rollout_guard; ROLLBACK;",
-    )
-    if held.strip() != "0":
-        raise DeploymentError("a version rollout owns the platform; wait for its normal completion")
     if not re.fullmatch(r"[0-9a-f]{40}", expected_candidate) or profile["candidate_sha"] != expected_candidate:
         raise DeploymentError("tuning candidate differs from the installed platform")
     if any(_runtime(kube, row).get("command_concurrency") is None
@@ -253,6 +296,26 @@ def apply(
     result["restarted_controllers"] = [name for name, _ in restarted]
     result["task_jobs_replaced"] = False
     return result
+
+
+def stage_postgres(
+    kube: Kubectl, namespace: str, *, expected_candidate: str, settings: dict[str, int],
+) -> dict[str, Any]:
+    """Persist database intent while excluding deployments and other tuning."""
+    with _tuning_guard(kube, namespace, expected_candidate):
+        return _stage_postgres_locked(kube, namespace, expected_candidate=expected_candidate, settings=settings)
+
+
+def apply(
+    kube: Kubectl, namespace: str, *, expected_candidate: str,
+    placement_policy: str | None = None, command_concurrency: int | None = None,
+    create_rates: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """Hold the deployment mutex through persistence, convergence and readback."""
+    with _tuning_guard(kube, namespace, expected_candidate):
+        return _apply_locked(kube, namespace, expected_candidate=expected_candidate,
+                             placement_policy=placement_policy, command_concurrency=command_concurrency,
+                             create_rates=create_rates)
 
 
 def main() -> None:

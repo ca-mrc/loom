@@ -980,14 +980,28 @@ The operator saves settings in the existing `loom-platform-config` environment
 (the normal idle rollout reads this same source for the next candidate), keeps
 the catalog placement metadata aligned, and then converges only the affected
 controllers or existing capacity-policy API. Configuration updates compare the
-ConfigMap resource version; an active version-rollout guard is left untouched
-and tuning waits for that rollout to finish. Readback checks saved values,
+ConfigMap resource version. Tuning atomically reserves the same singleton and
+transaction advisory lock as version rollout, and holds ownership through all
+writes, controller convergence and readback. A version rollout or another tuner
+cannot acquire it during that operation; existing foreign ownership is left
+untouched. New admission pauses briefly while tuning holds the guard, while
+in-flight Trials and task Pods continue without cancellation or resubmission.
+After acquiring its guard, deployment compares the live environment configuration
+with the source captured before rendering/preflight and rejects stale source
+before backup or workload mutation. Readback checks saved values,
 actual in-container settings, policy values and controller readiness. Existing
 images and task Jobs are retained. Placement changes roll the Control Plane;
 concurrency changes roll actuators; creation-rate changes take effect through
 the API without a controller restart. Other capacity limits are preserved.
 A partial update remains failed with desired values retained; repeating the
-same tuning command safely finishes convergence. Rollback uses the same command
+same tuning command safely finishes convergence. Normal return and handled
+failure release only that tuning operation's exact owner/candidate. Abrupt
+operator loss or an unconfirmed guard response retains the ordinary fail-closed
+pause. The operator prints its non-secret owner/candidate before acquisition;
+after confirming that process has ended, inspect the retained owner and use the
+existing `python -m loom.nebius_rollout_guard release --owner OWNER --candidate SHA`
+inside the installed Control Plane, then repeat the retained tuning command.
+Never release a foreign or still-active owner's guard. Rollback uses the same command
 with the previous setting and preserves in-flight work.
 
 Database resources and startup cache are separately persisted in
@@ -1676,5 +1690,7 @@ compute deletion; cancellation does not permit new model calls or automatic
 attempts. Missing output is shown as unavailable, not perpetually pending.
 Cancelled/unscored output remains ineligible for training delivery; successful
 supplemental attempts continue through the existing family selection rules.
+
+Every dispatcher uses the same per-lease head/active-claim ordering protection, including concurrency 1, so rolling between concurrency values retains command order across overlapping controller instances.
 
 A scaled-to-zero standby actuator retains the concurrency setting in its Deployment without being started for tuning. Inspection reports its configured value separately from the unavailable runtime value; active controllers must still pass runtime and readiness checks.

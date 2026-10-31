@@ -33,6 +33,7 @@ class FakeKube:
         self.calls: list[tuple] = []
         self.fail_set = False
         self.guard_held = False
+        self.tuning_owner = None
 
     def get(self, kind, name, namespace):
         return deepcopy(self.objects.get((kind, namespace, name), {}))
@@ -47,6 +48,18 @@ class FakeKube:
             if 'psql' in args:
                 return '1' if self.guard_held else '0'
             program = args[args.index('-c') + 1]
+            if program == tuning._GUARD:
+                query, owner, candidate = args[-3:]
+                if query == tuning._TUNING_ACQUIRE_SQL:
+                    ok = not (self.guard_held or self.tuning_owner)
+                    if ok:
+                        self.tuning_owner = (owner, candidate)
+                else:
+                    assert query == tuning._TUNING_RELEASE_SQL
+                    ok = self.tuning_owner == (owner, candidate)
+                    if ok:
+                        self.tuning_owner = None
+                return json.dumps({'ok': ok})
             if program == tuning._API:
                 method, path, body = args[-3:]
                 if method == 'GET':
@@ -134,6 +147,7 @@ def test_interrupted_controller_update_can_converge_from_saved_values(regional_i
     with pytest.raises(DeploymentError, match='interrupted'):
         tuning.apply(kube, config['namespace'], expected_candidate=candidate['candidate_sha'], command_concurrency=2)
     assert json.loads(kube.cm['data']['environment.json'])['execution_command_concurrency'] == 2
+    assert kube.tuning_owner is None
     version = kube.cm['metadata']['resourceVersion']
     result = tuning.apply(kube, config['namespace'], expected_candidate=candidate['candidate_sha'], command_concurrency=2)
     assert result['persisted']['command_concurrency'] == 2
@@ -280,3 +294,28 @@ def test_dormant_actuators_keep_configuration_without_requiring_a_pod(regional_i
     assert tuning._env(kube.objects[key])['LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY'] == '2'
     assert 'dormant-actuator' not in result['restarted_controllers']
     assert not any(args[:3] == ('rollout', 'status', 'deployment/dormant-actuator') for args in kube.calls)
+
+
+@pytest.mark.parametrize('operation', ['apply', 'stage-postgres'])
+def test_version_deployment_cannot_acquire_guard_during_tuning(regional_inputs, operation):
+    config, candidate, _ = regional_inputs
+
+    class RacingKube(FakeKube):
+        deployment_granted = None
+
+        def run(self, *args, **kwargs):
+            if args[0] == 'patch':
+                self.deployment_granted = not (self.guard_held or getattr(self, 'tuning_owner', None))
+                if self.deployment_granted:
+                    self.guard_held = True
+            return super().run(*args, **kwargs)
+
+    kube = RacingKube(regional_inputs)
+    if operation == 'apply':
+        tuning.apply(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+                     command_concurrency=2)
+    else:
+        tuning.stage_postgres(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+                              settings={'shared_buffers_mib': 256})
+    assert kube.deployment_granted is False
+    assert getattr(kube, 'tuning_owner', None) is None

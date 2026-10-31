@@ -1596,3 +1596,28 @@ def test_recovery_observes_persisted_database_without_control_plane_pod(rendered
     assert "statefulset/loom-postgres" in command and "psql" in command
     assert "BEGIN READ ONLY" in command[-1]
     assert "deployment/loom-control-plane" not in command
+
+
+@pytest.mark.parametrize('knob', ['execution_command_concurrency', 'postgres_settings'])
+def test_deployment_rejects_tuning_source_changed_before_guard(rendered, monkeypatch, knob):
+    args, config, _, files = rendered
+    args.apply = True
+    kube = FakeKubectl(config, files, database=True)
+    _current_primary(kube, config, files, config['target_id'])
+    args.expected_current_environment = json.loads(
+        kube.objects['configmap', 'loom-platform-config']['data']['environment.json'])
+    original_guard = deploy.rollout_guard
+
+    def interleave(_kube, _ns, action, _owner, _candidate):
+        if action == 'acquire':
+            changed = {**config, knob: 2 if knob == 'execution_command_concurrency'
+                       else {'shared_buffers_mib': 512}}
+            _current_primary(kube, changed, files, config['target_id'])
+        return original_guard(_kube, _ns, action, _owner, _candidate)
+
+    monkeypatch.setattr(deploy, 'rollout_guard', interleave)
+    monkeypatch.setattr(deploy, 'public_smoke', lambda *args: None)
+    with pytest.raises(deploy.DeploymentError, match='configuration source changed'):
+        deploy.deploy(args, kube=kube)
+    assert not any(command[0] in {'apply', 'create', 'delete'} for command in kube.commands)
+    assert kube.guard_identity is None

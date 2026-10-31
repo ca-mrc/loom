@@ -4762,13 +4762,16 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
                 namespace=target.namespace_name,
             ),
             controller_id="output-finalization-test",
+            # Keep the semantic finalization checkpoint observable before the
+            # bounded dispatcher refills with the newly queued cleanup command.
+            command_limit=1,
         )
         completed = await actuator.run_commands_once(now=now + timedelta(seconds=4))
         async with sessions() as session:
             commands = (await session.scalars(select(ServiceExecutionCommand).where(
                 ServiceExecutionCommand.lease_id == lease.id,
             ))).all()
-            assert completed == 3, [
+            assert completed == 1, [
                 (c.command_type, c.state, c.last_error_code, c.last_error_message) for c in commands
             ]
 
@@ -6780,4 +6783,63 @@ async def test_materializer_reads_default_image_version_from_the_batch_profile(p
         assert default_image_version(profile, SimpleNamespace(candidate_sha=plan.candidate_sha)) == version
         assert default_image_version(profile, SimpleNamespace(candidate_sha="f" * 40)) is None
     finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(('old_concurrency', 'new_concurrency'), [(2, 1), (1, 2)])
+async def test_actuator_rolling_concurrency_handoff_keeps_lease_command_order(
+    postgres_url: str, old_concurrency: int, new_concurrency: int,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    entered, release = asyncio.Event(), asyncio.Event()
+    kubernetes = _FakeKubernetesJobApi()
+    delivery = None
+    try:
+        async with sessions() as session:
+            first, target = await _seed_ready_trial(session, now=now)
+            other, _ = await _seed_ready_trial(session, now=now)
+            leases = [await _reserve(session, trial_id=trial, target=target, now=now)
+                      for trial in (first, other)]
+            await enqueue_execution_transition(session, lease_id=leases[0].id,
+                                               expected_generation=1, desired_state='start', now=now)
+            await session.execute(update(ServiceExecutionCommand).where(
+                (ServiceExecutionCommand.lease_id == leases[1].id)
+                | (ServiceExecutionCommand.command_type == 'start'),
+            ).values(available_at=now + timedelta(seconds=1)))
+            await session.commit()
+        common = {'sessions': sessions, 'kubernetes': kubernetes,
+                  'target': ExecutionTargetRuntime(target_id=target.target_id, namespace=target.namespace_name)}
+        old = ExecutionActuator(**common, controller_id='old', command_limit=1,
+                                command_concurrency=old_concurrency)
+        new = ExecutionActuator(**common, controller_id='new', command_concurrency=new_concurrency)
+        process = old._process_command
+
+        async def delayed(command, *, now):
+            entered.set()
+            await release.wait()
+            await process(command, now=now)
+
+        old._process_command = delayed
+        seen = []
+        next_process = new._process_command
+
+        async def observed(command, *, now):
+            seen.append((command.lease_id, command.command_type))
+            await next_process(command, now=now)
+
+        new._process_command = observed
+        delivery = asyncio.create_task(old.run_commands_once(now=now))
+        await asyncio.wait_for(entered.wait(), 10)
+        assert await asyncio.wait_for(new.run_commands_once(now=now + timedelta(seconds=1)), 10) == 1
+        assert seen == [(leases[1].id, 'create')]
+        release.set()
+        assert await asyncio.wait_for(delivery, 10) == 1
+        assert await asyncio.wait_for(new.run_commands_once(now=now + timedelta(seconds=1)), 10) == 1
+        assert seen[-1] == (leases[0].id, 'start')
+    finally:
+        release.set()
+        if delivery is not None:
+            await asyncio.gather(delivery, return_exceptions=True)
         await engine.dispose()
