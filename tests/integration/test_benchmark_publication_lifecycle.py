@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.benchmark_admission import BenchmarkAdmissionError
 from loom.db.schema import Benchmark, Task
+from loom.db.schema_startup import service_schema_head
 from loom.trajectory.storage import FakeObjectStore
 from loom_benchmark_tool.register_cmd import run_register
 from tests.unit.test_benchmark_readiness import _valid_task_config
@@ -222,7 +223,7 @@ async def test_cli_migration_roundtrip_retains_preceding_schema_and_accepted_cat
     finally:
         await migrate("upgrade", "head")
     async with publication_sessions() as session:
-        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0184"
+        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == service_schema_head()
         assert await session.scalar(text("SELECT to_regclass('public.service_execution_live_events')")) is not None
         for table in ("provider_request_pools", "provider_request_pool_members"):
             assert await session.scalar(text(f"SELECT to_regclass('public.{table}')")) is not None

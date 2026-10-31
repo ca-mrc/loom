@@ -11,6 +11,7 @@ import os
 import ssl
 import time
 from dataclasses import replace
+from ipaddress import ip_address, ip_network
 from pathlib import Path
 from uuid import uuid4
 
@@ -203,6 +204,13 @@ def test_repeat_refresh_preserves_retained_identity_and_observes_native_drain(re
             foundation = raw['installation']['foundation']
             platform = json.loads(foundation['platform_config_json'])
             platform['kubernetes_api_server'] = endpoint
+            # Only management cutover runs here, not the node observer. Retain
+            # the host-mapped operator origin but scope observer egress to nodes.
+            platform['resource_observer_api_cidrs'] = [
+                str(ip_network(ip_address(address.address)))
+                for node in core.list_node().items for address in node.status.addresses
+                if address.type == 'InternalIP'
+            ]
             foundation['platform_config_json'] = json.dumps(platform)
             return ManagementDeployment.model_validate(raw)
 
@@ -351,6 +359,13 @@ def test_rendered_refresh_probes_and_migration_execute_against_real_tls_database
         config = json.loads(foundation['platform_config_json'])
         config.update(kubernetes_api_server=endpoint, postgres_image=postgres_image, backup_image=postgres_image,
                       storage_class='local-path')
+        # These rendered management/SQL Jobs use the host-mapped operator API;
+        # no node observer runs here. Its egress scope still uses real node IPs.
+        config['resource_observer_api_cidrs'] = [
+            str(ip_network(ip_address(address.address)))
+            for node in core.list_node().items for address in node.status.addresses
+            if address.type == 'InternalIP'
+        ]
         foundation['platform_config_json'] = json.dumps(config)
         installation['applications']['runtime']['kubernetes']['endpoint'] = endpoint
         installation['applications']['shared']['schema_revision'] = CURRENT_REVISION
