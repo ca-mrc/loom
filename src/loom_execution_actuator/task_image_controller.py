@@ -633,8 +633,8 @@ class NativeTaskImageController:
 
     async def _outstanding(self, session: AsyncSession) -> list[TaskImageMaterializationAttempt]:
         return list((await session.scalars(select(TaskImageMaterializationAttempt).where(
-            TaskImageMaterializationAttempt.native_build["target_id"].as_string() == self.target.target_id,
-            TaskImageMaterializationAttempt.native_build["capacity_released_at"].as_string().is_(None),
+            TaskImageMaterializationAttempt.native_capacity_target_id == self.target.target_id,
+            TaskImageMaterializationAttempt.native_capacity_released_at.is_(None),
         ))).all())
 
     async def run_once(self) -> None:

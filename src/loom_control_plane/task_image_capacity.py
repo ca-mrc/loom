@@ -22,6 +22,7 @@ from loom_control_plane.execution_capacity import (
     admit_capacity_resources,
     native_build_resources,
 )
+from loom_control_plane.metrics import EXECUTION_CAPACITY_LOCK_WAIT_SECONDS
 
 
 def _bind_io_job(native: dict[str, Any], binding: dict[str, Any]) -> dict[str, Any]:
@@ -70,7 +71,8 @@ async def reserve_native_task_image_capacity(
     capacity_released_at, including after lease expiry or a terminal build.
     """
     current_time = _utc(now or datetime.now(UTC), name="now")
-    await session.execute(_CAPACITY_ADMISSION_LOCK)
+    with EXECUTION_CAPACITY_LOCK_WAIT_SECONDS.labels(operation="build").time():
+        await session.execute(_CAPACITY_ADMISSION_LOCK)
     attempt = await session.scalar(select(TaskImageMaterializationAttempt).where(
         TaskImageMaterializationAttempt.id == attempt_id,
     ).with_for_update())

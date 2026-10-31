@@ -30,6 +30,7 @@ from loom_control_plane.execution_placement import (
     quota_identity,
     require_provider_quota_headroom,
 )
+from loom_control_plane.metrics import EXECUTION_CAPACITY_LOCK_WAIT_SECONDS
 from loom_control_plane.task_image_io_capacity import NativeIOUnavailable, native_io_candidates
 from loom_execution_capacity_collector.contracts import (
     CapacityPlacement,
@@ -451,10 +452,10 @@ async def _native_capacity_reservations(
     # Reservation writers use canonical UTC ISO timestamps. Retain all active
     # reservations and only the released history needed by the create-rate limit.
     attempts = (await session.scalars(select(TaskImageMaterializationAttempt).where(
-        TaskImageMaterializationAttempt.native_build["capacity_reserved_at"].astext.is_not(None),
+        TaskImageMaterializationAttempt.native_capacity_reserved_at.is_not(None),
         or_(
-            TaskImageMaterializationAttempt.native_build["capacity_released_at"].astext.is_(None),
-            TaskImageMaterializationAttempt.native_build["capacity_reserved_at"].astext
+            TaskImageMaterializationAttempt.native_capacity_released_at.is_(None),
+            TaskImageMaterializationAttempt.native_capacity_reserved_at
             >= (current_time - timedelta(minutes=1)).isoformat(),
         ),
     ))).all()
@@ -495,7 +496,10 @@ async def reserve_execution_provisioning(
         raise ValueError("execution target does not exist")
     if target.provider != "nebius":
         return None
-    await session.execute(_CAPACITY_ADMISSION_LOCK)
+    with EXECUTION_CAPACITY_LOCK_WAIT_SECONDS.labels(
+        operation="execution_revalidate" if revalidate_existing else "execution_reserve",
+    ).time():
+        await session.execute(_CAPACITY_ADMISSION_LOCK)
     existing = (
         await session.execute(
             select(ExecutionProvisioningAuthorization)

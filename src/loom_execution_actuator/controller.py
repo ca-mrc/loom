@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.db.schema import ServiceExecutionLease
@@ -37,6 +37,7 @@ from loom_execution_actuator.contracts import (
     NormalizedJobState,
 )
 from loom_execution_actuator.metrics import (
+    COMMAND_CAPACITY_REVALIDATION_SECONDS,
     COMMAND_PROCESS_SECONDS,
     COMMAND_QUEUE_WAIT_SECONDS,
     KUBERNETES_API_ERRORS_TOTAL,
@@ -47,6 +48,7 @@ from loom_execution_actuator.metrics import (
     KUBERNETES_RECONCILE_CONVERGED,
     KUBERNETES_WATCH_RESTARTS_TOTAL,
     RESOURCE_USAGE_ERRORS_TOTAL,
+    TERMINAL_OBSERVATION_DELAY_SECONDS,
 )
 from loom_execution_actuator.pool_client import PoolRequestUnconfirmedError
 from loom_execution_actuator.pool_execution_resources import PoolExecutionResources
@@ -317,12 +319,17 @@ class ExecutionActuator:
         observation: KubernetesJobObservation,
         *,
         now: datetime,
+        source: Literal["command", "watch", "reconcile"] = "command",
     ) -> None:
         if self._pool_resources is not None and observation.normalized_state in {
             NormalizedJobState.DELETED, NormalizedJobState.MISSING, NormalizedJobState.ABSENT,
         }:
             raise ActuatorContractError("global deletion requires retained manager release")
         self._validate_observation(lease, observation)
+        if lease.pod_terminated_at is None and observation.terminated_at is not None:
+            TERMINAL_OBSERVATION_DELAY_SECONDS.labels(source=source).observe(
+                max(0, (now - observation.terminated_at).total_seconds()),
+            )
         if (
             observation.normalized_state == NormalizedJobState.DELETED
             and lease.desired_state in _CLEANUP_DESIRED_STATES
@@ -414,11 +421,12 @@ class ExecutionActuator:
         if existing is not None:
             self._validate_observation(lease, existing)
             return existing
-        async with self._sessions() as session:
-            await reserve_execution_provisioning(
-                session, lease_id=lease.id, now=now, revalidate_existing=True
-            )
-            await session.commit()
+        with COMMAND_CAPACITY_REVALIDATION_SECONDS.time():
+            async with self._sessions() as session:
+                await reserve_execution_provisioning(
+                    session, lease_id=lease.id, now=now, revalidate_existing=True
+                )
+                await session.commit()
         manifest = render_execution_job(lease, target=self._target, now=now)
         try:
             with KUBERNETES_API_SECONDS.labels(operation="create").time():
@@ -645,6 +653,12 @@ class ExecutionActuator:
             )
             KUBERNETES_API_ERRORS_TOTAL.labels(operation="list", status_class=status_class).inc()
             raise
+        observed_ids: set[UUID] = set()
+        for observation in inventory.observations:
+            try:
+                observed_ids.add(UUID(observation.lease_id))
+            except ValueError:
+                pass
         async with self._sessions() as session:
             family = await resolve_capacity_targets(session, self._target.target_id)
             sibling_ids = family.target_ids - {self._target.target_id}
@@ -652,7 +666,9 @@ class ExecutionActuator:
                 (
                     await session.execute(
                         select(ServiceExecutionLease).where(
-                            ServiceExecutionLease.target_id == self._target.target_id
+                            ServiceExecutionLease.target_id == self._target.target_id,
+                            or_(ServiceExecutionLease.deleted_at.is_(None),
+                                ServiceExecutionLease.id.in_(observed_ids)),
                         )
                     )
                 )
@@ -694,7 +710,7 @@ class ExecutionActuator:
                     )
                     drift += 1
                 else:
-                    await self._persist_observation(matched_lease, observation, now=current_time)
+                    await self._persist_observation(matched_lease, observation, now=current_time, source="reconcile")
             except (ActuatorContractError, KubernetesApiError, ServiceExecutionConflict):
                 drift += 1
         for lease in leases:
@@ -718,7 +734,7 @@ class ExecutionActuator:
                 ),
             )
             try:
-                await self._persist_observation(lease, missing, now=current_time)
+                await self._persist_observation(lease, missing, now=current_time, source="reconcile")
             except (ActuatorContractError, ServiceExecutionConflict):
                 continue
         KUBERNETES_ORPHAN_COUNT.set(drift)
@@ -775,12 +791,40 @@ class ExecutionActuator:
     async def watch_once(self, *, timeout_seconds: int = 15) -> int:
         if self._pool_resources is not None:
             raise ActuatorContractError("global execution requires qualified reconciliation, not namespace watches")
+        persisted = 0
+
+        async def persist(observation: KubernetesJobObservation) -> None:
+            nonlocal persisted
+            if observation.resource_version is not None:
+                self._watch_resource_version = observation.resource_version
+            try:
+                lease_id = UUID(observation.lease_id)
+            except ValueError:
+                return
+            try:
+                lease = await self._lease(lease_id)
+                if observation.normalized_state == NormalizedJobState.DELETED:
+                    # Validate the tombstone before using the same absence
+                    # payload as command/reconciliation. Historical observations
+                    # entering the general persistence API remain unchanged.
+                    self._validate_observation(lease, observation)
+                    observation = self._missing_job_observation(lease, normalized_state=(
+                        NormalizedJobState.DELETED
+                        if lease.desired_state in _CLEANUP_DESIRED_STATES or lease.desired_state == "deleted"
+                        else NormalizedJobState.MISSING
+                    ))
+                await self._persist_observation(lease, observation, now=datetime.now(UTC), source="watch")
+            except (ActuatorContractError, ServiceExecutionConflict):
+                return
+            persisted += 1
+
         try:
             observations = await self._kubernetes.watch_jobs(
                 namespace=self._target.namespace,
                 label_selector=_MANAGED_SELECTOR,
                 resource_version=self._watch_resource_version,
                 timeout_seconds=timeout_seconds,
+                on_observation=persist,
             )
             KUBERNETES_WATCH_RESTARTS_TOTAL.labels(outcome="completed").inc()
         except KubernetesApiError as exc:
@@ -791,22 +835,8 @@ class ExecutionActuator:
             )
             KUBERNETES_API_ERRORS_TOTAL.labels(operation="watch", status_class=status_class).inc()
             raise
-        persisted = 0
         for observation in observations:
-            if observation.resource_version is not None:
-                # Always advance past a malformed/foreign managed event; the
-                # full list remains the repair authority for quarantined drift.
-                self._watch_resource_version = observation.resource_version
-            try:
-                lease_id = UUID(observation.lease_id)
-            except ValueError:
-                continue
-            try:
-                lease = await self._lease(lease_id)
-                await self._persist_observation(lease, observation, now=datetime.now(UTC))
-            except (ActuatorContractError, ServiceExecutionConflict):
-                continue
-            persisted += 1
+            await persist(observation)
         return persisted
 
 

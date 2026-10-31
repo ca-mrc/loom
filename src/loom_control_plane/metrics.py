@@ -111,6 +111,16 @@ SERVICE_EXECUTION_MATERIALIZATION_BACKLOG = Gauge(
     "loom_service_execution_materialization_backlog",
     "Committed service execution bundles awaiting canonical materialization",
 )
+EXECUTION_CAPACITY_LOCK_WAIT_SECONDS = Histogram(
+    "loom_execution_capacity_lock_wait_seconds",
+    "Wait for the shared provisioning lock, excluding admission work after acquisition.",
+    labelnames=("operation",), buckets=(.01, .05, .1, .5, 1, 2, 5, 10, 20, 60),
+)
+SERVICE_EXECUTION_RESERVATION_SECONDS = Histogram(
+    "loom_service_execution_reservation_seconds",
+    "One local scheduler reservation transaction including compilation and commit.",
+    labelnames=("role",), buckets=(.01, .05, .1, .5, 1, 2, 5, 10, 20, 60),
+)
 SERVICE_EXECUTION_MATERIALIZATION_PENDING_BYTES = Gauge(
     "loom_service_execution_materialization_pending_bytes",
     "Source bundle bytes awaiting canonical materialization",

@@ -33,7 +33,7 @@ async def test_participant_guard_rejects_unaudited_schema_before_mutation(
         assert db.execute('SELECT count(*) FROM nebius_rollout_guard').fetchone() == (0,)
 
 
-@pytest.mark.parametrize('schema_revision', ['0175', '0176', '0177', '0178', '0179', '0180', '0181', '0182', '0183', '0184', '0185'])
+@pytest.mark.parametrize('schema_revision', ['0175', '0176', '0177', '0178', '0179', '0180', '0181', '0182', '0183', '0184', '0185', '0186'])
 def test_participant_schema_supports_complete_handoff_and_recovery_without_upgrading_manager(
         isolated_migration_postgres_url, schema_revision):
     from scripts.ops.nebius_pool_activation_database import pool_activation_state_sql
@@ -87,7 +87,7 @@ def test_participant_schema_supports_complete_handoff_and_recovery_without_upgra
         assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [(schema_revision,)]
         if schema_revision == '0175':
             assert db.execute("SELECT to_regclass('harbor_baseline_sessions')").fetchone() == (None,)
-        if schema_revision in {'0177', '0178', '0179', '0180', '0181', '0182', '0183', '0184', '0185'}:
+        if schema_revision in {'0177', '0178', '0179', '0180', '0181', '0182', '0183', '0184', '0185', '0186'}:
             assert db.execute('SELECT count(*) FROM task_source_publications').fetchone() == (0,)
         if schema_revision != '0176':
             with pytest.raises(psycopg.errors.RaiseException, match='pool activation schema unqualified'):

@@ -99,6 +99,33 @@ def _add_rendered_job_failure(core, namespace: str, name: str, error: AssertionE
                 ):
                     if needle in raw:
                         row["codes"].append(code)
+                # Bootstrap already emits bounded JSON diagnostics. Retain only
+                # finite database codes and numeric revisions, never messages,
+                # connection strings, arbitrary JSON fields or Pod log text.
+                for line in raw.splitlines()[-8:]:
+                    try:
+                        diagnostic = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(diagnostic, dict):
+                        continue
+                    error_type = diagnostic.get("error_type")
+                    if isinstance(error_type, str) and error_type in {"MigrationError", "OperationalError", "ProgrammingError", "IntegrityError"}:
+                        row["error_type"] = error_type
+                    revision = diagnostic.get("migration_revision")
+                    if isinstance(revision, str) and (revision == "unknown" or re.fullmatch(r"[0-9]{4}", revision)):
+                        row["migration_revision"] = revision
+                    database_error = diagnostic.get("database_error")
+                    if isinstance(database_error, str) and database_error in {
+                        "OperationalError", "ProgrammingError", "IntegrityError",
+                        "LockNotAvailable", "QueryCanceled", "DeadlockDetected",
+                        "InsufficientPrivilege", "UndefinedTable", "UndefinedColumn",
+                        "UndefinedObject", "CheckViolation", "DuplicateTable", "InvalidPassword",
+                    }:
+                        row["database_error"] = database_error
+                    sqlstate = diagnostic.get("sqlstate")
+                    if isinstance(sqlstate, str) and re.fullmatch(r"[0-9A-Z]{5}", sqlstate):
+                        row["sqlstate"] = sqlstate
                 row["trace_modules"] = re.findall(r'File "[^"\n]*/([A-Za-z0-9_.-]+\.py)", line ([0-9]+)', raw)[-6:]
                 rows.append(row)
         error.add_note("rendered Job termination: " + json.dumps(rows))

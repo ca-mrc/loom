@@ -20,6 +20,52 @@ pytestmark = pytest.mark.skipif(os.environ.get('LOOM_RUN_DISPOSABLE_K3S') != '1'
     reason='requires explicitly disposable Kubernetes')
 
 
+def _readiness_diagnostics(core, namespace, controller, children, pods):
+    """Finite native status codes only; no specs, messages, URLs or Pod logs."""
+    reasons = {"Unschedulable", "FailedScheduling", "FailedMount", "FailedCreate",
+        "ContainerCreating", "ImagePullBackOff", "ErrImagePull", "CrashLoopBackOff",
+        "CreateContainerConfigError", "CreateContainerError", "RunContainerError",
+        "Error", "OOMKilled", "Completed", "BackOff", "Failed", "Pulling", "Pulled",
+        "Scheduled", "Created", "Started", "Evicted", "NodeNotReady", "KubeletNotReady",
+        "KubeletReady", "KubeletHasDiskPressure", "KubeletHasNoDiskPressure",
+        "KubeletHasSufficientMemory", "KubeletHasInsufficientMemory",
+        "KubeletHasSufficientPID", "KubeletHasInsufficientPID", "MinimumReplicasUnavailable",
+        "MinimumReplicasAvailable", "ReplicaSetUpdated", "NewReplicaSetAvailable"}
+    types = {"Ready", "PodScheduled", "Initialized", "ContainersReady", "Available",
+        "Progressing", "ReplicaFailure", "DiskPressure", "MemoryPressure", "PIDPressure",
+        "NetworkUnavailable", "PodReadyToStartContainers"}
+
+    def code(value):
+        return value if isinstance(value, str) and value in reasons else "other"
+
+    def status(row):
+        value = row.get("status", {})
+        result = {key: value[key] for key in ("observedGeneration", "replicas", "readyReplicas",
+            "updatedReplicas", "availableReplicas", "unavailableReplicas") if type(value.get(key)) is int}
+        result["conditions"] = [{"type": c["type"], "status": c["status"], "reason": code(c.get("reason"))}
+            for c in value.get("conditions", [])[:16] if c.get("type") in types and c.get("status") in {"True", "False", "Unknown"}]
+        if value.get("phase") in {"Pending", "Running", "Succeeded", "Failed", "Unknown"}:
+            result["phase"] = value["phase"]
+        result["containers"] = [{"ready": c.get("ready") is True,
+            "states": [{"kind": key, "reason": code(state.get("reason")),
+                "exit_code": state.get("exitCode") if type(state.get("exitCode")) is int else None}
+                for key, state in c.get("state", {}).items() if key in {"waiting", "running", "terminated"}]}
+            for c in value.get("containerStatuses", [])[:8]]
+        return result
+
+    result = {"controller": status(controller),
+        "replicasets": [status(row) for row in children.get("items", [])[:8]],
+        "pods": [status(row) for row in pods.get("items", [])[:8]]}
+    try:
+        nodes = core.api_client.sanitize_for_serialization(core.list_node(limit=8, _request_timeout=(2, 3)))
+        result["nodes"] = [status(row) for row in nodes["items"][:8]]
+        events = core.list_namespaced_event(namespace, limit=64, _request_timeout=(2, 3))
+        result["event_reasons"] = sorted({code(row.reason) for row in events.items})
+    except Exception:
+        result["native_diagnostics_unavailable"] = True
+    return result
+
+
 @pytest.mark.timeout(240)
 def test_actual_runtime_deployment_start_and_drain_keep_native_defaults(tmp_path):
     from kubernetes import client
@@ -60,7 +106,8 @@ def test_actual_runtime_deployment_start_and_drain_keep_native_defaults(tmp_path
             controller, children, pods = observation()
             if qualify_started_deployment(current=controller, children=children, pods=pods, region='eu-north1'):
                 break
-            assert time.monotonic() < deadline, 'actual runtime Pod did not become ready'
+            assert time.monotonic() < deadline, ('actual runtime Pod did not become ready: ' +
+                str(_readiness_diagnostics(core, namespace, controller, children, pods)))
             time.sleep(0.5)
         assert len(pods['items']) == 1
         pod = pods['items'][0]
@@ -74,7 +121,8 @@ def test_actual_runtime_deployment_start_and_drain_keep_native_defaults(tmp_path
             stopped['spec']['replicas'] = 0
             if qualify_closed_workload_drain(original=original, desired=stopped, current=controller, children=children, pods=pods):
                 break
-            assert time.monotonic() < deadline, 'actual runtime Pod did not drain'
+            assert time.monotonic() < deadline, ('actual runtime Pod did not drain: ' +
+                str(_readiness_diagnostics(core, namespace, controller, children, pods)))
             time.sleep(0.5)
         assert pods['items'] == []
     finally:

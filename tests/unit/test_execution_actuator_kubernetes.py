@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +17,95 @@ from loom_execution_actuator.contracts import ExecutionTerminationSummaryV1, Nor
 from loom_execution_actuator.kubernetes_api import InClusterKubernetesJobApi, _normalize, _scrub_log
 
 _ROOT = Path(__file__).resolve().parents[2]
+
+
+async def test_watch_persists_first_event_before_the_stream_finishes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from loom_execution_actuator.controller import ExecutionActuator
+    from loom_execution_actuator.renderer import ExecutionTargetRuntime
+
+    emitted, release = threading.Event(), threading.Event()
+    persisted = asyncio.Event()
+    job = _job()
+
+    def stream(*_args: Any, **_kwargs: Any) -> Any:
+        emitted.set()
+        yield {"type": "MODIFIED", "object": job}
+        assert release.wait(10), "test did not release the watch"
+
+    monkeypatch.setattr("kubernetes.watch.Watch", lambda: _ns(stream=stream, stop=lambda: None))
+    api = object.__new__(InClusterKubernetesJobApi)
+    api._batch = _ns(list_namespaced_job=None)
+    monkeypatch.setattr(api, "_pods_for_job", lambda *_args: [])
+    actuator = ExecutionActuator(sessions=None, kubernetes=api,
+        target=ExecutionTargetRuntime(target_id=job.metadata.annotations["loom.openai.com/target-id"],
+            namespace=job.metadata.namespace), controller_id="watch-latency")
+
+    async def lease_for(_lease_id: Any) -> Any:
+        return _ns()
+
+    async def persist(*_args: Any, **_kwargs: Any) -> None:
+        persisted.set()
+
+    monkeypatch.setattr(actuator, "_lease", lease_for)
+    monkeypatch.setattr(actuator, "_persist_observation", persist)
+    task = asyncio.create_task(actuator.watch_once())
+    try:
+        assert await asyncio.to_thread(emitted.wait, 2)
+        # A handshake, not a benchmark threshold: the producer cannot finish
+        # until the first observation has been durably delivered to the consumer.
+        await asyncio.wait_for(persisted.wait(), timeout=2)
+    finally:
+        release.set()
+        await asyncio.wait_for(task, timeout=5)
+
+
+@pytest.mark.parametrize("remaining_pod", [False, True])
+async def test_watch_deleted_job_releases_only_after_its_pods_are_absent(
+    monkeypatch: pytest.MonkeyPatch, remaining_pod: bool,
+) -> None:
+    job = _job(deleting=True)
+    monkeypatch.setattr("kubernetes.watch.Watch", lambda: _ns(
+        stream=lambda *_args, **_kwargs: iter([{"type": "DELETED", "object": job}]),
+        stop=lambda: None,
+    ))
+    api = object.__new__(InClusterKubernetesJobApi)
+    api._batch = _ns(list_namespaced_job=None)
+    monkeypatch.setattr(api, "_pods_for_job", lambda *_args: [_pod()] if remaining_pod else [])
+    [observation] = await api.watch_jobs(namespace=job.metadata.namespace,
+        label_selector="managed", resource_version="40", timeout_seconds=15)
+    assert observation.job_uid == "job-uid"
+    assert observation.resource_version == "42"
+    assert observation.normalized_state == (
+        NormalizedJobState.TERMINATING if remaining_pod else NormalizedJobState.DELETED
+    )
+
+
+async def test_watch_cancellation_stops_stream_and_pending_callback(monkeypatch: pytest.MonkeyPatch) -> None:
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+    stopped = threading.Event()
+
+    async def callback(_observation: Any) -> None:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr("kubernetes.watch.Watch", lambda: _ns(
+        stream=lambda *_args, **_kwargs: iter([{"type": "MODIFIED", "object": _job()}]),
+        stop=stopped.set,
+    ))
+    api = object.__new__(InClusterKubernetesJobApi)
+    api._batch = _ns(list_namespaced_job=None)
+    monkeypatch.setattr(api, "_pods_for_job", lambda *_args: [])
+    task = asyncio.create_task(api.watch_jobs(namespace="loom-nebius-staging",
+        label_selector="managed", resource_version=None, timeout_seconds=15, on_observation=callback))
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(cancelled.wait(), timeout=2)
+    assert stopped.is_set()
 
 
 def _ns(**values: Any) -> SimpleNamespace:
@@ -515,6 +606,7 @@ def test_actuator_manifest_is_namespace_scoped_and_active_for_development() -> N
             "resources": ["pods"],
             "verbs": ["get", "list", "watch"],
         },
+        {"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]},
     ]
     assert not (
         {"secrets", "configmaps", "serviceaccounts"}

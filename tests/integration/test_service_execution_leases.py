@@ -371,10 +371,15 @@ class _FakeKubernetesJobApi:
         label_selector: str,
         resource_version: str | None,
         timeout_seconds: int,
+        on_observation: Any = None,
     ) -> tuple[KubernetesJobObservation, ...]:
         del label_selector, resource_version, timeout_seconds
         events = tuple(item for item in self.watch_events if item.namespace == namespace)
         self.watch_events.clear()
+        if on_observation is not None:
+            for observation in events:
+                await on_observation(observation)
+            return ()
         return events
 
 
@@ -3027,6 +3032,152 @@ async def test_scheduler_reserves_one_verifier_after_parent_cleanup(
             trial = await session.get(Trial, trial_id)
             assert trial is not None and trial.state == "running"
             assert trial.result["verifier_execution"]["state"] == "pending"
+    finally:
+        await engine.dispose()
+
+
+async def test_scheduler_commits_first_verifier_before_compiling_the_next(
+    postgres_url: str, _stub_verifier_plan: list[ExecutionRuntimePlanV1],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import loom_control_plane.service_execution_scheduler as scheduler
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    reached_second, release = asyncio.Event(), asyncio.Event()
+    reserve = scheduler._reserve_verifier_candidate
+    calls = 0
+    attempt_opportunities = 0
+
+    async def reserve_attempt(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal attempt_opportunities
+        attempt_opportunities += 1
+
+    async def pause_second(*args: Any, **kwargs: Any) -> ServiceExecutionLease:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            reached_second.set()
+            await release.wait()
+        return await reserve(*args, **kwargs)
+
+    task = None
+    try:
+        await _separate_attempt_awaiting_verifier(sessions, now=now)
+        await _separate_attempt_awaiting_verifier(sessions, now=now)
+        monkeypatch.setattr(scheduler, "_reserve_verifier_candidate", pause_second)
+        monkeypatch.setattr(scheduler, "reserve_next_service_execution", reserve_attempt)
+        task = asyncio.create_task(scheduler.run_service_execution_scheduler_loop(
+            session_factory=sessions, environment="staging", pool_id="nebius-cpu",
+            image_admission_keyring=IMAGE_ADMISSION_KEYRING, interval_seconds=.01,
+            maximum_deadline_seconds=7200,
+        ))
+        await asyncio.wait_for(reached_second.wait(), timeout=10)
+        async with sessions() as session:
+            free = await session.scalar(text(
+                "SELECT pg_try_advisory_xact_lock(hashtextextended('execution-capacity-mutation',1552))"
+            ))
+            assert free, "an earlier verifier must not hold capacity across the next compilation"
+            assert attempt_opportunities == 1, "attempt admission must interleave with the verifier wave"
+            assert await session.scalar(select(func.count()).select_from(ServiceExecutionLease)
+                .where(ServiceExecutionLease.execution_role == "verifier")) == 1
+            await session.rollback()
+    finally:
+        release.set()
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await engine.dispose()
+
+
+async def test_empty_inventory_does_not_load_deleted_lease_history(postgres_url: str) -> None:
+    from sqlalchemy import event
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    loaded: list[UUID] = []
+
+    def loaded_lease(lease: ServiceExecutionLease, _context: Any) -> None:
+        loaded.append(lease.id)
+
+    listening = False
+    try:
+        _, parent, target = await _separate_attempt_awaiting_verifier(sessions, now=datetime.now(UTC))
+        event.listen(ServiceExecutionLease, "load", loaded_lease)
+        listening = True
+        actuator = ExecutionActuator(sessions=sessions, kubernetes=_FakeKubernetesJobApi(),
+            target=ExecutionTargetRuntime(target_id=target.target_id, namespace=target.namespace_name),
+            controller_id="history-bounds")
+        assert await actuator.reconcile_full_once() == 0
+        assert parent.id not in loaded, "a quiet target must not deserialize its completed history"
+    finally:
+        if listening:
+            event.remove(ServiceExecutionLease, "load", loaded_lease)
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("tombstone", [False, True])
+async def test_watch_handoff_starts_verifier_without_waiting_for_full_reconcile(
+    postgres_url: str, _stub_verifier_plan: list[ExecutionRuntimePlanV1],
+    monkeypatch: pytest.MonkeyPatch, tombstone: bool,
+) -> None:
+    from loom_execution_actuator.kubernetes_api import InClusterKubernetesJobApi
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    kube = _FakeKubernetesJobApi()
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            parent = await _reserve(session, trial_id=trial_id, target=target, now=now,
+                requirements=_requirements(verifier_topology=VerifierTopology.SEPARATE_EXECUTION),
+                runtime_contract=_runtime_contract(verifier_execution="separate_execution"))
+            await session.commit()
+        actuator = ExecutionActuator(sessions=sessions, kubernetes=kube,
+            target=ExecutionTargetRuntime(target_id=target.target_id, namespace=target.namespace_name),
+            controller_id="watch-handoff")
+        assert await actuator.run_commands_once(now=now) == 1
+        created = kube.jobs[parent.job_name]
+        async with sessions() as session:
+            await _hand_off_to_verifier(session, parent_id=parent.id, now=now)
+            await enqueue_execution_transition(session, lease_id=parent.id,
+                expected_generation=1, desired_state="delete_pending", now=now)
+            await session.commit()
+        await actuator.run_commands_once(now=now)
+        assert kube.jobs == {}
+        job = SimpleNamespace(metadata=SimpleNamespace(
+            namespace=target.namespace_name, name=parent.job_name, uid=created.job_uid,
+            resource_version="deleted-42", deletion_timestamp=now,
+            labels={"loom.openai.com/lease-id": str(parent.id), "loom.openai.com/generation": "1"},
+            annotations={"loom.openai.com/target-id": target.target_id,
+                "loom.openai.com/execution-unit-key": str(parent.execution_unit_key)},
+        ), status=SimpleNamespace(conditions=[], completion_time=None, start_time=None))
+        monkeypatch.setattr("kubernetes.watch.Watch", lambda: SimpleNamespace(
+            stream=lambda *_args, **_kwargs: iter([{
+                "type": "DELETED" if tombstone else "MODIFIED", "object": job,
+            }]), stop=lambda: None,
+        ))
+        api = object.__new__(InClusterKubernetesJobApi)
+        api._batch = SimpleNamespace(list_namespaced_job=None)
+        monkeypatch.setattr(api, "_pods_for_job", lambda *_args: [])
+        monkeypatch.setattr(kube, "watch_jobs", api.watch_jobs)
+        assert await actuator.watch_once() == 1
+        async with sessions() as session:
+            verifiers = await reserve_next_verifier_executions(session,
+                pool_id=target.logical_pool_id, image_admission_keyring=IMAGE_ADMISSION_KEYRING,
+                now=datetime.now(UTC))
+            await session.commit()
+            # An authoritative deletion unblocks the complete handoff path.
+            # A merely terminating Job cannot release capacity prematurely.
+            assert len(verifiers) == int(tombstone)
+            retained = await session.get(ServiceExecutionLease, parent.id)
+            assert retained is not None
+            assert (retained.cleanup_state == "complete") is tombstone
+        if tombstone:
+            await actuator.run_commands_once()
+            assert kube.create_count == 2
     finally:
         await engine.dispose()
 
@@ -6375,6 +6526,8 @@ async def test_missing_job_diagnostic_variants_replay_without_rewriting_history(
         legacy = current.model_copy(update={"reason": None, "message": None})
         first, second = (legacy, current) if legacy_first else (current, legacy)
         await actuator._persist_observation(lease, first, now=now + timedelta(seconds=2))
+        kubernetes.watch_events.append(current.model_copy(update={"resource_version": "deleted-watch-42"}))
+        assert await actuator.watch_once() == 1
         async with sessions() as session:
             event, duplicate = await record_kubernetes_observation(
                 session, lease_id=lease.id, generation=lease.generation,

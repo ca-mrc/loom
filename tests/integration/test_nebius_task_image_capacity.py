@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
+import random
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, event, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import (
@@ -22,8 +24,10 @@ from loom.db.schema import (
 )
 from loom_control_plane.execution_capacity import (
     ExecutionProvisioningBlockedError,
+    _native_capacity_reservations,
     create_execution_capacity_observation,
 )
+from loom_control_plane.task_image_archive_retention import NativeImageArchiveRetention
 from loom_control_plane.task_image_capacity import reserve_native_task_image_capacity
 from loom_execution_actuator.renderer import ExecutionTargetRuntime
 from loom_execution_actuator.task_image_controller import (
@@ -75,6 +79,87 @@ async def _native(session, owned, pair, now, *, cpu=64000, checksum="2" * 64):
     session.add(attempt)
     await session.flush()
     return attempt.id, row.id
+
+
+async def test_native_capacity_reader_does_not_reparse_released_job_manifests(native_setup):
+    sessions, owned = native_setup
+    now = datetime.now(UTC)
+    past = now - timedelta(hours=2)
+    # Opaque, incompressible manifest data forces the same out-of-line JSON
+    # access that makes accumulated real builder history costly to inspect.
+    payload = random.Random(0).randbytes(40_000).hex()
+    async with sessions() as session, session.begin():
+        pair = await _seed_ready_trial(session, now=now)
+        for _ in range(120):
+            attempt_id, _ = await _native(session, owned, pair, past, checksum=uuid4().hex * 2)
+            attempt = await session.get(TaskImageMaterializationAttempt, attempt_id)
+            attempt.native_build = {**attempt.native_build,
+                "capacity_reserved_at": past.isoformat(), "capacity_released_at": past.isoformat(),
+                "job": {"opaque_manifest": payload}}
+    statements = []
+
+    def capture(_conn, _cursor, statement, parameters, _context, _many):
+        if statement.startswith("SELECT") and "FROM task_image_materialization_attempts" in statement:
+            statements.append((statement, parameters))
+
+    async with sessions() as session:
+        await session.execute(text("ANALYZE task_image_materialization_attempts"))
+        event.listen(session.bind.sync_engine, "before_cursor_execute", capture)
+        try:
+            assert await _native_capacity_reservations(session, current_time=now) == []
+        finally:
+            event.remove(session.bind.sync_engine, "before_cursor_execute", capture)
+        connection = await session.connection()
+        statement, parameters = statements[-1]
+        actual = (await connection.exec_driver_sql(
+            "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) " + statement, parameters,
+        )).scalar_one()
+        old = (await session.execute(text("""
+            EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) SELECT id
+            FROM task_image_materialization_attempts
+            WHERE native_build->>'capacity_reserved_at' IS NOT NULL
+              AND (native_build->>'capacity_released_at' IS NULL
+                   OR native_build->>'capacity_reserved_at'>=:cutoff)
+        """), {"cutoff": (now - timedelta(minutes=1)).isoformat()})).scalar_one()
+        actual = json.loads(actual) if isinstance(actual, str) else actual
+        old = json.loads(old) if isinstance(old, str) else old
+        def blocks(plan):
+            root = plan[0]["Plan"]
+            return root.get("Shared Hit Blocks", 0) + root.get("Shared Read Blocks", 0)
+        assert actual[0]["Plan"]["Actual Rows"] == old[0]["Plan"]["Actual Rows"] == 0
+        assert blocks(actual) * 4 < blocks(old), (
+            "empty admission must inspect compact metadata, not every historical Job manifest",
+            blocks(actual), blocks(old),
+        )
+    statements.clear()
+    event.listen(sessions.kw["bind"].sync_engine, "before_cursor_execute", capture)
+    try:
+        assert not await NativeImageArchiveRetention(sessions=sessions, client=None, bucket="unused").run_once()
+    finally:
+        event.remove(sessions.kw["bind"].sync_engine, "before_cursor_execute", capture)
+    async with sessions() as session:
+        connection = await session.connection()
+        statement, parameters = statements[-1]
+        actual_archive = (await connection.exec_driver_sql(
+            "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) " + statement, parameters,
+        )).scalar_one()
+        old_archive = (await session.execute(text("""
+            EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) SELECT a.id
+            FROM task_image_materialization_attempts a
+            JOIN task_image_materializations m ON m.id=a.materialization_id
+            WHERE a.native_build->>'capacity_released_at' IS NOT NULL
+              AND (m.state='retired' OR a.native_build->>'image_archives' IS NULL)
+              AND (a.native_build->>'archive_cleanup_checked_at' IS NULL
+                   OR a.native_build->>'archive_cleanup_checked_at'<:cutoff)
+              AND (a.native_build#>>'{configmap,data,claim.json}') LIKE '%"archive_write_intents"%'
+            ORDER BY a.claimed_at LIMIT 32
+        """), {"cutoff": (now - timedelta(hours=1)).isoformat()})).scalar_one()
+        actual_archive = json.loads(actual_archive) if isinstance(actual_archive, str) else actual_archive
+        old_archive = json.loads(old_archive) if isinstance(old_archive, str) else old_archive
+        assert actual_archive[0]["Plan"]["Actual Rows"] == old_archive[0]["Plan"]["Actual Rows"] == 0
+        assert blocks(actual_archive) * 4 < blocks(old_archive)
+        print({"admission_blocks_before": blocks(old), "admission_blocks_after": blocks(actual),
+               "archive_blocks_before": blocks(old_archive), "archive_blocks_after": blocks(actual_archive)})
 
 
 def _io_placement(pair, now, *, pressure=0.0, quota_nodes=1, requested_cpu=0):

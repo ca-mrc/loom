@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -197,4 +198,5 @@ class KubernetesJobApi(Protocol):
         label_selector: str,
         resource_version: str | None,
         timeout_seconds: int,
+        on_observation: Callable[[KubernetesJobObservation], Awaitable[None]] | None = None,
     ) -> tuple[KubernetesJobObservation, ...]: ...

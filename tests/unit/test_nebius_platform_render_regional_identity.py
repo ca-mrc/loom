@@ -209,3 +209,21 @@ def test_regional_candidate_renderer_keeps_remote_output_separate(
                            regional_render_dir=tmp_path / "remote")
     rollout.render_candidate(args, config, "{}")
     assert commands[0][commands[0].index("--regional-output") + 1] == str(args.regional_render_dir)
+
+
+def test_execution_failure_log_reader_has_only_namespaced_get_in_both_regions(regional_inputs: tuple) -> None:
+    config, candidate, profile = current_regions(regional_inputs)
+    target = config["regional_execution_targets"][0]
+    primary = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    remote = build_regional_execution(config, candidate, repo_root=ROOT)[target["target_id"]]
+    for documents, namespace in (
+        ([doc for group in primary.values() for doc in group], config["execution_namespace"]),
+        (remote, target["execution_namespace"]),
+    ):
+        role = next(doc for doc in documents if doc["kind"] == "Role"
+                    and doc["metadata"]["name"] == "loom-execution-actuator"
+                    and doc["metadata"]["namespace"] == namespace)
+        assert {"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]} in role["rules"]
+        assert all("secrets" not in rule["resources"] and "*" not in rule["resources"] for rule in role["rules"])
+        assert not any("pods/log" in rule["resources"] for doc in documents if doc["kind"] == "ClusterRole"
+                       for rule in doc["rules"])
