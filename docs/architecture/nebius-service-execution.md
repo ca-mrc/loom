@@ -1078,6 +1078,28 @@ a live runtime's task-input request without weakening broker generation checks.
 
 ### End-to-end throughput qualification
 
+Native output preparation advertises an optional `small_file_batch` capability.
+The Go runtime groups at most 16 files, 256 KiB per file and 1 MiB decoded per
+request through `POST /outputs/{session_id}/small-files`. Each file remains in
+the closed prepare inventory, with its original size/digest and durable
+multipart/verified progress. Batch replay resumes completed files after a lost
+response; only the existing final commit publishes the bundle. Larger files
+retain streaming multipart. An old prepare response without this capability
+keeps the old protocol. Eleven small files therefore require prepare, one batch
+and commit (three broker requests rather than 24); this request count is not a
+claim of measured production throughput.
+
+The gateway performs current Pod/lease authorization per batch and bounds raw
+request bytes before JSON decoding. Upload-token, lease/session identity,
+generation fencing, readback and final publication checks remain in place.
+SQL progress saves lock the session, merge only the addressed file and derive
+the aggregate from persisted files. Lifecycle saves use the existing version
+column to reject obsolete whole-session snapshots. A stale file request cannot
+revive an aborted/committed session or overwrite another file's receipts.
+Upload observations include separate `database_pool` checkout and `database`
+work intervals for `load_session`, `save_file` and `save_session`, nested under
+processing. These intervals must not be added again to their parent durations.
+
 Command-handler concurrency is one local knob. Qualify the whole pipeline with
 the same real Oracle task revisions, reference solutions, order, repeat count,
 verifier mode and declared resources before and after a fixed code deployment.

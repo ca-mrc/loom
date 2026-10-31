@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
 from pydantic import TypeAdapter
-from sqlalchemy import null, select
+from sqlalchemy import func, null, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.db.schema import (
@@ -65,6 +66,7 @@ from loom.pipeline.work_protocol import (
     FinalOutputPrepareRequestV1,
 )
 from loom.trajectory.storage import ObjectStore
+from loom.trajectory.upload_observation import UploadSpan
 from loom_control_plane.artifact_read_service import (
     ResolvedArtifactInput,
     ResolvedStoredFile,
@@ -183,6 +185,14 @@ class SqlArtifactCommitRepository(ArtifactCommitRepositoryV1):
         self._store = store
         self._bucket = bucket
 
+    @asynccontextmanager
+    async def _database(self, operation: str) -> AsyncIterator[AsyncSession]:
+        async with self._session_factory() as db:
+            with UploadSpan("database_pool", operation):
+                await db.connection()
+            with UploadSpan("database", operation):
+                yield db
+
     async def find_idempotent(
         self, producer_identity: bytes, idempotency_key: str
     ) -> _SessionState | None:
@@ -229,7 +239,7 @@ class SqlArtifactCommitRepository(ArtifactCommitRepositoryV1):
             await db.commit()
 
     async def get(self, session_id: UUID) -> _SessionState:
-        async with self._session_factory() as db:
+        async with self._database("load_session") as db:
             row = await db.get(ArtifactUploadSession, session_id)
             if row is None:
                 raise ArtifactCommitError("not_found")
@@ -331,6 +341,7 @@ class SqlArtifactCommitRepository(ArtifactCommitRepositoryV1):
             updated_at=row.updated_at,
             checkpoint_envelope_json=row.checkpoint_envelope_json,
             checkpoint_envelope_digest=row.checkpoint_envelope_digest,
+            version=row.version,
         )
         if row.canonical_manifest_json is not None:
             from loom.pipeline.artifact_commit import (
@@ -463,10 +474,16 @@ class SqlArtifactCommitRepository(ArtifactCommitRepositoryV1):
         )
 
     async def save(self, state: _SessionState) -> None:
-        async with self._session_factory() as db:
+        async with self._database("save_session") as db:
             row = await db.get(ArtifactUploadSession, state.id, with_for_update=True)
             if row is None:
                 raise ArtifactCommitError("not_found")
+            if row.state == "committed" and state.state != "committed":
+                raise ArtifactCommitError("committed_session_immutable")
+            if row.state == "aborted" and state.state != "aborted":
+                raise ArtifactCommitError("session_not_uploading")
+            if row.version != state.version and state.state != "aborted":
+                raise ArtifactCommitError("session_progress_conflict")
             for name, value in _session_values(state).items():
                 if name != "id":
                     setattr(row, name, value)
@@ -495,7 +512,66 @@ class SqlArtifactCommitRepository(ArtifactCommitRepositoryV1):
                     persisted.state = "uploading"
                 elif state.state == "aborted":
                     persisted.state = "aborted"
+            row.version += 1
             await db.commit()
+            state.version = row.version
+
+    async def save_file(self, state: _SessionState, *, file_index: int) -> None:
+        """Merge one file under the session lock without replaying stale siblings.
+
+        Lifecycle saves use the session version; independent file writes can
+        advance together, but may neither regress receipts nor revive an abort.
+        No transaction is held while waiting on object storage.
+        """
+        current = state.files[file_index]
+        async with self._database("save_file") as db:
+            row = await db.get(ArtifactUploadSession, state.id, with_for_update=True)
+            if row is None:
+                raise ArtifactCommitError("not_found")
+            if row.state not in {"uploading", "uploaded"}:
+                raise ArtifactCommitError("session_not_uploading")
+            if row.upload_token_digest != state.upload_token_digest:
+                raise ArtifactCommitError("upload_token_invalid")
+            persisted = await db.get(ArtifactUploadFile, (state.id, file_index))
+            if persisted is None:
+                raise ArtifactCommitError("file_not_found")
+            receipts = [current.receipts[index].model_dump(mode="json") for index in sorted(current.receipts)]
+            old_receipts = persisted.ordered_part_receipts_json
+            upload_id = None if current.upload is None else current.upload.upload_id
+            if (
+                receipts[:len(old_receipts)] != old_receipts
+                or (current.verified is None and persisted.multipart_upload_id is not None and persisted.multipart_upload_id != upload_id)
+                or (persisted.state == "verified" and (
+                    current.verified is None
+                    or current.verified.sha256 != persisted.computed_sha256
+                    or current.verified.size_bytes != persisted.actual_size
+                ))
+            ):
+                raise ArtifactCommitError("session_progress_conflict")
+            persisted.multipart_upload_id = upload_id
+            persisted.ordered_part_receipts_json = receipts
+            if current.verified is not None:
+                persisted.computed_sha256 = current.verified.sha256
+                persisted.actual_size = current.verified.size_bytes
+                persisted.state = "verified"
+            elif current.upload is not None:
+                persisted.state = "uploading"
+            await db.flush()
+            remaining, total_bytes = (await db.execute(
+                select(
+                    func.count().filter(ArtifactUploadFile.state != "verified"),
+                    func.coalesce(func.sum(ArtifactUploadFile.actual_size), 0),
+                ).where(ArtifactUploadFile.session_id == state.id)
+            )).one()
+            if remaining == 0:
+                row.state = "uploaded"
+                row.actual_total_bytes = total_bytes
+            row.updated_at = max(row.updated_at, state.updated_at)
+            row.version += 1
+            await db.commit()
+            state.state = row.state
+            state.actual_total_bytes = row.actual_total_bytes
+            state.version = row.version
 
     async def active(self) -> list[_SessionState]:
         async with self._session_factory() as db:

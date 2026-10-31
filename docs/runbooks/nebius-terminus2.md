@@ -677,6 +677,48 @@ Harbor startup uses packaged LiteLLM metadata with build-time fallback, describe
 in [the controller image guide](../../deploy/harbor-runtime.md). It does not
 download a price table during the agent's execution budget.
 
+## Opt-in native verifier dependency preparation
+
+For an already native Harbor bundle, derive a separate local task version:
+
+```bash
+python -m loom.native_verifier_preparation /path/to/original-task /path/to/new-prepared-task --task-id prepared-benchmark/task
+```
+
+The destination must be new and outside the source bundle, and the task ID must
+change. The command only prepares local files; it neither publishes a task/image
+nor submits a Trial. Register/build the new task through the ordinary catalog
+flow under a separate identity. Keep frozen baseline task revisions/images
+unchanged. Existing cached native images are never automatically reinterpreted
+or rebuilt by this capability.
+
+This bounded path requires the original final-stage Dockerfile, `user = "image"`,
+the exact native Harbor reward bridge, the task's own verifier image, and a
+proven image-default root USER. Independent verifier images, selected build
+targets, unknown base users, non-root/dynamic USERs, symlinks, custom wrappers
+and unknown installers require explicit qualification instead of an inferred
+identity change. Final-stage aliases inherit their own USER; unrelated build
+stages do not supply it. Supported Python/Debian/Ubuntu base defaults and
+explicit root final USERs are recognized.
+
+The original Dockerfile is retained. A derived Dockerfile installs the bounded
+recognizer's OS/Python dependencies in `/opt/verifier` at build time and records
+resolved Python requirements there. It leaves the authored HOME, WORKDIR,
+ENTRYPOINT, original interpreter, business-tree ownership, runtime resources,
+network policy, verifier mode and limits intact. The native reward bridge stays
+byte-identical. Only the derived bundle's `tests/test.sh` loses recognized
+installer plumbing; task setup, pytest arguments, assertions and reward code
+are retained. Its original bytes are retained at
+`verifier/harbor-source-test.sh`, alongside existing upstream provenance.
+
+Measure image build/pull size and cold-start cost as well as verifier setup,
+database/output latency and end-to-end completion throughput. Build-time
+resolution of unpinned auxiliary packages can differ from historical execution;
+qualify the new version's environment and scoring before a paired experiment.
+Local synthetic offline success proves this preparation path, not Oracle
+equivalence or the best production concurrency. Additional real Oracle
+executions remain subject to the separately approved attempt budget.
+
 ## What changes from old staging
 
 The original instruction and `tests/test_outputs.py` are copied byte for byte.

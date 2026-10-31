@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import ipaddress
 import json
@@ -27,6 +29,9 @@ from loom.db.schema import (
 )
 from loom.execution_runtime_contract import ExecutionRuntimePlanV1, ExecutionRuntimeResultV1
 from loom.pipeline.artifact_commit import (
+    SMALL_FILE_BATCH_MAX_BYTES,
+    SMALL_FILE_BATCH_MAX_FILES,
+    SMALL_FILE_MAX_BYTES,
     ArtifactCommitService,
     PartReceiptV1,
     ServiceExecutionOutputProducerV1,
@@ -122,6 +127,25 @@ class ServiceExecutionFileCompleteV1(ServiceExecutionPeerV1):
         if [item.part_number for item in values] != list(range(1, len(values) + 1)):
             raise ValueError("service execution output parts are not contiguous")
         return values
+
+
+class ServiceExecutionSmallFileV1(_Strict):
+    file_index: int = Field(ge=0)
+    content_base64: str = Field(max_length=4 * ((SMALL_FILE_MAX_BYTES + 2) // 3))
+
+
+class ServiceExecutionSmallFilesV1(ServiceExecutionPeerV1):
+    schema_version: Literal["loom.service-execution-small-files.v1"]
+    files: tuple[ServiceExecutionSmallFileV1, ...] = Field(min_length=1, max_length=SMALL_FILE_BATCH_MAX_FILES)
+
+    def decoded_files(self) -> list[tuple[int, bytes]]:
+        try:
+            files = [(item.file_index, base64.b64decode(item.content_base64, validate=True)) for item in self.files]
+        except (ValueError, binascii.Error) as exc:
+            raise ServiceExecutionBrokerError("small_file_batch_invalid") from exc
+        if sum(len(body) for _, body in files) > SMALL_FILE_BATCH_MAX_BYTES:
+            raise ServiceExecutionBrokerError("small_file_batch_invalid")
+        return files
 
 
 @dataclass(frozen=True)
@@ -633,7 +657,14 @@ class ServiceExecutionOutputRouteService:
                 current.output_generation = current.resource_generation
                 current.updated_at = datetime.now(UTC)
             await session.commit()
-        return grant.model_dump(mode="json")
+        return {
+            **grant.model_dump(mode="json"),
+            "small_file_batch": {
+                "max_files": SMALL_FILE_BATCH_MAX_FILES,
+                "max_total_bytes": SMALL_FILE_BATCH_MAX_BYTES,
+                "max_file_bytes": SMALL_FILE_MAX_BYTES,
+            },
+        }
 
     async def assert_session(
         self, *, lease: ServiceExecutionLease, session_id: UUID
@@ -692,6 +723,17 @@ class ServiceExecutionOutputRouteService:
             auth=UploadAuthV1(upload_token=upload_token),
         )
         return result.model_dump(mode="json")
+
+    async def small_files(
+        self, *, lease: ServiceExecutionLease, session_id: UUID,
+        request: ServiceExecutionSmallFilesV1, upload_token: str,
+    ) -> dict[str, Any]:
+        await self.assert_session(lease=lease, session_id=session_id)
+        results = await self._service.write_small_files(
+            session_id=session_id, files=request.decoded_files(),
+            auth=UploadAuthV1(upload_token=upload_token),
+        )
+        return {"files": [item.model_dump(mode="json") for item in results]}
 
     async def complete_file(
         self,
