@@ -964,6 +964,39 @@ observed completion throughput, queue waits, DB/API pressure and correctness;
 keep node/create/build limits unchanged unless their measured rejection or
 pressure explains the remaining bottleneck.
 
+The standalone operator entry point is
+`scripts/ops/nebius_execution_tuning.py`. After deploying a candidate containing
+this capability, `apply` accepts each setting independently; it needs neither
+a PR nor a rebuilt image. Use the existing strict operator Kubernetes identity:
+
+```sh
+python scripts/ops/nebius_execution_tuning.py inspect --kubeconfig "$KUBECONFIG" --namespace "$NAMESPACE"
+python scripts/ops/nebius_execution_tuning.py apply --kubeconfig "$KUBECONFIG" --namespace "$NAMESPACE" --expected-candidate "$CANDIDATE" --placement-policy environment-local-capacity-balanced
+python scripts/ops/nebius_execution_tuning.py apply --kubeconfig "$KUBECONFIG" --namespace "$NAMESPACE" --expected-candidate "$CANDIDATE" --command-concurrency 2
+python scripts/ops/nebius_execution_tuning.py apply --kubeconfig "$KUBECONFIG" --namespace "$NAMESPACE" --expected-candidate "$CANDIDATE" --create-rate "$TARGET=20"
+```
+
+The operator saves settings in the existing `loom-platform-config` environment
+(the normal idle rollout reads this same source for the next candidate), keeps
+the catalog placement metadata aligned, and then converges only the affected
+controllers or existing capacity-policy API. Configuration updates compare the
+ConfigMap resource version; an active version-rollout guard is left untouched
+and tuning waits for that rollout to finish. Readback checks saved values,
+actual in-container settings, policy values and controller readiness. Existing
+images and task Jobs are retained. Placement changes roll the Control Plane;
+concurrency changes roll actuators; creation-rate changes take effect through
+the API without a controller restart. Other capacity limits are preserved.
+A partial update remains failed with desired values retained; repeating the
+same tuning command safely finishes convergence. Rollback uses the same command
+with the previous setting and preserves in-flight work.
+
+A code-version deployment still follows normal idle rollout/backup/recovery.
+For owner-authorized maintenance, cancel through the ordinary batch API,
+retain completed results, wait for execution/build cleanup and deploy before
+submitting exactly the remaining tasks. Subsequent ordinary tuning does not
+cancel batches, re-submit Trials, release active leases or replace task Pods;
+controller restarts recover durable commands through normal fencing/reclaim.
+
 The observed projection records Job/Pod UIDs, Kubernetes resourceVersion,
 node, scheduling/start/termination timestamps, last reconciliation, and
 bounded normalized failure detail. Pending, unschedulable, image-pull backoff,
