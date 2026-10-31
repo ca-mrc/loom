@@ -376,7 +376,7 @@ The same manual boundary includes development activation, collector runtime,
 and the schema live/jobs/resources/projection/upgrade tests. Their complete
 lifecycle scenarios remain available through the existing input. The mixed
 `test_nebius_development_schema_consumers.py` stays automatic, retaining all
-24 public SQL schema/default contracts and its successor-to-activation case;
+28 public SQL schema/default contracts and its successor-to-activation case;
 `test_nebius_development_schema_entry.py` also keeps its automatic scope and
 identity protocol coverage. These are exact file selections, not a blanket
 exclusion of development or staging tests.
