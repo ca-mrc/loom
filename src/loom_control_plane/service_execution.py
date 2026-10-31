@@ -11,9 +11,10 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import Text, cast, func, literal, or_, select
+from sqlalchemy import Text, cast, exists, func, literal, or_, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from loom.db.schema import (
     Artifact,
@@ -203,6 +204,7 @@ class ClaimedExecutionCommand:
     payload: dict[str, Any]
     delivery_count: int
     claim_expires_at: datetime
+    available_at: datetime | None = None
 
 
 def _bounded_optional_text(value: object, limit: int, name: str) -> str | None:
@@ -1367,6 +1369,7 @@ async def claim_execution_commands(
     limit: int,
     lease_seconds: int,
     now: datetime | None = None,
+    serialize_leases: bool = False,
 ) -> tuple[ClaimedExecutionCommand, ...]:
     """Lease commands only for one target, filtering before limit and row locking."""
 
@@ -1377,6 +1380,27 @@ async def claim_execution_commands(
         raise ServiceExecutionConflict("invalid command consumer identity")
     if limit < 1 or limit > 100 or lease_seconds < 5 or lease_seconds > 300:
         raise ServiceExecutionConflict("invalid command claim bounds")
+    ordering = []
+    if serialize_leases:
+        other = aliased(ServiceExecutionCommand)
+        # One head per lease, with current cleanup generations ahead of obsolete
+        # commands. A delivery already held by another consumer fences all heads.
+        ordering = [
+            ~exists().where(
+                other.lease_id == ServiceExecutionCommand.lease_id,
+                other.state == CommandState.LEASED,
+                other.claim_expires_at > current_time,
+            ),
+            ~exists().where(
+                other.lease_id == ServiceExecutionCommand.lease_id,
+                other.state.in_([CommandState.PENDING, CommandState.LEASED]),
+                or_(
+                    other.generation > ServiceExecutionCommand.generation,
+                    (other.generation == ServiceExecutionCommand.generation)
+                    & (other.sequence < ServiceExecutionCommand.sequence),
+                ),
+            ),
+        ]
     rows = (
         (
             await session.execute(
@@ -1395,6 +1419,7 @@ async def claim_execution_commands(
                         ),
                     ),
                     ServiceExecutionCommand.available_at <= current_time,
+                    *ordering,
                 )
                 .order_by(
                     ServiceExecutionCommand.available_at,
@@ -1429,6 +1454,7 @@ async def claim_execution_commands(
                 payload=row.payload_json,
                 delivery_count=row.delivery_count,
                 claim_expires_at=expires_at,
+                available_at=row.available_at,
             )
         )
     await session.flush()

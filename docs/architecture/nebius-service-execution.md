@@ -948,6 +948,22 @@ replicas are safe because only one holds a durable command delivery lease and
 all observations are idempotent by resourceVersion, UID, state, lease, and
 generation.
 
+`execution_command_concurrency` is a deployment-owned integer from 1 through 8
+(default 1), rendered as `LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY` for primary
+and regional actuators. Values above 1 enable bounded parallel command delivery
+across leases. Claims contain at most one head per lease, exclude leases with
+an unexpired delivery, order the newest generation before obsolete work and
+preserve sequence within that generation. Only available handler slots are
+claimed; a slow lease does not hold up unrelated work. Shutdown cancels and
+joins handlers so unacknowledged deliveries follow normal expiry/reclaim.
+Command queue wait and handler duration are exported by bounded command type.
+Placement remains independently controlled by `execution_placement_policy`;
+select `environment-local-capacity-balanced` to use existing physical-pressure
+ordering without changing final admission. Tune delivery concurrency from
+observed completion throughput, queue waits, DB/API pressure and correctness;
+keep node/create/build limits unchanged unless their measured rejection or
+pressure explains the remaining bottleneck.
+
 The observed projection records Job/Pod UIDs, Kubernetes resourceVersion,
 node, scheduling/start/termination timestamps, last reconciliation, and
 bounded normalized failure detail. Pending, unschedulable, image-pull backoff,

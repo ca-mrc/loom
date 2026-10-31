@@ -60,6 +60,7 @@ class ExecutionActuatorSettings(BaseSettings):
     full_reconcile_seconds: float = Field(default=30.0, ge=5, le=300)
     watch_timeout_seconds: int = Field(default=15, ge=5, le=60)
     command_limit: int = Field(default=20, ge=1, le=100)
+    command_concurrency: int = Field(default=1, ge=1, le=8)
     command_lease_seconds: int = Field(default=60, ge=5, le=300)
     delete_grace_seconds: int = Field(default=30, ge=0, le=300)
     health_host: str = "0.0.0.0"

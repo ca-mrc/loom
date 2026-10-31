@@ -3,6 +3,17 @@ import re
 
 from prometheus_client import Counter, Gauge, Histogram
 
+COMMAND_QUEUE_WAIT_SECONDS = Histogram(
+    "loom_execution_actuator_command_queue_wait_seconds",
+    "Eligible-command wait before processing, including delivery queueing.",
+    labelnames=("command_type",), buckets=(1, 2, 5, 10, 20, 40, 60, 120, 300, 600),
+)
+COMMAND_PROCESS_SECONDS = Histogram(
+    "loom_execution_actuator_command_process_seconds",
+    "Command handler duration including API and persistence work.",
+    labelnames=("command_type",),
+)
+
 KUBERNETES_API_SECONDS = Histogram(
     "loom_execution_actuator_kubernetes_api_seconds",
     "Kubernetes API latency by bounded operation.",

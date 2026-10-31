@@ -1349,7 +1349,10 @@ def test_node_share_profile_does_not_publish_retired_default_template(platform_i
     assert "default_task_resource_requests" not in rendered
 
 
-def test_operator_renders_pinned_candidate_in_separate_process(platform_inputs, tmp_path, monkeypatch):
+@pytest.mark.parametrize("concurrency", [1, 2])
+def test_operator_renders_pinned_candidate_in_separate_process(
+    platform_inputs, tmp_path, monkeypatch, concurrency,
+):
     """A later operator renderer cannot add flags unsupported by candidate images."""
     import subprocess
     from types import SimpleNamespace
@@ -1360,6 +1363,8 @@ def test_operator_renders_pinned_candidate_in_separate_process(platform_inputs, 
 
     sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
     config, candidate, profile = platform_inputs
+    config["execution_command_concurrency"] = concurrency
+    config["execution_placement_policy"] = "environment-local-capacity-balanced"
     candidate['candidate_sha'] = sha
     profile['candidate_sha'] = sha
     (tmp_path / 'candidate.json').write_text(json.dumps(candidate))
@@ -1373,4 +1378,40 @@ def test_operator_renders_pinned_candidate_in_separate_process(platform_inputs, 
     docs = list(yaml.safe_load_all((args.render_dir / '10-config-network.yaml').read_text()))
     cm = next(doc for doc in docs if doc['kind'] == 'ConfigMap' and doc['metadata']['name'] == 'loom-platform-config')
     assert json.loads(cm['data']['profile.json'])['candidate_sha'] == sha
+    rendered_config = json.loads(cm['data']['environment.json'])
+    assert rendered_config['execution_command_concurrency'] == concurrency
+    assert rendered_config['execution_placement_policy'] == 'environment-local-capacity-balanced'
+    execution = list(yaml.safe_load_all((args.render_dir / '60-execution.yaml').read_text()))
+    actuator = next(doc for doc in execution if doc['kind'] == 'Deployment'
+                    and doc['metadata']['name'] == 'loom-execution-actuator')
+    env = {row['name']: row.get('value')
+           for row in actuator['spec']['template']['spec']['containers'][0]['env']}
+    assert env['LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY'] == str(concurrency)
     assert (args.render_dir / '40-services.yaml').is_file()
+
+
+@pytest.mark.parametrize("concurrency", [1, 2, 4, 8])
+def test_command_concurrency_is_rendered_for_every_regional_actuator(
+    regional_inputs: tuple, concurrency: int,
+) -> None:
+    config, candidate, profile = regional_inputs
+    config["execution_command_concurrency"] = concurrency
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    actuators = [doc for group in files.values() for doc in group
+                 if doc["kind"] == "Deployment"
+                 and doc["metadata"]["name"].endswith("actuator")]
+    assert len(actuators) >= 2
+    for doc in actuators:
+        env = {row["name"]: row.get("value")
+               for row in doc["spec"]["template"]["spec"]["containers"][0]["env"]}
+        assert env["LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY"] == str(concurrency)
+
+
+@pytest.mark.parametrize("concurrency", [0, 9, True, "2"])
+def test_command_concurrency_rejects_invalid_platform_values(
+    platform_inputs: tuple, concurrency: object,
+) -> None:
+    config, candidate, profile = platform_inputs
+    config["execution_command_concurrency"] = concurrency
+    with pytest.raises(NebiusPlatformError, match="execution_command_concurrency"):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)

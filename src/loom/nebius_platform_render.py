@@ -123,6 +123,7 @@ def validate_environment(config: dict[str, Any]) -> None:
             "emulated_auth_execution_target",
             "execution_disk_type",
             "execution_placement_policy",
+            "execution_command_concurrency",
         }
         != expected
     ):
@@ -139,6 +140,9 @@ def validate_environment(config: dict[str, Any]) -> None:
         "environment-local-health-first", "environment-local-capacity-balanced",
     }:
         raise NebiusPlatformError("unsupported execution_placement_policy")
+    concurrency = config.get("execution_command_concurrency", 1)
+    if type(concurrency) is not int or not 1 <= concurrency <= 8:
+        raise NebiusPlatformError("execution_command_concurrency must be between 1 and 8")
     disk_type = config.get("execution_disk_type", "NETWORK_SSD")
     if not isinstance(disk_type, str) or disk_type not in EXECUTION_DISK_STORAGE_QUOTAS:
         raise NebiusPlatformError("execution_disk_type must be NETWORK_SSD or NETWORK_SSD_NON_REPLICATED")
@@ -1172,6 +1176,9 @@ def _execution_documents(
                 if filename == "nebius-execution-actuator.yaml":
                     pod["containers"][0].setdefault("env", []).extend(_env({
                         "LOOM_ENV": config["environment"], "LOOM_NAMESPACE": ns,
+                        "LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY": config.get(
+                            "execution_command_concurrency", 1,
+                        ),
                     }))
                 if builder is not None:
                     pod["containers"][0].setdefault("env", []).extend(
