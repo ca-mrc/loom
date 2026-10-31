@@ -45,7 +45,11 @@ from tests.cluster.test_nebius_shared_ingress import (
     _certificate,
     _run,
 )
-from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
+from tests.integration.test_execution_actuator_k3s import (
+    _disposable_node_api_cidrs,
+    _load_client,
+    _start_k3s,
+)
 from tests.ops import test_nebius_certificates as certificate_material
 from tests.ops.test_nebius_dns_publication import Provider
 from tests.ops.test_nebius_ingress_gateway import inputs as inputs
@@ -382,6 +386,9 @@ def test_connected_installation_recovers_then_cuts_over_with_installed_guard(
         kubeconfig.write_text(yaml.safe_dump(context))
         kubeconfig.chmod(0o600)
         platform["kubernetes_api_server"] = endpoint
+        # The operator uses the host-mapped API; no node observer runs here.
+        # Bind its platform egress declaration to real, exact node addresses.
+        platform['resource_observer_api_cidrs'] = _disposable_node_api_cidrs(core)
         old_host = platform["public_host"]
         old_tls = _certificate([old_host])
         server = '''import http.server, json, ssl

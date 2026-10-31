@@ -10,7 +10,11 @@ from dataclasses import replace
 import httpx
 import pytest
 
-from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
+from tests.integration.test_execution_actuator_k3s import (
+    _disposable_node_api_cidrs,
+    _load_client,
+    _start_k3s,
+)
 from tests.ops.test_nebius_development_management_renewal import (
     application_management_inputs as application_management_inputs,
 )
@@ -61,6 +65,9 @@ def test_real_ingress_patch_preserves_uid_and_route_and_rejects_stale_version(re
         foundation = raw['installation']['foundation']
         platform = json.loads(foundation['platform_config_json'])
         platform['kubernetes_api_server'] = endpoint
+        # The operator uses the host-mapped API; no node observer runs here.
+        # Bind its platform egress declaration to real, exact node addresses.
+        platform['resource_observer_api_cidrs'] = _disposable_node_api_cidrs(core)
         foundation['platform_config_json'] = json.dumps(platform)
         deployment = ManagementDeployment.model_validate(raw)
         binding = request.retained.binding

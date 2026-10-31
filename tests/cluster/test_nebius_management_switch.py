@@ -7,7 +7,6 @@ import os
 import ssl
 import time
 from dataclasses import replace
-from ipaddress import ip_address, ip_network
 from uuid import uuid4
 
 import httpx
@@ -15,6 +14,7 @@ import pytest
 
 from tests.integration.test_execution_actuator_k3s import (
     _build_image,
+    _disposable_node_api_cidrs,
     _docker_platform,
     _import_image,
     _load_client,
@@ -68,11 +68,7 @@ def test_fixed_switch_retires_running_old_pods_and_preserves_deployment_uid(swit
         platform['kubernetes_api_server'] = endpoint
         # This management-cutover fixture uses the host-mapped operator API and
         # does not run the node observer. Keep its egress scope on real node IPs.
-        platform['resource_observer_api_cidrs'] = [
-            str(ip_network(ip_address(address.address)))
-            for node in core.list_node().items for address in node.status.addresses
-            if address.type == 'InternalIP'
-        ]
+        platform['resource_observer_api_cidrs'] = _disposable_node_api_cidrs(core)
         foundation['platform_config_json'] = json.dumps(platform)
         deployment = ManagementDeployment.model_validate(raw)
         management = core.create_namespace({'metadata': {'name': deployment.namespace, 'labels': {
