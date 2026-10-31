@@ -1349,7 +1349,10 @@ def test_node_share_profile_does_not_publish_retired_default_template(platform_i
     assert "default_task_resource_requests" not in rendered
 
 
-def test_operator_renders_pinned_candidate_in_separate_process(platform_inputs, tmp_path, monkeypatch):
+@pytest.mark.parametrize("concurrency", [1, 2])
+def test_operator_renders_pinned_candidate_in_separate_process(
+    platform_inputs, tmp_path, monkeypatch, concurrency,
+):
     """A later operator renderer cannot add flags unsupported by candidate images."""
     import subprocess
     from types import SimpleNamespace
@@ -1360,6 +1363,12 @@ def test_operator_renders_pinned_candidate_in_separate_process(platform_inputs, 
 
     sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
     config, candidate, profile = platform_inputs
+    config["execution_command_concurrency"] = concurrency
+    config["execution_placement_policy"] = "environment-local-capacity-balanced"
+    config["postgres_settings"] = {
+        "cpu_request_millis": 1000, "cpu_limit_millis": 3000,
+        "memory_request_mib": 1024, "memory_limit_mib": 2048, "shared_buffers_mib": 512,
+    }
     candidate['candidate_sha'] = sha
     profile['candidate_sha'] = sha
     (tmp_path / 'candidate.json').write_text(json.dumps(candidate))
@@ -1373,4 +1382,82 @@ def test_operator_renders_pinned_candidate_in_separate_process(platform_inputs, 
     docs = list(yaml.safe_load_all((args.render_dir / '10-config-network.yaml').read_text()))
     cm = next(doc for doc in docs if doc['kind'] == 'ConfigMap' and doc['metadata']['name'] == 'loom-platform-config')
     assert json.loads(cm['data']['profile.json'])['candidate_sha'] == sha
+    rendered_config = json.loads(cm['data']['environment.json'])
+    assert rendered_config['execution_command_concurrency'] == concurrency
+    assert rendered_config['execution_placement_policy'] == 'environment-local-capacity-balanced'
+    execution = list(yaml.safe_load_all((args.render_dir / '60-execution.yaml').read_text()))
+    actuator = next(doc for doc in execution if doc['kind'] == 'Deployment'
+                    and doc['metadata']['name'] == 'loom-execution-actuator')
+    env = {row['name']: row.get('value')
+           for row in actuator['spec']['template']['spec']['containers'][0]['env']}
+    assert env['LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY'] == str(concurrency)
+    database = list(yaml.safe_load_all((args.render_dir / '20-database.yaml').read_text()))
+    pg = next(doc for doc in database if doc['kind'] == 'StatefulSet')['spec']['template']['spec']['containers'][0]
+    assert pg['resources']['requests'] == {'cpu': '1', 'memory': '1Gi'}
+    assert pg['resources']['limits'] == {'cpu': '3', 'memory': '2Gi'}
+    assert 'shared_buffers=512MB' in pg['args']
     assert (args.render_dir / '40-services.yaml').is_file()
+
+
+@pytest.mark.parametrize("concurrency", [1, 2, 4, 8])
+def test_command_concurrency_is_rendered_for_every_regional_actuator(
+    regional_inputs: tuple, concurrency: int,
+) -> None:
+    config, candidate, profile = regional_inputs
+    config["execution_command_concurrency"] = concurrency
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    actuators = [doc for group in files.values() for doc in group
+                 if doc["kind"] == "Deployment"
+                 and doc["metadata"]["name"].endswith("actuator")]
+    assert len(actuators) >= 2
+    for doc in actuators:
+        env = {row["name"]: row.get("value")
+               for row in doc["spec"]["template"]["spec"]["containers"][0]["env"]}
+        assert env["LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY"] == str(concurrency)
+
+
+@pytest.mark.parametrize("concurrency", [0, 9, True, "2"])
+def test_command_concurrency_rejects_invalid_platform_values(
+    platform_inputs: tuple, concurrency: object,
+) -> None:
+    config, candidate, profile = platform_inputs
+    config["execution_command_concurrency"] = concurrency
+    with pytest.raises(NebiusPlatformError, match="execution_command_concurrency"):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
+def test_postgres_settings_render_resources_cache_and_persist(platform_inputs):
+    config, candidate, profile = platform_inputs
+    baseline = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    settings = {'cpu_request_millis': 1000, 'cpu_limit_millis': 3000,
+                'memory_request_mib': 1024, 'memory_limit_mib': 2048, 'shared_buffers_mib': 512}
+    config['postgres_settings'] = settings
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    pg = next(row for row in files['20-database.yaml'] if row['kind'] == 'StatefulSet')
+    old = next(row for row in baseline['20-database.yaml'] if row['kind'] == 'StatefulSet')
+    container = pg['spec']['template']['spec']['containers'][0]
+    assert container['resources'] == {'requests': {'cpu': '1', 'memory': '1Gi'},
+                                      'limits': {'cpu': '3', 'memory': '2Gi'}}
+    assert 'shared_buffers=512MB' in container['args']
+    assert not any('work_mem' in value or 'max_connections' in value for value in container['args'])
+    assert pg['spec']['volumeClaimTemplates'] == old['spec']['volumeClaimTemplates']
+    assert container['image'] == old['spec']['template']['spec']['containers'][0]['image']
+    cm = next(row for row in files['10-config-network.yaml'] if row['kind'] == 'ConfigMap'
+              and row['metadata']['name'] == 'loom-platform-config')
+    assert json.loads(cm['data']['environment.json'])['postgres_settings'] == settings
+    for previous, current in zip(baseline['40-services.yaml'], files['40-services.yaml'], strict=True):
+        if previous['kind'] == 'Deployment':
+            assert previous['spec']['template']['spec']['containers'][0]['resources'] == (
+                current['spec']['template']['spec']['containers'][0]['resources'])
+
+
+@pytest.mark.parametrize('settings', [
+    {'cpu_request_millis': 4000, 'cpu_limit_millis': 3000},
+    {'memory_request_mib': 2048, 'memory_limit_mib': 1024},
+    {'shared_buffers_mib': 1024}, {'cpu_limit_millis': True}, {'work_mem': 64},
+])
+def test_postgres_settings_reject_invalid_or_unrelated_changes(platform_inputs, settings):
+    config, candidate, profile = platform_inputs
+    config['postgres_settings'] = settings
+    with pytest.raises(NebiusPlatformError, match='postgres_settings'):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)

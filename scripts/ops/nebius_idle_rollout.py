@@ -473,6 +473,8 @@ def rollout(args: argparse.Namespace, *, participant_rollout: RetainedParticipan
     args.apply = True
     args.retry_failed_jobs = False
     args.expected_current_candidate = current
+    if participant_rollout is None:
+        args.expected_current_environment = json.loads(data["environment.json"])
     args.guard_owner = participant_rollout.guard_owner if participant_rollout is not None else "rollout-" + uuid.uuid4().hex
     if record is not None:
         args.resume_guard_owner = record["guard_owner"]

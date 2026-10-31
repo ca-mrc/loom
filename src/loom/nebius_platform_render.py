@@ -69,6 +69,27 @@ def _name(value: Any, label: str) -> str:
     return value
 
 
+def postgres_settings(config: dict[str, Any]) -> dict[str, int]:
+    """Resolve deployment-owned database resources; preserve legacy defaults."""
+    settings = {
+        "cpu_request_millis": 100, "cpu_limit_millis": 1000,
+        "memory_request_mib": 256, "memory_limit_mib": 1024,
+        "shared_buffers_mib": 128,
+    }
+    supplied = config.get("postgres_settings", {})
+    if not isinstance(supplied, dict) or set(supplied) - settings.keys():
+        raise NebiusPlatformError("postgres_settings has unknown fields")
+    for key, value in supplied.items():
+        if type(value) is not int or value < 1:
+            raise NebiusPlatformError("postgres_settings values must be positive integers")
+        settings[key] = value
+    if (settings["cpu_request_millis"] > settings["cpu_limit_millis"]
+            or settings["memory_request_mib"] > settings["memory_limit_mib"]
+            or settings["shared_buffers_mib"] >= settings["memory_limit_mib"]):
+        raise NebiusPlatformError("postgres_settings requests/cache exceed their limits")
+    return settings
+
+
 def validate_environment(config: dict[str, Any]) -> None:
     managed = config.get("schema_version") in {"loom.nebius-managed-environment.v1", "loom.nebius-environment-platform.v2"}
     if not managed and config.get("schema_version") != "loom.nebius-platform.v1":
@@ -123,6 +144,8 @@ def validate_environment(config: dict[str, Any]) -> None:
             "emulated_auth_execution_target",
             "execution_disk_type",
             "execution_placement_policy",
+            "execution_command_concurrency",
+            "postgres_settings",
         }
         != expected
     ):
@@ -139,6 +162,10 @@ def validate_environment(config: dict[str, Any]) -> None:
         "environment-local-health-first", "environment-local-capacity-balanced",
     }:
         raise NebiusPlatformError("unsupported execution_placement_policy")
+    postgres_settings(config)
+    concurrency = config.get("execution_command_concurrency", 1)
+    if type(concurrency) is not int or not 1 <= concurrency <= 8:
+        raise NebiusPlatformError("execution_command_concurrency must be between 1 and 8")
     disk_type = config.get("execution_disk_type", "NETWORK_SSD")
     if not isinstance(disk_type, str) or disk_type not in EXECUTION_DISK_STORAGE_QUOTAS:
         raise NebiusPlatformError("execution_disk_type must be NETWORK_SSD or NETWORK_SSD_NON_REPLICATED")
@@ -1172,6 +1199,9 @@ def _execution_documents(
                 if filename == "nebius-execution-actuator.yaml":
                     pod["containers"][0].setdefault("env", []).extend(_env({
                         "LOOM_ENV": config["environment"], "LOOM_NAMESPACE": ns,
+                        "LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY": config.get(
+                            "execution_command_concurrency", 1,
+                        ),
                     }))
                 if builder is not None:
                     pod["containers"][0].setdefault("env", []).extend(
@@ -1687,6 +1717,24 @@ def _build_platform(
     pgpod = postgres["spec"]["template"]["spec"]
     pgpod["securityContext"].update(runAsUser=999, runAsGroup=999, fsGroup=999)
     pg = pgpod["containers"][0]
+    database_settings = postgres_settings(config)
+
+    def cpu_quantity(millis: int) -> str:
+        return str(millis // 1000) if millis % 1000 == 0 else f"{millis}m"
+
+    def memory_quantity(mib: int) -> str:
+        return f"{mib // 1024}Gi" if mib % 1024 == 0 else f"{mib}Mi"
+
+    pg["resources"] = {
+        "requests": {
+            "cpu": cpu_quantity(database_settings["cpu_request_millis"]),
+            "memory": memory_quantity(database_settings["memory_request_mib"]),
+        },
+        "limits": {
+            "cpu": cpu_quantity(database_settings["cpu_limit_millis"]),
+            "memory": memory_quantity(database_settings["memory_limit_mib"]),
+        },
+    }
     pg["args"] = [
         "-c",
         "ssl=on",
@@ -1695,6 +1743,8 @@ def _build_platform(
         "-c",
         "ssl_key_file=/var/run/loom-db-tls/tls.key",
     ]
+    if "shared_buffers_mib" in config.get("postgres_settings", {}):
+        pg["args"] += ["-c", f"shared_buffers={database_settings['shared_buffers_mib']}MB"]
     pg["readinessProbe"] = {
         "exec": {"command": ["pg_isready", "-U", "postgres", "-d", "loom"]},
         "periodSeconds": 5,

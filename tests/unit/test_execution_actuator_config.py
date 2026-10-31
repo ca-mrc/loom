@@ -23,8 +23,10 @@ def test_execution_actuator_settings_parse_target_placement(
         '[{"key":"loom.nebius/execution","operator":"Equal","value":"true","effect":"NoSchedule"}]',
     )
 
+    monkeypatch.setenv("LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY", "2")
     settings = ExecutionActuatorSettings()
 
+    assert settings.command_concurrency == 2
     assert settings.node_selector == {"loom.nebius/node-role": "execution"}
     assert settings.tolerations == (
         {

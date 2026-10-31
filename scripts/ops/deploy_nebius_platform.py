@@ -1248,6 +1248,11 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
                         or candidate_writer.retained.reference != participant_reference):
                     raise DeploymentError('candidate writer changed during rollout')
 
+        expected_environment = getattr(args, "expected_current_environment", None)
+        if pool is None and expected_environment is None:
+            source = kube.get("configmap", "loom-platform-config", config["namespace"])
+            raw = source.get("data", {}).get("environment.json")
+            expected_environment = json.loads(raw) if raw is not None else None
         if pool is None:
             state = preflight(kube, manifest, config, files, args.expected_cluster_id, pool_completions=pool_completions)
         else:
@@ -1338,6 +1343,9 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
             validate_target_replacement(current, config, retire_target)
             if retire_target is not None and canonical(current.get("data", {})) != replacement_source:
                 raise DeploymentError("target replacement source changed before guard acquisition")
+            if pool is None and expected_environment is not None:
+                if json.loads(current.get("data", {}).get("environment.json", "null")) != expected_environment:
+                    raise DeploymentError("deployment configuration source changed before guard acquisition")
             expected_current = getattr(args, "expected_current_candidate", None)
             if expected_current is not None:
                 current = kube.get("configmap", "loom-platform-config", ns)

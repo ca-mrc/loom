@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from loom.nebius_rollout_guard import acquire, admission_open, release
+from loom.nebius_rollout_guard import LOCK_KEY, acquire, admission_open, release
 from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
 from loom_control_plane.task_image_materializations import claim_task_image_materialization
 from tests.integration import test_service_execution_leases as execution
@@ -374,3 +374,91 @@ def test_periodic_read_only_probe_tracks_busy_idle_and_held_guard(isolated_migra
         finally:
             await engine.dispose()
     asyncio.run(scenario())
+
+
+@pytest.mark.asyncio
+async def test_execution_tuning_and_rollout_share_atomic_guard_without_cancelling_work(
+    isolated_migration_postgres_url,
+):
+    from scripts.ops.nebius_execution_tuning import _TUNING_ACQUIRE_SQL
+
+    engine = create_async_engine(isolated_migration_postgres_url)
+    candidate = 'a' * 40
+    try:
+        async with AsyncSession(engine) as session, session.begin():
+            assert (await acquire(session, owner='version-test', candidate=candidate))['status'] == 'acquired'
+        async with AsyncSession(engine) as session, session.begin():
+            assert await session.scalar(text(_TUNING_ACQUIRE_SQL),
+                                        {'owner': 'tuning-test', 'candidate': candidate}) is None
+            assert (await release(session, owner='version-test', candidate=candidate))['status'] == 'released'
+        async with AsyncSession(engine) as session, session.begin():
+            trial, target = await execution._seed_ready_trial(session, now=datetime.now(UTC))
+            lease = await execution._reserve(session, trial_id=trial, target=target, now=datetime.now(UTC))
+            lease_id = lease.id
+        async with AsyncSession(engine) as session, session.begin():
+            assert await session.scalar(text(_TUNING_ACQUIRE_SQL),
+                                        {'owner': 'tuning-test', 'candidate': candidate}) == 1
+        async with AsyncSession(engine) as session, session.begin():
+            assert (await acquire(session, owner='version-test', candidate=candidate))['status'] == 'skipped_locked'
+            assert await session.scalar(text(_TUNING_ACQUIRE_SQL),
+                                        {'owner': 'second-tuner', 'candidate': candidate}) is None
+            assert not await admission_open(session)
+            assert await session.scalar(text('SELECT state FROM trials WHERE id=:id'), {'id': trial}) == 'claimed'
+            assert await session.scalar(text('SELECT revoked_at FROM execution_leases WHERE id=:id'),
+                                        {'id': lease_id}) is None
+            assert (await release(session, owner='tuning-test', candidate=candidate))['status'] == 'released'
+        async with AsyncSession(engine) as session, session.begin():
+            assert await admission_open(session)
+            assert await session.scalar(text('SELECT state FROM trials WHERE id=:id'), {'id': trial}) == 'claimed'
+        # Also exclude tuning before a version transaction has committed its row.
+        async with AsyncSession(engine) as version, version.begin():
+            await version.execute(text('SELECT pg_advisory_xact_lock(:key)'), {'key': LOCK_KEY})
+            async with AsyncSession(engine) as tuner, tuner.begin():
+                assert await tuner.scalar(text(_TUNING_ACQUIRE_SQL),
+                                          {'owner': 'tuning-test', 'candidate': candidate}) is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_tuning_guard_executes_real_operator_program_and_releases_on_failure(
+    isolated_migration_postgres_url,
+):
+    import os
+    import subprocess
+    import sys
+
+    from scripts.ops import nebius_execution_tuning as tuning
+
+    environment = {**{k: v for k, v in os.environ.items() if not k.startswith('LOOM_CP_')},
+                   'LOOM_CP_DB_URL': isolated_migration_postgres_url,
+                   'LOOM_CP_MINIO_ACCESS_KEY': 'test-access', 'LOOM_CP_MINIO_SECRET_KEY': 'test-secret',
+                   'LOOM_CP_STEP_JWT_SIGNING_KEY': 'tuning-guard-test-signing-key-000000'}
+
+    class RuntimeKube:
+        def run(self, *args):
+            assert args[:5] == ('exec', '-n', 'test-platform', 'deployment/loom-control-plane', '--')
+            assert args[5:8] == ('python', '-c', tuning._GUARD)
+            result = subprocess.run([sys.executable, *args[6:]], env=environment,
+                                    capture_output=True, text=True, timeout=30)
+            assert isolated_migration_postgres_url not in result.stdout + result.stderr
+            assert result.returncode == 0, 'guard subprocess failed; private output withheld'
+            return result.stdout
+
+    engine = create_async_engine(isolated_migration_postgres_url)
+    try:
+        for fail in (False, True):
+            try:
+                with tuning._tuning_guard(RuntimeKube(), 'test-platform', 'a' * 40):
+                    async with AsyncSession(engine) as session, session.begin():
+                        assert not await admission_open(session)
+                        assert await session.scalar(text('SELECT count(*) FROM nebius_rollout_guard')) == 1
+                    if fail:
+                        raise RuntimeError('test interrupted tuning')
+            except RuntimeError as error:
+                assert fail and str(error) == 'test interrupted tuning'
+            async with AsyncSession(engine) as session, session.begin():
+                assert await session.scalar(text('SELECT count(*) FROM nebius_rollout_guard')) == 0
+                assert await admission_open(session)
+    finally:
+        await engine.dispose()

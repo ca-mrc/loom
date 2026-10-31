@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -36,6 +37,8 @@ from loom_execution_actuator.contracts import (
     NormalizedJobState,
 )
 from loom_execution_actuator.metrics import (
+    COMMAND_PROCESS_SECONDS,
+    COMMAND_QUEUE_WAIT_SECONDS,
     KUBERNETES_API_ERRORS_TOTAL,
     KUBERNETES_API_SECONDS,
     KUBERNETES_CLEANUP_RETRIES_TOTAL,
@@ -92,12 +95,16 @@ class ExecutionActuator:
         target: ExecutionTargetRuntime,
         controller_id: str,
         command_limit: int = 20,
+        command_concurrency: int = 1,
         command_lease_seconds: int = 60,
         delete_grace_seconds: int = 30,
         pool_resources: PoolExecutionResources | None = None,
     ) -> None:
         if not controller_id or len(controller_id) > 120:
             raise ValueError("invalid controller_id")
+        if type(command_concurrency) is not int or not 1 <= command_concurrency <= 8:
+            raise ValueError("command_concurrency must be between 1 and 8")
+        self._command_concurrency = command_concurrency
         self._sessions = sessions
         self._kubernetes = kubernetes
         self._target = target
@@ -114,20 +121,65 @@ class ExecutionActuator:
         self._pool_resources = pool_resources
 
     async def run_commands_once(self, *, now: datetime | None = None) -> int:
+        return await self._run_concurrent_commands_once(now=now)
+
+    async def _deliver_command(
+        self, command: ClaimedExecutionCommand, *, now: datetime | None = None,
+    ) -> None:
         current_time = now or datetime.now(UTC)
-        async with self._sessions() as session:
-            commands = await claim_execution_commands(
-                session,
-                consumer_id=self._controller_id,
-                target_id=self._target.target_id,
-                limit=self._command_limit,
-                lease_seconds=self._command_lease_seconds,
-                now=current_time,
+        if command.available_at is not None:
+            COMMAND_QUEUE_WAIT_SECONDS.labels(command.command_type).observe(
+                max(0.0, (current_time - command.available_at).total_seconds()),
             )
-            await session.commit()
-        for command in commands:
+        with COMMAND_PROCESS_SECONDS.labels(command.command_type).time():
             await self._process_command(command, now=current_time)
-        return len(commands)
+
+    async def _run_concurrent_commands_once(self, *, now: datetime | None = None) -> int:
+        active: set[asyncio.Task[None]] = set()
+        remaining, processed = self._command_limit, 0
+        try:
+            while remaining or active:
+                slots = min(remaining, self._command_concurrency - len(active))
+                if slots:
+                    async with self._sessions() as session:
+                        commands = await claim_execution_commands(
+                            session, consumer_id=self._controller_id,
+                            target_id=self._target.target_id, limit=slots,
+                            lease_seconds=self._command_lease_seconds,
+                            now=now or datetime.now(UTC), serialize_leases=True,
+                        )
+                        await session.commit()
+                    remaining -= len(commands)
+                    active.update(asyncio.create_task(self._deliver_command(command, now=now))
+                                  for command in commands)
+                if not active:
+                    break
+                done, active = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+                await asyncio.gather(*done)
+                processed += len(done)
+            return processed
+        finally:
+            for task in active:
+                task.cancel()
+            await asyncio.gather(*active, return_exceptions=True)
+
+    def _missing_job_observation(
+        self, lease: ServiceExecutionLease, *, normalized_state: NormalizedJobState,
+    ) -> KubernetesJobObservation:
+        # Command and inventory paths must describe the same absent resource.
+        # Diagnostic differences are payload differences under the same event key.
+        return KubernetesJobObservation(
+            namespace=self._target.namespace,
+            job_name=lease.job_name,
+            lease_id=str(lease.id),
+            resource_generation=lease.resource_generation,
+            target_id=self._target.target_id,
+            execution_unit_key=str(lease.execution_unit_key),
+            normalized_state=normalized_state,
+            job_uid=lease.job_uid,
+            reason="JobMissing",
+            message="expected exact Kubernetes Job was not listed",
+        )
 
     async def _lease(self, lease_id: UUID) -> ServiceExecutionLease:
         async with self._sessions() as session:
@@ -514,15 +566,8 @@ class ExecutionActuator:
                 elif self._pool_resources is not None:
                     await self._cleanup_pool(lease, now=now)
                 else:
-                    observation = KubernetesJobObservation(
-                        namespace=self._target.namespace,
-                        job_name=lease.job_name,
-                        lease_id=str(lease.id),
-                        resource_generation=lease.resource_generation,
-                        target_id=self._target.target_id,
-                        execution_unit_key=str(lease.execution_unit_key),
-                        normalized_state=NormalizedJobState.DELETED,
-                        job_uid=lease.job_uid,
+                    observation = self._missing_job_observation(
+                        lease, normalized_state=NormalizedJobState.DELETED,
                     )
                     await self._persist_observation(lease, observation, now=now)
             elif command.command_type in {"start", "finalize"}:
@@ -641,21 +686,13 @@ class ExecutionActuator:
                 # a recorded UID only when the namespace inventory is authoritative.
                 continue
             drift += 1
-            missing = KubernetesJobObservation(
-                namespace=self._target.namespace,
-                job_name=lease.job_name,
-                lease_id=str(lease.id),
-                resource_generation=lease.resource_generation,
-                target_id=self._target.target_id,
-                execution_unit_key=str(lease.execution_unit_key),
+            missing = self._missing_job_observation(
+                lease,
                 normalized_state=(
                     NormalizedJobState.DELETED
                     if lease.desired_state in _CLEANUP_DESIRED_STATES
                     else NormalizedJobState.MISSING
                 ),
-                job_uid=lease.job_uid,
-                reason="JobMissing",
-                message="expected exact Kubernetes Job was not listed",
             )
             try:
                 await self._persist_observation(lease, missing, now=current_time)

@@ -3402,6 +3402,236 @@ async def test_deferred_outbox_constraint_rolls_back_trial_reservation(
         await engine.dispose()
 
 
+async def test_serialized_command_claims_fence_other_consumers_and_preserve_order(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_a, target = await _seed_ready_trial(session, now=now)
+            trial_b, _ = await _seed_ready_trial(session, now=now)
+            leases = [await _reserve(session, trial_id=trial, target=target, now=now)
+                      for trial in (trial_a, trial_b)]
+            for lease in leases:
+                await enqueue_execution_transition(
+                    session, lease_id=lease.id, expected_generation=1,
+                    desired_state="start", now=now,
+                )
+            await session.commit()
+        async with sessions() as session:
+            first = await claim_execution_commands(
+                session, consumer_id="a", target_id=target.target_id, limit=8,
+                lease_seconds=5, now=now, serialize_leases=True,
+            )
+            async with sessions() as competing:
+                assert not await claim_execution_commands(
+                    competing, consumer_id="competing", target_id=target.target_id,
+                    limit=8, lease_seconds=5, now=now, serialize_leases=True,
+                )
+            await session.commit()
+            assert len(first) == 2
+            assert {command.command_type for command in first} == {"create"}
+        async with sessions() as session:
+            assert not await claim_execution_commands(
+                session, consumer_id="b", target_id=target.target_id, limit=8,
+                lease_seconds=5, now=now + timedelta(seconds=1), serialize_leases=True,
+            )
+        async with sessions() as session:
+            await acknowledge_execution_command(
+                session, command_id=first[0].id, consumer_id="a",
+                acknowledgement={"created": True}, now=now + timedelta(seconds=1),
+            )
+            await session.commit()
+        async with sessions() as session:
+            following = await claim_execution_commands(
+                session, consumer_id="b", target_id=target.target_id, limit=8,
+                lease_seconds=5, now=now + timedelta(seconds=2), serialize_leases=True,
+            )
+            await session.commit()
+            assert len(following) == 1
+            assert following[0].lease_id == first[0].lease_id
+            assert following[0].command_type == "start"
+        async with sessions() as session:
+            reclaimed = await claim_execution_commands(
+                session, consumer_id="b", target_id=target.target_id, limit=8,
+                lease_seconds=5, now=now + timedelta(seconds=6), serialize_leases=True,
+            )
+            await session.commit()
+            assert len(reclaimed) == 1
+            assert reclaimed[0].id == first[1].id
+            assert reclaimed[0].delivery_count == 2
+        async with sessions() as session:
+            with pytest.raises(ServiceExecutionConflict, match="not authoritative"):
+                await acknowledge_execution_command(
+                    session, command_id=first[1].id, consumer_id="a",
+                    acknowledgement={"created": True}, now=now + timedelta(seconds=6),
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("concurrency", [2, 4])
+async def test_actuator_concurrent_delivery_does_not_block_other_leases(
+    postgres_url: str, concurrency: int,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    entered, release, fast_done = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    kubernetes = _FakeKubernetesJobApi()
+    try:
+        async with sessions() as session:
+            first_trial, target = await _seed_ready_trial(session, now=now)
+            trials = [first_trial]
+            for _ in range(concurrency):
+                trial, _ = await _seed_ready_trial(session, now=now)
+                trials.append(trial)
+            leases = [await _reserve(session, trial_id=trial, target=target, now=now)
+                      for trial in trials]
+            await session.commit()
+        actuator = ExecutionActuator(
+            sessions=sessions, kubernetes=kubernetes,
+            target=ExecutionTargetRuntime(target_id=target.target_id, namespace=target.namespace_name),
+            controller_id="parallel", command_concurrency=concurrency,
+        )
+        process = actuator._process_command
+        active, peak, fast_count = 0, 0, 0
+
+        async def delayed(command, *, now):
+            nonlocal active, peak, fast_count
+            active += 1
+            peak = max(peak, active)
+            try:
+                if command.lease_id == leases[0].id:
+                    entered.set()
+                    await release.wait()
+                await process(command, now=now)
+                if command.lease_id != leases[0].id:
+                    fast_count += 1
+                    if fast_count == concurrency:
+                        fast_done.set()
+            finally:
+                active -= 1
+
+        actuator._process_command = delayed
+        delivery = asyncio.create_task(actuator.run_commands_once(now=now))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            await asyncio.wait_for(fast_done.wait(), 5)
+            assert not delivery.done()
+            assert peak == concurrency
+        finally:
+            release.set()
+            assert await asyncio.wait_for(delivery, 5) == len(leases)
+        assert kubernetes.create_count == len(leases)
+        async with sessions() as session:
+            assert await session.scalar(select(func.count(ServiceExecutionCommand.id)).where(
+                ServiceExecutionCommand.lease_id.in_([lease.id for lease in leases]),
+                ServiceExecutionCommand.state == "acknowledged",
+            )) == len(leases)
+    finally:
+        await engine.dispose()
+
+
+async def test_serialized_claims_prioritize_cleanup_generation_and_fence_stale_work(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial, target=target, now=now)
+            await enqueue_execution_transition(
+                session, lease_id=lease.id, expected_generation=1,
+                desired_state="start", now=now,
+            )
+            await enqueue_execution_transition(
+                session, lease_id=lease.id, expected_generation=1,
+                desired_state="cancel", now=now,
+            )
+            await session.commit()
+        kubernetes = _FakeKubernetesJobApi()
+        actuator = ExecutionActuator(
+            sessions=sessions, kubernetes=kubernetes,
+            target=ExecutionTargetRuntime(target_id=target.target_id, namespace=target.namespace_name),
+            controller_id="cleanup", command_concurrency=2,
+        )
+        async with sessions() as session:
+            commands = await claim_execution_commands(
+                session, consumer_id="cleanup", target_id=target.target_id, limit=8,
+                lease_seconds=5, now=now, serialize_leases=True,
+            )
+            await session.commit()
+            assert len(commands) == 1 and commands[0].command_type == "cancel"
+        await actuator._process_command(commands[0], now=now)
+        assert await actuator.run_commands_once(now=now) == 2
+        assert kubernetes.create_count == 0
+        async with sessions() as session:
+            rows = list(await session.scalars(select(ServiceExecutionCommand).where(
+                ServiceExecutionCommand.lease_id == lease.id,
+            )))
+            assert all(command.state == "dead_letter" for command in rows
+                       if command.command_type in {"create", "start"})
+            assert all(command.last_error_message == "command generation is stale" for command in rows
+                       if command.command_type in {"create", "start"})
+            persisted = await session.get(ServiceExecutionLease, lease.id)
+            assert persisted is not None and persisted.cleanup_state == "complete"
+    finally:
+        await engine.dispose()
+
+
+async def test_execution_metrics_count_commands_and_cleanup_leases_independently(
+    postgres_url: str,
+) -> None:
+    from loom_control_plane.metrics import (
+        SERVICE_EXECUTION_CLEANUP_DEBT,
+        SERVICE_EXECUTION_COMMAND_BACKLOG,
+        SERVICE_EXECUTION_RECONCILE_LAG_SECONDS,
+    )
+    from loom_control_plane.service_execution import refresh_service_execution_metrics
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            leases = []
+            for _ in range(3):
+                trial, target = await _seed_ready_trial(session, now=now)
+                leases.append(await _reserve(session, trial_id=trial, target=target, now=now))
+            for lease in leases[:2]:
+                await enqueue_execution_transition(
+                    session, lease_id=lease.id, expected_generation=1,
+                    desired_state="cancel", now=now,
+                )
+            first = await claim_execution_commands(
+                session, consumer_id="metrics", target_id=target.target_id,
+                limit=1, lease_seconds=5, now=now,
+            )
+            assert len(first) == 1
+            await acknowledge_execution_command(
+                session, command_id=first[0].id, consumer_id="metrics",
+                acknowledgement={"created": True}, now=now,
+            )
+            oldest = await session.scalar(select(func.min(ServiceExecutionCommand.created_at)).where(
+                ServiceExecutionCommand.state.in_(["pending", "leased"]),
+            ))
+            assert oldest is not None
+            measured_at = now + timedelta(minutes=1)
+            await refresh_service_execution_metrics(session, now=measured_at)
+            assert SERVICE_EXECUTION_COMMAND_BACKLOG._value.get() == 4
+            assert SERVICE_EXECUTION_CLEANUP_DEBT._value.get() == 2
+            assert SERVICE_EXECUTION_RECONCILE_LAG_SECONDS._value.get() == pytest.approx(
+                (measured_at - oldest).total_seconds(),
+            )
+    finally:
+        await engine.dispose()
+
+
 async def test_command_redelivery_and_acknowledgement_are_replay_safe(
     postgres_url: str,
 ) -> None:
@@ -4532,13 +4762,16 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
                 namespace=target.namespace_name,
             ),
             controller_id="output-finalization-test",
+            # Keep the semantic finalization checkpoint observable before the
+            # bounded dispatcher refills with the newly queued cleanup command.
+            command_limit=1,
         )
         completed = await actuator.run_commands_once(now=now + timedelta(seconds=4))
         async with sessions() as session:
             commands = (await session.scalars(select(ServiceExecutionCommand).where(
                 ServiceExecutionCommand.lease_id == lease.id,
             ))).all()
-            assert completed == 3, [
+            assert completed == 1, [
                 (c.command_type, c.state, c.last_error_code, c.last_error_message) for c in commands
             ]
 
@@ -6049,8 +6282,10 @@ async def test_actuator_refuses_uid_reuse_and_never_deletes_foreign_scope(
         await engine.dispose()
 
 
+@pytest.mark.parametrize("reconcile_first", [False, True])
 async def test_actuator_records_unavailable_before_accepting_an_already_absent_job(
     postgres_url: str,
+    reconcile_first: bool,
 ) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -6084,13 +6319,83 @@ async def test_actuator_records_unavailable_before_accepting_an_already_absent_j
             )
             await session.commit()
 
+        if reconcile_first:
+            await actuator.reconcile_full_once(now=now + timedelta(seconds=1))
         assert await actuator.run_commands_once(now=now + timedelta(seconds=1)) == 1
         async with sessions() as session:
+            cancel = await session.scalar(select(ServiceExecutionCommand).where(
+                ServiceExecutionCommand.lease_id == lease.id,
+                ServiceExecutionCommand.command_type == "cancel",
+            ))
+            assert cancel is not None and cancel.state == "acknowledged"
             closed = await session.get(ServiceExecutionLease, lease.id)
             assert closed is not None
             assert closed.observed_state == "deleted"
             assert closed.output_commit_state == "unavailable"
             assert closed.output_unavailable_reason == "operator_cancelled"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("legacy_first", [False, True])
+async def test_missing_job_diagnostic_variants_replay_without_rewriting_history(
+    postgres_url: str, legacy_first: bool,
+) -> None:
+    from loom_control_plane.service_execution import record_kubernetes_observation
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    kubernetes = _FakeKubernetesJobApi()
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await session.commit()
+        actuator = ExecutionActuator(
+            sessions=sessions, kubernetes=kubernetes,
+            target=ExecutionTargetRuntime(
+                target_id=target.target_id, namespace=target.namespace_name,
+            ),
+            controller_id="diagnostic-replay",
+        )
+        await actuator.run_commands_once(now=now)
+        async with sessions() as session:
+            await enqueue_execution_transition(
+                session, lease_id=lease.id, expected_generation=1,
+                desired_state="cancel", now=now + timedelta(seconds=1),
+            )
+            await session.commit()
+            lease = await session.get(ServiceExecutionLease, lease.id)
+            assert lease is not None
+            session.expunge(lease)
+        current = actuator._missing_job_observation(
+            lease, normalized_state=NormalizedJobState.DELETED,
+        )
+        legacy = current.model_copy(update={"reason": None, "message": None})
+        first, second = (legacy, current) if legacy_first else (current, legacy)
+        await actuator._persist_observation(lease, first, now=now + timedelta(seconds=2))
+        async with sessions() as session:
+            event, duplicate = await record_kubernetes_observation(
+                session, lease_id=lease.id, generation=lease.generation,
+                payload=second.event_payload(), observed_at=now + timedelta(seconds=3),
+            )
+            assert duplicate is True
+            assert event.payload_json == first.event_payload()
+            await session.commit()
+        for changed in (
+            {"message": "different diagnostic"},
+            {"resource_generation": lease.resource_generation + 1},
+            {"node_name": "different-node"},
+            {"terminated_at": now.isoformat()},
+        ):
+            async with sessions() as session:
+                with pytest.raises(ServiceExecutionConflict, match="replay changed"):
+                    await record_kubernetes_observation(
+                        session, lease_id=lease.id, generation=lease.generation,
+                        payload={**second.event_payload(), **changed},
+                        observed_at=now + timedelta(seconds=4),
+                    )
     finally:
         await engine.dispose()
 
@@ -6478,4 +6783,63 @@ async def test_materializer_reads_default_image_version_from_the_batch_profile(p
         assert default_image_version(profile, SimpleNamespace(candidate_sha=plan.candidate_sha)) == version
         assert default_image_version(profile, SimpleNamespace(candidate_sha="f" * 40)) is None
     finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(('old_concurrency', 'new_concurrency'), [(2, 1), (1, 2)])
+async def test_actuator_rolling_concurrency_handoff_keeps_lease_command_order(
+    postgres_url: str, old_concurrency: int, new_concurrency: int,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    entered, release = asyncio.Event(), asyncio.Event()
+    kubernetes = _FakeKubernetesJobApi()
+    delivery = None
+    try:
+        async with sessions() as session:
+            first, target = await _seed_ready_trial(session, now=now)
+            other, _ = await _seed_ready_trial(session, now=now)
+            leases = [await _reserve(session, trial_id=trial, target=target, now=now)
+                      for trial in (first, other)]
+            await enqueue_execution_transition(session, lease_id=leases[0].id,
+                                               expected_generation=1, desired_state='start', now=now)
+            await session.execute(update(ServiceExecutionCommand).where(
+                (ServiceExecutionCommand.lease_id == leases[1].id)
+                | (ServiceExecutionCommand.command_type == 'start'),
+            ).values(available_at=now + timedelta(seconds=1)))
+            await session.commit()
+        common = {'sessions': sessions, 'kubernetes': kubernetes,
+                  'target': ExecutionTargetRuntime(target_id=target.target_id, namespace=target.namespace_name)}
+        old = ExecutionActuator(**common, controller_id='old', command_limit=1,
+                                command_concurrency=old_concurrency)
+        new = ExecutionActuator(**common, controller_id='new', command_concurrency=new_concurrency)
+        process = old._process_command
+
+        async def delayed(command, *, now):
+            entered.set()
+            await release.wait()
+            await process(command, now=now)
+
+        old._process_command = delayed
+        seen = []
+        next_process = new._process_command
+
+        async def observed(command, *, now):
+            seen.append((command.lease_id, command.command_type))
+            await next_process(command, now=now)
+
+        new._process_command = observed
+        delivery = asyncio.create_task(old.run_commands_once(now=now))
+        await asyncio.wait_for(entered.wait(), 10)
+        assert await asyncio.wait_for(new.run_commands_once(now=now + timedelta(seconds=1)), 10) == 1
+        assert seen == [(leases[1].id, 'create')]
+        release.set()
+        assert await asyncio.wait_for(delivery, 10) == 1
+        assert await asyncio.wait_for(new.run_commands_once(now=now + timedelta(seconds=1)), 10) == 1
+        assert seen[-1] == (leases[0].id, 'start')
+    finally:
+        release.set()
+        if delivery is not None:
+            await asyncio.gather(delivery, return_exceptions=True)
         await engine.dispose()

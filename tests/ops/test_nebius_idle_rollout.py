@@ -320,6 +320,7 @@ def test_runner_loss_before_first_manifest_recovers_original_previous_candidate(
     def deploy(args, **kwargs):
         assert args.resume_guard_owner == running_rollout_intent()["guard_owner"]
         assert args.expected_current_candidate == "c" * 40
+        assert args.expected_current_environment["namespace"] == args.namespace
         assert args.retry_failed_jobs is True
         assert args.migration_schema_head == "original_head"
         return {"status": "complete"}

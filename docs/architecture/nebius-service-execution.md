@@ -603,6 +603,13 @@ operator recovery and diagnostics.
 Command consumers use bounded delivery leases;
 an expired claim redelivers the same command and idempotency key. Exact event
 and acknowledgement replay is accepted, while changed replay is rejected.
+Synthetic missing-Job observations from command delivery and inventory
+reconciliation use the same `JobMissing` diagnostics. Historical absent-resource
+observations encoded with null diagnostics remain replay-compatible only when
+all other payload fields match, neither observation contains a Pod UID or
+resource version, and both diagnostics are one of those two known encodings.
+The retained event is unchanged; identity or other payload drift still fails
+normal replay consistency checks.
 Event arrival may be out of order: all valid events are retained, but only a
 higher event ordinal may advance the current projection.
 
@@ -940,6 +947,92 @@ full lists, and an expired resourceVersion resets the watch cursor. Multiple
 replicas are safe because only one holds a durable command delivery lease and
 all observations are idempotent by resourceVersion, UID, state, lease, and
 generation.
+
+`execution_command_concurrency` is a deployment-owned integer from 1 through 8
+(default 1), rendered as `LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY` for primary
+and regional actuators. Values above 1 enable bounded parallel command delivery
+across leases. Claims contain at most one head per lease, exclude leases with
+an unexpired delivery, order the newest generation before obsolete work and
+preserve sequence within that generation. Only available handler slots are
+claimed; a slow lease does not hold up unrelated work. Shutdown cancels and
+joins handlers so unacknowledged deliveries follow normal expiry/reclaim.
+Command queue wait and handler duration are exported by bounded command type.
+Placement remains independently controlled by `execution_placement_policy`;
+select `environment-local-capacity-balanced` to use existing physical-pressure
+ordering without changing final admission. Tune delivery concurrency from
+observed completion throughput, queue waits, DB/API pressure and correctness;
+keep node/create/build limits unchanged unless their measured rejection or
+pressure explains the remaining bottleneck.
+
+The standalone operator entry point is
+`scripts/ops/nebius_execution_tuning.py`. After deploying a candidate containing
+this capability, `apply` accepts each setting independently; it needs neither
+a PR nor a rebuilt image. Use the existing strict operator Kubernetes identity:
+
+```sh
+python scripts/ops/nebius_execution_tuning.py inspect --kubeconfig "$KUBECONFIG" --namespace "$NAMESPACE"
+python scripts/ops/nebius_execution_tuning.py apply --kubeconfig "$KUBECONFIG" --namespace "$NAMESPACE" --expected-candidate "$CANDIDATE" --placement-policy environment-local-capacity-balanced
+python scripts/ops/nebius_execution_tuning.py apply --kubeconfig "$KUBECONFIG" --namespace "$NAMESPACE" --expected-candidate "$CANDIDATE" --command-concurrency 2
+python scripts/ops/nebius_execution_tuning.py apply --kubeconfig "$KUBECONFIG" --namespace "$NAMESPACE" --expected-candidate "$CANDIDATE" --create-rate "$TARGET=20"
+```
+
+The operator saves settings in the existing `loom-platform-config` environment
+(the normal idle rollout reads this same source for the next candidate), keeps
+the catalog placement metadata aligned, and then converges only the affected
+controllers or existing capacity-policy API. Configuration updates compare the
+ConfigMap resource version. Tuning atomically reserves the same singleton and
+transaction advisory lock as version rollout, and holds ownership through all
+writes, controller convergence and readback. A version rollout or another tuner
+cannot acquire it during that operation; existing foreign ownership is left
+untouched. New admission pauses briefly while tuning holds the guard, while
+in-flight Trials and task Pods continue without cancellation or resubmission.
+After acquiring its guard, deployment compares the live environment configuration
+with the source captured before rendering/preflight and rejects stale source
+before backup or workload mutation. Readback checks saved values,
+actual in-container settings, policy values and controller readiness. Existing
+images and task Jobs are retained. Placement changes roll the Control Plane;
+concurrency changes roll actuators; creation-rate changes take effect through
+the API without a controller restart. Other capacity limits are preserved.
+A partial update remains failed with desired values retained; repeating the
+same tuning command safely finishes convergence. Normal return and handled
+failure release only that tuning operation's exact owner/candidate. Abrupt
+operator loss or an unconfirmed guard response retains the ordinary fail-closed
+pause. The operator prints its non-secret owner/candidate before acquisition;
+after confirming that process has ended, inspect the retained owner and use the
+existing `python -m loom.nebius_rollout_guard release --owner OWNER --candidate SHA`
+inside the installed Control Plane, then repeat the retained tuning command.
+Never release a foreign or still-active owner's guard. Rollback uses the same command
+with the previous setting and preserves in-flight work.
+
+Database resources and startup cache are separately persisted in
+`postgres_settings`: `cpu_request_millis`, `cpu_limit_millis`,
+`memory_request_mib`, `memory_limit_mib`, and `shared_buffers_mib`. Omitting the
+object preserves legacy resource defaults and does not override the server's
+existing shared-buffer setting. The selected starting point for #2730 is
+1000/3000 millicores, 1024/2048 MiB and 512 MiB shared buffers. Other service
+resources, `max_connections` and `work_mem` stay unchanged.
+
+```sh
+python scripts/ops/nebius_execution_tuning.py stage-postgres --kubeconfig "$KUBECONFIG" --namespace "$NAMESPACE" --expected-candidate "$CURRENT_CANDIDATE" --postgres-cpu-request-millis 1000 --postgres-cpu-limit-millis 3000 --postgres-memory-request-mib 1024 --postgres-memory-limit-mib 2048 --postgres-shared-buffers-mib 512
+```
+
+`stage-postgres` only saves and reads back desired configuration. It does not
+patch/restart the database or other controllers. Stage it before the initial
+maintenance rollout becomes idle; that normal rollout applies resources and
+`shared_buffers` together. The PostgreSQL [resource configuration reference](https://www.postgresql.org/docs/16/runtime-config-resource.html)
+requires server startup for `shared_buffers` and describes 25% as a common
+starting point, with workload-dependent benefit. Verify restart/connection
+recovery, cgroup CPU throttling and memory/cache counters, buffer reads/hits,
+query latency and batch throughput; the percentage is not an acceptance gate.
+Ordinary placement/concurrency/rate tuning preserves these database settings
+and never applies a database restart.
+
+A code-version deployment still follows normal idle rollout/backup/recovery.
+For owner-authorized maintenance, cancel through the ordinary batch API,
+retain completed results, wait for execution/build cleanup and deploy before
+submitting exactly the remaining tasks. Subsequent ordinary tuning does not
+cancel batches, re-submit Trials, release active leases or replace task Pods;
+controller restarts recover durable commands through normal fencing/reclaim.
 
 The observed projection records Job/Pod UIDs, Kubernetes resourceVersion,
 node, scheduling/start/termination timestamps, last reconciliation, and
@@ -1597,3 +1690,7 @@ compute deletion; cancellation does not permit new model calls or automatic
 attempts. Missing output is shown as unavailable, not perpetually pending.
 Cancelled/unscored output remains ineligible for training delivery; successful
 supplemental attempts continue through the existing family selection rules.
+
+Every dispatcher uses the same per-lease head/active-claim ordering protection, including concurrency 1, so rolling between concurrency values retains command order across overlapping controller instances.
+
+A scaled-to-zero standby actuator retains the concurrency setting in its Deployment without being started for tuning. Inspection reports its configured value separately from the unavailable runtime value; active controllers must still pass runtime and readiness checks.

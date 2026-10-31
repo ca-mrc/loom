@@ -11,9 +11,10 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import Text, cast, func, literal, or_, select
+from sqlalchemy import Text, cast, exists, func, literal, or_, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from loom.db.schema import (
     Artifact,
@@ -203,6 +204,7 @@ class ClaimedExecutionCommand:
     payload: dict[str, Any]
     delivery_count: int
     claim_expires_at: datetime
+    available_at: datetime | None = None
 
 
 def _bounded_optional_text(value: object, limit: int, name: str) -> str | None:
@@ -1367,6 +1369,7 @@ async def claim_execution_commands(
     limit: int,
     lease_seconds: int,
     now: datetime | None = None,
+    serialize_leases: bool = False,
 ) -> tuple[ClaimedExecutionCommand, ...]:
     """Lease commands only for one target, filtering before limit and row locking."""
 
@@ -1377,6 +1380,27 @@ async def claim_execution_commands(
         raise ServiceExecutionConflict("invalid command consumer identity")
     if limit < 1 or limit > 100 or lease_seconds < 5 or lease_seconds > 300:
         raise ServiceExecutionConflict("invalid command claim bounds")
+    ordering = []
+    if serialize_leases:
+        other = aliased(ServiceExecutionCommand)
+        # One head per lease, with current cleanup generations ahead of obsolete
+        # commands. A delivery already held by another consumer fences all heads.
+        ordering = [
+            ~exists().where(
+                other.lease_id == ServiceExecutionCommand.lease_id,
+                other.state == CommandState.LEASED,
+                other.claim_expires_at > current_time,
+            ),
+            ~exists().where(
+                other.lease_id == ServiceExecutionCommand.lease_id,
+                other.state.in_([CommandState.PENDING, CommandState.LEASED]),
+                or_(
+                    other.generation > ServiceExecutionCommand.generation,
+                    (other.generation == ServiceExecutionCommand.generation)
+                    & (other.sequence < ServiceExecutionCommand.sequence),
+                ),
+            ),
+        ]
     rows = (
         (
             await session.execute(
@@ -1395,6 +1419,7 @@ async def claim_execution_commands(
                         ),
                     ),
                     ServiceExecutionCommand.available_at <= current_time,
+                    *ordering,
                 )
                 .order_by(
                     ServiceExecutionCommand.available_at,
@@ -1429,6 +1454,7 @@ async def claim_execution_commands(
                 payload=row.payload_json,
                 delivery_count=row.delivery_count,
                 claim_expires_at=expires_at,
+                available_at=row.available_at,
             )
         )
     await session.flush()
@@ -2349,6 +2375,29 @@ async def record_execution_event(
     return event, False
 
 
+def _equivalent_missing_job_diagnostics(
+    previous: dict[str, Any], incoming: dict[str, Any],
+) -> bool:
+    """Accept only the two historical encodings of one synthetic absence."""
+    diagnostics = {
+        (None, None),
+        ("JobMissing", "expected exact Kubernetes Job was not listed"),
+    }
+    for payload in (previous, incoming):
+        if (
+            payload.get("normalized_state") not in {"deleted", "missing"}
+            or (payload.get("reason"), payload.get("message")) not in diagnostics
+            or any(payload.get(key) is not None for key in (
+                "pod_uid", "resource_version", "pod_resource_version",
+            ))
+        ):
+            return False
+    return (
+        {key: value for key, value in previous.items() if key not in {"reason", "message"}}
+        == {key: value for key, value in incoming.items() if key not in {"reason", "message"}}
+    )
+
+
 async def record_kubernetes_observation(
     session: AsyncSession,
     *,
@@ -2394,6 +2443,11 @@ async def record_kubernetes_observation(
     ).scalar_one_or_none()
     if existing is not None:
         ordinal = existing.ordinal
+        previous = await _resolve_execution_event_payload(session, existing)
+        if _equivalent_missing_job_diagnostics(previous, payload):
+            # Replay the exact retained payload through the unchanged consistency
+            # guard. Do not rewrite history or accept other diagnostic changes.
+            payload = previous
     else:
         ordinal = lease.last_event_ordinal + 1
     return await record_execution_event(
@@ -2935,25 +2989,19 @@ async def refresh_service_execution_metrics(
     now: datetime | None = None,
 ) -> None:
     current_time = now or datetime.now(UTC)
+    # These are independent gauges. Joining every historical command to its
+    # lease expands the input and forces DISTINCT for unrelated cleanup state.
+    pending_commands = ServiceExecutionCommand.state.in_(["pending", "leased"])
     pending, cleanup, oldest = (
-        await session.execute(
-            select(
-                func.count(ServiceExecutionCommand.id).filter(
-                    ServiceExecutionCommand.state.in_(["pending", "leased"])
-                ),
-                func.count(func.distinct(ServiceExecutionLease.id)).filter(
-                    ServiceExecutionLease.cleanup_state.in_(["pending", "in_progress", "blocked"])
-                ),
-                func.min(ServiceExecutionCommand.created_at).filter(
-                    ServiceExecutionCommand.state.in_(["pending", "leased"])
-                ),
-            )
-            .select_from(ServiceExecutionLease)
-            .outerjoin(
-                ServiceExecutionCommand,
-                ServiceExecutionCommand.lease_id == ServiceExecutionLease.id,
-            )
-        )
+        await session.execute(select(
+            select(func.count(ServiceExecutionCommand.id))
+            .where(pending_commands).scalar_subquery(),
+            select(func.count(ServiceExecutionLease.id)).where(
+                ServiceExecutionLease.cleanup_state.in_(["pending", "in_progress", "blocked"]),
+            ).scalar_subquery(),
+            select(func.min(ServiceExecutionCommand.created_at))
+            .where(pending_commands).scalar_subquery(),
+        ))
     ).one()
     SERVICE_EXECUTION_COMMAND_BACKLOG.set(int(pending or 0))
     SERVICE_EXECUTION_CLEANUP_DEBT.set(int(cleanup or 0))

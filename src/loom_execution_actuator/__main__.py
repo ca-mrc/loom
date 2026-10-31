@@ -204,6 +204,7 @@ async def _run() -> None:
             target=target,
             controller_id=settings.controller_id,
             command_limit=settings.command_limit,
+            command_concurrency=settings.command_concurrency,
             command_lease_seconds=settings.command_lease_seconds,
             delete_grace_seconds=settings.delete_grace_seconds,
             pool_resources=pool_resources,
