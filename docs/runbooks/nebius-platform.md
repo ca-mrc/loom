@@ -1744,7 +1744,9 @@ bounded Loom Pod identities from the configured execution namespace, never CRI
 configuration, host paths, file contents or statistics from unrelated namespaces. They are at most 700 KiB and are garbage-collected with their Node.
 Only the exact lease namespace and Pod UID reach the durable resource ledger.
 Observer API egress is restricted to its configured endpoint: an IP endpoint uses
-explicit API CIDRs; a DNS endpoint uses exact Cilium FQDN and DNS rules. When
+explicit API CIDRs; a DNS endpoint uses exact Cilium FQDN and DNS rules. DNS
+peers are confined to kube-system CoreDNS Pods with `k8s-app` equal to `coredns`
+or `kube-dns`; both managed regions currently use `coredns`. When
 explicit API CIDRs accompany a DNS endpoint, only the exact DNS query is added;
 the CIDRs remain the API-traffic authority.
 

@@ -143,8 +143,9 @@ def observer_documents(config: dict[str, Any], image: str, *,
             "spec": {"endpointSelector": {"matchLabels": dict(LABELS)}, "egress": [
                 *([] if network_egress else [{"toFQDNs": [{"matchName": hostname}],
                  "toPorts": [{"ports": [{"port": str(port), "protocol": "TCP"}]}]}]),
-                {"toEndpoints": [{"matchLabels": {"k8s:io.kubernetes.pod.namespace": "kube-system",
-                                                    "k8s:k8s-app": "kube-dns"}}],
+                {"toEndpoints": [{"matchLabels": {"k8s:io.kubernetes.pod.namespace": "kube-system"},
+                                  "matchExpressions": [{"key": "k8s:k8s-app", "operator": "In",
+                                                        "values": ["kube-dns", "coredns"]}]}],
                  "toPorts": [{"ports": [{"port": "53", "protocol": "ANY"}],
                               "rules": {"dns": [{"matchName": hostname}]}}]},
             ]}})

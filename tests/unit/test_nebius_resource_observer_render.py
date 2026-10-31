@@ -83,7 +83,7 @@ def test_dns_api_uses_only_exact_cilium_fqdn_and_dns_queries(platform_inputs):
     assert policy["apiVersion"] == "cilium.io/v2" and policy["metadata"]["namespace"] == namespace
     assert policy["spec"]["egress"][0] == {"toFQDNs": [{"matchName": "api.cluster.test"}], "toPorts": [{"ports": [{"port": "443", "protocol": "TCP"}]}]}
     assert policy["spec"]["egress"][1]["toPorts"][0]["rules"] == {"dns": [{"matchName": "api.cluster.test"}]}
-    assert policy["spec"]["egress"][1]["toEndpoints"] == [{"matchLabels": {"k8s:io.kubernetes.pod.namespace": "kube-system", "k8s:k8s-app": "kube-dns"}}]
+    assert policy["spec"]["egress"][1]["toEndpoints"] == [{"matchLabels": {"k8s:io.kubernetes.pod.namespace": "kube-system"}, "matchExpressions": [{"key": "k8s:k8s-app", "operator": "In", "values": ["kube-dns", "coredns"]}]}]
     assert "matchPattern" not in str(policy)
     generic = next(d for d in docs if d["kind"] == "NetworkPolicy" and d["metadata"].get("namespace") == namespace)
     assert generic["spec"]["egress"] == []
@@ -121,5 +121,24 @@ def test_dns_endpoint_with_explicit_api_cidrs_retains_exact_dns_queries(platform
     assert len(policy["spec"]["egress"]) == 1
     dns = policy["spec"]["egress"][0]
     assert dns["toPorts"][0]["rules"] == {"dns": [{"matchName": "api.cluster.test"}]}
-    assert dns["toEndpoints"] == [{"matchLabels": {"k8s:io.kubernetes.pod.namespace": "kube-system", "k8s:k8s-app": "kube-dns"}}]
+    assert dns["toEndpoints"] == [{"matchLabels": {"k8s:io.kubernetes.pod.namespace": "kube-system"}, "matchExpressions": [{"key": "k8s:k8s-app", "operator": "In", "values": ["kube-dns", "coredns"]}]}]
     assert not any("toFQDNs" in rule for rule in policy["spec"]["egress"])
+
+
+@pytest.mark.parametrize("dns_app", ["coredns", "kube-dns"])
+def test_dns_policy_matches_managed_dns_pods_without_selecting_other_apps(platform_inputs, dns_app):
+    config, candidate, profile = platform_inputs
+    docs = _all(build_platform(config, candidate, profile, {}, repo_root=ROOT))
+    policy, = [d for d in docs if d["kind"] == "CiliumNetworkPolicy"]
+    selectors = [selector for rule in policy["spec"]["egress"] for selector in rule.get("toEndpoints", [])]
+
+    def matches(selector, namespace, app):
+        labels = {"k8s:io.kubernetes.pod.namespace": namespace, "k8s:k8s-app": app}
+        return (all(labels.get(key) == value for key, value in selector.get("matchLabels", {}).items())
+                and all(item["operator"] == "In" and labels.get(item["key"]) in item["values"]
+                        for item in selector.get("matchExpressions", [])))
+
+    # Both managed clusters actually use coredns; kube-dns remains compatible.
+    assert any(matches(selector, "kube-system", dns_app) for selector in selectors)
+    assert not any(matches(selector, "kube-system", "unrelated") for selector in selectors)
+    assert not any(matches(selector, "unrelated", dns_app) for selector in selectors)
