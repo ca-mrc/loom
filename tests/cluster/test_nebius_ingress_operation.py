@@ -45,7 +45,11 @@ from tests.cluster.test_nebius_shared_ingress import (
     _certificate,
     _run,
 )
-from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
+from tests.integration.test_execution_actuator_k3s import (
+    _disposable_node_api_cidrs,
+    _load_client,
+    _start_k3s,
+)
 from tests.ops import test_nebius_certificates as certificate_material
 from tests.ops.test_nebius_dns_publication import Provider
 from tests.ops.test_nebius_ingress_gateway import inputs as inputs
@@ -58,6 +62,32 @@ POSTGRES = "docker.io/library/postgres@sha256:304ab813518754228f9f792f79d6da3635
 GUARD_PYTHON = "public.ecr.aws/docker/library/python@sha256:4766d8b510c428e595d74b9cc5bbb2fae8e26316fffb4adc89908d79aacd58a2"
 pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1",
                                 reason="requires an explicitly disposable Kubernetes API")
+
+
+def _safe_exception_chain(error: BaseException) -> list[dict[str, object]]:
+    """Retain bounded types/locations/codes, including a suppressed context."""
+    chain: list[dict[str, object]] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen and len(chain) < 6:
+        seen.add(id(current))
+        frames = []
+        trace = current.__traceback__
+        while trace is not None:
+            frames.append({'file': Path(trace.tb_frame.f_code.co_filename).name, 'line': trace.tb_lineno})
+            frames = frames[-4:]
+            trace = trace.tb_next
+        entry: dict[str, object] = {'type': type(current).__name__, 'traceback': frames}
+        for field in ('errno', 'returncode', 'status', 'verify_code'):
+            try:
+                value = getattr(current, field, None)
+            except Exception:
+                continue
+            if type(value) is int:
+                entry[field] = value
+        chain.append(entry)
+        current = current.__cause__ if current.__cause__ is not None else current.__context__
+    return chain
 
 
 def _prepare_fixture_image(image, directory, mirror_limited=None):
@@ -382,6 +412,9 @@ def test_connected_installation_recovers_then_cuts_over_with_installed_guard(
         kubeconfig.write_text(yaml.safe_dump(context))
         kubeconfig.chmod(0o600)
         platform["kubernetes_api_server"] = endpoint
+        # The operator uses the host-mapped API; no node observer runs here.
+        # Bind its platform egress declaration to real, exact node addresses.
+        platform['resource_observer_api_cidrs'] = _disposable_node_api_cidrs(core)
         old_host = platform["public_host"]
         old_tls = _certificate([old_host])
         server = '''import http.server, json, ssl
@@ -536,6 +569,10 @@ server.socket=context.wrap_socket(server.socket,server_side=True); server.serve_
     except BaseException as error:
         phase("failed")
         error.add_note("phase timeline: " + " ".join(phases))
+        try:
+            error.add_note("safe exception chain: " + json.dumps(_safe_exception_chain(error)))
+        except Exception:
+            pass  # A diagnostic must not replace the original failure.
         try:
             node = container.get_wrapped_container()
             node.reload()

@@ -136,7 +136,7 @@ def test_regional_builder_preflight_checks_remote_keys_and_each_namespace(
     else:
         assert set(deploy.preflight_regional_rollout(primary, config, tmp_path)) == {target["target_id"]}
         namespaces = {row[-1] for row in commands if row[:2] == ("auth", "can-i") and "-n" in row}
-        assert namespaces == {target["execution_namespace"], target["execution_namespace"] + "-build"}
+        assert namespaces == {target["execution_namespace"], target["execution_namespace"] + "-build", target["execution_namespace"] + "-observations"}
         assert {row[2] for row in commands if row[:2] == ("get", "secret")} == {
             "loom-task-build-source", "loom-task-build-cache", "loom-task-build-registry", "loom-task-image-archive-writer"}
     assert not any(row[0] in {"apply", "patch", "create"} for row in commands)

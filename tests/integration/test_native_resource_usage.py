@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -323,5 +324,100 @@ async def test_native_container_restart_retains_separate_cumulative_counters(pos
                 == 13000
             )
             assert all(row.image_digest is not None for row in measured)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(("recover", "reset", "terminal_failure"), [
+    (False, False, False), (True, False, False), (True, True, False),
+    (True, False, True), (True, True, True),
+])
+async def test_sampling_diagnostic_survives_cleanup_and_clears_after_recovery(
+    postgres_url, recover, reset, terminal_failure
+):
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    kubernetes = _FakeKubernetesJobApi()
+    reads = 0
+
+    async def resource_summary(*, node_name):
+        nonlocal reads
+        reads += 1
+        if reads == 1 or (terminal_failure and reads > (4 if reset else 2)):
+            raise httpx.ConnectTimeout("private transport details must not be persisted")
+        if not recover:
+            raise httpx.ReadTimeout("private transport details must not be persisted")
+        obs = next(iter(kubernetes.jobs.values()))
+        usage = {2: 9000000, 3: 4000000, 4: 10000000}[reads]
+        return {"pods": [{
+            "podRef": {"uid": obs.pod_uid, "namespace": obs.namespace},
+            "containers": [{"name": "execution", "cpu": {"usageCoreNanoSeconds": usage}}],
+        }]}
+
+    kubernetes.resource_summary = resource_summary
+    try:
+        async with sessions() as session, session.begin():
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+        actuator = ExecutionActuator(
+            sessions=sessions, kubernetes=kubernetes,
+            target=ExecutionTargetRuntime(target_id=target.target_id, namespace=target.namespace_name),
+            controller_id="usage-diagnostic-test",
+        )
+        await actuator.run_commands_once(now=now)
+        obs = kubernetes.jobs[lease.job_name].model_copy(update={
+            "normalized_state": NormalizedJobState.RUNNING,
+            "node_name": "node-1", "pod_uid": "pod-1", "resource_version": "2",
+        })
+        kubernetes.jobs[lease.job_name] = obs
+        await actuator.reconcile_full_once(now=now + timedelta(seconds=1))
+        await actuator.reconcile_full_once(now=now + timedelta(seconds=2))
+        assert reads == 1
+        async with sessions() as session:
+            row = await session.scalar(select(TrialResourceUsage).where(
+                TrialResourceUsage.execution_lease_id == lease.id,
+                TrialResourceUsage.role_name == "execution",
+            ))
+            assert row.diagnostic_code == "kubelet_connect_timeout"
+            assert row.cpu_usage_usec is None
+        if recover:
+            await actuator.reconcile_full_once(now=now + timedelta(seconds=17))
+            assert reads == 2
+        if reset:
+            await actuator.reconcile_full_once(now=now + timedelta(seconds=33))
+            await actuator.reconcile_full_once(now=now + timedelta(seconds=49))
+            assert reads == 4
+        if not recover:
+            await actuator.reconcile_full_once(now=now + timedelta(seconds=17))
+            async with sessions() as session:
+                row = await session.scalar(select(TrialResourceUsage).where(
+                    TrialResourceUsage.execution_lease_id == lease.id,
+                    TrialResourceUsage.role_name == "execution",
+                ))
+                assert row.diagnostic_code == "kubelet_read_timeout"
+        seconds = 66 if reset else 34 if recover else 18
+        if not terminal_failure:
+            seconds = 50 if reset else 18
+        terminal_at = now + timedelta(seconds=seconds)
+        async with sessions() as session, session.begin():
+            await request_trial_execution_cancellation(session, trial_id=trial_id, now=terminal_at)
+        fresh = await actuator._lease(lease.id)
+        await actuator._delete(fresh, obs, now=terminal_at, cancel_immediately=True)
+        assert lease.job_name not in kubernetes.jobs
+        async with sessions() as session:
+            rows = list((await session.scalars(select(TrialResourceUsage).where(
+                TrialResourceUsage.execution_lease_id == lease.id,
+            ))).all())
+            main = next(row for row in rows if row.role_name == "execution")
+            assert all(row.finalized_at is not None for row in rows)
+            assert main.diagnostic_code == (
+                "counter_reset_without_new_incarnation" if reset
+                else "kubelet_connect_timeout" if terminal_failure
+                else "sampled_maxima_not_kernel_peaks" if recover else "kubelet_read_timeout"
+            )
+            assert main.cpu_usage_usec == (10000 if reset else 9000 if recover else None)
+            assert main.completeness == ("partial" if recover else "unavailable")
+            assert main.finalized_at == terminal_at
     finally:
         await engine.dispose()

@@ -39,9 +39,11 @@ _PATHS = {
     'ClusterRole': ('rbac.authorization.k8s.io/v1', 'clusterroles', True),
     'ClusterRoleBinding': ('rbac.authorization.k8s.io/v1', 'clusterrolebindings', True),
     'NetworkPolicy': ('networking.k8s.io/v1', 'networkpolicies', False),
+    'CiliumNetworkPolicy': ('cilium.io/v2', 'ciliumnetworkpolicies', False),
     'ValidatingAdmissionPolicy': ('admissionregistration.k8s.io/v1', 'validatingadmissionpolicies', True),
     'ValidatingAdmissionPolicyBinding': ('admissionregistration.k8s.io/v1', 'validatingadmissionpolicybindings', True),
     'Deployment': ('apps/v1', 'deployments', False),
+    'DaemonSet': ('apps/v1', 'daemonsets', False),
     'Job': ('batch/v1', 'jobs', False), 'CronJob': ('batch/v1', 'cronjobs', False),
 }
 

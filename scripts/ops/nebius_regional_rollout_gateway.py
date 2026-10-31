@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 SCHEMA = "loom.nebius-regional-rollout-scope.v1"
 DENIED = "Regional rollout command outside the installed scope"
 LIMIT = 4 * 1024 * 1024
+OBSERVER_NAME = "loom-native-resource-observer"
 SECRET_KEY_TEMPLATE = r'go-template={{range $key,$value := .data}}{{if $value}}{{$key}}{{"\n"}}{{end}}{{end}}'
 CLUSTER_KINDS = {"Namespace", "ClusterRole", "ClusterRoleBinding", "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"}
 RESOURCE_KINDS = {
@@ -27,6 +28,7 @@ RESOURCE_KINDS = {
     "clusterroles.rbac.authorization.k8s.io": "ClusterRole",
     "clusterrolebindings.rbac.authorization.k8s.io": "ClusterRoleBinding",
     "resourcequotas": "ResourceQuota", "networkpolicies.networking.k8s.io": "NetworkPolicy",
+    "daemonsets.apps": "DaemonSet", "ciliumnetworkpolicies.cilium.io": "CiliumNetworkPolicy",
     "validatingadmissionpolicies.admissionregistration.k8s.io": "ValidatingAdmissionPolicy",
     "validatingadmissionpolicybindings.admissionregistration.k8s.io": "ValidatingAdmissionPolicyBinding",
 }
@@ -35,6 +37,7 @@ API_VERSIONS = {
     **{kind: "v1" for kind in ("Namespace", "ServiceAccount", "ResourceQuota", "Pod")},
     **{kind: "rbac.authorization.k8s.io/v1" for kind in ("Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding")},
     "NetworkPolicy": "networking.k8s.io/v1",
+    "DaemonSet": "apps/v1", "CiliumNetworkPolicy": "cilium.io/v2",
     "ValidatingAdmissionPolicy": "admissionregistration.k8s.io/v1",
     "ValidatingAdmissionPolicyBinding": "admissionregistration.k8s.io/v1",
 }
@@ -69,9 +72,9 @@ def validate_scope(value: Any) -> dict[str, Any]:
             raise ScopeError("explicit HTTPS regional endpoint required")
         namespace_uids = region["namespace_uids"]
         if (not isinstance(namespace_uids, dict) or region["namespace"] not in namespace_uids
-                or set(namespace_uids) - {region["namespace"], region["namespace"] + "-build"}
+                or set(namespace_uids) - {region["namespace"], region["namespace"] + "-build", region["namespace"] + "-observations"}
                 or any(not isinstance(uid, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,255}", uid) for uid in namespace_uids.values())):
-            raise ScopeError("only retained execution and optional build namespace UIDs allowed")
+            raise ScopeError("only retained execution, build and observer namespace UIDs allowed")
         resources = region["resources"]
         if not isinstance(resources, list) or not resources or len(resources) > 64:
             raise ScopeError("existing regional resource identities required")
@@ -83,6 +86,13 @@ def validate_scope(value: Any) -> dict[str, Any]:
             if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,252}", name):
                 raise ScopeError("invalid regional resource name")
             namespace = resource["namespace"]
+            observer = region["namespace"] + "-observations"
+            if resource["kind"] in {"DaemonSet", "CiliumNetworkPolicy"} and (name != OBSERVER_NAME or namespace != observer):
+                raise ScopeError("only the exact dedicated observer workload and policy allowed")
+            if namespace == observer and (resource["kind"] not in {"ServiceAccount", "Role", "RoleBinding", "DaemonSet", "NetworkPolicy", "CiliumNetworkPolicy"}
+                    or name not in {OBSERVER_NAME, OBSERVER_NAME + "-reader"}
+                    or (resource["kind"] in {"ServiceAccount", "DaemonSet", "NetworkPolicy", "CiliumNetworkPolicy"} and name != OBSERVER_NAME)):
+                raise ScopeError("regional observer resource differs from its exact scope")
             if namespace is not None and namespace not in namespace_uids:
                 raise ScopeError("regional resource namespace outside retained scope")
             if (resource["kind"] in CLUSTER_KINDS) != (namespace is None):
@@ -167,6 +177,10 @@ def _known(region: dict[str, Any], kind: str, name: str, namespace: str | None =
 def _read_command(region: dict[str, Any], args: list[str]) -> bool:
     if args == ["get", "nodes", "-l", "loom.nebius/platform=integration", "-o", "json"]:
         return True
+    if args == ["get", "daemonset", OBSERVER_NAME, "-n", region["namespace"] + "-observations", "--ignore-not-found", "-o", "json"]:
+        return _known(region, "DaemonSet", OBSERVER_NAME, region["namespace"] + "-observations")
+    if args == ["rollout", "status", "daemonset/" + OBSERVER_NAME, "-n", region["namespace"] + "-observations", "--timeout=300s"]:
+        return _known(region, "DaemonSet", OBSERVER_NAME, region["namespace"] + "-observations")
     # Kubectl.get uses this exact shape, including -n for cluster-scoped VAP.
     if len(args) == 8 and args[0] == "get" and args[3:] == ["-n", region["namespace"], "--ignore-not-found", "-o", "json"]:
         kind = {"namespace": "Namespace", "validatingadmissionpolicy": "ValidatingAdmissionPolicy"}.get(args[1])
@@ -202,7 +216,7 @@ def _manifest(scope: dict[str, Any], region: dict[str, Any], payload: bytes, *, 
     # List is also supported; neither representation can bypass per-object scope.
     decoder = json.JSONDecoder()
     remaining = result.stdout.decode().strip()
-    documents = []
+    documents: list[dict[str, Any]] = []
     while remaining:
         data, offset = decoder.raw_decode(remaining)
         documents.extend(data.get("items", []) if data.get("kind") == "List" else [data])
@@ -274,7 +288,7 @@ def handle(scope: dict[str, Any], command: str, *, stdin: bytes | None = None) -
         payload = None
     else:
         raise ScopeError("regional operation outside installed scope")
-    result = _run(scope, ["--context", region["context"], "--request-timeout=30s", *rest], payload=payload, timeout=40)
+    result = _run(scope, ["--context", region["context"], "--request-timeout=30s", *rest], payload=payload, timeout=340 if rest[:2] == ["rollout", "status"] else 40)
     return result.returncode, result.stdout, result.stderr
 
 

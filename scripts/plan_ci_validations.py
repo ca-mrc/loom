@@ -111,7 +111,7 @@ REPOSITORY_POLICY_TOOLS = {
     "scripts/ops/ci_reliability_metrics.py",
 }
 GO_INPUT_PREFIXES = (
-    "cmd/loom-build-deadline/", "cmd/loom-llm-gateway-sandbox/",
+    "cmd/loom-node-resource-stats/", "cmd/loom-build-deadline/", "cmd/loom-llm-gateway-sandbox/",
     "cmd/loom-sandbox-runtime/", "cmd/loom-guest-runtime/",
     "cmd/loom-execution-runtime/", "internal/guestchannel/",
 )

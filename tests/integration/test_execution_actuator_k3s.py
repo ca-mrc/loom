@@ -14,8 +14,10 @@ from contextlib import contextmanager
 from copy import copy, deepcopy
 from datetime import UTC, datetime, timedelta
 from functools import cached_property
+from ipaddress import ip_address, ip_network
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -438,6 +440,23 @@ def _wait_for_native_addons(core: object, required: tuple[str, ...], *, deadline
     error = AssertionError(f'disposable k3s native addons did not become ready: {pending}')
     error.add_note(_native_addon_diagnostics(core, required))
     raise error
+
+
+def _disposable_node_api_cidrs(core: Any) -> list[str]:
+    """Wait for real disposable K3s node addresses; never invent API egress."""
+    deadline = time.monotonic() + 30
+    while True:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, "disposable K3s Node InternalIP did not register"
+        cidrs = sorted({
+            str(ip_network(ip_address(address.address)))
+            for node in core.list_node(_request_timeout=min(5, remaining)).items
+            for address in getattr(node.status, "addresses", None) or []
+            if address.type == "InternalIP"
+        })
+        if cidrs:
+            return cidrs
+        time.sleep(min(0.25, max(0, deadline - time.monotonic())))
 
 
 def _load_client(container: object, *, required_addons: tuple[str, ...] = ()) -> tuple[object, object, object]:

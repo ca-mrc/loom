@@ -75,7 +75,7 @@ class TrialResourceUsageReport(BaseModel):
         default=None,
         pattern=r"^(?:sha256:)?[0-9a-f]{64}$",
     )
-    source: Literal["docker_stats", "provider", "unsupported", "kubelet_summary"]
+    source: Literal["docker_stats", "provider", "unsupported", "kubelet_summary", "native_node_observer"]
     observation_seq: int = Field(ge=0)
     container_started_at: datetime | None = None
     first_observed_at: datetime
@@ -134,19 +134,36 @@ def aggregate_resource_usage(
 ) -> dict[str, object]:
     """Return an explicit, conservative multi-container projection.
 
-    Cumulative counters are summed. Per-container peaks are summed as an upper
-    bound because their timestamps may differ; callers must not present that
-    value as a synchronized whole-trial peak.
+    Cumulative counters are summed across distinct incarnations. Overlapping
+    native sources for one known incarnation contribute their field maximum,
+    preserving original provenance without double counting. Per-container peaks
+    remain an upper bound, not a synchronized whole-trial peak.
     """
 
     def total(name: str) -> int | None:
-        values = [
-            getattr(report.counters, name)
-            for report in reports
-            if (report.container_role == "pod") == (name == "ephemeral_storage_sampled_max_bytes")
-        ]
-        known = [int(value) for value in values if value is not None]
-        return sum(known) if known else None
+        values: dict[tuple[object, ...], int] = {}
+        for report in reports:
+            if (report.container_role == "pod") != (name == "ephemeral_storage_sampled_max_bytes"):
+                continue
+            value = getattr(report.counters, name)
+            if value is None:
+                continue
+            if report.execution_lease_id is not None and (
+                report.container_started_at is not None or report.container_role == "pod"
+            ):
+                # Two sources may observe the same physical incarnation. Keep
+                # both provenance records, but never add their cumulative usage.
+                key: tuple[object, ...] = (
+                    "native", report.trial_id, report.attempt_count,
+                    report.execution_lease_id, report.resource_generation,
+                    report.target_id, report.pod_uid, report.container_role,
+                    report.role_name, report.container_started_at,
+                )
+            else:
+                # Missing incarnation identity cannot prove two rows overlap.
+                key = ("record", report.trial_id, report.attempt_count, report.execution_key)
+            values[key] = max(values.get(key, 0), int(value))
+        return sum(values.values()) if values else None
 
     complete = sum(report.completeness == "complete" for report in reports)
     partial = sum(report.completeness == "partial" for report in reports)

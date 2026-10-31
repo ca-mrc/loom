@@ -1711,28 +1711,118 @@ minimal-harness and real trajectory acceptance in #1550/#1538/#1766.
 
 ### Native Trial resource observations
 
-The execution actuator samples kubelet `/stats/summary` directly over verified
-HTTPS during ordinary reconciliation (normally 30 seconds; a 15-second
-per-node cache coalesces watch/reconcile reads). Only the lease's namespace and
-exact Pod UID are persisted. The actuator needs GET `nodes` to qualify the node's
-private `InternalIP` and GET `nodes/stats` for kubelet webhook authorization.
-It uses the cluster CA and renewable runtime bearer, never an administrator
-certificate, disabled TLS verification, redirect, ambient proxy or API-server
-`nodes/proxy` fallback. Execution Pods retain no Kubernetes API privilege.
-The protected cutover probes direct node reachability, serving-certificate trust
-and summary access before retiring writer authority. Known direct-kubelet sampling
-failures are reported as unavailable, not readiness or capacity failures. API
-access, exact runtime/Node identity, complete inventories, qualified TLS/bearer
-configuration and the fixed reader protocol remain mandatory. A source test does
-not establish installed sample availability. Clusters with a separate kubelet CA
-can operate without detailed samples; do not disable certificate checks to fill
-the gap or treat a static current-node CA snapshot as renewable autoscaling trust.
+The normal rollout deploys the fixed observer resources under the existing
+idle guard and mandatory backup. Retained shared delivery uses the same typed
+resource paths, candidate binding and Pod default checks. Its existing prohibition
+on creating a new Namespace in a code-only release remains: first shared
+installation needs the separately authorized namespace/bootstrap preparation.
+This change does not activate a closed shared pool.
 
-Decode the HTTP JSON directly, preserving cumulative CPU, sampled memory and
-filesystem/container statistics. Reject a summary for another node or a body
-larger than 16 MiB. Disposable real-kubelet coverage proves summary access while
-node proxy, kubelet Pod/exec, Secret and execution access remain denied. Existing
-resource-ledger coverage retains exact Pod UID selection and counter accounting.
+The closed, scoped environment-runtime compositor selects its existing reader
+contract explicitly: it omits both the observer resources and the actuator's
+observation-namespace setting. Its namespace and read-only RBAC scope therefore
+stay coherent. Complete primary and regional platform renders keep the observer
+enabled; source selection does not change in response to a failed sample.
+
+The complete Nebius platform render enables node-local observations for each
+execution region. A `loom-native-resource-observer` DaemonSet runs only on execution nodes
+in a separate `<execution-namespace>-observations` namespace. Every fifteen
+seconds it publishes a bounded `node-<NodeUID>` ConfigMap through the verified
+Kubernetes API. The actuator reads that snapshot with its normal regional API
+identity during reconciliation (normally thirty seconds; a fifteen-second
+per-node cache coalesces reads). It needs only GET access to the dedicated
+namespace's ConfigMaps/producer Pods and the exact Node. It does not connect to
+private kubelet port 10250, obtain administrator authority, or use `nodes/proxy`.
+
+The reader verifies the Node UID, ConfigMap Node owner, producer Pod UID/name,
+DaemonSet owner and node placement, exact execution namespace and Pod UID,
+container incarnation, original sample times and a maximum sixty-second age.
+Cached reads recheck freshness rather than renewing the source timestamp. Invalid,
+ambiguous or stale snapshots remain unavailable; there is no automatic
+fallback to a less trusted source. ConfigMaps contain numeric observations and
+bounded Loom Pod identities from the configured execution namespace, never CRI
+configuration, host paths, file contents or statistics from unrelated namespaces. They are at most 700 KiB and are garbage-collected with their Node.
+Only the exact lease namespace and Pod UID reach the durable resource ledger.
+The producer preserves its configured API origin across the Kubernetes client's
+authentication refresh. The original projected token/CA loader still refreshes
+credentials and its errors still propagate; it cannot silently reset requests to
+the SDK's default Service origin outside the configured API egress policy.
+Observer API egress is restricted to its configured endpoint: an IP endpoint uses
+explicit API CIDRs; a DNS endpoint uses exact Cilium FQDN and DNS rules. DNS
+peers are confined to kube-system CoreDNS Pods with `k8s-app` equal to `coredns`
+or `kube-dns`; both managed regions currently use `coredns`. When
+explicit API CIDRs accompany a DNS endpoint, only the exact DNS query is added;
+the CIDRs remain the API-traffic authority.
+
+The observer is a new trusted node component. Its helper has no listener and
+calls only CRI status/statistics over the local Unix socket. Running containers
+use `ContainerStats`; exited init containers use `ListContainerStats` filtered
+by the exact ID, with a single matching reply required, because containerd can
+retain their writable snapshot after task CPU/memory metrics disappear.
+**A read-only socket mount does not restrict the CRI protocol's authority.**
+The observer image therefore remains trusted with that socket; it is not exposed
+to task containers. It also has read-only Pod-log and kubelet-Pod-volume mounts,
+without a host-root mount, host PID/network namespace or privileged container.
+It drops all capabilities and adds only `CAP_DAC_READ_SEARCH` (rendered as
+`DAC_READ_SEARCH`) so metadata scans can traverse legitimate workload-owned
+mode-0700 directories. UID 0 alone cannot do this after all capabilities are
+dropped. This capability bypasses discretionary file-read and directory-search
+permissions across the mounted host paths: the observer is trusted with those
+reads, although its scans use metadata only and reject symlink traversal.
+The host mounts and container root filesystem remain read-only;
+`CAP_DAC_OVERRIDE` and other capabilities are absent, and privilege escalation
+is disabled. The dedicated namespace permits these hostPath mounts; ordinary task
+namespaces retain their existing restrictions. There is no new database writer
+or public metrics service. Its API permissions are confined to Node GET, target
+namespace Pod GET/list, and dedicated observation namespace Pod GET and ConfigMap
+create/GET/update. The actor has read access only. DNS API endpoints use the
+installed Cilium's exact-name DNS/FQDN egress policy; numeric endpoints can use
+explicit API CIDRs. Do not freeze a one-time DNS result as a rotation guarantee.
+
+CRI supplies cumulative CPU, sampled memory and the writable root filesystem.
+Original CRI timestamps must be present and fresh, including the writable-layer
+timestamp: a missing wrapper or timestamp is unknown, never an inferred zero.
+An expired or future-dated counter field is removed independently, preserving
+other fresh counters and Pods. Expired rootfs/log data also invalidates that
+Pod's storage total; the total's oldest-component clock covers volume expiry.
+Malformed payloads, identity mismatches and expiry of the original snapshot
+remain whole-snapshot failures. Cache filtering never renews any source clock.
+When a trustworthy CPU-rate sample is absent, two nondecreasing cumulative
+samples from the same container ID and their actual time difference supply the
+sampled rate. Container logs include their attempts and rotations. Pod ephemeral
+storage sums writable layers, the Pod log tree once, supported disk-backed local
+ephemeral volumes and etc-hosts; volume and log paths are not added twice.
+Kubernetes local ephemeral volumes include disk EmptyDir, ConfigMap and GitRepo;
+Memory EmptyDir, projected/Secret/downward-API volumes and PVCs are excluded.
+If any required component cannot be qualified, the Pod total remains null.
+Directory/inode hard links are deduplicated; merged image layers and whole-node
+`df`/filesystem values are never substituted for container disk usage.
+
+The source is recorded as `native_node_observer`. Original sample times, rather
+than reconcile time, determine the ledger's observation endpoints, and older
+samples cannot roll a gauge backwards. Switching source finalizes the old row
+as `observation_source_changed` and uses an independent execution key; historical
+unavailable rows are not relabeled or backfilled. Aggregates take the field
+maximum across sources for the same known container incarnation (or same Pod
+storage identity), then sum distinct incarnations, retaining both provenance
+records without double-counting cumulative usage. Missing incarnation identity
+remains an accounting limitation. Actual new-node observations,
+credential rotation and task/verifier retention must be qualified in both regions.
+DaemonSet zero desired/zero ready proves only a scale-to-zero installation.
+
+The generic direct-kubelet reader remains available when
+`resource_observation_namespace` is unset, for environments with a supported
+serving-trust contract. It uses the current runtime bearer, verified TLS,
+identity-bound private InternalIP and GET `nodes/stats`; redirects, ambient proxy
+and node-proxy fallback remain prohibited, with a sixteen-MiB response bound.
+For default Nebius MK8s, the supported-source constraint recorded in
+[#2595](https://github.com/ca-mrc/loom/issues/2595#issuecomment-6303599835)
+is stronger than a missing local CA setting: no supported kubelet serving-CA
+distribution, SAN/address contract or serving-certificate rotation mechanism is
+provided. Do not trust a failed handshake's peer root. Provider OS monitoring
+used for node I/O admission and the aggregated CPU/memory metrics API do not
+establish complete per-container resource usage. Source tests, API availability
+and successful deployment remain distinct from installed sample acceptance.
 
 Trial/Batch `resource-usage` APIs and delivery exports retain the same durable
 ledger after native nodes are removed. Native rows carry execution lease,
@@ -1759,7 +1849,17 @@ with guessed usage, and resource requests remain unchanged.
 
 Collection/parsing/persistence faults increment
 `loom_execution_actuator_resource_usage_errors_total` and emit a lease-scoped,
-secret-safe warning. Usage writes use a savepoint so telemetry failure cannot
+secret-safe warning. Collection failures retain bounded diagnostic codes through
+the node cache and durable usage rows: `tls_api`/`tls_kubelet` (optionally with
+`_verify_N`, where N is 0 through 255), `kubelet_connect_timeout`,
+`kubelet_read_timeout`, API/kubelet `unauthenticated`/`forbidden`/`not_found`, and
+`kubelet_sample_malformed`. Unknown failures remain `kubelet_sample_unavailable`;
+exception messages, endpoints, response bodies and credentials are never retained.
+A successful later observation clears a previous collection-failure diagnostic
+for the container row receiving actual counters; a counter reset without a new
+incarnation remains a distinct accounting limitation. Missing or failed terminal
+samples can still record their own diagnostic while retaining earlier counters.
+Usage writes use a savepoint so telemetry failure cannot
 roll back primary lifecycle observations or prevent cleanup. A persistence
 failure can therefore leave missing/unfinalized usage; operators must not treat
 absence of usage as zero consumption or evidence sufficient to reduce requests.

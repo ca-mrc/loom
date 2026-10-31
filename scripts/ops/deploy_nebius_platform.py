@@ -28,6 +28,8 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(ROOT / "src"))
 
 from loom.nebius_platform_render import canonical, validate_environment  # noqa: E402
+from loom.nebius_resource_observer_render import NAME as OBSERVER_NAME  # noqa: E402
+from loom.nebius_resource_observer_render import observation_namespace  # noqa: E402
 from loom.nebius_task_identity_policy import identity_policy_documents  # noqa: E402
 
 if TYPE_CHECKING:
@@ -240,7 +242,8 @@ def validate_render(
         raise DeploymentError("execution namespace policy differs from the explicit configuration")
     if config["schema_version"] == "loom.nebius-managed-environment.v1":
         raise DeploymentError("managed children require the environment-management lifecycle")
-    namespaces = {config["namespace"], config["execution_namespace"]}
+    observer_namespace = observation_namespace(config["execution_namespace"])
+    namespaces = {config["namespace"], config["execution_namespace"], observer_namespace}
     if config.get("task_image_builder") is not None:
         namespaces.add(config["execution_namespace"] + "-build")
     for filename, rows in files.items():
@@ -253,6 +256,7 @@ def validate_render(
                 if metadata["name"] not in {
                     config["execution_namespace"] + "-collector",
                     config["execution_namespace"] + "-actuator-usage",
+                    observer_namespace + "-nodes",
                 }:
                     raise DeploymentError(
                         "cluster resource does not belong to the integration target"
@@ -263,6 +267,14 @@ def validate_render(
                         or metadata["name"] != config["execution_namespace"] + "-private-root-v1"):
                     raise DeploymentError("admission policy does not belong to the integration target")
                 continue
+            if namespace == observer_namespace and row["kind"] != "Namespace" and (
+                row["kind"] not in {"ServiceAccount", "Role", "RoleBinding", "DaemonSet", "NetworkPolicy", "CiliumNetworkPolicy"}
+                or metadata["name"] not in {OBSERVER_NAME, OBSERVER_NAME + "-reader"}
+                or (row["kind"] in {"ServiceAccount", "DaemonSet", "NetworkPolicy", "CiliumNetworkPolicy"} and metadata["name"] != OBSERVER_NAME)
+            ):
+                raise DeploymentError("observer resource differs from its exact dedicated scope")
+            if row["kind"] in {"DaemonSet", "CiliumNetworkPolicy"} and namespace != observer_namespace:
+                raise DeploymentError("observer workload escapes its dedicated namespace")
             if namespace not in namespaces:
                 raise DeploymentError(
                     f"rendered resource targets a different namespace: {filename}"
@@ -568,7 +580,7 @@ def install_regional_task_identity_policy(
     if policies != expected:
         raise DeploymentError("regional identity policy differs from the target-bound contract")
     all_namespaces = [doc for doc in documents if doc["kind"] == "Namespace"]
-    expected_namespaces = {target["execution_namespace"]}
+    expected_namespaces = {target["execution_namespace"], observation_namespace(target["execution_namespace"])}
     if target.get("task_image_builder") is not None:
         expected_namespaces.add(target["execution_namespace"] + "-build")
     if (len(all_namespaces) != len(expected_namespaces)
@@ -602,6 +614,8 @@ def preflight_regional_rollout(
         "RoleBinding": "rolebindings.rbac.authorization.k8s.io", "ClusterRole": "clusterroles.rbac.authorization.k8s.io",
         "ClusterRoleBinding": "clusterrolebindings.rbac.authorization.k8s.io", "ResourceQuota": "resourcequotas",
         "NetworkPolicy": "networkpolicies.networking.k8s.io",
+        "DaemonSet": "daemonsets.apps",
+        "CiliumNetworkPolicy": "ciliumnetworkpolicies.cilium.io",
         "ValidatingAdmissionPolicy": "validatingadmissionpolicies.admissionregistration.k8s.io",
         "ValidatingAdmissionPolicyBinding": "validatingadmissionpolicybindings.admissionregistration.k8s.io",
     }
@@ -622,7 +636,8 @@ def preflight_regional_rollout(
             raise DeploymentError("regional identity policy differs from the target-bound contract")
         execution_namespace = target["execution_namespace"]
         build_namespace = execution_namespace + "-build" if target.get("task_image_builder") is not None else None
-        namespaces = {execution_namespace}
+        observer_namespace = observation_namespace(execution_namespace)
+        namespaces = {execution_namespace, observer_namespace}
         if build_namespace:
             namespaces.add(build_namespace)
         for row in documents:
@@ -631,12 +646,23 @@ def preflight_regional_rollout(
                     or (kind == "Namespace" and metadata["name"] not in namespaces)
                     or (kind not in cluster_kinds and metadata.get("namespace") not in namespaces)):
                 raise DeploymentError("regional render escapes its configured execution scope")
+            if metadata.get("namespace") == observer_namespace and (
+                kind not in {"ServiceAccount", "Role", "RoleBinding", "DaemonSet", "NetworkPolicy", "CiliumNetworkPolicy"}
+                or metadata["name"] not in {OBSERVER_NAME, OBSERVER_NAME + "-reader"}
+                or (kind in {"ServiceAccount", "DaemonSet", "NetworkPolicy", "CiliumNetworkPolicy"} and metadata["name"] != OBSERVER_NAME)
+            ):
+                raise DeploymentError("regional observer resource differs from its exact scope")
+            if kind in {"DaemonSet", "CiliumNetworkPolicy"} and metadata.get("namespace") != observer_namespace:
+                raise DeploymentError("regional observer escapes its dedicated namespace")
+            if kind == "Namespace" and metadata["name"] == observer_namespace:
+                if metadata.get("labels", {}).get("pod-security.kubernetes.io/enforce") != "privileged":
+                    raise DeploymentError("regional observer host access differs from its isolated contract")
             if kind == "Namespace" and metadata["name"] == build_namespace:
                 if metadata.get("labels", {}).get("pod-security.kubernetes.io/enforce") != "privileged":
                     raise DeploymentError("regional build namespace differs from its isolated build contract")
             if kind in {"ClusterRole", "ClusterRoleBinding"} and metadata["name"] not in {
                 target["execution_namespace"] + "-collector", target["execution_namespace"] + "-actuator-usage",
-                target["target_id"] + "-gateway-tokenreview",
+                target["target_id"] + "-gateway-tokenreview", observer_namespace + "-nodes",
             }:
                 raise DeploymentError("regional cluster role differs from its configured target")
         scopes = {(row["kind"], row["metadata"].get("namespace")) for row in documents}
@@ -1057,8 +1083,28 @@ def execution_target_action(
         raise DeploymentError("target replacement readback mismatch; inspect the recorded deployment phase")
 
 
+def verify_resource_observers(kube: Kubectl, documents: list[dict[str, Any]]) -> None:
+    """Verify deployment on current nodes; a zero-node DS is not sampling acceptance."""
+    for desired in documents:
+        if desired["kind"] != "DaemonSet" or desired["metadata"]["name"] != OBSERVER_NAME:
+            continue
+        metadata = desired["metadata"]
+        live = kube.get("daemonset", metadata["name"], metadata["namespace"])
+        expected = {c["name"]: c["image"] for c in desired["spec"]["template"]["spec"]["containers"]}
+        observed = {c["name"]: c["image"] for c in live.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])}
+        status = live.get("status", {})
+        scheduled = status.get("desiredNumberScheduled")
+        if (observed != expected or type(scheduled) is not int or scheduled < 0
+                or status.get("observedGeneration", 0) < live.get("metadata", {}).get("generation", 1)
+                or any(status.get(key, 0) != scheduled for key in
+                       ("currentNumberScheduled", "updatedNumberScheduled", "numberReady", "numberAvailable"))
+                or status.get("numberMisscheduled", 0) != 0):
+            raise DeploymentError("candidate observer readback failed: " + metadata["name"])
+
+
 def verify_deployed_images(kube: Kubectl, files: dict[str, list[dict[str, Any]]]) -> None:
-    """Check live Deployment templates and readiness against the fixed candidate."""
+    """Check live workload templates and readiness against the fixed candidate."""
+    verify_resource_observers(kube, files["60-execution.yaml"])
     for filename in ("40-services.yaml", "60-execution.yaml"):
         for desired in files[filename]:
             if desired["kind"] != "Deployment":
@@ -1138,6 +1184,9 @@ def _rollout_candidate_files(*, kube: Kubectl, manifest: dict[str, Any], config:
     for actuator in [row["metadata"]["name"] for row in files["60-execution.yaml"] if row["kind"] == "Deployment"]:
         kube.run("rollout", "status", "deployment/" + actuator, "-n", config["execution_namespace"],
             "--timeout=300s", timeout=340)
+    for observer in [row for row in files["60-execution.yaml"] if row["kind"] == "DaemonSet" and row["metadata"]["name"] == OBSERVER_NAME]:
+        kube.run("rollout", "status", "daemonset/" + OBSERVER_NAME, "-n", observer["metadata"]["namespace"],
+                 "--timeout=300s", timeout=340)
     apply_file("70-public.yaml")
     phase("public-load-balancer-ready")
     kube.run("wait", "--for=jsonpath={.status.loadBalancer.ingress}", "service/loom-web", "-n", ns,
@@ -1423,6 +1472,10 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
                                                      snapshot_root / target_id)
             phase("apply-regional-execution-" + target_id)
             remote.run("apply", "-f", str(regional_snapshot / (target_id + ".yaml")))
+            if any(row["kind"] == "DaemonSet" and row["metadata"]["name"] == OBSERVER_NAME for row in _documents):
+                remote.run("rollout", "status", "daemonset/" + OBSERVER_NAME, "-n", observation_namespace(target["execution_namespace"]),
+                           "--timeout=300s", timeout=340)
+                verify_resource_observers(remote, _documents)
         if config.get("task_identity_policy") is not None:
             before_write()
             phase("install-and-verify-task-identity-policy")

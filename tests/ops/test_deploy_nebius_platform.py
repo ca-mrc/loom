@@ -546,6 +546,13 @@ class FakeKubectl(deploy.Kubectl):
                     obj["metadata"]["generation"] = 1
                     obj["status"] = {"observedGeneration": 1, "updatedReplicas": replicas,
                                      "availableReplicas": replicas, "replicas": replicas}
+                if obj["kind"] == "DaemonSet":
+                    obj["metadata"]["generation"] = 1
+                    obj["status"] = {
+                        "observedGeneration": 1, "desiredNumberScheduled": 1,
+                        "currentNumberScheduled": 1, "updatedNumberScheduled": 1,
+                        "numberReady": 1, "numberAvailable": 1, "numberMisscheduled": 0,
+                    }
                 if obj["kind"] == "Job":
                     obj["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
         if args[:2] == ("create", "job"):
@@ -1220,11 +1227,25 @@ def test_regional_deploy_waits_for_each_primary_actuator_and_checks_secret_keys(
 
     target_id = config["regional_execution_targets"][0]["target_id"]
     remote_docs = build_regional_execution(config, candidate, repo_root=deploy.ROOT)[target_id]
-    remote = SimpleNamespace(run=lambda *command: kube.commands.append(("regional", *command)))
+    remote = FakeKubectl(config, files)
+    remote_run = remote.run
+
+    def regional_run(*command, timeout=90):
+        kube.commands.append(("regional", *command))
+        return remote_run(*command, timeout=timeout)
+
+    remote.run = regional_run
     monkeypatch.setattr(deploy, "preflight_regional_rollout", lambda *_args: {target_id: (remote, remote_docs)})
     monkeypatch.setattr(deploy, "public_smoke", lambda *_args: None)
     assert deploy.deploy(args, kube=kube)["status"] == "complete"
-    assert len([command for command in kube.commands if command[0] == "regional"]) == 1
+    regional_commands = [command[1:] for command in kube.commands if command[0] == "regional"]
+    assert regional_commands[0][:2] == ("apply", "-f")
+    assert regional_commands[1] == (
+        "rollout", "status", "daemonset/loom-native-resource-observer", "-n",
+        config["regional_execution_targets"][0]["execution_namespace"] + "-observations",
+        "--timeout=300s",
+    )
+    assert len(regional_commands) == 2
     rollouts = [command[2] for command in kube.commands if command[:2] == ("rollout", "status")]
     assert "deployment/loom-execution-actuator" in rollouts
     assert "deployment/" + target_id + "-actuator" in rollouts

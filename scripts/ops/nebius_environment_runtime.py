@@ -114,7 +114,7 @@ def render_environment_runtime(*, declaration: EnvironmentFoundationDeclarationV
             applications['loom-service']['spec']['template']['spec']['containers'][0])[
                 'LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON']['value'])
         images = {key: value['image_ref'] for key, value in candidate['images'].items()}
-        execution = _execution_documents(config, images, repo_root)
+        execution = _execution_documents(config, images, repo_root, resource_observations=False)
         actuators = [doc for doc in execution if doc['kind'] == 'Deployment']
         primary, = [doc for doc in actuators if doc['metadata']['name'] == 'loom-execution-actuator']
         build_target = participant.target(row.target_id, 'task_image_build')
@@ -180,7 +180,8 @@ def render_environment_runtime(*, declaration: EnvironmentFoundationDeclarationV
                 rules=[{'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['get', 'create', 'delete']},
                     {'apiGroups': [''], 'resources': ['configmaps'], 'verbs': ['get', 'create', 'delete']},
                     {'apiGroups': [''], 'resources': ['pods'], 'verbs': ['get', 'list', 'delete']}]))
-        isolation = [doc for doc in execution if doc['kind'] == 'NetworkPolicy']
+        isolation = [doc for doc in execution if doc['kind'] == 'NetworkPolicy'
+            and doc['metadata'].get('namespace') == row.execution_namespace]
         isolation.extend(doc for doc in _task_image_builder_documents(config, build.settings) if doc['kind'] == 'NetworkPolicy')
         isolation.extend(build_policy_documents(row.build_namespace, profiles))
         # The closed foundation denies all execution egress. Grant only reader

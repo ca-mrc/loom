@@ -941,3 +941,11 @@ def test_workflow_plan_passes_the_change_base_for_registration_checks() -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
     step = next(s for s in workflow["jobs"]["workflow-plan"]["steps"] if s.get("id") == "plan")
     assert '--base-sha "${BASE_SHA:-}"' in step["run"]
+
+
+def test_node_resource_helper_edits_select_their_go_conformance_package():
+    from scripts.plan_ci_validations import go_packages_for_changes
+
+    assert go_packages_for_changes(("cmd/loom-node-resource-stats/main.go",), full=False) == (
+        "./cmd/loom-node-resource-stats/...",
+    )

@@ -8,6 +8,7 @@ import base64
 import copy
 import json
 import os
+import re
 import ssl
 import time
 from dataclasses import replace
@@ -19,7 +20,11 @@ import yaml
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
-from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
+from tests.integration.test_execution_actuator_k3s import (
+    _disposable_node_api_cidrs,
+    _load_client,
+    _start_k3s,
+)
 from tests.ops.test_nebius_management_refresh import refresh_request as refresh_request
 from tests.ops.test_nebius_management_refresh_predecessor import (
     application_material as application_material,
@@ -59,6 +64,46 @@ assert CURRENT_REVISION is not None
 
 pytestmark = pytest.mark.skipif(os.environ.get('LOOM_RUN_DISPOSABLE_K3S') != '1',
     reason='requires explicitly disposable Kubernetes')
+
+
+def _add_rendered_job_failure(core, namespace: str, name: str, error: AssertionError) -> None:
+    """Retain bounded termination facts and finite codes, never raw Pod logs."""
+    rows = []
+    try:
+        pods = core.list_namespaced_pod(namespace, label_selector="job-name=" + name,
+            limit=2, _request_timeout=(2, 3)).items[:2]
+        for pod in pods:
+            statuses = (pod.status.init_container_statuses or []) + (pod.status.container_statuses or [])
+            for status in statuses[:8]:
+                terminated = status.state.terminated if status.state else None
+                if terminated is None or not terminated.exit_code:
+                    continue
+                reason = terminated.reason if terminated.reason in {
+                    "Error", "OOMKilled", "Completed", "ContainerCannotRun", "DeadlineExceeded", "StartError"
+                } else "other"
+                row = {"container": status.name, "reason": reason,
+                    "exit_code": terminated.exit_code, "codes": []}
+                raw = core.read_namespaced_pod_log(pod.metadata.name, namespace,
+                    container=status.name, tail_lines=80, limit_bytes=16384, _request_timeout=(2, 3))
+                for needle, code in (
+                    ("ModuleNotFoundError", "module_missing"), ("ImportError", "import_failure"),
+                    ("OperationalError", "database_operational"), ("ProgrammingError", "database_programming"),
+                    ("IntegrityError", "database_integrity"), ("UndefinedTable", "undefined_table"),
+                    ("UndefinedColumn", "undefined_column"), ("UndefinedObject", "undefined_object"),
+                    ("InsufficientPrivilege", "database_permission"), ("CheckViolation", "check_violation"),
+                    ("DuplicateTable", "duplicate_table"), ("InvalidPassword", "database_password"),
+                    ("certificate verify failed", "tls_verification"),
+                    ("could not translate host name", "database_dns"),
+                    ("Connection refused", "database_connection_refused"),
+                    ("ValueError", "value_error"), ("RuntimeError", "runtime_error"),
+                ):
+                    if needle in raw:
+                        row["codes"].append(code)
+                row["trace_modules"] = re.findall(r'File "[^"\n]*/([A-Za-z0-9_.-]+\.py)", line ([0-9]+)', raw)[-6:]
+                rows.append(row)
+        error.add_note("rendered Job termination: " + json.dumps(rows))
+    except Exception as diagnostic_error:
+        error.add_note("rendered Job diagnostics unavailable: " + type(diagnostic_error).__name__)
 
 
 def _add_refresh_diagnostics(core, apps, namespace, iteration: int | None, error):
@@ -203,6 +248,9 @@ def test_repeat_refresh_preserves_retained_identity_and_observes_native_drain(re
             foundation = raw['installation']['foundation']
             platform = json.loads(foundation['platform_config_json'])
             platform['kubernetes_api_server'] = endpoint
+            # Only management cutover runs here, not the node observer. Retain
+            # the host-mapped operator origin but scope observer egress to nodes.
+            platform['resource_observer_api_cidrs'] = _disposable_node_api_cidrs(core)
             foundation['platform_config_json'] = json.dumps(platform)
             return ManagementDeployment.model_validate(raw)
 
@@ -351,6 +399,9 @@ def test_rendered_refresh_probes_and_migration_execute_against_real_tls_database
         config = json.loads(foundation['platform_config_json'])
         config.update(kubernetes_api_server=endpoint, postgres_image=postgres_image, backup_image=postgres_image,
                       storage_class='local-path')
+        # These rendered management/SQL Jobs use the host-mapped operator API;
+        # no node observer runs here. Its egress scope still uses real node IPs.
+        config['resource_observer_api_cidrs'] = _disposable_node_api_cidrs(core)
         foundation['platform_config_json'] = json.dumps(config)
         installation['applications']['runtime']['kubernetes']['endpoint'] = endpoint
         installation['applications']['shared']['schema_revision'] = CURRENT_REVISION
@@ -365,7 +416,11 @@ def test_rendered_refresh_probes_and_migration_execute_against_real_tls_database
 
         def finished_job(name, ns):
             status = batch.read_namespaced_job(name, ns).status
-            assert not status.failed, f'rendered Job failed: {ns}/{name}'
+            try:
+                assert not status.failed, f'rendered Job failed: {ns}/{name}'
+            except AssertionError as error:
+                _add_rendered_job_failure(core, ns, name, error)
+                raise
             return status.succeeded == 1
 
         def wait_for(check, message, timeout=180):

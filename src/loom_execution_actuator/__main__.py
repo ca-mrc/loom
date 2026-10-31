@@ -176,7 +176,12 @@ async def _run() -> None:
         resources.push_async_callback(engine.dispose)
         await assert_schema_at_head(engine, db_url_env_var="LOOM_EXECUTION_ACTUATOR_DB_URL")
         sessions = async_sessionmaker(engine, expire_on_commit=False)
-        kubernetes = InClusterKubernetesJobApi(connection=settings.kubernetes_connection)
+        kubernetes = InClusterKubernetesJobApi(
+            connection=settings.kubernetes_connection,
+            resource_observation_namespace=settings.resource_observation_namespace,
+            resource_observation_execution_namespace=settings.namespace,
+            resource_observation_max_age_seconds=settings.resource_observation_max_age_seconds,
+        )
         resources.push_async_callback(kubernetes.close)
         target = ExecutionTargetRuntime(
             target_id=settings.target_id,
@@ -208,6 +213,9 @@ async def _run() -> None:
             command_lease_seconds=settings.command_lease_seconds,
             delete_grace_seconds=settings.delete_grace_seconds,
             pool_resources=pool_resources,
+            resource_usage_source=(
+                "native_node_observer" if settings.resource_observation_namespace else "kubelet_summary"
+            ),
         )
         builder: NativeTaskImageController | PoolNativeBuildController | None = None
         if settings.task_image_builder is not None:

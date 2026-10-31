@@ -403,6 +403,9 @@ build_context = "."
 source_paths = [
   ".dockerignore",
   "deploy/Dockerfile.execution-actuator",
+  "cmd/loom-node-resource-stats/**",
+  "go.mod",
+  "go.sum",
   "deploy/execution-actuator-requirements.txt",
   "database/migrations/**",
   "src/loom/__init__.py",

@@ -1,3 +1,11 @@
+FROM golang:1.26.10-alpine@sha256:a2012b4a1d1f9f7e9f44e0d39b805a901e856b1dd80b4e6ee4338db547050308 AS node-stats-build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/loom-node-resource-stats ./cmd/loom-node-resource-stats
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+    -o /out/loom-node-resource-stats ./cmd/loom-node-resource-stats
+
 FROM python:3.11-slim
 RUN apt-get update -qq && \
     apt-get install -y --only-upgrade --no-install-recommends perl-base=5.40.1-6+deb13u1 && \
@@ -59,6 +67,7 @@ COPY src/loom_control_plane/__init__.py src/loom_control_plane/execution_admissi
     src/loom_control_plane/service_execution_task_snapshot.py \
     src/loom_control_plane/execution_resource_allocation.py src/loom_control_plane/pool_execution_handoff.py \
     ./src/loom_control_plane/
+COPY --from=node-stats-build /out/loom-node-resource-stats /usr/local/bin/loom-node-resource-stats
 COPY src/loom_execution_actuator ./src/loom_execution_actuator
 COPY src/loom_execution_capacity_collector ./src/loom_execution_capacity_collector
 COPY database/migrations ./database/migrations
@@ -66,6 +75,7 @@ USER 65532:65532
 # Claims validate task models after imports complete. Exercise that lazy
 # dependency path as well, without credentials, connections or task execution.
 RUN python - <<'PY'
+import loom_execution_actuator.node_observer
 import loom_execution_actuator.__main__
 import loom_execution_capacity_collector.__main__
 import loom.task_bundle_source_journal

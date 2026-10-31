@@ -42,8 +42,9 @@ from loom_service.environment_management.kubernetes_provider import _contains
 if TYPE_CHECKING:
     from scripts.ops.nebius_pool_participant_creation import ParticipantCreationAPI
 
-_KINDS = frozenset({'Namespace', 'ConfigMap', 'ServiceAccount', 'Role', 'RoleBinding', 'NetworkPolicy',
-    'StatefulSet', 'Service', 'Deployment', 'CronJob', 'ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'})
+_KINDS = frozenset({'Namespace', 'ConfigMap', 'ServiceAccount', 'Role', 'RoleBinding', 'ClusterRole',
+    'ClusterRoleBinding', 'NetworkPolicy', 'CiliumNetworkPolicy', 'StatefulSet', 'Service', 'Deployment',
+    'DaemonSet', 'CronJob', 'ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'})
 _MARKER = 'loom.nebius/participant-candidate-operation'
 _SERVICE_ALLOCATION = ('clusterIP', 'clusterIPs', 'ipFamilies', 'ipFamilyPolicy', 'healthCheckNodePort')
 _PRESERVED_KINDS = frozenset({'PersistentVolumeClaim', 'ResourceQuota'})

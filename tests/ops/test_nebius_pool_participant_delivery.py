@@ -328,6 +328,12 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
                     replicas = value['spec'].get('replicas', 1)
                     value['status'] = {'observedGeneration': 1, 'replicas': replicas,
                         'updatedReplicas': replicas, 'availableReplicas': replicas, 'readyReplicas': replicas}
+                if value['kind'] == 'DaemonSet':
+                    value['status'] = {
+                        'observedGeneration': 1, 'desiredNumberScheduled': 1,
+                        'currentNumberScheduled': 1, 'updatedNumberScheduled': 1,
+                        'numberReady': 1, 'numberAvailable': 1, 'numberMisscheduled': 0,
+                    }
                 kube.objects[value['kind'].lower(), value['metadata']['name']] = value
                 inventory[key] = copy.deepcopy(value)
                 written.append(key)

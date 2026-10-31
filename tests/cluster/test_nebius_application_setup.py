@@ -14,7 +14,11 @@ import httpx
 import pytest
 import yaml
 
-from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
+from tests.integration.test_execution_actuator_k3s import (
+    _disposable_node_api_cidrs,
+    _load_client,
+    _start_k3s,
+)
 from tests.ops.test_nebius_application_setup import application_material as application_material
 from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
@@ -103,6 +107,9 @@ def test_application_setup_stages_fixed_resources_on_real_api(tmp_path, applicat
         foundation = raw['installation']['foundation']
         platform = json.loads(foundation['platform_config_json'])
         platform['kubernetes_api_server'] = endpoint
+        # This management-staging fixture uses the host-mapped operator API and
+        # does not run the node observer. Keep its egress scope on real node IPs.
+        platform['resource_observer_api_cidrs'] = _disposable_node_api_cidrs(core)
         foundation['platform_config_json'] = json.dumps(platform)
         deployment = ManagementDeployment.model_validate(raw)
         application = deployment.installation.applications

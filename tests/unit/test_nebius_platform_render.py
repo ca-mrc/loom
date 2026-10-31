@@ -408,12 +408,15 @@ def test_independent_namespace_routing_storage_and_no_secret_material(
     files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
     serialized = json.dumps(files)
     assert "oldlab" not in serialized and "gb10" not in serialized
-    assert "hostPath" not in serialized and "loom.svc" not in serialized
+    assert "loom.svc" not in serialized
+    assert "hostPath" not in json.dumps([d for batch in files.values() for d in batch
+        if d["metadata"].get("namespace") != config["execution_namespace"] + "-observations"])
     docs = [doc for batch in files.values() for doc in batch]
     assert not any(doc["kind"] == "Secret" for doc in docs)
     assert {doc["metadata"].get("namespace") for doc in docs if "namespace" in doc["metadata"]} == {
         config["namespace"],
         config["execution_namespace"],
+        config["execution_namespace"] + "-observations",
     }
     postgres = next(doc for doc in docs if doc["kind"] == "StatefulSet")
     assert (
@@ -887,7 +890,7 @@ def test_execution_quota_uses_native_envelope_and_namespace_control_requests(
     assert all(set(rule["verbs"]) <= {"get", "list"} for rule in role["rules"])
     usage = next(doc for doc in docs if doc["kind"] == "ClusterRole" and doc["metadata"]["name"].endswith("-actuator-usage"))
     assert usage["rules"] == [{"apiGroups": [""], "resources": ["nodes", "nodes/stats"], "verbs": ["get"]}]
-    assert len({(doc["kind"], doc["metadata"]["name"]) for doc in docs}) == len(docs)
+    assert len({(doc["kind"], doc["metadata"].get("namespace"), doc["metadata"]["name"]) for doc in docs}) == len(docs)
 
 
 def test_execution_quota_preserves_explicit_lower_limits(platform_inputs: tuple) -> None:
@@ -958,7 +961,7 @@ def test_regional_manifests_separate_native_roles_from_primary_processes(
         "PersistentVolumeClaim",
     } & {doc["kind"] for doc in remote}
     assert all(
-        doc["metadata"].get("namespace") in (None, target["execution_namespace"]) for doc in remote
+        doc["metadata"].get("namespace") in (None, target["execution_namespace"], target["execution_namespace"] + "-observations") for doc in remote
     )
     assert all(
         doc["metadata"].get("namespace") != target["execution_namespace"]
@@ -968,7 +971,7 @@ def test_regional_manifests_separate_native_roles_from_primary_processes(
     bindings = [doc for doc in remote if doc["kind"] in {"RoleBinding", "ClusterRoleBinding"}]
     assert {doc["subjects"][0]["name"] for doc in bindings} == set(
         target["service_account_ids"].values()
-    )
+    ) | {"loom-native-resource-observer"}
     usage_binding = next(doc for doc in bindings if doc["metadata"]["name"].endswith("-actuator-usage"))
     assert usage_binding["subjects"][0]["name"] == target["service_account_ids"]["actuator"]
     assert all(
@@ -980,7 +983,7 @@ def test_regional_manifests_separate_native_roles_from_primary_processes(
                 "name": doc["subjects"][0]["name"],
             }
         ]
-        for doc in bindings
+        for doc in bindings if doc["subjects"][0]["kind"] != "ServiceAccount"
     )
     gateway_role = next(
         doc
@@ -1268,7 +1271,10 @@ def test_task_egress_mounts_explicit_bounded_gateway_policy(platform_inputs: tup
     assert json.loads(service_env['LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON'])['supports_task_web_egress'] is True
     assert 'LOOM_GW_TASK_EGRESS_CONFIG_FILE' not in service_env
     for namespace in files['00-namespaces.yaml']:
-        assert namespace['metadata']['labels']['pod-security.kubernetes.io/enforce'] == 'restricted'
+        if namespace['metadata']['name'] == config['execution_namespace'] + '-observations':
+            assert namespace['metadata']['labels']['pod-security.kubernetes.io/enforce'] == 'privileged'
+        else:
+            assert namespace['metadata']['labels']['pod-security.kubernetes.io/enforce'] == 'restricted'
 
 
 @pytest.mark.parametrize('configured,ready', [(True, False), (False, True), (False, 'true')])

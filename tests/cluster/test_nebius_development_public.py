@@ -16,6 +16,7 @@ import pytest
 from tests.cluster.test_nebius_shared_ingress import _add_failure_diagnostics
 from tests.integration.test_execution_actuator_k3s import (
     _build_image,
+    _disposable_node_api_cidrs,
     _docker_platform,
     _import_image,
     _load_client,
@@ -81,6 +82,9 @@ async def test_public_phase_replays_real_resources_and_exposes_only_web_api_to_i
             raw['installation']['applications']['runtime']['kubernetes']['endpoint'] = endpoint
             config = foundation.platform_config
             config['kubernetes_api_server'] = endpoint
+            # The operator uses the host-mapped API; no node observer runs here.
+            # Bind its platform egress declaration to real, exact node addresses.
+            config['resource_observer_api_cidrs'] = await asyncio.to_thread(_disposable_node_api_cidrs, core)
             raw['installation']['foundation']['platform_config_json'] = json.dumps(config)
             request = replace(request, deployment=ManagementDeployment.model_validate(raw),
                 shared_namespace_uid=namespaces['loom-dev'].metadata.uid)
