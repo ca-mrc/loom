@@ -587,8 +587,11 @@ ownership. Per-step and agent-process identity overrides remain unsupported.
 
 The trusted controller keeps its nonroot identity. Explicitly root private task
 and verifier containers retain no-new-privileges and drop all capabilities,
-then receive only `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID`, and `KILL`
-for package installation and cleanup of descendants that drop UID. This grants
+then receive only `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID`, `KILL`,
+and `SETPCAP` for package installation, cleanup of descendants that drop UID,
+and native graders that clear the capability bounding set before running
+untrusted code. The grader must still clear all capability sets and protect its
+private reports after dropping UID. This grants
 no host mounts, devices, kernel administration, nested-container service, or
 privileged mode. The active runtime binary and namespace security policy must
 support this configuration before the deployment-owned opt-in is enabled.

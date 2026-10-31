@@ -215,6 +215,8 @@ def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Pa
         mutations = [
             lambda p: p["spec"]["containers"][0]["securityContext"].update(runAsUser=0, runAsNonRoot=False),
             lambda p: p["spec"]["initContainers"][1]["securityContext"]["capabilities"]["add"].append("SYS_ADMIN"),
+            lambda p: p["spec"]["initContainers"][1]["securityContext"]["capabilities"]["add"].remove("SETPCAP"),
+            lambda p: p["spec"]["containers"][0]["securityContext"]["capabilities"].update(add=["SETPCAP"]),
             lambda p: p["spec"]["initContainers"][1]["securityContext"].update(allowPrivilegeEscalation=True),
             lambda p: p["spec"]["initContainers"][1]["volumeMounts"][0].update(name="workspace"),
             lambda p: p["spec"]["initContainers"][1].update(envFrom=[{"secretRef": {"name": "controller-token"}}]),

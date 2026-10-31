@@ -37,10 +37,12 @@ container-local root or explicit numeric UID/GID/HOME for its private Terminus
 task and verifier containers. Image-default USER is resolved from the final OCI
 image before compilation; admission always receives concrete numeric identity.
 The controller remains non-root. Only explicitly root private containers add
-`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID`
-and `KILL` after dropping all capabilities; they retain no-new-privileges and
+`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID`, `KILL`,
+and `SETPCAP` after dropping all capabilities; they retain no-new-privileges and
 private PID namespaces. This supports package installation and cleanup of
-task descendants that drop UID, without host/device/kernel privileges.
+task descendants that drop UID. `SETPCAP` lets native graders clear the capability
+bounding set before dropping UID and running untrusted task code; the child
+retains no capabilities. Host/device/kernel administration remains forbidden.
 The final image ENTRYPOINT may prefix the canonical bounded sandbox command;
 both are frozen into the image-bound execution plan. Trusted containers retain
 their own fixed command and identity; the Pod's nonroot defaults remain intact.

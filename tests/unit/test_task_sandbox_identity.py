@@ -64,7 +64,7 @@ def test_identity_reaches_private_containers_without_changing_controller(user, h
         assert security["allowPrivilegeEscalation"] is False
         assert security["capabilities"]["drop"] == ["ALL"]
         assert security["capabilities"].get("add", []) == (
-            ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID", "KILL"] if uid == 0 else []
+            ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID", "KILL", "SETPCAP"] if uid == 0 else []
         )
         assert {"name": "HOME", "value": home or "/root"} in container["env"]
     assert ExecutionRuntimePlanV1.model_validate(plan.canonical_payload()) == plan

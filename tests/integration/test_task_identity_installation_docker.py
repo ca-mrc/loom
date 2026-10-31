@@ -20,6 +20,54 @@ from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_pat
 pytestmark = [pytest.mark.docker, pytest.mark.timeout(180)]
 
 
+def test_root_verifier_can_drop_all_capabilities_before_untrusted_code():
+    """The child-task grader must drop its bounding set and protect its reports."""
+    import docker
+
+    script = r"""import json, os, pathlib, subprocess
+logs = pathlib.Path('/logs/verifier')
+logs.mkdir(parents=True, mode=0o700)
+logs.chmod(0o700)
+child = r'''
+import json, os, pathlib
+status = dict(line.split(':', 1) for line in pathlib.Path('/proc/self/status').read_text().splitlines() if ':' in line)
+assert os.getuid() == os.getgid() == 65534
+assert not os.getgroups()
+for name in ('CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb'):
+    assert int(status[name].strip(), 16) == 0, (name, status[name])
+assert status['NoNewPrivs'].strip() == '1'
+assert not os.access('/logs/verifier', os.W_OK)
+try:
+    pathlib.Path('/logs/verifier/reward.txt').write_text('1')
+except PermissionError:
+    pass
+else:
+    raise AssertionError('untrusted child can forge verifier reward')
+print('untrusted child has no capabilities or verifier-report access')
+'''
+result = subprocess.run([
+    '/usr/bin/setpriv', '--reuid=65534', '--regid=65534', '--clear-groups',
+    '--no-new-privs', '--bounding-set=-all', '--inh-caps=-all', '--ambient-caps=-all',
+    '--', '/usr/local/bin/python', '-I', '-c', child,
+], capture_output=True, text=True)
+assert result.returncode == 0, result.stderr
+print(result.stdout, end='')
+assert not (logs / 'reward.txt').exists()
+(logs / 'reward.txt').write_text('0')
+assert (logs / 'reward.txt').read_text() == '0'
+"""
+    client = docker.from_env()
+    try:
+        output = client.containers.run(
+            "python:3.11-slim", ["-I", "-c", script], entrypoint="python", remove=True,
+            network_mode="none", cap_drop=["ALL"], cap_add=list(ROOT_INSTALL_CAPABILITIES),
+            security_opt=["no-new-privileges"], mem_limit="128m", nano_cpus=250_000_000,
+        )
+        assert output.strip() == b"untrusted child has no capabilities or verifier-report access"
+    finally:
+        client.close()
+
+
 @pytest.mark.parametrize("custom_shell", [False, True])
 @pytest.mark.parametrize("bootstrap", [
     "uvx --with pytest==8.4.1 pytest /tests/test.py\n",
