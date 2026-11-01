@@ -19,7 +19,7 @@ from scripts.ops.nebius_development_collector_cloud import (
 from scripts.ops.nebius_development_pool_registration import retained_development_participant
 from scripts.ops.nebius_development_runtime_setup import DevelopmentDatabaseRuntime
 from scripts.ops.nebius_development_shared_runtime import prepare_shared_runtime
-from scripts.ops.nebius_pool_runtime import _RetainedPoolCollectorSettings
+from scripts.ops.nebius_pool_runtime import _collector_mode_data, _RetainedPoolCollectorSettings
 
 from loom.nebius_platform_render import _obj, _replace_tree
 
@@ -91,6 +91,8 @@ def prepare_collector_runtime(request: DevelopmentDatabaseRuntime, *,
             values['quota_' + resource + '_name'] = identity[3]
             values['quota_' + resource + '_unit'] = identity[4]
         settings = _RetainedPoolCollectorSettings(_env_file=None, **values)
+        documents = list(yaml.safe_load_all((_ROOT / 'deploy/k8s/nebius-capacity-collector.yaml').read_text()))
+        base_config, = (row for row in documents if row and row['kind'] == 'ConfigMap' and row['metadata']['name'] == 'loom-execution-capacity-collector')
         namespace, name = participant.execution_namespace.name, 'loom-execution-capacity-collector'
         config_name = 'loom-pool-collector-' + spec.operation_id.hex
         secret_name = 'loom-dev-collector-' + request.operation_id.hex
@@ -99,9 +101,9 @@ def prepare_collector_runtime(request: DevelopmentDatabaseRuntime, *,
         configuration['data'] = {_PREFIX + key.upper(): str(value)
             for key, value in settings.model_dump(mode='json').items()
             if value is not None and key not in {'nebius_credentials_file', 'management_bearer_token_file'}}
-        configuration['data'][_PREFIX + 'COLLECTION_MODE'] = 'pool'
+        configuration['data'].update(_collector_mode_data(base_config['data']))
 
-        cronjob, = (row for row in yaml.safe_load_all((_ROOT / 'deploy/k8s/nebius-capacity-collector.yaml').read_text())
+        cronjob, = (row for row in documents
             if row and row['kind'] == 'CronJob' and row['metadata']['name'] == name)
         cronjob = _replace_tree(cronjob, {'loom-nebius-development': namespace})
         cronjob['spec']['suspend'] = True

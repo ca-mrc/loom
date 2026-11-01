@@ -28,6 +28,29 @@ def _component_script(script: str) -> str:
     return shlex.split(creator.split("exec ", 1)[1])[-1]
 
 
+def test_explicit_cpu_request_keeps_all_phase_limits_and_storage_reserved(inputs) -> None:
+    from loom_execution_capacity_collector.kubernetes import rendered_pod_resources
+
+    config = replace(inputs["config"], cpu_request_millis=1000)
+    _, job = render_task_image_job(**{**inputs, "config": config})
+    pod = job["spec"]["template"]["spec"]
+    for container in [*pod["initContainers"], *pod["containers"]]:
+        resources = container["resources"]
+        assert resources["requests"]["cpu"] == "1000m"
+        assert resources["limits"]["cpu"] == f"{config.cpu_millis}m"
+        for key in ("memory", "ephemeral-storage"):
+            assert resources["requests"][key] == resources["limits"][key]
+    assert rendered_pod_resources(pod).model_dump() == {
+        "cpu_millis": 1000, "memory_mib": config.memory_mib, "storage_mib": config.ephemeral_storage_mib,
+    }
+
+
+@pytest.mark.parametrize("cpu_request", [True, 0, 99, 1000.5, 4001])
+def test_renderer_rejects_invalid_cpu_request_before_a_job(inputs, cpu_request) -> None:
+    with pytest.raises(ValueError, match="cpu_request_millis"):
+        replace(inputs["config"], cpu_request_millis=cpu_request)
+
+
 @pytest.fixture
 def inputs():
     return {

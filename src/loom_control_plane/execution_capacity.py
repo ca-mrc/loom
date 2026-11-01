@@ -21,6 +21,10 @@ from loom.db.schema import (
     TaskImageMaterializationAttempt,
 )
 from loom.pipeline.keys import canonical_digest
+from loom_control_plane.execution_capacity_reconciliation import (
+    reconcile_capacity_placement,
+    released_pending_counts,
+)
 from loom_control_plane.execution_capacity_targets import resolve_capacity_targets
 from loom_control_plane.execution_placement import (
     PlacementConstraint,
@@ -663,12 +667,25 @@ async def admit_capacity_resources(
     placement_payload = observation.observation_json.get("placement")
     if not placement_payload:
         raise ExecutionProvisioningBlockedError("execution_capacity_placement_unavailable")
-    placement = CapacityPlacement.model_validate(placement_payload)
+    original_placement = CapacityPlacement.model_validate(placement_payload)
+    placement = await reconcile_capacity_placement(
+        session, original_placement,
+        target_ids=group.target_ids, now=current_time,
+    )
+    released_counts = released_pending_counts(original_placement, placement)
+    observed_jobs = {key: getattr(observation, key) for key in released_counts}
+    # Inconsistent per-Pod metadata must never be clamped into free capacity.
+    if all(released_counts[key] <= observed_jobs[key] for key in observed_jobs):
+        observed_jobs = {key: value - released_counts[key] for key, value in observed_jobs.items()}
     authorizations = (
         (
             await session.execute(
-                select(ExecutionProvisioningAuthorization).where(
-                    ExecutionProvisioningAuthorization.state.in_(_ACTIVE_AUTHORIZATION_STATES),
+                select(ExecutionProvisioningAuthorization).join(
+                    ServiceExecutionLease,
+                    ServiceExecutionLease.id == ExecutionProvisioningAuthorization.lease_id,
+                ).where(
+                    or_(ExecutionProvisioningAuthorization.state.in_(_ACTIVE_AUTHORIZATION_STATES),
+                        ServiceExecutionLease.cleanup_state != "complete"),
                     *(() if exclude_lease_id is None else (ExecutionProvisioningAuthorization.lease_id != exclude_lease_id,)),
                 )
             )
@@ -766,24 +783,24 @@ async def admit_capacity_resources(
     )
     recent_pending += sum(row.state != "running" for row in recent_native)
     incoming_pending = int(demand_id not in observed_leases)
-    if observation.pending_jobs + recent_pending + incoming_pending + waiting_here > policy.max_pending_jobs:
+    if observed_jobs["pending_jobs"] + recent_pending + incoming_pending + waiting_here > policy.max_pending_jobs:
         raise ExecutionProvisioningBlockedError("execution_capacity_pending_limit_exceeded")
     recent_unschedulable = (sum(row.state == "unschedulable" for row in recent_authorizations)
                             + sum(row.state == "unschedulable" for row in recent_native))
     if (
-        observation.unschedulable_jobs + recent_unschedulable >= policy.max_unschedulable_jobs
+        observed_jobs["unschedulable_jobs"] + recent_unschedulable >= policy.max_unschedulable_jobs
         and policy.max_unschedulable_jobs >= 0
     ):
-        if observation.unschedulable_jobs + recent_unschedulable > 0:
+        if observed_jobs["unschedulable_jobs"] + recent_unschedulable > 0:
             raise ExecutionProvisioningBlockedError(
                 "execution_capacity_unschedulable_limit_exceeded"
             )
     recent_image_pull = (sum(row.state == "image_pull_backoff" for row in recent_authorizations)
                          + sum(row.state == "image_pull_backoff" for row in recent_native))
     if (
-        observation.image_pull_backoff_jobs + recent_image_pull
+        observed_jobs["image_pull_backoff_jobs"] + recent_image_pull
         >= policy.max_image_pull_backoff_jobs
-        and observation.image_pull_backoff_jobs + recent_image_pull > 0
+        and observed_jobs["image_pull_backoff_jobs"] + recent_image_pull > 0
     ):
         raise ExecutionProvisioningBlockedError(
             "execution_capacity_image_pull_backoff_limit_exceeded"
@@ -954,6 +971,9 @@ async def admit_capacity_resources(
                 continue
             raise ExecutionProvisioningBlockedError("execution_capacity_shared_observation_stale")
         try:
+            other = await reconcile_capacity_placement(
+                session, other, target_ids=other_group.target_ids, now=current_time,
+            )
             other_plan = plan_placement(
                 other,
                 [*demands([row for row in authorizations if row.target_id in other_group.target_ids]),

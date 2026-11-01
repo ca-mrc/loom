@@ -30,6 +30,14 @@ A waiting record is not a reservation or proof of executable capacity. See
 
 Native snapshots copy parent files between layers. Their file-cache and write
 load can saturate a shared node while CPU and requested storage still fit.
+Native build CPU requests may be explicitly lower than the existing CPU limit;
+all prepare/build/publish containers use that request. Memory and scratch retain
+request equal to limit. Admission reserves the rendered Pod's effective phase
+peak (and qualified RuntimeClass overhead), so node observations and pending
+build reservations use the same resource arithmetic. Omitted CPU request settings
+preserve historical rendering and frozen settings. Reducing CPU requests does
+not change the I/O policy or justify a smaller scratch budget: full-phase native
+snapshot/cache/OCI measurements must qualify any smaller hard envelope first.
 New native claims therefore also use the ordinary collector's UID-qualified
 Nebius OS monitoring. MK8s defaults do not supply a supported verified kubelet
 serving trust path; the Kubernetes API CA must not be assumed to sign kubelet

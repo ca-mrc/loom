@@ -35,6 +35,7 @@ from loom_execution_actuator.contracts import (
     KubernetesJobApi,
     KubernetesJobObservation,
     NormalizedJobState,
+    PodCleanupReceipt,
 )
 from loom_execution_actuator.metrics import (
     COMMAND_CAPACITY_REVALIDATION_SECONDS,
@@ -326,6 +327,17 @@ class ExecutionActuator:
         }:
             raise ActuatorContractError("global deletion requires retained manager release")
         self._validate_observation(lease, observation)
+        if (observation.normalized_state == NormalizedJobState.DELETED
+                and lease.pod_uid and lease.job_uid):
+            confirm = getattr(self._kubernetes, "confirm_pod_absence", None)
+            if confirm is not None:
+                if not await confirm(namespace=lease.namespace_name, pod_uid=lease.pod_uid, job_uid=lease.job_uid):
+                    raise KubernetesApiError("dependent Pod still exists", status_code=409)
+                observation = observation.model_copy(update={"cleanup_receipt": PodCleanupReceipt(
+                    pod_uid=lease.pod_uid, job_uid=lease.job_uid,
+                    resource_generation=lease.resource_generation,
+                    confirmed_at=datetime.now(UTC),
+                )})
         if lease.pod_terminated_at is None and observation.terminated_at is not None:
             TERMINAL_OBSERVATION_DELAY_SECONDS.labels(source=source).observe(
                 max(0, (now - observation.terminated_at).total_seconds()),

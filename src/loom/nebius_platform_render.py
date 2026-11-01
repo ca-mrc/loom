@@ -1001,6 +1001,8 @@ def _task_image_builder_settings(
         "cpu_millis",
         "memory_mib",
         "ephemeral_storage_mib",
+        "cpu_request_millis",
+        "resource_ceiling",
         "max_processes",
         "active_deadline_seconds",
         "max_concurrent",
@@ -1039,7 +1041,7 @@ def _task_image_builder_settings(
                 "build cache must not share source, backup or trajectory storage"
             )
     try:
-        return NativeTaskImageSettings(
+        settings = NativeTaskImageSettings(
             namespace=config["execution_namespace"] + "-build",
             service_image=service_image,
             storage_endpoint=storage["storage_endpoint"],
@@ -1048,10 +1050,25 @@ def _task_image_builder_settings(
             # bucket. The separate source bucket stores execution input packs.
             source_bucket=storage["buckets"]["artifacts"],
             cache_secret_name="loom-task-build-cache" if cache else None,
-            **{"archive_secret_name": "loom-task-build-source", **supplied, "cache_bucket": cache},
+            **{"archive_secret_name": "loom-task-build-source",
+               **{key: value for key, value in supplied.items() if key != "resource_ceiling"}, "cache_bucket": cache},
         )
+        task_image_builder_resource_ceiling(supplied, settings)
+        return settings
     except ValueError:
         raise NebiusPlatformError("invalid task image build resource limits or namespace") from None
+
+
+def task_image_builder_resource_ceiling(builder: dict[str, Any], settings: Any) -> dict[str, int]:
+    """Persist tuning's original ceiling without changing runtime settings identity."""
+    bounds = {"cpu_millis": (100, 64000), "memory_mib": (512, 262144),
+              "ephemeral_storage_mib": (16384, 524288)}
+    ceiling = builder.get("resource_ceiling", {key: getattr(settings, key) for key in bounds})
+    if (not isinstance(ceiling, dict) or set(ceiling) != set(bounds)
+            or any(type(ceiling[key]) is not int or not low <= ceiling[key] <= high
+                   or getattr(settings, key) > ceiling[key] for key, (low, high) in bounds.items())):
+        raise ValueError("native build resources exceed their original tuning ceiling")
+    return dict(ceiling)
 
 
 def _task_image_builder_documents(config: dict[str, Any], settings: Any) -> list[dict[str, Any]]:
@@ -1070,7 +1087,7 @@ def _task_image_builder_documents(config: dict[str, Any], settings: Any) -> list
             "count/jobs.batch": str(count),
             # Kubernetes creates kube-root-ca.crt in every namespace.
             "count/configmaps": str(count + 1),
-            "requests.cpu": f"{settings.cpu_millis * count}m",
+            "requests.cpu": f"{(settings.cpu_request_millis or settings.cpu_millis) * count}m",
             "requests.memory": f"{settings.memory_mib * count}Mi",
             "requests.ephemeral-storage": f"{settings.ephemeral_storage_mib * count}Mi",
             "limits.cpu": f"{settings.cpu_millis * count}m",

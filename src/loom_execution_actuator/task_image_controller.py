@@ -53,12 +53,14 @@ from loom_control_plane.task_image_materializations import (
     task_image_materialization_payload,
 )
 from loom_execution_actuator.image_publication_receipt import decode_publication_receipt
+from loom_execution_actuator.kubernetes_api import exact_pods_absent
 from loom_execution_actuator.metrics import blocked_outcome, record_build_cycle
 from loom_execution_actuator.renderer import ExecutionTargetRuntime
 from loom_execution_actuator.task_image_renderer import render_task_image_job
 from loom_execution_actuator.task_image_settings import (
     NativeTaskImageSettings as NativeTaskImageSettings,
 )
+from loom_execution_capacity_collector.kubernetes import rendered_pod_resources
 
 _MANAGER = "loom-task-image-builder"
 _SELECTOR = "app.kubernetes.io/managed-by=" + _MANAGER
@@ -401,6 +403,11 @@ class NativeBuildKubernetesApi:
             }, _request_timeout=20)
             return False
         return await asyncio.to_thread(run)
+
+    async def confirm_pod_absence(self, *, namespace: str, pod_uid: str, job_uid: str) -> bool:
+        return await asyncio.to_thread(
+            exact_pods_absent, self._core, namespace=namespace, pod_uid=pod_uid, job_uid=job_uid,
+        )
 
 
 def _safe_log(value: str) -> str:
@@ -791,6 +798,7 @@ class NativeTaskImageController:
             cm, job = render_task_image_job(materialization_id=row.id, lease_epoch=row.lease_epoch,
                                            claim=claim, components=components, target=self.target,
                                            config=self.settings.job_config())
+            resources = rendered_pod_resources(job["spec"]["template"]["spec"])
         except (ValueError, TypeError, KeyError):
             await self._fail(session, row, "build_input_unsupported", retryable=False,
                              message="Unsupported Dockerfile, context, architecture, or task build configuration")
@@ -802,8 +810,8 @@ class NativeTaskImageController:
         attempt.native_build = {
             "target_id": self.target.target_id, "namespace": self.settings.namespace,
             "job_name": job["metadata"]["name"], "job_uid": None, "state": "reserved",
-            "resources": {"vcpu_millis": self.settings.cpu_millis, "memory_mib": self.settings.memory_mib,
-                          "storage_mib": self.settings.ephemeral_storage_mib},
+            "resources": {"vcpu_millis": resources.cpu_millis, "memory_mib": resources.memory_mib,
+                          "storage_mib": resources.storage_mib},
             "max_processes": self.settings.max_processes, "reserved_at": now.isoformat(),
             "concurrency_limit": self.settings.max_concurrent,
             "deadline_at": (now + timedelta(seconds=job["spec"]["activeDeadlineSeconds"])).isoformat(),
@@ -976,7 +984,24 @@ class NativeTaskImageController:
 
     async def _cleanup(self, attempt_id: UUID, native: dict[str, Any]) -> None:
         if await self.kubernetes.delete(native["namespace"], native["job_name"], native.get("job_uid"), configmap=native["configmap"]):
-            native.update(state="released", capacity_released_at=datetime.now(UTC).isoformat())
+            confirm = getattr(self.kubernetes, "confirm_pod_absence", None)
+            receipt = None
+            if confirm is not None and native.get("pod_uid") and native.get("job_uid"):
+                if not await confirm(namespace=native["namespace"], pod_uid=native["pod_uid"], job_uid=native["job_uid"]):
+                    return
+                # Identity was already checked against the retained attempt by the
+                # lifecycle. Persist proof only after the exact Pod is absent.
+                async with self.sessions() as session:
+                    attempt = await session.get(TaskImageMaterializationAttempt, attempt_id)
+                    assert attempt is not None
+                    epoch = attempt.lease_epoch
+                receipt = {"pod_uid": native["pod_uid"], "job_uid": native["job_uid"],
+                           "target_id": native["target_id"], "lease_epoch": epoch,
+                           "pods_absent": True}
+            at = datetime.now(UTC).isoformat()
+            native.update(state="released", capacity_released_at=at)
+            if receipt is not None:
+                native["capacity_release_receipt"] = {**receipt, "confirmed_at": at}
             await self._save_native(attempt_id, native)
 
     async def _record_result(self, attempt_id: UUID, observed: dict[str, Any]) -> None:

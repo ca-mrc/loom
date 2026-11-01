@@ -1004,6 +1004,22 @@ fence completes. Other queued builds may continue in the healthy region. Both
 builds and execution phases consume the same physical region capacity and I/O
 admission budget; builder and execution maxima cannot be added together.
 
+To retain regional build intent in an installed standalone platform, use
+`scripts/ops/nebius_execution_tuning.py stage-builders` with
+`--enable-regional-builder <configured-target-id>`. This copies the reviewed
+primary builder's resource and shared-storage/registry settings into that
+regional entry; it does not inherit its Kubernetes identity or start a loop.
+The operation saves only the platform configuration under the deployment mutex.
+It leaves running controllers, Jobs, frozen claims and capacity policies intact.
+The next normal protected deployment must perform the exact regional API/CA,
+namespace, operator permission and Secret-key preflight described above and
+install the scoped build resources before enabling the loop. A saved intent is
+not cross-region storage or registry acceptance: newly materialized images must
+still prove source/cache/archive consumption, registry publication and both
+execution phases through the existing source/grant and UID-fenced lifecycle.
+Do not copy signing authority or relax private-root task admission to enable a
+builder.
+
 Do not apply a private-root regional file directly to relax namespace PSS.
 Under the existing idle rollout guard and exact remote-cluster binding, the
 operator first calls `install_regional_task_identity_policy` from
@@ -1283,7 +1299,7 @@ imports both entrypoints and the lazily loaded source journal. The storage and
 Docker Python libraries are dependencies of those shared source helpers; this
 does not mount a host runtime socket or move Dockerfile execution into the actuator.
 
-Enable the primary-only loop by adding the following to the operator's platform
+Enable the primary loop by adding the following to the operator's platform
 configuration; omission leaves native building disabled:
 
 ```json
@@ -1303,6 +1319,70 @@ configuration; omission leaves native building disabled:
   "oci_export_format": "archive"
 }
 ```
+
+`cpu_millis`, `memory_mib` and `ephemeral_storage_mib` remain hard per-container
+limits. An optional `cpu_request_millis` independently sets the CPU request of
+all sequential prepare/build/publish containers; omission retains the existing
+request equal to its limit and historical settings serialization. It must be an
+integer from 100 through `cpu_millis`. Memory and ephemeral-storage requests stay
+equal to their limits. Build admission accounts for the maximum effective Pod
+request across every phase, plus qualified RuntimeClass overhead, using the same
+arithmetic as observed Pods. CPU may burst to its unchanged hard limit while
+sharing a node; this does not reserve that burst. Physical capacity, I/O admission,
+cloud quota ceilings and cleanup charges continue to apply.
+
+Choose the request and any smaller memory/scratch envelope from complete
+prepare/build/publish observations, including native snapshots, cache import,
+OCI export/extraction and publication. An instantaneous low CPU or disk sample
+does not establish a safe envelope. Keep memory and scratch headroom for those
+peaks; scratch is never oversubscribed. For an already enabled builder running a
+supporting actuator, the standalone tuning command saves and applies only these
+resource settings while work continues:
+
+```bash
+python scripts/ops/nebius_execution_tuning.py apply-builders \
+  --kubeconfig "$KUBECONFIG_PATH" --namespace "$PLATFORM_NAMESPACE" \
+  --expected-candidate "$INSTALLED_CANDIDATE_SHA" \
+  --build-cpu-request-millis "$TARGET_ID=$MEASURED_CPU_REQUEST_MILLIS"
+```
+
+Optional `--build-cpu-limit-millis`, `--build-memory-mib` and
+`--build-storage-mib` use the same `TARGET=VALUE` syntax. The first tuning saves
+the original CPU/memory/scratch hard ceilings as `resource_ceiling` in the
+durable builder config. Later tuning may restore a smaller value up to that
+original ceiling; subsequent deployments preserve it. It cannot increase the
+original node/cloud limits. Scratch retains the renderer's 16 GiB minimum.
+There is no new fixed request recommendation or changed default.
+
+`apply-builders` holds the existing rollout mutex, uses ConfigMap and quota
+resource-version checks, rolls only the selected existing actuator and changes
+its build quota only when needed. Live tuning retains each existing quota
+resource total when a new setting is smaller, within the original ceilings:
+an older frozen attempt may still need to create its original larger Job.
+A later normal idle deployment can tighten those quota totals. It compares existing execution/native Job
+UIDs and frozen resource envelopes before and after; naturally completed Jobs
+may disappear. It never replaces/cancels Jobs or rewrites frozen attempts. A
+partial update remains failed and can converge by repeating the same saved
+intent. Regional use requires the installed builder-aware protected gateway.
+Namespace, credentials, runtime or identity changes, unsupported installed
+images and first regional enablement require `stage-builders` followed by the
+normal protected installer/deployment. Those stage changes do not restart any
+controller. Builder tuning cannot be mixed with database or execution knobs.
+
+The existing minutely capacity-collector Job normally publishes complete
+feedback at wall-start offsets 0, 15, 30 and 45 seconds within a 50-second
+sampling window when it starts promptly. Its budget also ends five seconds
+before the next absolute minute; late startup therefore allows fewer samples.
+A slow pass skips expired slots instead of catching up or overlapping, and each
+complete capture must fit the remaining budget. Expiry before any complete
+observation fails; a planned budget end after a completed observation keeps
+the complete result. Real provider failures still propagate. The Job keeps its
+existing 120-second deadline and final receipt. I/O reads retain their ten-second budget,
+sixty-second freshness qualification and unchanged pressure threshold. Network
+or collection failures remain fail-closed, so this best-effort feedback does not
+guarantee four samples per minute, ten-second recovery or freshness at every
+instant. This reuses the same CronJob,
+worker identity and RBAC; it adds no worker or permission.
 
 Each build loop pass has three steps:
 1. Reconcile outstanding builds, at most four at a time.
@@ -1570,6 +1650,12 @@ path as the other platform credentials in `<execution_namespace>-build`:
 | `loom-task-build-source` | `access-key`, `secret-key` | Read ordinary catalog bundles in the canonical artifacts bucket |
 | `loom-task-build-registry` | `credentials.json` | Authorized service-account key scoped to the native registry used for task images |
 | `loom-task-build-cache` (optional) | `access-key`, `secret-key` | Read/write/delete only `task-build-cache/` in the configured cache bucket |
+| `task_image_builder.archive_secret_name` (defaults to `loom-task-build-source`) | `access-key`, `secret-key` | When Compose archive intents exist, write only the reviewed `task-image-archives/` prefix and read the bucket's versioning metadata |
+
+The archive role may reuse the source Secret reference; four logical roles do
+not necessarily require four Secrets. A strictly read-only source credential
+requires a separate already scoped archive-writer reference for Compose. Do not
+broaden catalog/source visibility or grant arbitrary bucket writes to satisfy it.
 
 The deployer checks these keys before enabling the loop. Never put credentials
 in platform JSON, ConfigMaps, task build arguments or execution metadata. The

@@ -22,6 +22,7 @@ from loom_execution_capacity_collector.contracts import (
     ManagedPodPlacement,
     NodePlacement,
     NodeTemplateSample,
+    PodPendingCounts,
     ResourceTotals,
 )
 
@@ -648,8 +649,13 @@ class InClusterKubernetesCapacityReader:
             include_pending = target if pool is None else pool.includes_pending(pod)
             if pool is not None:
                 target = target and include_pending
+            contributes = target or (pool is not None and (node_name in node_names or include_pending))
+            pending, unschedulable, image_pull, reason = _pending_state(pod)
+            pending_counts = (PodPendingCounts(pending=pending, unschedulable=unschedulable,
+                                               image_pull_backoff=image_pull) if contributes else None)
             managed = (_managed_placement(pod) if target else None) if pool is None else pool.managed(pod)
             if managed is not None:
+                managed = managed.model_copy(update={"pending_counts": pending_counts})
                 reservation = managed.lease_id if pool is not None else f"{managed.lease_id}:{managed.generation}"
                 if (pool is not None or target_scope is not None) and reservation in observed_reservations:
                     raise KubernetesObservationError("multiple live Pods for one shared reservation")
@@ -667,10 +673,10 @@ class InClusterKubernetesCapacityReader:
                 pending_pods.append(managed if managed is not None else ManagedPodPlacement(
                     uid=_identity(pod.metadata.uid, name="Pod UID"),
                     lease_id="foreign-pod:" + pod.metadata.uid, generation=1, requests=_pod_request(pod),
+                    pending_counts=pending_counts,
                 ))
-            if not (target or (pool is not None and (node_name in node_names or include_pending))):
+            if not contributes:
                 continue
-            pending, unschedulable, image_pull, reason = _pending_state(pod)
             pending_jobs += int(pending)
             unschedulable_jobs += int(unschedulable)
             image_pull_jobs += int(image_pull)

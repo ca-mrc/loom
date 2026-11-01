@@ -4,10 +4,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 
 class ExecutionTerminationSummaryV1(BaseModel):
@@ -100,6 +100,17 @@ class ContainerLogExcerpt(BaseModel):
     text: str = Field(min_length=1, max_length=4096)
 
 
+class PodCleanupReceipt(BaseModel):
+    """Native identities checked absent, or acknowledged by the owning manager."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    pod_uid: str = Field(min_length=1, max_length=128)
+    job_uid: str = Field(min_length=1, max_length=128)
+    resource_generation: int = Field(gt=0)
+    pods_absent: Literal[True] = True
+    confirmed_at: AwareDatetime
+
+
 class KubernetesJobObservation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -125,6 +136,7 @@ class KubernetesJobObservation(BaseModel):
     reason: str | None = Field(default=None, max_length=120)
     message: str | None = Field(default=None, max_length=2000)
     termination_summary: ExecutionTerminationSummaryV1 | None = None
+    cleanup_receipt: PodCleanupReceipt | None = None
 
     @model_validator(mode="after")
     def _timestamps_are_ordered(self) -> KubernetesJobObservation:
@@ -143,7 +155,10 @@ class KubernetesJobObservation(BaseModel):
         return self
 
     def event_payload(self) -> dict[str, Any]:
-        return self.model_dump(mode="json", exclude={"schema_version", "namespace", "job_name"})
+        excluded = {"schema_version", "namespace", "job_name"}
+        if self.cleanup_receipt is None:
+            excluded.add("cleanup_receipt")
+        return self.model_dump(mode="json", exclude=excluded)
 
 
 class KubernetesApiError(RuntimeError):

@@ -92,8 +92,17 @@ async def test_restart_reads_manager_release_without_replaying_results_or_budget
             before.state, before.lease_epoch, before.attempt_count, before.claimed_by, before.registry_images,
             before.failure_reason, before.next_attempt_at)
         assert done.native_build["state"] == "released" and done.native_build["capacity_released_at"]
-        assert {key: value for key, value in done.native_build.items() if key not in {"state", "capacity_released_at"}} == {
+        assert {key: value for key, value in done.native_build.items()
+                if key not in {"state", "capacity_released_at", "capacity_release_receipt"}} == {
             key: value for key, value in native.items() if key != "state"}
+        if native.get("pod_uid") and native.get("job_uid"):
+            assert done.native_build["capacity_release_receipt"] == {
+                "pod_uid": native["pod_uid"], "job_uid": native["job_uid"],
+                "target_id": native["target_id"], "lease_epoch": done.lease_epoch,
+                "confirmed_at": done.native_build["capacity_released_at"], "pods_absent": True,
+            }
+        else:
+            assert "capacity_release_receipt" not in done.native_build
         await controller.run_once()
         assert reader.calls == reads
         assert (await local_rows(sessions, request))[1].native_build == done.native_build

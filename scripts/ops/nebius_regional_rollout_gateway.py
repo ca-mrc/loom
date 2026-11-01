@@ -59,7 +59,7 @@ def validate_scope(value: Any) -> dict[str, Any]:
         raise ScopeError("explicit existing regional targets required")
     contexts = set()
     for region in regions:
-        if not isinstance(region, dict) or set(region) != {"context", "cluster_name", "api_server", "namespace", "namespace_uids", "resources", "secret_key_reads"}:
+        if not isinstance(region, dict) or set(region) - {"builder_documents"} != {"context", "cluster_name", "api_server", "namespace", "namespace_uids", "resources", "secret_key_reads"}:
             raise ScopeError("invalid regional target scope")
         for key in ("context", "cluster_name", "namespace"):
             if not isinstance(region[key], str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,255}", region[key]):
@@ -120,6 +120,41 @@ def validate_scope(value: Any) -> dict[str, Any]:
             if identity in seen:
                 raise ScopeError("duplicate secret key-name resource")
             seen.add(identity)
+        if "builder_documents" in region:
+            reviewed = region["builder_documents"]
+            if (not isinstance(reviewed, dict) or set(reviewed) - {"resource_ceiling", "max_concurrent"} != {"candidate_sha", "documents"}
+                    or not re.fullmatch(r"[0-9a-f]{40}", str(reviewed["candidate_sha"]))
+                    or not isinstance(reviewed["documents"], list)
+                    or len(reviewed["documents"]) != 6
+                    or len(json.dumps(reviewed).encode()) > 65536):
+                raise ScopeError("fixed candidate builder documents required")
+            if "resource_ceiling" in reviewed or "max_concurrent" in reviewed:
+                ceiling = reviewed.get("resource_ceiling")
+                if (("resource_ceiling" in reviewed) != ("max_concurrent" in reviewed)
+                        or not isinstance(ceiling, dict) or set(ceiling) != {"cpu_millis", "memory_mib", "ephemeral_storage_mib"}
+                        or any(type(v) is not int or v <= 0 for v in ceiling.values())
+                        or (reviewed.get("max_concurrent") is not None
+                            and (type(reviewed["max_concurrent"]) is not int or reviewed["max_concurrent"] < 1))):
+                    raise ScopeError("fixed builder resource ceilings required")
+            build = region["namespace"] + "-build"
+            expected = {
+                ("Namespace", build, None),
+                ("ResourceQuota", "loom-task-image-build-capacity", build),
+                ("ServiceAccount", "loom-execution-attempt", build),
+                ("Role", "loom-task-image-builder", build),
+                ("RoleBinding", "loom-task-image-builder", build),
+                ("NetworkPolicy", "loom-task-image-builder", build),
+            }
+            observed = set()
+            for doc in reviewed["documents"]:
+                if not isinstance(doc, dict) or not isinstance(doc.get("metadata"), dict):
+                    raise ScopeError("invalid fixed builder document")
+                identity = (doc.get("kind"), doc["metadata"].get("name"), doc["metadata"].get("namespace"))
+                if identity not in expected or doc.get("apiVersion") != API_VERSIONS[identity[0]]:
+                    raise ScopeError("builder documents escape the fixed build scope")
+                observed.add(identity)
+            if observed != expected or not expected <= identities:
+                raise ScopeError("builder documents differ from retained resource identities")
     return value
 
 
@@ -175,6 +210,10 @@ def _known(region: dict[str, Any], kind: str, name: str, namespace: str | None =
 
 
 def _read_command(region: dict[str, Any], args: list[str]) -> bool:
+    if len(args) == 6 and args[:2] == ["get", "jobs"] and args[2] == "-n" and args[4:] == ["-o", "json"]:
+        return bool(region.get("builder_documents")) and args[3] in {region["namespace"], region["namespace"] + "-build"}
+    if args == ["get", "resourcequota", "loom-task-image-build-capacity", "-n", region["namespace"] + "-build", "--ignore-not-found", "-o", "json"]:
+        return _known(region, "ResourceQuota", "loom-task-image-build-capacity", region["namespace"] + "-build")
     if args == ["get", "nodes", "-l", "loom.nebius/platform=integration", "-o", "json"]:
         return True
     if args == ["get", "daemonset", OBSERVER_NAME, "-n", region["namespace"] + "-observations", "--ignore-not-found", "-o", "json"]:
@@ -237,6 +276,76 @@ def _manifest(scope: dict[str, Any], region: dict[str, Any], payload: bytes, *, 
                 raise ScopeError("only the existing server-dry-run policy probe is allowed")
         elif not _known(region, kind, name, metadata.get("namespace")):
             raise ScopeError("regional manifest outside installed resource identities")
+        for reviewed in region.get("builder_documents", {}).get("documents", []):
+            expected = reviewed["metadata"]
+            if (kind, name, metadata.get("namespace")) == (reviewed["kind"], expected["name"], expected.get("namespace")):
+                actual, expected = _document_content(doc), _document_content(reviewed)
+                if kind == "ResourceQuota" and "resource_ceiling" in region["builder_documents"]:
+                    hard = actual.get("spec", {}).get("hard")
+                    if not _build_quota_hard(region, hard):
+                        raise ScopeError("builder quota exceeds original resource ceilings")
+                    actual["spec"]["hard"] = expected["spec"]["hard"]
+                if actual != expected:
+                    raise ScopeError("builder manifest differs from the reviewed fixed candidate")
+
+
+def _document_content(document: dict[str, Any]) -> dict[str, Any]:
+    """Ignore only empty serialization fields added by native client dry-run."""
+    value = json.loads(json.dumps(document))
+    metadata = value.get("metadata", {})
+    if metadata.get("creationTimestamp") is None:
+        metadata.pop("creationTimestamp", None)
+    if value.get("status") == {}:
+        value.pop("status")
+    if value.get("kind") == "Namespace" and value.get("spec") == {}:
+        value.pop("spec")
+    return value
+
+
+def _build_quota_hard(region: dict[str, Any], hard: Any) -> bool:
+    reviewed = region.get("builder_documents", {})
+    if not isinstance(hard, dict) or "resource_ceiling" not in reviewed:
+        return False
+    quota = next(d for d in reviewed["documents"] if d["kind"] == "ResourceQuota")
+    expected = quota["spec"]["hard"]
+    count = reviewed["max_concurrent"]
+    if count is None:
+        return hard == expected == {}
+    if set(hard) != set(expected) or any(hard.get(key) != expected[key] for key in ("pods", "count/jobs.batch", "count/configmaps")):
+        return False
+    ceiling = reviewed["resource_ceiling"]
+    for resource, field, unit, minimum in (("cpu", "cpu_millis", "m", 100),
+                                          ("memory", "memory_mib", "Mi", 512),
+                                          ("ephemeral-storage", "ephemeral_storage_mib", "Mi", 16384)):
+        values = []
+        for kind in ("requests", "limits"):
+            value = hard.get(kind + "." + resource)
+            if not isinstance(value, str) or not re.fullmatch(r"[1-9][0-9]*" + unit, value):
+                return False
+            values.append(int(value.removesuffix(unit)))
+        request, limit = values
+        if not minimum * count <= request <= limit <= ceiling[field] * count:
+            return False
+        if resource != "cpu" and request != limit:
+            return False
+    return True
+
+
+def _quota_patch(region: dict[str, Any], args: list[str]) -> bool:
+    expected = ["patch", "resourcequota", "loom-task-image-build-capacity", "-n", region["namespace"] + "-build", "--type=json", "-p"]
+    if len(args) != 8 or args[:7] != expected:
+        return False
+    try:
+        operations = json.loads(args[7])
+        if (len(operations) != 2 or set(operations[0]) != {"op", "path", "value"}
+                or operations[0]["op"] != "test" or operations[0]["path"] != "/metadata/resourceVersion"
+                or not re.fullmatch(r"[0-9]+", str(operations[0]["value"]))
+                or set(operations[1]) != {"op", "path", "value"}
+                or operations[1]["op"] != "replace" or operations[1]["path"] != "/spec/hard"):
+            return False
+        return _build_quota_hard(region, operations[1]["value"])
+    except (ValueError, TypeError, KeyError, IndexError):
+        return False
 
 
 def handle(scope: dict[str, Any], command: str, *, stdin: bytes | None = None) -> tuple[int, bytes, bytes] | None:
@@ -284,11 +393,35 @@ def handle(scope: dict[str, Any], command: str, *, stdin: bytes | None = None) -
         observed = set(result.stdout.decode().splitlines())
         keys = sorted(observed.intersection(secret["required_keys"]))
         return 0, ("".join(key + "\n" for key in keys)).encode(), b""
+    elif rest[:2] == ["get", "jobs"] and _read_command(region, rest):
+        name = rest[3]
+        namespace = _json(_run(scope, ["--context", region["context"], "--request-timeout=10s", "get", "namespace", name, "-o", "json"], timeout=15))
+        if namespace.get("metadata", {}).get("uid") != region["namespace_uids"].get(name):
+            raise ScopeError("regional Job snapshot namespace identity changed")
+        payload = None
+    elif _quota_patch(region, rest):
+        build = region["namespace"] + "-build"
+        namespace = _json(_run(scope, ["--context", region["context"], "--request-timeout=10s", "get", "namespace", build, "-o", "json"], timeout=15))
+        if namespace.get("metadata", {}).get("uid") != region["namespace_uids"].get(build):
+            raise ScopeError("regional build namespace identity changed")
+        payload = None
     elif _read_command(region, rest) or _permission_command(region, rest):
         payload = None
     else:
         raise ScopeError("regional operation outside installed scope")
     result = _run(scope, ["--context", region["context"], "--request-timeout=30s", *rest], payload=payload, timeout=340 if rest[:2] == ["rollout", "status"] else 40)
+    if rest[:2] == ["get", "jobs"]:
+        # Only identity and frozen resource envelopes cross this read boundary;
+        # omit command/env/image/source/credential-bearing Job configuration.
+        jobs = _json(result)
+        projected = []
+        for row in jobs.get("items", []):
+            spec = row["spec"]["template"]["spec"]
+            projected.append({"metadata": {key: row["metadata"][key] for key in ("name", "uid")},
+                "spec": {"activeDeadlineSeconds": row["spec"].get("activeDeadlineSeconds"),
+                         "template": {"spec": {key: [{"name": c["name"], "resources": c.get("resources", {})} for c in spec.get(key, [])]
+                                                for key in ("containers", "initContainers")}}}})
+        return 0, (json.dumps({"items": projected}) + "\n").encode(), b""
     return result.returncode, result.stdout, result.stderr
 
 

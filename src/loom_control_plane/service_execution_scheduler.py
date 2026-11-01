@@ -44,6 +44,7 @@ from loom.service_execution_materialization import (
 from loom.task_image_failure import image_preparation_failure
 from loom.task_image_materialization import (
     get_trial_task_image_execution_grant,
+    required_task_image_components,
     resolve_prepared_task,
 )
 from loom.verifier_runtime import apply_legacy_verifier_default
@@ -96,7 +97,20 @@ class CompiledServiceExecution:
     image_mode: Literal["reused", "built", "unknown", "prebuilt"]
 
 
-_SERVICE_TRIAL_SQL = """
+# Mirror required_task_image_components for the persisted TaskConfig shape.
+# Missing bindings are not evidence that a Dockerfile/sidecar/Compose build is
+# unnecessary. Keep both task and independent-verifier environments covered.
+_TASK_IMAGE_BUILD_REQUIRED_SQL = " OR ".join(
+    f"jsonb_path_exists(task_definition.config, '$.{environment}.{declaration}')"
+    for environment in ("environment", "verifier.environment")
+    for declaration in (
+        "dockerfile ? (@ != null)",
+        "sidecars[*].dockerfile ? (@ != null)",
+        'native_compose.services[*] ? (@.name != "main" && @.build != null)',
+    )
+)
+
+_SERVICE_TRIAL_SQL = f"""
 SELECT t.id,
        t.submitted_at,
        t.task_id,
@@ -126,6 +140,53 @@ SELECT t.id,
          t.execution_route_pool_name IS NULL
          OR t.execution_route_pool_name = :pool_id
        )
+   AND (
+         EXISTS (
+           SELECT 1
+             FROM trial_task_image_materializations prerequisite
+             JOIN task_image_materializations image
+               ON image.id = prerequisite.materialization_id
+            WHERE prerequisite.trial_id = t.id
+              AND image.task_id = t.task_id
+              AND image.cpu_arch = 'x86_64'
+              AND image.state = 'ready'
+         )
+         OR (
+           EXISTS (
+             SELECT 1
+               FROM trial_task_image_materializations prerequisite
+               JOIN task_image_materializations image
+                 ON image.id = prerequisite.materialization_id
+              WHERE prerequisite.trial_id = t.id
+                AND image.task_id = t.task_id
+                AND image.cpu_arch = 'x86_64'
+           )
+           AND NOT EXISTS (
+             SELECT 1
+               FROM trial_task_image_materializations prerequisite
+               JOIN task_image_materializations image
+                 ON image.id = prerequisite.materialization_id
+              WHERE prerequisite.trial_id = t.id
+                AND image.task_id = t.task_id
+                AND image.cpu_arch = 'x86_64'
+                AND image.state != 'failed'
+           )
+         )
+         OR (
+           NOT ({_TASK_IMAGE_BUILD_REQUIRED_SQL})
+           AND NOT EXISTS (
+             SELECT 1
+               FROM trial_task_image_materializations prerequisite
+               JOIN task_image_materializations image
+                 ON image.id = prerequisite.materialization_id
+              WHERE prerequisite.trial_id = t.id
+                AND (
+                     image.cpu_arch = 'x86_64'
+                     OR image.task_id != t.task_id
+                )
+           )
+         )
+       )
    AND NOT EXISTS (
          SELECT 1 FROM execution_leases lease
           WHERE lease.trial_id = t.id
@@ -134,6 +195,10 @@ SELECT t.id,
        )
 """
 
+# Shared by local selection, global proposals and their locked by-id rechecks.
+# Ready x86_64 alternatives can run; truly prebuilt tasks need no prerequisite;
+# all-failed prerequisites still reach compilation to settle without an attempt.
+# Keep the authoritative image/source/grant checks in compilation and claim.
 _NEXT_SERVICE_TRIAL = text(_SERVICE_TRIAL_SQL + """
  ORDER BY (q.in_flight_count::double precision / q.fair_share_weight) ASC,
           t.submit_priority DESC,
@@ -148,7 +213,8 @@ _NEXT_SERVICE_TRIAL = text(_SERVICE_TRIAL_SQL + """
 # concurrent change to the task definition or batch runtime configuration.
 _SERVICE_TRIAL_BY_ID = text(_SERVICE_TRIAL_SQL + """
    AND t.id = :trial_id
- FOR UPDATE OF t, task_definition, b
+ FOR UPDATE OF t
+ FOR SHARE OF task_definition, b
 """)
 
 
@@ -277,6 +343,16 @@ async def _reserve_service_execution_candidate(
     )
     if row is None:
         return None, False
+    # The fair scan holds only Trial, so parent cancellation can commit before
+    # compilation. Reload the exact eligible source under shared Task/Batch
+    # locks: an edit either wins this check or waits for this claim to commit.
+    # Pin outside the write savepoint so a classified compilation failure cannot
+    # release its source locks before the terminal Trial update below.
+    row = (await session.execute(_SERVICE_TRIAL_BY_ID, {
+        "trial_id": row["id"], "pool_id": pool_id, "now": current_time,
+    })).mappings().one_or_none()
+    if row is None:
+        return None, True
     try:
         async with session.begin_nested():
             lease = await _reserve_service_candidate(
@@ -409,9 +485,13 @@ async def _compile_service_candidate_plan(
             return None
         raise ExecutionProvisioningBlockedError("task_image_preparation_pending", retry_after_seconds=15)
     try:
-        grant = await get_trial_task_image_execution_grant(
+        # The selection predicate is advisory. Recheck missing bindings under
+        # the usual source locks rather than treating a build task as prebuilt.
+        if not prerequisites and required_task_image_components(TaskConfig.model_validate(row["task_config"])):
+            raise RuntimeError("required task-image prerequisite is unavailable")
+        grant = (await get_trial_task_image_execution_grant(
             session, trial_id=row["id"], cpu_arches=["x86_64"],
-        )
+        ) if prerequisites else None)
     except RuntimeError as exc:
         raise ExecutionProvisioningBlockedError(
             "task_image_preparation_pending", retry_after_seconds=15,

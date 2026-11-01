@@ -27,7 +27,10 @@ from loom.nebius_pool_priority import PoolSubmissionSourceV1
 from loom.nebius_pool_settings import PoolRuntimeSettings
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
 from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
-from loom_execution_capacity_collector.config import PoolCapacityCollectorSettings
+from loom_execution_capacity_collector.config import (
+    CapacityCollectorModeSettings,
+    PoolCapacityCollectorSettings,
+)
 from loom_service.environment_management.deployment import mount_pool_profiles
 from loom_service.pool_management.installation import PoolMachineInstallation
 from loom_service.pool_management.installation_render import mount_machine_token
@@ -43,6 +46,19 @@ class _RetainedPoolCollectorSettings(PoolCapacityCollectorSettings):
             dotenv_settings: PydanticBaseSettingsSource, file_secret_settings: PydanticBaseSettingsSource,
             ) -> tuple[PydanticBaseSettingsSource, ...]:
         return (init_settings,)
+
+
+def _collector_mode_data(data: dict[str, str]) -> dict[str, str]:
+    """Preserve the reviewed cadence without borrowing ambient settings."""
+    prefix = "LOOM_EXECUTION_CAPACITY_COLLECTOR_"
+    values = {key: data.get(prefix + key.upper(), field.default)
+              for key, field in CapacityCollectorModeSettings.model_fields.items()}
+    values["collection_mode"] = "pool"
+    # Every field is explicit so BaseSettings cannot replace a missing retained
+    # value with the operator's environment. Legacy inputs remain one-shot.
+    mode = CapacityCollectorModeSettings(_env_file=None, **values)
+    return {prefix + key.upper(): str(value) for key, value in mode.model_dump(mode="json").items()
+            if value is not None}
 
 
 class PoolCollectorCredential(BaseModel):
@@ -392,11 +408,12 @@ retained for the existing two-file initializer, but now holds observer authority
         supplied = {key.removeprefix(prefix).lower(): value for key, value in config_map["data"].items()}
         legacy = {"target_id", "pool_id", "namespace", "node_label_selector", "control_plane_url", "source",
             "request_attempts", "build_concurrency_limit"}
-        if ("collection_mode" in supplied or not set(supplied) <= set(PoolCapacityCollectorSettings.model_fields) | legacy
+        cadence = set(CapacityCollectorModeSettings.model_fields) - {"collection_mode"}
+        if ("collection_mode" in supplied or not set(supplied) <= set(PoolCapacityCollectorSettings.model_fields) | legacy | cadence
                 or {"management_url", "management_bearer_token_file"} & set(supplied)):
             raise ValueError
         values = {key: field.default for key, field in PoolCapacityCollectorSettings.model_fields.items() if not field.is_required()}
-        values.update({key: value for key, value in supplied.items() if key not in legacy})
+        values.update({key: value for key, value in supplied.items() if key not in legacy | cadence})
         values.update(pool_id=spec.pool_id, management_url=management_origin,
             nebius_credentials_file=paths[prefix + "NEBIUS_CREDENTIALS_FILE"],
             management_bearer_token_file=paths[prefix + "CONTROL_PLANE_BEARER_TOKEN_FILE"])
@@ -419,7 +436,7 @@ retained for the existing two-file initializer, but now holds observer authority
         config_name = "loom-pool-collector-" + spec.operation_id.hex
         data = {prefix + key.upper(): str(value) for key, value in settings.model_dump(mode="json").items()
             if value is not None and key not in {"nebius_credentials_file", "management_bearer_token_file"}}
-        data[prefix + "COLLECTION_MODE"] = "pool"
+        data.update(_collector_mode_data(config_map["data"]))
         configuration = {"apiVersion": "v1", "kind": "ConfigMap", "immutable": True,
             "metadata": {"name": config_name, "namespace": namespace, "labels": {
                 "loom.nebius/management-installation": str(spec.installation_id), "loom.nebius/pool-operation": str(spec.operation_id)}},
