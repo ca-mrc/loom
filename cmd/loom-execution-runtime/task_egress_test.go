@@ -364,3 +364,43 @@ func TestTaskEgressDiagnosticsUseDeclaredBundleInventory(t *testing.T) {
 		}
 	}
 }
+
+func TestTaskEgressPreservesFixedHandshakeRejections(t *testing.T) {
+	for _, reason := range []string{"task_egress_capacity_exceeded", "task_egress_timeout", "task_egress_draining", "task_egress_request_invalid", "PRIVATE_UPSTREAM_SENTINEL"} {
+		t.Run(reason, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ws, err := websocket.Accept(w, r, nil)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				defer ws.CloseNow()
+				if _, _, err := ws.Read(r.Context()); err != nil {
+					return
+				}
+				_ = ws.Close(websocket.StatusPolicyViolation, reason)
+			}))
+			defer server.Close()
+			root, _ := url.Parse(server.URL + "/internal/service-execution")
+			tokenFile := filepath.Join(t.TempDir(), "pod-token")
+			if err := os.WriteFile(tokenFile, []byte("synthetic-pod-token"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			broker := &workloadBroker{podTokenFile: tokenFile, root: root, identity: workloadIdentity{LeaseID: "lease-one", Generation: 1, ExecutionRole: "attempt"}, client: server.Client()}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			connection, err := broker.taskTunnel(ctx, webDestination{"packages.example.org", "https"}, "sha256:synthetic", time.Now().Add(time.Minute), "verifier")
+			if connection != nil {
+				connection.Close()
+				t.Fatal("rejected handshake returned a tunnel")
+			}
+			expected := reason
+			if reason == "PRIVATE_UPSTREAM_SENTINEL" {
+				expected = "task_egress_gateway_unavailable"
+			}
+			if err == nil || err.Error() != expected {
+				t.Fatalf("fixed rejection lost: got %v want %s", err, expected)
+			}
+		})
+	}
+}

@@ -157,13 +157,27 @@ address configuration before authorizing tunnels. Gateway-only defaults and task
 Pod network restrictions are unchanged. See [sandbox isolation](sandbox-isolation.md#declared-hosted-task-web-egress)
 for configuration, task declarations, transport bounds and acceptance limits.
 
+The public TLS proxy uses absolute cluster service names (including the final
+DNS dot) for the Service and Gateway upstreams. Its Web Pod resolver waits one
+second per DNS attempt, retaining two attempts, within the unchanged three-second
+Caddy dial budget. This lets the existing second DNS attempt recover a transient
+lost reply without spending the budget on search-domain expansion. Persistent
+DNS failure still rejects the request; total read deadlines remain unchanged.
+The Gateway Pod uses the same resolver options within its existing five-second
+Task DNS deadline. Each Task connection still resolves and validates its public
+addresses; no address or authorization result is cached. The deployment renderer
+persists both Pod settings and absolute proxy upstream names across releases.
+
 Rejected or timed-out tunnels log a fixed outcome, lease identity, handshake
-stage, total and stage elapsed milliseconds, and HTTP status at WARNING. Peer closure before the
-relay starts also uses WARNING, so failed handshakes remain visible under the
+stage, total and stage elapsed milliseconds, and HTTP status at WARNING. Peer
+closure before relay starts also uses WARNING, so failed handshakes remain visible under the
 normal logging configuration. Successful tunnels and ordinary relay closure stay
 at INFO. This diagnostic logs no destination, token, exception detail or payload;
 lease identities are syntactically validated before early rejection is logged.
-It changes neither authorization, DNS resolution, deadlines nor connection limits.
+The runtime preserves fixed timeout, draining and invalid-request handshake
+reasons as well as destination/identity/capacity rejections. Unknown close
+reasons remain generic. Authorization, total deadlines and connection limits
+retain their existing behavior.
 
 Tunnel shutdown releases the connection slot and drain count before sending the
 final WebSocket close. A peer that has already disconnected can make Starlette

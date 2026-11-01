@@ -1148,7 +1148,7 @@ def test_regional_public_routes_preserve_exact_model_and_broker_boundaries(
     assert routes[3]["match"] == [{"path": ["/api/v1/*"]}]
     assert routes[0]["handle"][0]["flush_interval"] == -1
     assert routes[0]["handle"][0]["upstreams"] == [
-        {"dial": f"loom-llm-gateway.{config['namespace']}.svc:9100"}
+        {"dial": f"loom-llm-gateway.{config['namespace']}.svc.cluster.local.:9100"}
     ]
 
 
@@ -1315,7 +1315,7 @@ def test_regional_task_egress_uses_existing_authenticated_broker_route(regional_
     routes = caddy['apps']['http']['servers']['public']['routes'][0]['handle'][-1]['routes']
     broker = routes[0]
     assert broker['match'] == [{'path': ['/internal/service-execution/*']}]
-    assert broker['handle'][0]['upstreams'] == [{'dial': f"loom-llm-gateway.{config['namespace']}.svc:9100"}]
+    assert broker['handle'][0]['upstreams'] == [{'dial': f"loom-llm-gateway.{config['namespace']}.svc.cluster.local.:9100"}]
     assert broker['handle'][0]['flush_interval'] == -1
 
 
@@ -1403,6 +1403,12 @@ def test_operator_renders_pinned_candidate_in_separate_process(
     assert pg['resources']['limits'] == {'cpu': '3', 'memory': '2Gi'}
     assert 'shared_buffers=512MB' in pg['args']
     assert (args.render_dir / '40-services.yaml').is_file()
+    services = list(yaml.safe_load_all((args.render_dir / '40-services.yaml').read_text()))
+    for name in ("loom-web", "loom-llm-gateway"):
+        pod = next(doc for doc in services if doc['metadata']['name'] == name)['spec']['template']['spec']
+        assert pod['dnsConfig'] == {"options": [
+            {"name": "timeout", "value": "1"}, {"name": "attempts", "value": "2"},
+        ]}
 
 
 @pytest.mark.parametrize("concurrency", [1, 2, 4, 8])
@@ -1467,3 +1473,33 @@ def test_postgres_settings_reject_invalid_or_unrelated_changes(platform_inputs, 
     config['postgres_settings'] = settings
     with pytest.raises(NebiusPlatformError, match='postgres_settings'):
         build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
+@pytest.mark.parametrize("inputs_fixture", ["platform_inputs", "regional_inputs"])
+def test_public_proxy_dns_retry_fits_existing_dial_budget(request, inputs_fixture):
+    config, candidate, profile = request.getfixturevalue(inputs_fixture)
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    web = next(doc for doc in files["40-services.yaml"] if doc["metadata"]["name"] == "loom-web")
+    options = {x["name"]: x["value"] for x in web["spec"]["template"]["spec"].get("dnsConfig", {}).get("options", [])}
+    assert options.get("timeout") == "1" and options.get("attempts") == "2"
+    gateway = next(doc for doc in files["40-services.yaml"] if doc["metadata"]["name"] == "loom-llm-gateway")
+    gateway_options = {x["name"]: x["value"] for x in gateway["spec"]["template"]["spec"].get("dnsConfig", {}).get("options", [])}
+    assert gateway_options == options
+    caddy = json.loads(files["10-config-network.yaml"][0]["data"]["public-tls.json"])
+    def proxies(value):
+        if isinstance(value, dict):
+            if value.get("handler") == "reverse_proxy":
+                yield value
+            for child in value.values():
+                yield from proxies(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from proxies(child)
+    internal = [proxy for proxy in proxies(caddy)
+                if any(x["dial"].endswith((":8090", ":9100")) for x in proxy.get("upstreams", []))]
+    assert internal
+    for proxy in internal:
+        assert all(x["dial"].endswith((".svc.cluster.local.:8090", ".svc.cluster.local.:9100"))
+                   for x in proxy["upstreams"])
+        assert proxy["transport"]["dial_timeout"] == "3s"
+        assert proxy["transport"]["read_timeout"] == "300s"
