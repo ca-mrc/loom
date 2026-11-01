@@ -41,6 +41,25 @@ local JSONL, object storage, and the Control Plane `trial_events` mirror see it.
 This matters because the durable event table uses `(trial_id, seq)` as its
 idempotency key.
 
+### Native monitoring previews
+
+The trusted native controller publishes provisional phase and declared trajectory
+events separately from the canonical archive. Adjacent phase boundaries coalesce
+on the existing one-second preview tick; shutdown drains their ordered tail.
+Queue, event and byte limits, replay identity and sequence checks still apply.
+Phase execution stays nonblocking and shutdown retains its existing bounded
+drain. Canonical publication remains the final source of trajectory and
+accounting data.
+
+The Gateway cancels unfinished native monitoring requests when their caller
+disconnects, including the bodyless ledger binding read and preview event POST.
+This releases pending authorization and database work after the controller's
+short request deadline. A completed response retains its cleanup, just as model
+forwarding does. `loom_gateway_native_monitoring_requests_total` records fixed
+binding/event, outcome and observed HTTP-status labels, including caller
+disconnects; it contains no event content or credentials. HTTP completion is
+distinct from proof that a client received the response.
+
 ### Event kinds (snake_case)
 
 | Kind | Emitted by | Carries |

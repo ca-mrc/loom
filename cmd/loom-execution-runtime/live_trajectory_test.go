@@ -66,6 +66,56 @@ func fastLiveOptions() nativeTrajectoryOptions {
 	return o
 }
 
+func TestNativeTrajectoryCoalescesAdjacentBoundariesAndFlushesOnClose(t *testing.T) {
+	var requests atomic.Int32
+	var mu sync.Mutex
+	var received []map[string]any
+	broker, stop := liveTestBroker(t, func(body nativeTrajectoryRequest) {
+		requests.Add(1)
+		mu.Lock()
+		defer mu.Unlock()
+		for _, raw := range body.Events {
+			var event map[string]any
+			if err := json.Unmarshal(raw, &event); err != nil {
+				t.Error(err)
+			}
+			received = append(received, event)
+		}
+	})
+	defer stop()
+	options := fastLiveOptions()
+	// No periodic flush occurs: adjacent boundaries should wait for the
+	// existing cadence, while close must still deliver their ordered tail.
+	options.pollInterval = time.Hour
+	options.stopTimeout = 2 * time.Second
+	workspace := t.TempDir()
+	p := testPlan(workspace, phase{Role: "agent", Argv: []string{"/bin/true"}, WorkingDirectory: workspace, TimeoutSeconds: 5})
+	p.MaxArtifactBytes = 1024 * 1024
+	u := startNativeTrajectory(context.Background(), broker, p, workspace, options)
+	defer u.close()
+	for _, role := range []string{"setup", "agent", "verifier"} {
+		u.phaseBoundary(role, time.Now().Add(time.Minute))
+		u.phaseBoundary(role, time.Time{})
+	}
+	// Channel length is safe to inspect. Wait until the run loop has consumed
+	// the boundaries, so an immediate stop cannot hide per-boundary requests.
+	waitLive(t, func() bool { return len(u.boundaries) == 0 })
+	u.close()
+	if requests.Load() != 1 {
+		t.Fatalf("adjacent boundaries made %d requests, want one ordered batch", requests.Load())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(received) != 7 {
+		t.Fatalf("lost phase events: got %d, want trial start and six boundaries", len(received))
+	}
+	for i, event := range received {
+		if event["seq"] != float64(i) {
+			t.Fatalf("sequence %d changed: %v", i, event["seq"])
+		}
+	}
+}
+
 func TestNativeTrajectoryStreamsPhaseAndPartialAppendBeforeProcessFinishes(t *testing.T) {
 	workspace, output := t.TempDir(), t.TempDir()
 	directory := filepath.Join(workspace, ".loom", "agent")

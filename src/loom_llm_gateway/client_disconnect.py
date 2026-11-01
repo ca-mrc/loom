@@ -1,10 +1,11 @@
-"""Cancel abandoned model forwarding without competing for request-body reads."""
+"""Cancel abandoned forwarding and native monitoring without stealing bodies."""
 
 from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
 
+from prometheus_client import Counter
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 _MODEL_PATHS = frozenset(
@@ -18,6 +19,15 @@ _MODEL_PATHS = frozenset(
         "/harbor-baseline/v1/chat/completions",
     }
 )
+_NATIVE_MONITORING_PATHS = frozenset({
+    ("POST", "/internal/service-execution/trajectory-events"),
+    ("GET", "/internal/service-execution/llm-calls"),
+})
+_NATIVE_MONITORING_REQUESTS = Counter(
+    "loom_gateway_native_monitoring_requests_total",
+    "Native monitoring HTTP outcomes; completion is distinct from client delivery.",
+    ("kind", "outcome", "http_status"),
+)
 
 
 class ModelClientDisconnectMiddleware:
@@ -25,8 +35,10 @@ class ModelClientDisconnectMiddleware:
 
     ASGI does not automatically cancel a non-streaming handler when its HTTP
     caller disappears. Close its upstream transport promptly instead of leaving
-    inference active until the signed deadline. The request task is awaited so
-    its durable dispatch/accounting cleanup completes before we return.
+    inference active until the signed deadline. Native monitoring callers also
+    have short deadlines: abandoned previews must release auth/DB work rather
+    than contend with execution. The request task is awaited so its transaction
+    and durable dispatch/accounting cleanup completes before we return.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -34,20 +46,30 @@ class ModelClientDisconnectMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         path = scope.get("path", "")
+        method = scope.get("method", "")
+        native_monitoring = (method, path) in _NATIVE_MONITORING_PATHS
         if (
             scope["type"] != "http"
-            or scope.get("method") != "POST"
             or not (
-                path in _MODEL_PATHS
-                or path.startswith("/google/v1beta/models/")
-                or path.startswith("/v1beta/models/")
+                native_monitoring
+                or (method == "POST" and (
+                    path in _MODEL_PATHS
+                    or path.startswith("/google/v1beta/models/")
+                    or path.startswith("/v1beta/models/")
+                ))
             )
         ):
             await self.app(scope, receive, send)
             return
         body_consumed = asyncio.Event()
+        if native_monitoring and method == "GET":
+            # This known bodyless ledger read never consumes a body. The
+            # watcher owns its receive stream from the beginning; POST/model
+            # handlers retain exclusive ownership until their body is complete.
+            body_consumed.set()
         disconnected = asyncio.Event()
         response_complete = False
+        response_status = 0
 
         async def receive_body_or_disconnect() -> Message:
             # Until the application consumes the final body frame, it remains
@@ -61,8 +83,10 @@ class ModelClientDisconnectMiddleware:
             return {"type": "http.disconnect"}
 
         async def send_response(message: Message) -> None:
-            nonlocal response_complete
+            nonlocal response_complete, response_status
             await send(message)
+            if message["type"] == "http.response.start":
+                response_status = message["status"]
             if message["type"] == "http.response.body" and not message.get("more_body", False):
                 # Normal response completion can itself cause ASGI transports
                 # to report disconnect. Do not interrupt later accounting.
@@ -94,3 +118,14 @@ class ModelClientDisconnectMiddleware:
             watcher.cancel()
             with suppress(asyncio.CancelledError):
                 await watcher
+            if native_monitoring:
+                outcome = (
+                    "completed" if response_complete
+                    else "client_disconnected" if disconnected.is_set()
+                    else "cancelled" if request.cancelled()
+                    else "error"
+                )
+                _NATIVE_MONITORING_REQUESTS.labels(
+                    kind="binding" if method == "GET" else "events",
+                    outcome=outcome, http_status=str(response_status),
+                ).inc()
