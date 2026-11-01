@@ -106,5 +106,5 @@ async def task_egress(websocket: WebSocket) -> None:
         logger.info("task_egress outcome=%s lease=%s", outcome, lease_key)
         try:
             await websocket.close(code=1000 if outcome == "task_egress_completed" else 1008, reason=outcome)
-        except (RuntimeError, OSError):
+        except (RuntimeError, OSError, WebSocketDisconnect):
             pass

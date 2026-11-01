@@ -12,7 +12,7 @@ from uuid import uuid4
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from loom.execution_runtime_contract import TASK_EGRESS_OUTPUT
 from loom.pipeline.keys import canonical_digest
@@ -39,8 +39,29 @@ def gateway(monkeypatch):
     return app, headers, authorize
 
 
-def test_gateway_relays_real_socket_bytes_and_releases_drain(monkeypatch) -> None:
+@pytest.mark.parametrize("peer_closed", [False, True])
+def test_gateway_relays_real_socket_bytes_and_releases_drain(monkeypatch, peer_closed) -> None:
     app, headers, authorize = gateway(monkeypatch)
+    if peer_closed:
+        original_close = WebSocket.close
+
+        async def close_after_transport_disconnect(self, *args, **kwargs):
+            original_send = self._send
+
+            async def disconnected_send(message):
+                if message["type"] == "websocket.close":
+                    raise OSError("peer already disconnected")
+                await original_send(message)
+
+            self._send = disconnected_send
+            try:
+                # Exercise Starlette's real OSError -> WebSocketDisconnect
+                # translation at the ASGI transport boundary.
+                await original_close(self, *args, **kwargs)
+            finally:
+                self._send = original_send
+
+        monkeypatch.setattr(WebSocket, "close", close_after_transport_disconnect)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen()

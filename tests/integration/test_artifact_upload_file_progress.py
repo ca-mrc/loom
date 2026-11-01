@@ -144,17 +144,17 @@ async def test_interleaved_file_progress_and_terminal_fence(
                 idempotency_key="recover-lost-completion",
                 request_digest=digest(b"recovery"),
             )
-            original_save = repository.save_file
+            original_save = repository.save_files
             interrupted = False
 
-            async def lose_completion(state, *, file_index):  # type: ignore[no-untyped-def]
+            async def lose_completion(state, *, file_indexes):  # type: ignore[no-untyped-def]
                 nonlocal interrupted
-                if not interrupted and state.files[file_index].verified is not None:
+                if not interrupted and any(state.files[i].verified is not None for i in file_indexes):
                     interrupted = True
                     raise OSError("object completed before durable response")
-                await original_save(state, file_index=file_index)
+                await original_save(state, file_indexes=file_indexes)
 
-            monkeypatch.setattr(repository, "save_file", lose_completion)
+            monkeypatch.setattr(repository, "save_files", lose_completion)
             recovery_auth = UploadAuthV1(upload_token=recovery.upload_token)
             with pytest.raises(OSError):
                 await service.write_small_files(
