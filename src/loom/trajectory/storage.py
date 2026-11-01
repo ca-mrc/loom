@@ -283,6 +283,12 @@ class MultipartUpload:
     parts: list[tuple[int, str]] = field(default_factory=list)  # (part_number, etag)
     write_identity: str | None = None
 
+    def record_part(self, part_number: int, etag: str) -> None:
+        # S3 replaces a part on retransmission. A resumed handle may already
+        # contain an accepted part whose application receipt was lost.
+        self.parts[:] = [part for part in self.parts if part[0] != part_number]
+        self.parts.append((part_number, etag))
+
 
 @dataclass(frozen=True)
 class ObjectReadback:
@@ -519,8 +525,10 @@ class FakeObjectStore:
         part_number: int,
         body: bytes,
     ) -> None:
-        self._multiparts[upload.upload_id].append((part_number, body))
-        upload.parts.append((part_number, f"etag-{part_number}"))
+        parts = self._multiparts[upload.upload_id]
+        parts[:] = [part for part in parts if part[0] != part_number]
+        parts.append((part_number, body))
+        upload.record_part(part_number, f"etag-{part_number}")
 
     async def complete_multipart_upload(self, upload: MultipartUpload) -> str:
         parts = sorted(self._multiparts.pop(upload.upload_id), key=lambda p: p[0])
@@ -974,7 +982,7 @@ class MinioObjectStore:
             return cast(str, resp["ETag"])
 
         etag = await self._run_client_call("upload_part", _do)
-        upload.parts.append((part_number, etag))
+        upload.record_part(part_number, etag)
 
     async def complete_multipart_upload_with_metadata(
         self,
@@ -1120,7 +1128,7 @@ class MinioObjectStore:
                 return cast(str, response["ETag"])
 
             etag = await self._run_client_call("upload_part_stream", _do)
-            upload.parts.append((part_number, etag))
+            upload.record_part(part_number, etag)
 
     async def _create_stream_upload(self, *, bucket: str, key: str) -> MultipartUpload:
         # Initiation is not safely replayable: a timed-out SDK call can still

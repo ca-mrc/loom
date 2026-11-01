@@ -1092,12 +1092,24 @@ claim of measured production throughput.
 The gateway performs current Pod/lease authorization per batch and bounds raw
 request bytes before JSON decoding. Upload-token, lease/session identity,
 generation fencing, readback and final publication checks remain in place.
-SQL progress saves lock the session, merge only the addressed file and derive
-the aggregate from persisted files. Lifecycle saves use the existing version
+SQL progress saves lock the session, merge only the addressed files and derive
+the aggregate from persisted files. A small-file batch first persists all
+multipart IDs and part receipts in one transaction, before completing any
+objects. A second transaction persists the verified-file group. An interrupted
+phase saves its completed prefix; replay resumes the durable uploads and recovers
+lost completion responses. Thus eleven files use two progress transactions
+instead of twenty-two, without changing the object-store protocol or holding a
+database transaction during S3 I/O. Legacy multipart requests keep their
+individual progress transactions.
+
+Part retransmission replaces the same part number in a resumed upload's local
+ETag list, matching S3 semantics. An aborted session remains readable without
+trying to recover deleted multipart data, and cannot re-enter upload state.
+Lifecycle saves use the existing version
 column to reject obsolete whole-session snapshots. A stale file request cannot
 revive an aborted/committed session or overwrite another file's receipts.
 Upload observations include separate `database_pool` checkout and `database`
-work intervals for `load_session`, `save_file` and `save_session`, nested under
+work intervals for `load_session`, `save_file`, `save_files` and `save_session`, nested under
 processing. These intervals must not be added again to their parent durations.
 
 Command-handler concurrency is one local knob. Qualify the whole pipeline with

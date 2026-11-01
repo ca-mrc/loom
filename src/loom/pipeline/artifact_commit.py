@@ -537,6 +537,7 @@ class ArtifactCommitRepositoryV1(Protocol):
     async def get(self, session_id: UUID) -> _SessionState: ...
     async def save(self, session: _SessionState) -> None: ...
     async def save_file(self, session: _SessionState, *, file_index: int) -> None: ...
+    async def save_files(self, session: _SessionState, *, file_indexes: Sequence[int]) -> None: ...
     async def active(self) -> Iterable[_SessionState]: ...
 
 
@@ -569,10 +570,18 @@ class InMemoryArtifactCommitRepository:
         self.sessions[session.id] = session
 
     async def save_file(self, session: _SessionState, *, file_index: int) -> None:
+        await self.save_files(session, file_indexes=[file_index])
+
+    async def save_files(self, session: _SessionState, *, file_indexes: Sequence[int]) -> None:
         current = await self.get(session.id)
         if current.state not in {"uploading", "uploaded"}:
             raise ArtifactCommitError("session_not_uploading")
-        current.files[file_index] = session.files[file_index]
+        if not file_indexes or len(set(file_indexes)) != len(file_indexes) or any(
+            index < 0 or index >= len(current.files) for index in file_indexes
+        ):
+            raise ArtifactCommitError("file_not_found")
+        for file_index in file_indexes:
+            current.files[file_index] = session.files[file_index]
         if all(item.verified is not None for item in current.files):
             current.state = "uploaded"
             current.actual_total_bytes = sum(item.verified.size_bytes for item in current.files if item.verified)
@@ -873,6 +882,7 @@ class ArtifactCommitService:
     async def _write_part(
         self, *, session: _SessionState, file_index: int, part_number: int,
         content_length: int, content_sha256: str, body: AsyncIterator[bytes],
+        persist_progress: bool = True,
     ) -> PartReceiptV1:
         if session.state != "uploading" or not 0 <= file_index < len(session.files):
             raise ArtifactCommitError("session_not_uploading")
@@ -932,17 +942,17 @@ class ArtifactCommitService:
         file_state.receipts[part_number] = receipt
         ARTIFACT_PARTS.labels(session.producer.commit_kind).inc()
         session.updated_at = self._now()
-        try:
-            await self._repository.save_file(session, file_index=file_index)
-        except ArtifactCommitError:
-            # A rejected new upload was never attached by the repository. Do
-            # not leave it behind on a concurrent-file conflict or abort. An
-            # ambiguous database/network error is deliberately not handled here.
-            if created_upload:
-                await self._store.abort_multipart_upload(file_state.upload)
-            raise
+        if persist_progress:
+            try:
+                await self._repository.save_file(session, file_index=file_index)
+            except ArtifactCommitError:
+                # An explicitly rejected new upload was never attached. An
+                # ambiguous database/network error cannot establish that fact.
+                if created_upload:
+                    await self._store.abort_multipart_upload(file_state.upload)
+                raise
         if (
-            part_number == 1
+            persist_progress and part_number == 1
             and self._multipart_fault_hook is not None
             and isinstance(session.producer, FinalOutputProducerV1)
             and await self._multipart_fault_hook.after_part_persisted(
@@ -994,6 +1004,7 @@ class ArtifactCommitService:
 
     async def _complete_file(
         self, *, session: _SessionState, file_index: int, ordered_parts: list[PartReceiptV1],
+        persist_progress: bool = True,
     ) -> VerifiedFileV1:
         if session.state == "aborted":
             raise ArtifactCommitError("session_not_uploading")
@@ -1003,7 +1014,7 @@ class ArtifactCommitService:
         if file_state.verified is not None:
             if ordered_parts != list(file_state.receipts.values()):
                 raise ArtifactCommitError("file_completion_conflict")
-            if session.state in {"uploading", "uploaded"}:
+            if persist_progress and session.state in {"uploading", "uploaded"}:
                 session.updated_at = self._now()
                 await self._repository.save_file(session, file_index=file_index)
             return file_state.verified
@@ -1040,17 +1051,19 @@ class ArtifactCommitService:
                 item.verified.size_bytes for item in session.files if item.verified
             )
         session.updated_at = self._now()
-        await self._repository.save_file(session, file_index=file_index)
+        if persist_progress:
+            await self._repository.save_file(session, file_index=file_index)
         return file_state.verified
 
     async def write_small_files(
         self, *, session_id: UUID, files: Sequence[tuple[int, bytes]], auth: UploadAuthV1,
     ) -> list[VerifiedFileV1]:
-        """One authorization/snapshot per bounded batch; retain durable file steps.
+        """Persist bounded groups of receipts before completing any objects.
 
-        A response may be lost after any file. Replaying the exact payload skips
-        completed files and resumes multipart receipts, without publishing the
-        session. Large files continue through the streaming multipart protocol.
+        Two metadata transactions replace two per file. Durable multipart IDs
+        still fence aborts and recover lost completions; a failed group saves
+        its completed prefix before propagating the failure. Large files retain
+        their existing streaming protocol and per-part durability.
         """
         if (
             not 1 <= len(files) <= SMALL_FILE_BATCH_MAX_FILES
@@ -1076,35 +1089,69 @@ class ArtifactCommitService:
                 or len(body) > plan.expected_max_bytes
             ):
                 raise ArtifactCommitError("part_digest_mismatch")
+        indexes = [index for index, _ in files]
+        unattached: list[_FileState] = []
+
+        async def persist() -> None:
+            try:
+                await self._repository.save_files(session, file_indexes=indexes)
+            except ArtifactCommitError:
+                # Only an explicit rejection proves new uploads were not
+                # attached. Never abort them on an ambiguous DB response.
+                for state in unattached:
+                    if state.upload is not None:
+                        await self._store.abort_multipart_upload(state.upload)
+                raise
+            unattached.clear()
+
+        # Stage every part, then durably attach all upload IDs/receipts before
+        # any CompleteMultipartUpload can publish an object. Abort/recovery use
+        # precisely the same durable multipart identities as the legacy path.
+        try:
+            for index, payload in files:
+                file_state = session.files[index]
+                previous = file_state.receipts.get(1)
+                known_digest = (
+                    file_state.verified.sha256 if file_state.verified is not None
+                    else previous.sha256 if previous is not None else None
+                )
+                if known_digest is not None and known_digest != digest_bytes(payload):
+                    raise ArtifactCommitError("part_digest_mismatch")
+                if file_state.verified is not None:
+                    continue
+                if file_state.upload is None:
+                    unattached.append(file_state)
+
+                async def stream_body(payload: bytes = payload) -> AsyncIterator[bytes]:
+                    yield payload
+
+                expected_digest = file_state.plan.expected_sha256
+                assert expected_digest is not None
+                await self._write_part(
+                    session=session, file_index=index, part_number=1,
+                    content_length=len(payload), content_sha256=expected_digest,
+                    body=stream_body(), persist_progress=False,
+                )
+        except BaseException:
+            await persist()
+            raise
+        await persist()
+
         result = []
-        for index, payload in files:
-            file_state = session.files[index]
-            previous = file_state.receipts.get(1)
-            known_digest = (
-                file_state.verified.sha256 if file_state.verified is not None
-                else previous.sha256 if previous is not None else None
-            )
-            # A persisted receipt bypasses streaming on replay. Validate its
-            # supplied bytes here; fresh parts use the existing streaming hash.
-            if known_digest is not None and known_digest != digest_bytes(payload):
-                raise ArtifactCommitError("part_digest_mismatch")
-            if file_state.verified is not None:
-                # SQL loading can recover a lost multipart-completion response;
-                # persist that verified recovery before skipping the file.
-                await self._repository.save_file(session, file_index=index)
-                result.append(file_state.verified)
-                continue
-
-            async def stream_body(payload: bytes = payload) -> AsyncIterator[bytes]:
-                yield payload
-
-            expected_digest = file_state.plan.expected_sha256
-            assert expected_digest is not None
-            receipt = await self._write_part(
-                session=session, file_index=index, part_number=1,
-                content_length=len(payload), content_sha256=expected_digest, body=stream_body(),
-            )
-            result.append(await self._complete_file(session=session, file_index=index, ordered_parts=[receipt]))
+        try:
+            for index, _ in files:
+                file_state = session.files[index]
+                if file_state.verified is not None:
+                    result.append(file_state.verified)
+                    continue
+                result.append(await self._complete_file(
+                    session=session, file_index=index,
+                    ordered_parts=[file_state.receipts[1]], persist_progress=False,
+                ))
+        except BaseException:
+            await persist()
+            raise
+        await persist()
         return result
 
     async def read_verified_file(
