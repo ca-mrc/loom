@@ -487,6 +487,21 @@ async def _native_capacity_reservations(
     return result
 
 
+async def _rolling_create_usage(
+    session: AsyncSession, *, target_ids: frozenset[str], current_time: datetime,
+    native: list[_NativeCapacityReservation],
+) -> tuple[int, list[datetime]]:
+    """Shared inclusive rate history; released creates still consume allowance."""
+    count = await session.scalar(select(func.count(ExecutionProvisioningAuthorization.id)).where(
+        ExecutionProvisioningAuthorization.target_id.in_(target_ids),
+        ExecutionProvisioningAuthorization.authorized_at >= current_time - timedelta(minutes=1),
+    ))
+    native_times = [row.reserved_at for row in native
+                    if row.target_id in target_ids
+                    and row.reserved_at >= current_time - timedelta(minutes=1)]
+    return int(count or 0) + len(native_times), native_times
+
+
 async def reserve_execution_provisioning(
     session: AsyncSession,
     *,
@@ -721,13 +736,9 @@ async def admit_capacity_resources(
         ExecutionProvisioningAuthorization.target_id.in_(group.target_ids),
         ExecutionProvisioningAuthorization.authorized_at >= current_time - timedelta(minutes=1),
     )
-    recent_creates = await session.scalar(
-        select(func.count(ExecutionProvisioningAuthorization.id)).where(*rate_history)
+    recent_creates, native_create_times = await _rolling_create_usage(
+        session, target_ids=group.target_ids, current_time=current_time, native=native,
     )
-    native_create_times = [row.reserved_at for row in native
-                          if row.target_id in group.target_ids
-                          and row.reserved_at >= current_time - timedelta(minutes=1)]
-    recent_creates = int(recent_creates or 0) + len(native_create_times)
     waiting_here = sum(row.target_id in group.target_ids for row in waiting) + sum(
         row.target_id in group.target_ids for row in execution_waiting)
     if not already_reserved and recent_creates + waiting_here >= policy.max_create_per_minute:

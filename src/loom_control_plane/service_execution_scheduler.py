@@ -778,6 +778,19 @@ async def run_service_execution_scheduler_loop(
             })
         return lease is not None
 
+    async def wake_rate_heads() -> None:
+        from loom_control_plane.execution_capacity_wait import wake_ready_rate_heads
+
+        # Reservation/remember-wait transactions have released their capacity
+        # locks. This transaction changes only retry eligibility of valid heads.
+        async with session_factory() as session:
+            woken = await wake_ready_rate_heads(
+                session, environment=environment, pool_id=pool_id, now=datetime.now(UTC),
+            )
+            await session.commit()
+        if woken:
+            _LOG.info("service_execution_rate_heads_woken", extra={"heads": woken, "pool_id": pool_id})
+
     while not cancellation_requested():
         try:
             if global_selector is not None:
@@ -788,6 +801,9 @@ async def run_service_execution_scheduler_loop(
                     return
                 if selected is not None:
                     continue
+                await wake_rate_heads()
+                if cancellation_requested():
+                    return
                 await asyncio.sleep(interval_seconds)
                 continue
             async with session_factory() as session:
@@ -827,6 +843,9 @@ async def run_service_execution_scheduler_loop(
                 processed = await reserve_attempt() or processed
             if processed:
                 continue
+            if cancellation_requested():
+                return
+            await wake_rate_heads()
         except asyncio.CancelledError:
             return
         except Exception as exc:

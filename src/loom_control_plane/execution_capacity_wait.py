@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -23,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import (
     Batch,
+    ExecutionCapacityPolicy,
     ServiceExecutionClass,
     ServiceExecutionLease,
     ServiceExecutionTarget,
@@ -79,8 +81,9 @@ class ExecutionCapacityWait:
 
 
 def _candidate_rows(exclude_lease_id: UUID | None = None) -> Select[Any]:
-    # Read under the capacity lock without taking Trial locks: the scheduler
-    # already takes its Trial lock before capacity admission, never the reverse.
+    # Admission reads under its capacity lock without taking additional Trial
+    # locks. Retry wakeups use an advisory snapshot, then lock/recheck a Trial
+    # outside that lock; only normal admission grants authority.
     return (select(
         Trial.id, Trial.task_id, Trial.attempt_count, Trial.execution_route_generation,
         Trial.execution_route_pool_name, Trial.requires_caps, Trial.next_attempt_at,
@@ -241,6 +244,100 @@ async def read_execution_capacity_waits(
             # Do not fetch younger pages once this target's head is known.
             await result.close()
     return list(heads.values()), own_order
+
+
+async def wake_ready_rate_heads(
+    session: AsyncSession, *, environment: str, pool_id: str, now: datetime,
+) -> int:
+    """Reconsider stale rate backoff for validated heads, never grant capacity.
+
+    Run in a fresh scheduler transaction after unsuccessful admission commits.
+    No capacity lock is held while locking Trials. Advisory rate/fairness reads
+    may race; the ordinary reservation must recheck every admission fence.
+    """
+    waiting_target = Trial.scheduling_observation["capacity_wait"]["target_id"].astext
+    future_targets = list((await session.scalars(select(waiting_target)
+        .join(Batch, Batch.id == Trial.batch_id).where(
+        Trial.state == "queued", Trial.cancellation_requested_at.is_(None),
+        Trial.next_attempt_at > now,
+        Trial.requires_caps["worker_pool"].astext == pool_id,
+        Trial.scheduling_observation["reason"].astext == "execution_capacity_create_rate_exceeded",
+        waiting_target.is_not(None),
+        Batch.backend == "nebius", Batch.state.in_(("submitted", "running")),
+    ).distinct())).all())
+    if not future_targets:
+        return 0
+    from loom.nebius_rollout_guard import admission_open
+    from loom_control_plane.execution_capacity import (
+        _native_capacity_reservations,
+        _rolling_create_usage,
+    )
+    from loom_control_plane.execution_capacity_targets import (
+        CapacityTargetGroup,
+        resolve_capacity_targets,
+    )
+    from loom_control_plane.task_image_capacity_wait import read_capacity_waits
+
+    if not await admission_open(session):
+        return 0
+    native = await _native_capacity_reservations(session, current_time=now)
+    usage: dict[str, int] = {}
+    eligible: dict[str, tuple[CapacityTargetGroup, ExecutionCapacityPolicy]] = {}
+    # A full rate window cannot wake anything. Avoid reading rich Task/profile
+    # contexts on those idle polls; only an available owner needs head validation.
+    for target_id in future_targets:
+        target = await session.get(ServiceExecutionTarget, target_id)
+        if target is None or target.environment != environment or target.logical_pool_id != pool_id:
+            continue
+        try:
+            group = await resolve_capacity_targets(session, target.id)
+        except ValueError:
+            continue  # Disposable hints cannot repair a changed target binding.
+        policy = await session.get(ExecutionCapacityPolicy, group.owner.id)
+        if policy is None or not policy.enabled:
+            continue
+        if group.owner.id not in usage:
+            usage[group.owner.id], _ = await _rolling_create_usage(
+                session, target_ids=group.target_ids, current_time=now, native=native,
+            )
+        if usage[group.owner.id] < policy.max_create_per_minute:
+            eligible[target.id] = group, policy
+    if not eligible:
+        return 0
+    heads, _ = await read_execution_capacity_waits(session, now=now)
+    native_waits, _ = await read_capacity_waits(session, now=now)
+    woken = 0
+    for head in sorted(heads, key=lambda item: item.order):
+        if head.target_id not in eligible:
+            continue
+        group, policy = eligible[head.target_id]
+        older = sum(item.target_id in group.target_ids and item.order < head.order for item in heads)
+        older += sum(item.target_id in group.target_ids and (
+            item.first_waited_at, f"task-image-wait:{item.materialization_id}:{item.lease_epoch}"
+        ) < head.order for item in native_waits)
+        if usage[group.owner.id] + older >= policy.max_create_per_minute:
+            continue
+        trial = await session.scalar(select(Trial).where(
+            Trial.id == head.trial_id, Trial.state == "queued",
+            Trial.cancellation_requested_at.is_(None), Trial.next_attempt_at > now,
+            Trial.scheduling_observation["reason"].astext == "execution_capacity_create_rate_exceeded",
+        ).with_for_update(skip_locked=True).execution_options(populate_existing=True))
+        if trial is None:
+            continue
+        # Revalidate after the nonblocking Trial lock: cancellation, routing,
+        # image/source changes or a renewed wait must not revive an old head.
+        row = (await session.execute(_candidate_rows().where(Trial.id == trial.id))).mappings().one_or_none()
+        payload = (trial.scheduling_observation or {}).get("capacity_wait")
+        current = await _eligible(session, row, payload, now) if row is not None else None
+        if current is None or current != head:
+            continue
+        observation = deepcopy(trial.scheduling_observation or {})
+        observation["capacity_wait"]["retry_at"] = now.isoformat()
+        # Preserve first_waited_at, renewal/expiry and immutable input fences.
+        trial.next_attempt_at = now
+        trial.scheduling_observation = observation
+        woken += 1
+    return woken
 
 
 async def remember_execution_capacity_wait(
