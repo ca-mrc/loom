@@ -137,7 +137,8 @@ from loom_control_plane.service_execution_output import (
     ServiceExecutionPeerV1,
     authorize_service_execution_peer,
     mint_service_execution_peer_token,
-    resolve_service_execution_input,
+    read_service_execution_input,
+    resolve_service_execution_input_source,
 )
 from loom_control_plane.service_execution_scheduler import (
     reserve_next_service_execution,
@@ -5901,14 +5902,12 @@ async def test_service_execution_input_is_resolved_from_persisted_task_binding(
         async with sessions() as session:
             persisted = await session.get(ServiceExecutionLease, lease.id)
             assert persisted is not None
-            resolved = await resolve_service_execution_input(
-                session,
-                lease=persisted,
-                store=store,
-                artifacts_bucket="artifacts",
+            source = await resolve_service_execution_input_source(
+                session, lease=persisted, artifacts_bucket="artifacts",
             )
-            assert resolved.manifest == manifest
-            assert resolved.prefix == "task-bundles/example/"
+        resolved = await read_service_execution_input(source, store=store)
+        assert resolved.manifest == manifest
+        assert resolved.prefix == "task-bundles/example/"
 
         await store.put_object(
             bucket="artifacts",
@@ -5918,13 +5917,11 @@ async def test_service_execution_input_is_resolved_from_persisted_task_binding(
         async with sessions() as session:
             persisted = await session.get(ServiceExecutionLease, lease.id)
             assert persisted is not None
-            with pytest.raises(ServiceExecutionBrokerError, match="task_input_manifest_drift"):
-                await resolve_service_execution_input(
-                    session,
-                    lease=persisted,
-                    store=store,
-                    artifacts_bucket="artifacts",
-                )
+            source = await resolve_service_execution_input_source(
+                session, lease=persisted, artifacts_bucket="artifacts",
+            )
+        with pytest.raises(ServiceExecutionBrokerError, match="task_input_manifest_drift"):
+            await read_service_execution_input(source, store=store)
     finally:
         await engine.dispose()
 
