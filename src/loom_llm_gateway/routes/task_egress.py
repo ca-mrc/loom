@@ -103,7 +103,10 @@ async def task_egress(websocket: WebSocket) -> None:
             assert isinstance(runtime, TaskEgressRuntime)
             runtime.release(lease_key)
         await drain.leave()
-        logger.info("task_egress outcome=%s lease=%s", outcome, lease_key)
+        level = logging.INFO if outcome in {
+            "task_egress_completed", "task_egress_transport_closed",
+        } else logging.WARNING
+        logger.log(level, "task_egress outcome=%s lease=%s", outcome, lease_key)
         try:
             await websocket.close(code=1000 if outcome == "task_egress_completed" else 1008, reason=outcome)
         except (RuntimeError, OSError, WebSocketDisconnect):

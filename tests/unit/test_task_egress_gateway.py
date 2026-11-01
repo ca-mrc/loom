@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import socket
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -37,6 +40,77 @@ def gateway(monkeypatch):
         "X-Loom-Execution-Role": "attempt", "X-Loom-Runtime-Contract-SHA256": lease.runtime_contract_sha256,
         "X-Loom-Phase-Deadline": lease.deadline_at.isoformat()}
     return app, headers, authorize
+
+
+def test_gateway_dns_and_real_tunnel_progress_during_blocked_storage(monkeypatch) -> None:
+    from loom.trajectory.storage import MinioObjectStore
+
+    app, headers, _authorize = gateway(monkeypatch)
+    entered = threading.Event()
+    release = threading.Event()
+    original_connect = asyncio.open_connection
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.settimeout(10)
+
+    def upstream():
+        connection, _ = listener.accept()
+        with connection:
+            assert connection.recv(100) == b"request-bytes"
+            connection.sendall(b"package-bytes")
+
+    thread = threading.Thread(target=upstream)
+    thread.start()
+
+    async def pinned_connect(host, port, **kwargs):
+        assert host == "1.1.1.1" and port == 443
+        return await original_connect(*listener.getsockname(), **kwargs)
+
+    def public_dns(host, port, **_kwargs):
+        assert host == policy().destinations[0].host and port == 443
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 443))]
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
+        store = MinioObjectStore(
+            endpoint_url="http://127.0.0.1:9", access_key="synthetic-local",
+            secret_key="synthetic-local", operation_timeout=15, operation_attempts=1,
+        )
+
+        def blocked_sdk(_client):
+            entered.set()
+            assert release.wait(12)
+
+        storage = asyncio.create_task(store._run_client_call("HeadObject", blocked_sdk))
+        try:
+            while not entered.is_set():
+                await asyncio.sleep(0.001)
+            yield
+            assert not storage.done()
+        finally:
+            release.set()
+            await storage
+            store.close()
+
+    app.router.lifespan_context = lifespan
+    monkeypatch.setattr(socket, "getaddrinfo", public_dns)
+    monkeypatch.setattr(asyncio, "open_connection", pinned_connect)
+    try:
+        with TestClient(app) as client, client.websocket_connect(
+            "/internal/service-execution/task-egress", headers=headers,
+        ) as ws:
+            ws.send_json(policy().destinations[0].model_dump())
+            assert ws.receive_json() == {"status": "ready"}
+            ws.send_bytes(b"request-bytes")
+            assert ws.receive_bytes() == b"package-bytes"
+    finally:
+        listener.close()
+        thread.join(timeout=12)
+    assert not thread.is_alive()
+    assert not app.state.task_egress.connections
+    assert ensure_drain_state(app).in_flight == 0
 
 
 @pytest.mark.parametrize("peer_closed", [False, True])
@@ -132,11 +206,11 @@ def test_public_web_dials_a_host_that_is_not_on_an_allowlist(monkeypatch) -> Non
     ("host", "task_egress_destination_denied"), ("disabled", "task_egress_unavailable"),
     ("expired", "task_egress_deadline"), ("drain", "task_egress_unavailable"),
 ])
-def test_gateway_rejects_before_any_dial(monkeypatch, mode, reason) -> None:
+def test_gateway_rejects_before_any_dial(monkeypatch, caplog, mode, reason) -> None:
     app, headers, authorize = gateway(monkeypatch)
     destination = policy().destinations[0].model_dump()
     if mode == "identity":
-        authorize.side_effect = HTTPException(status_code=403)
+        authorize.side_effect = HTTPException(status_code=403, detail="PRIVATE_PAYLOAD_SENTINEL")
     elif mode == "digest":
         headers["X-Loom-Runtime-Contract-SHA256"] = "sha256:" + "0" * 64
     elif mode == "host":
@@ -156,6 +230,11 @@ def test_gateway_rejects_before_any_dial(monkeypatch, mode, reason) -> None:
     assert exc.value.reason == reason
     dial.assert_not_called()
     assert ensure_drain_state(app).in_flight == 0
+    messages = [record for record in caplog.records if record.name == task_egress.__name__]
+    assert any(record.levelno == logging.WARNING and f"outcome={reason}" in record.getMessage()
+               for record in messages)
+    assert all("PRIVATE_PAYLOAD_SENTINEL" not in record.getMessage()
+               and "other.example.org" not in record.getMessage() for record in messages)
 
 
 def test_gateway_rechecks_lease_and_closes_active_tunnel(monkeypatch) -> None:
