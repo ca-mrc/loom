@@ -1505,6 +1505,17 @@ their future progress cannot be predicted from create timestamps. This retry
 time grants no capacity: health, rate, placement, quotas and authority are all
 checked again under the shared transaction lock.
 
+The retry timestamp is an estimate from the waiting state at that moment. After
+an unsuccessful admission pass, the scheduler rechecks only valid future-dated
+rate-limited execution heads when shared create history has room for them and older
+native/execution heads. This handles a predecessor leaving or moving to another
+target without sleeping until an obsolete retry time. The update changes retry
+eligibility only, preserving original waiting age, renewal/expiry and input
+fences; normal local or global admission still owns every actual grant. It runs
+in a fresh transaction, respects the rollout pause and skips locked Trials.
+Full rate windows are checked before loading rich Task/profile contexts. Other
+capacity or budget backoffs remain unchanged; no limit or resource is enlarged.
+
 When a current observation lacks an allocatable template sample, admission and
 waiting eligibility read compatible historical observations newest first. The
 reader streams one full inventory at a time and stops at the first compatible

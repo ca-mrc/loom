@@ -18,6 +18,8 @@ from loom_control_plane import service_execution_scheduler as scheduler
     ("selection", True, True),
     ("local_commit", False, False),
     ("local_commit", False, True),
+    ("wakeup_commit", False, False),
+    ("wakeup_commit", True, False),
 ])
 async def test_scheduler_stops_when_readiness_consumes_cancellation(
         monkeypatch, cancel_at, global_mode, selected):
@@ -52,7 +54,8 @@ async def test_scheduler_stops_when_readiness_consumes_cancellation(
         def __init__(self):
             nonlocal sessions
             sessions += 1
-            self.name = ("parent_selection_commit", "verifier_commit", "local_commit")[(sessions - 1) % 3]
+            self.name = ("wakeup_commit" if global_mode else
+                ("parent_selection_commit", "verifier_commit", "local_commit", "wakeup_commit")[(sessions - 1) % 4])
 
         async def __aenter__(self):
             return self
@@ -64,6 +67,9 @@ async def test_scheduler_stops_when_readiness_consumes_cancellation(
             await step(self.name)
 
         async def scalars(self, _query):
+            if self.name == "wakeup_commit":
+                operations.append("rate_head_probe")
+                return SimpleNamespace(all=list)
             operations.append("select_verifier_parents")
             return SimpleNamespace(all=lambda: ["parent-id"])
 
@@ -97,7 +103,12 @@ async def test_scheduler_stops_when_readiness_consumes_cancellation(
             0 if global_mode or cancel_at == "parent_selection_commit" else 1
         )
         if global_mode:
-            assert sessions == 0 and "reserve_local" not in operations
+            assert sessions == (1 if cancel_at == "wakeup_commit" else 0)
+            assert "reserve_local" not in operations
+        if cancel_at == "wakeup_commit":
+            assert operations.count("rate_head_probe") == 1
+        if cancel_at == "local_commit":
+            assert "rate_head_probe" not in operations
         if cancel_at == "verifier_commit":
             assert "selection" not in operations and "reserve_local" not in operations
         if not task.cancelled():

@@ -122,7 +122,9 @@ async def read_capacity_waits(
     claiming_target: ServiceExecutionTarget | None = None,
     claiming_resources: ResourceTotals | None = None,
 ) -> tuple[list[TaskImageCapacityWait], tuple[datetime, str] | None]:
-    """Caller holds capacity lock; older builders precede younger builders.
+    """Admission holds the capacity lock; retry wakeup reads are advisory.
+
+    Older builders precede younger builders at actual admission.
 
     Reading never renews a fence. Only the controller that just validated actual
     claim/render eligibility can renew it. A claim's own savepoint has advanced
