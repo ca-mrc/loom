@@ -753,13 +753,20 @@ def _replace_tree(value: Any, replacements: dict[str, str]) -> Any:
     return value
 
 
+def _connection_dns_config() -> dict[str, Any]:
+    # Keep two attempts inside Caddy's 3s dial and Gateway's 5s DNS deadlines.
+    return {"options": [
+        {"name": "timeout", "value": "1"}, {"name": "attempts", "value": "2"},
+    ]}
+
+
 def public_tls_config(config: dict[str, Any]) -> dict[str, Any]:
     """Native Caddy TLS automation with a valid manual certificate for migration."""
     host, ns = config["public_host"], config["namespace"]
     api_proxy = {
         "handler": "reverse_proxy",
-        "upstreams": [{"dial": f"loom-service.{ns}.svc:8090"}],
-        "transport": {"protocol": "http", "read_timeout": "300s"},
+        "upstreams": [{"dial": f"loom-service.{ns}.svc.cluster.local.:8090"}],
+        "transport": {"protocol": "http", "dial_timeout": "3s", "read_timeout": "300s"},
         "flush_interval": -1,
         "headers": {
             "request": {
@@ -859,7 +866,7 @@ def public_tls_config(config: dict[str, Any]) -> dict[str, Any]:
     }
     if config.get("regional_execution_targets"):
         routes = result["apps"]["http"]["servers"]["public"]["routes"][0]["handle"][-1]["routes"]
-        gateway = dict(api_proxy, upstreams=[{"dial": f"loom-llm-gateway.{ns}.svc:9100"}])
+        gateway = dict(api_proxy, upstreams=[{"dial": f"loom-llm-gateway.{ns}.svc.cluster.local.:9100"}])
         routes[0:0] = [
             {
                 "match": [{"path": ["/internal/service-execution/*"]}],
@@ -1956,6 +1963,7 @@ def _build_platform(
                 "readOnly": True,
             })
         if component == "gateway":
+            pod["dnsConfig"] = _connection_dns_config()
             pod["terminationGracePeriodSeconds"] = 300
             if "task_egress" in config:
                 pod.setdefault("volumes", []).append({
@@ -2034,6 +2042,10 @@ def _build_platform(
         memory="64Mi",
     )
     wpod = web["spec"]["template"]["spec"]
+    # A lost DNS reply must reach the resolver's existing second attempt before
+    # Caddy's three-second dial budget expires. Absolute upstream names avoid
+    # spending that budget probing namespace/search suffixes.
+    wpod["dnsConfig"] = _connection_dns_config()
     wpod["securityContext"].update(runAsUser=101, runAsGroup=101, fsGroup=101)
     wpod["volumes"] = [
         {"name": "public-config", "configMap": {"name": "loom-platform-config"}},

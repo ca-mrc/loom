@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import socket
 import threading
 from datetime import UTC, datetime, timedelta
@@ -40,7 +41,7 @@ def gateway(monkeypatch):
 
 
 @pytest.mark.parametrize("peer_closed", [False, True])
-def test_gateway_relays_real_socket_bytes_and_releases_drain(monkeypatch, peer_closed) -> None:
+def test_gateway_relays_real_socket_bytes_and_releases_drain(monkeypatch, peer_closed, caplog) -> None:
     app, headers, authorize = gateway(monkeypatch)
     if peer_closed:
         original_close = WebSocket.close
@@ -87,6 +88,8 @@ def test_gateway_relays_real_socket_bytes_and_releases_drain(monkeypatch, peer_c
     assert not thread.is_alive()
     assert not app.state.task_egress.connections
     assert ensure_drain_state(app).in_flight == 0
+    assert not any(r.levelno >= logging.WARNING and r.name == task_egress.__name__
+                   for r in caplog.records)
     assert authorize.await_args.kwargs["purpose"] == "token"
 
 
@@ -128,15 +131,18 @@ def test_public_web_dials_a_host_that_is_not_on_an_allowlist(monkeypatch) -> Non
 
 
 @pytest.mark.parametrize("mode,reason", [
-    ("identity", "task_egress_identity_rejected"), ("digest", "task_egress_contract_mismatch"),
+    ("identity", "task_egress_identity_rejected"),
+    ("identity_unavailable", "task_egress_identity_rejected"), ("digest", "task_egress_contract_mismatch"),
     ("host", "task_egress_destination_denied"), ("disabled", "task_egress_unavailable"),
     ("expired", "task_egress_deadline"), ("drain", "task_egress_unavailable"),
 ])
-def test_gateway_rejects_before_any_dial(monkeypatch, mode, reason) -> None:
+def test_gateway_rejects_before_any_dial(monkeypatch, caplog, mode, reason) -> None:
     app, headers, authorize = gateway(monkeypatch)
     destination = policy().destinations[0].model_dump()
     if mode == "identity":
-        authorize.side_effect = HTTPException(status_code=403)
+        authorize.side_effect = HTTPException(status_code=403, detail="PRIVATE_PAYLOAD_SENTINEL")
+    elif mode == "identity_unavailable":
+        authorize.side_effect = HTTPException(status_code=503, detail="PRIVATE_PAYLOAD_SENTINEL")
     elif mode == "digest":
         headers["X-Loom-Runtime-Contract-SHA256"] = "sha256:" + "0" * 64
     elif mode == "host":
@@ -155,6 +161,39 @@ def test_gateway_rejects_before_any_dial(monkeypatch, mode, reason) -> None:
             ws.receive_json()
     assert exc.value.reason == reason
     dial.assert_not_called()
+    assert ensure_drain_state(app).in_flight == 0
+    messages = [record for record in caplog.records if record.name == task_egress.__name__]
+    assert any(record.levelno == logging.WARNING and f"outcome={reason}" in record.getMessage()
+               for record in messages)
+    if mode in {"identity", "identity_unavailable"}:
+        status = 403 if mode == "identity" else 503
+        assert any("stage=authorize" in record.getMessage() and f"http_status={status}" in record.getMessage()
+                   and "lease=" + headers["X-Loom-Execution-Lease-Id"] in record.getMessage()
+                   for record in messages)
+    assert all("PRIVATE_PAYLOAD_SENTINEL" not in record.getMessage()
+               and "other.example.org" not in record.getMessage() for record in messages)
+
+
+@pytest.mark.parametrize("failure,reason", [
+    (TimeoutError(), "task_egress_timeout"),
+    (OSError("PRIVATE_PAYLOAD_SENTINEL"), "task_egress_transport_closed"),
+])
+def test_failed_handshake_logs_connect_stage_and_releases_slot(monkeypatch, caplog, failure, reason):
+    app, headers, _ = gateway(monkeypatch)
+    monkeypatch.setattr(task_egress, "connect_destination", AsyncMock(side_effect=failure))
+    with TestClient(app) as client, pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/internal/service-execution/task-egress", headers=headers) as ws:
+            ws.send_json(policy().destinations[0].model_dump())
+            ws.receive_json()
+    records = [r for r in caplog.records if r.name == task_egress.__name__]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    message = records[0].getMessage()
+    assert f"outcome={reason}" in message and "stage=connect" in message
+    assert "elapsed_ms=" in message and "stage_ms=" in message
+    assert "PRIVATE_PAYLOAD_SENTINEL" not in message
+    assert policy().destinations[0].host not in message
+    assert not app.state.task_egress.connections
     assert ensure_drain_state(app).in_flight == 0
 
 

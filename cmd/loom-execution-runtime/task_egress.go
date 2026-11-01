@@ -317,7 +317,7 @@ func (b *workloadBroker) taskTunnel(ctx context.Context, d webDestination, diges
 		var closed websocket.CloseError
 		if errors.As(err, &closed) {
 			switch closed.Reason {
-			case "destination_dns_failed", "destination_address_denied", "destination_connect_failed", "destination_connect_timeout", "task_egress_destination_denied", "task_egress_not_declared", "task_egress_identity_rejected", "task_egress_unavailable", "task_egress_capacity_exceeded", "task_egress_deadline", "task_egress_contract_mismatch":
+			case "destination_dns_failed", "destination_address_denied", "destination_connect_failed", "destination_connect_timeout", "task_egress_destination_denied", "task_egress_not_declared", "task_egress_identity_rejected", "task_egress_unavailable", "task_egress_capacity_exceeded", "task_egress_deadline", "task_egress_contract_mismatch", "task_egress_timeout", "task_egress_draining", "task_egress_request_invalid":
 				return nil, errors.New(closed.Reason)
 			}
 		}

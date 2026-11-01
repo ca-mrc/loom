@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, WebSocket
@@ -35,6 +36,10 @@ async def task_egress(websocket: WebSocket) -> None:
     acquired = False
     writer = None
     outcome = "task_egress_denied"
+    stage = "validation"
+    started = time.monotonic()
+    stage_started = started
+    http_status = 0
     await websocket.accept()
     await drain.enter()
     try:
@@ -47,7 +52,10 @@ async def task_egress(websocket: WebSocket) -> None:
             generation=websocket.headers.get("x-loom-execution-generation", ""),
             execution_role=websocket.headers.get("x-loom-execution-role", ""),
         )
+        lease_key = str(identity.lease_id)
+        stage, stage_started = "authorize", time.monotonic()
         lease = await _authorize(websocket, identity, purpose="token")
+        stage, stage_started = "policy", time.monotonic()
         plan = ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json)
         if (canonical_digest(plan.canonical_payload()) != lease.runtime_contract_sha256
             or websocket.headers.get("x-loom-runtime-contract-sha256") != lease.runtime_contract_sha256):
@@ -60,8 +68,10 @@ async def task_egress(websocket: WebSocket) -> None:
         if allowed is None:
             raise EgressDeniedError("task_egress_not_declared")
         lease_key = str(lease.id)
+        stage, stage_started = "capacity", time.monotonic()
         runtime.acquire(lease_key)
         acquired = True
+        stage, stage_started = "request", time.monotonic()
         async with asyncio.timeout(5):
             text = await websocket.receive_text()
         if len(text) > 1024:
@@ -75,8 +85,10 @@ async def task_egress(websocket: WebSocket) -> None:
         deadline = min(lease.deadline_at, phase_deadline)
         if deadline <= datetime.now(UTC):
             raise EgressDeniedError("task_egress_deadline")
+        stage, stage_started = "connect", time.monotonic()
         async with asyncio.timeout(min(15, (deadline - datetime.now(UTC)).total_seconds())):
             reader, writer = await connect_destination(destination, runtime.config.protected_cidrs)
+        stage, stage_started = "ready", time.monotonic()
         await websocket.send_json({"status": "ready"})
 
         async def reauthorize() -> None:
@@ -84,11 +96,16 @@ async def task_egress(websocket: WebSocket) -> None:
             if (await drain.snapshot())[1]:
                 raise EgressDeniedError("task_egress_draining")
 
+        stage, stage_started = "relay", time.monotonic()
         await relay(websocket, reader, writer, deadline=deadline, reauthorize=reauthorize)
         outcome = "task_egress_completed"
+    except asyncio.CancelledError:
+        outcome = "task_egress_cancelled"
+        raise
     except EgressDeniedError as exc:
         outcome = str(exc)
-    except HTTPException:
+    except HTTPException as exc:
+        http_status = exc.status_code
         outcome = "task_egress_identity_rejected"
     except (ValidationError, ValueError, KeyError, TypeError):
         outcome = "task_egress_request_invalid"
@@ -103,7 +120,15 @@ async def task_egress(websocket: WebSocket) -> None:
             assert isinstance(runtime, TaskEgressRuntime)
             runtime.release(lease_key)
         await drain.leave()
-        logger.info("task_egress outcome=%s lease=%s", outcome, lease_key)
+        normal_close = outcome == "task_egress_completed" or (
+            outcome in {"task_egress_transport_closed", "task_egress_cancelled"} and stage == "relay"
+        )
+        logger.log(
+            logging.INFO if normal_close else logging.WARNING,
+            "task_egress outcome=%s lease=%s stage=%s elapsed_ms=%d stage_ms=%d http_status=%d",
+            outcome, lease_key, stage, int((time.monotonic() - started) * 1000),
+            int((time.monotonic() - stage_started) * 1000), http_status,
+        )
         try:
             await websocket.close(code=1000 if outcome == "task_egress_completed" else 1008, reason=outcome)
         except (RuntimeError, OSError, WebSocketDisconnect):
