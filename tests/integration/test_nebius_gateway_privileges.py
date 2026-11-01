@@ -42,7 +42,8 @@ from loom.service_execution_materialization import (
 from loom.trajectory.storage import FakeObjectStore
 from loom_control_plane.service_execution_output import (
     VerifiedExecutionPod,
-    resolve_service_execution_input,
+    read_service_execution_input,
+    resolve_service_execution_input_source,
 )
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
@@ -297,11 +298,12 @@ async def test_gateway_reads_frozen_task_input_without_materialization_write_pri
     store.objects[("artifacts", "original/manifest.json")] = manifest_body
     try:
         async with sessions() as session:
-            resolved = await resolve_service_execution_input(
-                session, lease=lease, store=store, artifacts_bucket="artifacts",
+            source = await resolve_service_execution_input_source(
+                session, lease=lease, artifacts_bucket="artifacts",
             )
-            assert resolved.prefix == "original/task/"
-            assert resolved.manifest_body == manifest_body
+        resolved = await read_service_execution_input(source, store=store)
+        assert resolved.prefix == "original/task/"
+        assert resolved.manifest_body == manifest_body
     finally:
         await engine.dispose()
 

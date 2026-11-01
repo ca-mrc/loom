@@ -30,6 +30,7 @@ from loom.task_image_archives import PreparedImageArchiveV1
 from loom.trajectory.upload_observation import UploadSpan, observe_upload
 from loom_control_plane.service_execution_output import (
     ResolvedServiceExecutionHandoff,
+    ResolvedServiceExecutionInput,
     ServiceExecutionBrokerError,
     ServiceExecutionFileCompleteV1,
     ServiceExecutionOutputCommitV1,
@@ -40,8 +41,9 @@ from loom_control_plane.service_execution_output import (
     VerifiedExecutionPod,
     authorize_service_execution_peer,
     mint_service_execution_peer_token,
+    read_service_execution_input,
     resolve_service_execution_handoff,
-    resolve_service_execution_input,
+    resolve_service_execution_input_source,
 )
 from loom_llm_gateway.harness_cache import (
     HarnessCacheEntry,
@@ -350,6 +352,20 @@ async def issue_service_execution_token(
     }
 
 
+async def _resolved_input(
+    request: Request, lease: ServiceExecutionLease,
+) -> ResolvedServiceExecutionInput:
+    try:
+        async with request.app.state.session_factory() as session:
+            source = await resolve_service_execution_input_source(
+                session, lease=lease,
+                artifacts_bucket=request.app.state.settings.artifacts_bucket,
+            )
+        return await read_service_execution_input(source, store=request.app.state.artifact_store)
+    except ServiceExecutionBrokerError as exc:
+        raise _broker_http(exc) from exc
+
+
 @router.get("/inputs/manifest")
 async def get_service_execution_input_manifest(
     request: Request,
@@ -359,16 +375,7 @@ async def get_service_execution_input_manifest(
 ) -> Response:
     identity = _peer(lease_id, generation, role)
     lease = await _authorize(request, identity, purpose="input")
-    async with request.app.state.session_factory() as session:
-        try:
-            resolved = await resolve_service_execution_input(
-                session,
-                lease=lease,
-                store=request.app.state.artifact_store,
-                artifacts_bucket=request.app.state.settings.artifacts_bucket,
-            )
-        except ServiceExecutionBrokerError as exc:
-            raise _broker_http(exc) from exc
+    resolved = await _resolved_input(request, lease)
     return Response(
         content=resolved.manifest_body,
         media_type="application/json",
@@ -388,16 +395,7 @@ async def get_service_execution_input_file(
 ) -> StreamingResponse:
     identity = _peer(lease_id, generation, role)
     lease = await _authorize(request, identity, purpose="input")
-    async with request.app.state.session_factory() as session:
-        try:
-            resolved = await resolve_service_execution_input(
-                session,
-                lease=lease,
-                store=request.app.state.artifact_store,
-                artifacts_bucket=request.app.state.settings.artifacts_bucket,
-            )
-        except ServiceExecutionBrokerError as exc:
-            raise _broker_http(exc) from exc
+    resolved = await _resolved_input(request, lease)
     if file_index < 0 or file_index >= len(resolved.manifest.files):
         raise HTTPException(status_code=404, detail="task_input_file_not_found")
     item = resolved.manifest.files[file_index]

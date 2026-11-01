@@ -16,7 +16,10 @@ from loom.service_execution_materialization import (
     ServiceExecutionInputManifestV1,
 )
 from loom.trajectory.storage import FakeObjectStore
-from loom_control_plane.service_execution_output import resolve_service_execution_input
+from loom_control_plane.service_execution_output import (
+    read_service_execution_input,
+    resolve_service_execution_input_source,
+)
 from loom_control_plane.service_execution_task_snapshot import (
     ServiceExecutionTaskSnapshotError,
     resolve_service_execution_task_snapshot,
@@ -97,7 +100,8 @@ async def test_prepared_snapshot_preserves_inputs_after_task_update_and_retireme
             for state in ("retiring", "retired"):
                 snapshot.state = state
                 await session.flush()
-                resolved = await resolve_service_execution_input(session, lease=lease, store=store, artifacts_bucket="artifacts")
+                source = await resolve_service_execution_input_source(session, lease=lease, artifacts_bucket="artifacts")
+                resolved = await read_service_execution_input(source, store=store)
                 assert resolved.manifest == manifest
                 assert resolved.prefix == "original/task/"
                 frozen = await resolve_service_execution_task_snapshot(session, lease=lease)

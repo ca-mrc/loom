@@ -147,6 +147,14 @@ invalid input returns HTTP 400. These bounded reads run outside the event loop
 with at most eight concurrent compatibility checks. Existing frozen task packages,
 execution plans and historical results are not rewritten.
 
+For running workloads, the Gateway resolves the lease's frozen input binding in
+a short database session, then closes that session before fetching or validating
+the object-store manifest. Manifest and file routes share this boundary so a slow
+source read cannot occupy the database pool used by peer authorization. The
+existing runtime identity, snapshot association, bucket, digest, revision, file
+count and byte-count checks still apply; this does not cache authorization or
+change database connection limits.
+
 The additional qualified distribution is exactly `opensuse/leap:15.5`. The
 platform appends a derived harness layer using the existing Zypper repositories
 and the distribution packages `asciinema bash ca-certificates curl shadow python3

@@ -42,6 +42,7 @@ from loom.pipeline.artifact_commit import (
 from loom.pipeline.keys import canonical_digest
 from loom.service_execution_materialization import (
     MAX_INPUT_MANIFEST_BYTES,
+    ServiceExecutionInputBindingV1,
     ServiceExecutionInputManifestV1,
     build_verifier_handoff_manifest,
     service_execution_input_binding,
@@ -149,6 +150,14 @@ class ServiceExecutionSmallFilesV1(ServiceExecutionPeerV1):
 
 
 @dataclass(frozen=True)
+class ServiceExecutionInputSource:
+    binding: ServiceExecutionInputBindingV1
+    task_revision_sha256: str
+    bucket: str
+    prefix: str
+
+
+@dataclass(frozen=True)
 class ResolvedServiceExecutionInput:
     manifest: ServiceExecutionInputManifestV1
     manifest_body: bytes
@@ -165,13 +174,13 @@ def _s3_location(value: str) -> tuple[str, str]:
     return bucket, key
 
 
-async def resolve_service_execution_input(
+async def resolve_service_execution_input_source(
     session: AsyncSession,
     *,
     lease: ServiceExecutionLease,
-    store: ObjectStore,
     artifacts_bucket: str,
-) -> ResolvedServiceExecutionInput:
+) -> ServiceExecutionInputSource:
+    """Resolve the frozen input binding using DB reads only."""
     plan = _runtime_plan(lease)
     if plan.task_input is None:
         raise ServiceExecutionBrokerError("task_input_unavailable")
@@ -187,7 +196,7 @@ async def resolve_service_execution_input(
         raise ServiceExecutionBrokerError("task_input_identity_invalid") from exc
     if binding is None:
         raise ServiceExecutionBrokerError("task_input_unavailable")
-    manifest_bucket, manifest_key = _s3_location(binding.manifest_uri)
+    manifest_bucket, _manifest_key = _s3_location(binding.manifest_uri)
     source_bucket, source_prefix = _s3_location(row.source)
     if (
         manifest_bucket != artifacts_bucket
@@ -198,6 +207,20 @@ async def resolve_service_execution_input(
         or binding.total_bytes != plan.task_input.total_bytes
     ):
         raise ServiceExecutionBrokerError("task_input_identity_drift")
+    return ServiceExecutionInputSource(
+        binding=binding,
+        task_revision_sha256=plan.task_revision_sha256,
+        bucket=source_bucket,
+        prefix=source_prefix,
+    )
+
+
+async def read_service_execution_input(
+    source: ServiceExecutionInputSource, *, store: ObjectStore,
+) -> ResolvedServiceExecutionInput:
+    """Read and validate object bytes after the caller releases its DB session."""
+    binding = source.binding
+    manifest_bucket, manifest_key = _s3_location(binding.manifest_uri)
     body = await store.get_object(bucket=manifest_bucket, key=manifest_key)
     if len(body) > MAX_INPUT_MANIFEST_BYTES:
         raise ServiceExecutionBrokerError("task_input_manifest_too_large")
@@ -209,7 +232,7 @@ async def resolve_service_execution_input(
         raise ServiceExecutionBrokerError("task_input_manifest_invalid") from exc
     if (
         manifest.canonical_bytes() != body
-        or manifest.task_revision_sha256 != plan.task_revision_sha256
+        or manifest.task_revision_sha256 != source.task_revision_sha256
         or len(manifest.files) != binding.file_count
         or sum(item.size_bytes for item in manifest.files) != binding.total_bytes
     ):
@@ -217,8 +240,8 @@ async def resolve_service_execution_input(
     return ResolvedServiceExecutionInput(
         manifest=manifest,
         manifest_body=body,
-        bucket=source_bucket,
-        prefix=source_prefix,
+        bucket=source.bucket,
+        prefix=source.prefix,
     )
 
 
