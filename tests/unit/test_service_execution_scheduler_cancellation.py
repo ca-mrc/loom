@@ -11,18 +11,20 @@ import pytest
 from loom_control_plane import service_execution_scheduler as scheduler
 
 
-@pytest.mark.parametrize(("cancel_at", "global_mode", "selected"), [
-    ("parent_selection_commit", False, False),
-    ("verifier_commit", False, False),
-    ("selection", True, False),
-    ("selection", True, True),
-    ("local_commit", False, False),
-    ("local_commit", False, True),
-    ("wakeup_commit", False, False),
-    ("wakeup_commit", True, False),
+@pytest.mark.parametrize(("cancel_at", "global_mode", "selected", "continue_scan"), [
+    ("parent_selection_commit", False, False, False),
+    ("verifier_commit", False, False, False),
+    ("selection", True, False, False),
+    ("selection", True, True, False),
+    ("local_commit", False, False, False),
+    ("local_commit", False, True, False),
+    ("wakeup_commit", False, False, False),
+    ("wakeup_commit", True, False, False),
+    ("local_commit", False, False, True),
+    ("wakeup_commit", False, False, True),
 ])
 async def test_scheduler_stops_when_readiness_consumes_cancellation(
-        monkeypatch, cancel_at, global_mode, selected):
+        monkeypatch, cancel_at, global_mode, selected, continue_scan):
     reader, writer = socket.socketpair()
     reader.setblocking(False)
     writer.send(b"ready")
@@ -85,12 +87,12 @@ async def test_scheduler_stops_when_readiness_consumes_cancellation(
     async def reserve_local(*args, **kwargs):
         operations.append("reserve_local")
         if selected:
-            return SimpleNamespace(target_id="local-target", selected_pool_id="nebius-cpu")
-        return None
+            return SimpleNamespace(target_id="local-target", selected_pool_id="nebius-cpu"), False
+        return None, continue_scan
 
     monkeypatch.setattr(waiting, "wait_for", cancel_on_completion)
     monkeypatch.setattr(scheduler, "reserve_next_verifier_executions", reserve_verifiers)
-    monkeypatch.setattr(scheduler, "reserve_next_service_execution", reserve_local)
+    monkeypatch.setattr(scheduler, "_reserve_service_execution_candidate", reserve_local)
     task = asyncio.create_task(scheduler.run_service_execution_scheduler_loop(
         session_factory=Session, environment="staging", pool_id="nebius-cpu",
         image_admission_keyring=None, interval_seconds=0.01,
@@ -109,6 +111,7 @@ async def test_scheduler_stops_when_readiness_consumes_cancellation(
             assert operations.count("rate_head_probe") == 1
         if cancel_at == "local_commit":
             assert "rate_head_probe" not in operations
+        assert operations.count("reserve_local") <= 1
         if cancel_at == "verifier_commit":
             assert "selection" not in operations and "reserve_local" not in operations
         if not task.cancelled():
