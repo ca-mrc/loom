@@ -235,87 +235,117 @@ async def reserve_next_service_execution(
     placement_policy: ExecutionPlacementPolicy = "environment-local-health-first",
     now: datetime | None = None,
 ) -> ServiceExecutionLease | None:
-    """Reserve one normally queued, explicitly converted service task."""
+    """Reserve one queued task within a caller-managed transaction.
 
+    This bounded convenience API does not commit its caller's work. The live
+    dispatcher uses the single-candidate operation with a fresh transaction for
+    each denial, so remembered capacity waits cannot lock the remaining wave.
+    """
     current_time = (now or datetime.now(UTC)).astimezone(UTC)
-    # Inspect a bounded number in the existing fair-share order. A failed
-    # savepoint releases admission/budget writes but preserves the Trial row lock.
     for _ in range(32):
-        row = (
-            (await session.execute(_NEXT_SERVICE_TRIAL, {"now": current_time, "pool_id": pool_id}))
-            .mappings()
-            .one_or_none()
+        lease, continue_scan = await _reserve_service_execution_candidate(
+            session, environment=environment, pool_id=pool_id,
+            image_admission_keyring=image_admission_keyring,
+            maximum_deadline_seconds=maximum_deadline_seconds,
+            placement_policy=placement_policy, now=current_time,
         )
-        if row is None:
-            return None
-        try:
-            async with session.begin_nested():
-                return await _reserve_service_candidate(
-                    session,
-                    row=row,
-                    environment=environment,
-                    pool_id=pool_id,
-                    image_admission_keyring=image_admission_keyring,
-                    maximum_deadline_seconds=maximum_deadline_seconds,
-                    current_time=current_time,
-                    placement_policy=placement_policy,
-                )
-        except ServiceExecutionParentTerminalError:
-            # The parent changed after selection. Its cancellation/settlement
-            # owns the child state; rollback this candidate and continue scanning.
-            continue
-        except ServiceExecutionConfigurationError as exc:
-            # The candidate savepoint has rolled back. This queued failure owns
-            # no attempt, lease, admission slot or spend; leave transient and
-            # unexpected errors on their existing retry paths.
-            await session.execute(update(Trial).where(
-                Trial.id == row["id"], Trial.state == "queued",
-                Trial.cancellation_requested_at.is_(None),
-            ).values(
-                state="failed", failure_reason="service_execution_configuration_invalid",
-                failure_message=str(exc), finished_at=current_time, next_attempt_at=None,
-                scheduling_observation=None,
-            ))
-            _LOG.warning("service_execution_configuration_invalid", extra={
-                "trial_id": str(row["id"]), "reason": str(exc),
-            })
-        except ServiceExecutionPolicyBlockedError as exc:
-            # Only policy denials are candidate-local waits. The savepoint has
-            # released their route, admission seat and spend; identity and
-            # invariant conflicts must still escape to the scheduler's error path.
-            retry_at = current_time + timedelta(seconds=max(1, min(300, exc.retry_after_seconds)))
-            await session.execute(update(Trial).where(
-                Trial.id == row["id"], Trial.state == "queued",
-                Trial.cancellation_requested_at.is_(None),
-            ).values(
-                next_attempt_at=retry_at,
-                scheduling_observation={"reason": exc.reason, "observed_at": current_time.isoformat()},
-            ))
-            _LOG.info("service_execution_policy_wait", extra={
-                "trial_id": str(row["id"]), "reason": exc.reason,
-            })
-        except ExecutionProvisioningBlockedError as exc:
-            from loom_control_plane.execution_capacity_wait import remember_execution_capacity_wait
-            from loom_control_plane.task_image_capacity_wait import WAIT_LEASE_SECONDS
-
-            delay = max(1, min(300, exc.retry_after_seconds))
-            if exc.capacity_wait is not None:
-                delay = min(delay, WAIT_LEASE_SECONDS // 2)
-            retry_at = current_time + timedelta(seconds=delay)
-            observation = await remember_execution_capacity_wait(
-                session, row=row, context=exc.capacity_wait, reason=exc.reason,
-                now=current_time, retry_at=retry_at,
-            )
-            await session.execute(
-                update(Trial)
-                .where(Trial.id == row["id"], Trial.state == "queued")
-                .values(
-                    next_attempt_at=retry_at,
-                    scheduling_observation=observation,
-                )
-            )
-            _LOG.info("service_execution_capacity_wait", extra={"reason": exc.reason})
+        if lease is not None or not continue_scan:
+            return lease
     return None
+
+
+async def _reserve_service_execution_candidate(
+    session: AsyncSession,
+    *,
+    environment: str,
+    pool_id: str,
+    image_admission_keyring: ImageAdmissionKeyring,
+    maximum_deadline_seconds: int = 7200,
+    placement_policy: ExecutionPlacementPolicy = "environment-local-health-first",
+    now: datetime | None = None,
+) -> tuple[ServiceExecutionLease | None, bool]:
+    """Examine one candidate; report whether a denial permits further scanning.
+
+    The caller owns the transaction. A continuous dispatcher must commit this
+    candidate before compiling another: remembered waits take capacity authority.
+    """
+    current_time = (now or datetime.now(UTC)).astimezone(UTC)
+    row = (
+        (await session.execute(_NEXT_SERVICE_TRIAL, {"now": current_time, "pool_id": pool_id}))
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        return None, False
+    try:
+        async with session.begin_nested():
+            lease = await _reserve_service_candidate(
+                session,
+                row=row,
+                environment=environment,
+                pool_id=pool_id,
+                image_admission_keyring=image_admission_keyring,
+                maximum_deadline_seconds=maximum_deadline_seconds,
+                current_time=current_time,
+                placement_policy=placement_policy,
+            )
+            return lease, False
+    except ServiceExecutionParentTerminalError:
+        # The parent changed after selection. Its cancellation/settlement
+        # owns the child state; rollback this candidate and continue scanning.
+        return None, True
+    except ServiceExecutionConfigurationError as exc:
+        # The candidate savepoint has rolled back. This queued failure owns
+        # no attempt, lease, admission slot or spend; leave transient and
+        # unexpected errors on their existing retry paths.
+        await session.execute(update(Trial).where(
+            Trial.id == row["id"], Trial.state == "queued",
+            Trial.cancellation_requested_at.is_(None),
+        ).values(
+            state="failed", failure_reason="service_execution_configuration_invalid",
+            failure_message=str(exc), finished_at=current_time, next_attempt_at=None,
+            scheduling_observation=None,
+        ))
+        _LOG.warning("service_execution_configuration_invalid", extra={
+            "trial_id": str(row["id"]), "reason": str(exc),
+        })
+    except ServiceExecutionPolicyBlockedError as exc:
+        # Only policy denials are candidate-local waits. The savepoint has
+        # released their route, admission seat and spend; identity and
+        # invariant conflicts must still escape to the scheduler's error path.
+        retry_at = current_time + timedelta(seconds=max(1, min(300, exc.retry_after_seconds)))
+        await session.execute(update(Trial).where(
+            Trial.id == row["id"], Trial.state == "queued",
+            Trial.cancellation_requested_at.is_(None),
+        ).values(
+            next_attempt_at=retry_at,
+            scheduling_observation={"reason": exc.reason, "observed_at": current_time.isoformat()},
+        ))
+        _LOG.info("service_execution_policy_wait", extra={
+            "trial_id": str(row["id"]), "reason": exc.reason,
+        })
+    except ExecutionProvisioningBlockedError as exc:
+        from loom_control_plane.execution_capacity_wait import remember_execution_capacity_wait
+        from loom_control_plane.task_image_capacity_wait import WAIT_LEASE_SECONDS
+
+        delay = max(1, min(300, exc.retry_after_seconds))
+        if exc.capacity_wait is not None:
+            delay = min(delay, WAIT_LEASE_SECONDS // 2)
+        retry_at = current_time + timedelta(seconds=delay)
+        observation = await remember_execution_capacity_wait(
+            session, row=row, context=exc.capacity_wait, reason=exc.reason,
+            now=current_time, retry_at=retry_at,
+        )
+        await session.execute(
+            update(Trial)
+            .where(Trial.id == row["id"], Trial.state == "queued")
+            .values(
+                next_attempt_at=retry_at,
+                scheduling_observation=observation,
+            )
+        )
+        _LOG.info("service_execution_capacity_wait", extra={"reason": exc.reason})
+    return None, True
 
 
 async def _compile_service_candidate(
@@ -763,20 +793,33 @@ async def run_service_execution_scheduler_loop(
         return task is not None and task.cancelling() > 0
 
     async def reserve_attempt() -> bool:
+        # Keep both the fair scan bound and the existing per-wave metric.
+        # Commit each denied candidate before compiling the next: remembered
+        # waits own capacity authority until that candidate commits.
         with SERVICE_EXECUTION_RESERVATION_SECONDS.labels(role="attempt").time():
-            async with session_factory() as session:
-                lease = await reserve_next_service_execution(
-                    session, environment=environment, pool_id=pool_id,
-                    image_admission_keyring=image_admission_keyring,
-                    maximum_deadline_seconds=maximum_deadline_seconds,
-                    placement_policy=placement_policy,
-                )
-                await session.commit()
-        if lease is not None:
-            _LOG.info("service_execution_reserved", extra={
-                "target_id": lease.target_id, "pool_id": lease.selected_pool_id,
-            })
-        return lease is not None
+            for index in range(32):
+                if index:
+                    # Metadata-only rechecks run after the prior commit, so a
+                    # ready future head need not wait for the remaining wave.
+                    await wake_rate_heads()
+                    if cancellation_requested():
+                        return False
+                async with session_factory() as session:
+                    lease, continue_scan = await _reserve_service_execution_candidate(
+                        session, environment=environment, pool_id=pool_id,
+                        image_admission_keyring=image_admission_keyring,
+                        maximum_deadline_seconds=maximum_deadline_seconds,
+                        placement_policy=placement_policy,
+                    )
+                    await session.commit()
+                if lease is not None:
+                    _LOG.info("service_execution_reserved", extra={
+                        "target_id": lease.target_id, "pool_id": lease.selected_pool_id,
+                    })
+                    return True
+                if cancellation_requested() or not continue_scan:
+                    return False
+        return False
 
     async def wake_rate_heads() -> None:
         from loom_control_plane.execution_capacity_wait import wake_ready_rate_heads

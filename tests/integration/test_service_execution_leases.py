@@ -3051,9 +3051,10 @@ async def test_scheduler_commits_first_verifier_before_compiling_the_next(
     calls = 0
     attempt_opportunities = 0
 
-    async def reserve_attempt(*_args: Any, **_kwargs: Any) -> None:
+    async def reserve_attempt(*_args: Any, **_kwargs: Any) -> tuple[None, bool]:
         nonlocal attempt_opportunities
         attempt_opportunities += 1
+        return None, False
 
     async def pause_second(*args: Any, **kwargs: Any) -> ServiceExecutionLease:
         nonlocal calls
@@ -3068,7 +3069,7 @@ async def test_scheduler_commits_first_verifier_before_compiling_the_next(
         await _separate_attempt_awaiting_verifier(sessions, now=now)
         await _separate_attempt_awaiting_verifier(sessions, now=now)
         monkeypatch.setattr(scheduler, "_reserve_verifier_candidate", pause_second)
-        monkeypatch.setattr(scheduler, "reserve_next_service_execution", reserve_attempt)
+        monkeypatch.setattr(scheduler, "_reserve_service_execution_candidate", reserve_attempt)
         task = asyncio.create_task(scheduler.run_service_execution_scheduler_loop(
             session_factory=sessions, environment="staging", pool_id="nebius-cpu",
             image_admission_keyring=IMAGE_ADMISSION_KEYRING, interval_seconds=.01,

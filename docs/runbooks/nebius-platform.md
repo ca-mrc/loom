@@ -1496,6 +1496,14 @@ registered-pool path retains its workload-class/age ordering. There is no fixed
 split between build and execution capacity. Cleanup-pending resources remain
 charged until their release is acknowledged.
 
+The environment-local execution dispatcher keeps its fair scan of at most 32
+candidates per wave, with a separate transaction for each candidate. A denied
+candidate's waiting state is committed before the next candidate is compiled,
+so the shared capacity transaction lock does not cover the rest of the wave.
+Eligible rate-waiting heads are reconsidered between failed candidates after
+that commit. Each real reservation still checks its identity, budget, queue and
+capacity fences together in one transaction.
+
 Create-rate admission uses a rolling 60-second history shared by native builds
 and executions in the same physical capacity family, including released work.
 A rate-limited execution retries just after enough history entries expire to
