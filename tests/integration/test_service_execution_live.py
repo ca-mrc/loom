@@ -29,6 +29,7 @@ from loom.db.schema import (
 )
 from loom.service_execution_live import read_live_preview
 from loom_control_plane.service_execution_output import VerifiedExecutionPod
+from loom_llm_gateway.client_disconnect import ModelClientDisconnectMiddleware
 from loom_llm_gateway.routes import service_execution
 from loom_service.routes import trajectory
 from tests.integration.test_nebius_platform_bootstrap import platform_database  # noqa: F401
@@ -50,6 +51,7 @@ async def _live_app(postgres_url: str):
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     app = FastAPI()
+    app.add_middleware(ModelClientDisconnectMiddleware)
     app.state.session_factory = sessions
     app.state.minio_client = _MissingObjectStore()
     app.state.settings = SimpleNamespace(db_url=postgres_url, trajectories_bucket='test-trajectories')

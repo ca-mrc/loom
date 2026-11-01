@@ -222,7 +222,8 @@ func (u *nativeTrajectory) run() {
 			}
 		case boundary := <-u.boundaries:
 			u.observeBoundary(boundary)
-			u.flush()
+			// Coalesce adjacent phase boundaries on the existing preview tick.
+			// Execution remains nonblocking, and stop drains the ordered tail.
 		case <-ticker.C:
 			u.tail()
 			u.flush()
