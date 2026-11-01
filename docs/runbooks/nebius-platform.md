@@ -1496,6 +1496,15 @@ registered-pool path retains its workload-class/age ordering. There is no fixed
 split between build and execution capacity. Cleanup-pending resources remain
 charged until their release is acknowledged.
 
+Create-rate admission uses a rolling 60-second history shared by native builds
+and executions in the same physical capacity family, including released work.
+A rate-limited execution retries just after enough history entries expire to
+leave room for both older eligible waiting heads and its own request. If waiting
+heads alone exhaust the rate allowance, the ordinary 30-second retry remains;
+their future progress cannot be predicted from create timestamps. This retry
+time grants no capacity: health, rate, placement, quotas and authority are all
+checked again under the shared transaction lock.
+
 Queued execution heads are read in bounded pages per target. Expired hints are
 skipped in PostgreSQL; invalid heads advance to the next page without treating
 their cached inputs as authority. Once a valid oldest head is found, younger

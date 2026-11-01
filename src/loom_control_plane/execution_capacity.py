@@ -707,20 +707,39 @@ async def admit_capacity_resources(
     ]
     recent_native = [row for row in native_active
                      if row.target_id in group.target_ids and row.demand_id not in observed_leases]
+    rate_history = (
+        ExecutionProvisioningAuthorization.target_id.in_(group.target_ids),
+        ExecutionProvisioningAuthorization.authorized_at >= current_time - timedelta(minutes=1),
+    )
     recent_creates = await session.scalar(
-        select(func.count(ExecutionProvisioningAuthorization.id)).where(
-            ExecutionProvisioningAuthorization.target_id.in_(group.target_ids),
-            ExecutionProvisioningAuthorization.authorized_at >= current_time - timedelta(minutes=1),
-        )
+        select(func.count(ExecutionProvisioningAuthorization.id)).where(*rate_history)
     )
-    recent_creates = int(recent_creates or 0) + sum(
-        row.target_id in group.target_ids and row.reserved_at >= current_time - timedelta(minutes=1)
-        for row in native
-    )
+    native_create_times = [row.reserved_at for row in native
+                          if row.target_id in group.target_ids
+                          and row.reserved_at >= current_time - timedelta(minutes=1)]
+    recent_creates = int(recent_creates or 0) + len(native_create_times)
     waiting_here = sum(row.target_id in group.target_ids for row in waiting) + sum(
         row.target_id in group.target_ids for row in execution_waiting)
-    if not already_reserved and int(recent_creates or 0) + waiting_here >= policy.max_create_per_minute:
-        raise ExecutionProvisioningBlockedError("execution_capacity_create_rate_exceeded", 30)
+    if not already_reserved and recent_creates + waiting_here >= policy.max_create_per_minute:
+        retry_after = 30
+        if waiting_here < policy.max_create_per_minute:
+            # Older renewable heads keep their slots. Enough actual creates
+            # must age out for those heads AND this demand, including released
+            # reservations and native builds sharing this physical owner.
+            needed = recent_creates + waiting_here - policy.max_create_per_minute + 1
+            execution_times = (await session.scalars(
+                select(ExecutionProvisioningAuthorization.authorized_at)
+                .where(*rate_history)
+                .order_by(ExecutionProvisioningAuthorization.authorized_at)
+                .limit(needed)
+            )).all()
+            create_times = sorted([*execution_times, *native_create_times])
+            if len(create_times) >= needed:
+                remaining = (create_times[needed - 1] + timedelta(minutes=1) - current_time).total_seconds()
+                # The rolling query includes its lower bound: retry strictly
+                # after expiry, and renew waiting authority within 60 seconds.
+                retry_after = min(60, max(1, int(remaining) + 1))
+        raise ExecutionProvisioningBlockedError("execution_capacity_create_rate_exceeded", retry_after)
     recent_pending = sum(
         row.state in _PENDING_AUTHORIZATION_STATES for row in recent_authorizations
     )
