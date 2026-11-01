@@ -157,6 +157,11 @@ address configuration before authorizing tunnels. Gateway-only defaults and task
 Pod network restrictions are unchanged. See [sandbox isolation](sandbox-isolation.md#declared-hosted-task-web-egress)
 for configuration, task declarations, transport bounds and acceptance limits.
 
+Tunnel shutdown releases the connection slot and drain count before sending the
+final WebSocket close. A peer that has already disconnected can make Starlette
+raise `WebSocketDisconnect` from that closing send; this final close is best
+effort, so normal disconnection does not produce an unhandled ASGI traceback.
+
 ## Logical pool and regional policy
 
 The accepted service pool identities and adapter boundaries are:
