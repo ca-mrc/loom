@@ -157,14 +157,13 @@ address configuration before authorizing tunnels. Gateway-only defaults and task
 Pod network restrictions are unchanged. See [sandbox isolation](sandbox-isolation.md#declared-hosted-task-web-egress)
 for configuration, task declarations, transport bounds and acceptance limits.
 
-Task DNS resolution uses a separate bounded process executor so object-storage
-and file operations cannot occupy its worker queue. The five-second DNS timeout,
-per-connection resolution, protected-address checks and numeric-address pinning
-remain in effect; resolution and authorization results are not cached.
-Rejected or timed-out tunnels log their fixed outcome and lease identity at
-WARNING so operational error sampling retains the reason. Successful tunnels
-and normal transport closure remain at INFO; destination and payload content
-are not logged by this diagnostic.
+Rejected or timed-out tunnels log a fixed outcome, lease identity, handshake
+stage, total and stage elapsed milliseconds, and HTTP status at WARNING. Peer closure before the
+relay starts also uses WARNING, so failed handshakes remain visible under the
+normal logging configuration. Successful tunnels and ordinary relay closure stay
+at INFO. This diagnostic logs no destination, token, exception detail or payload;
+lease identities are syntactically validated before early rejection is logged.
+It changes neither authorization, DNS resolution, deadlines nor connection limits.
 
 Tunnel shutdown releases the connection slot and drain count before sending the
 final WebSocket close. A peer that has already disconnected can make Starlette

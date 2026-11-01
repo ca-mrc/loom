@@ -6,9 +6,7 @@ import ipaddress
 import logging
 import socket
 from collections.abc import Awaitable, Callable
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from functools import partial
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -21,10 +19,6 @@ _FRAME_BYTES = 64 * 1024
 _MAX_BYTES = 1024**3
 _IDLE_SECONDS = 60
 _FENCE_SECONDS = 5
-# Long storage calls use the event loop's default executor. Keep DNS on one
-# separately bounded process pool; threads start lazily and Python joins them
-# at process exit. Every connection still resolves and validates its addresses.
-_DNS_EXECUTOR = ThreadPoolExecutor(thread_name_prefix="loom-task-egress-dns")
 # Translation/tunnel ranges can encode otherwise forbidden IPv4 destinations.
 _TRANSITION_RANGES = tuple(ipaddress.ip_network(value) for value in (
     "64:ff9b::/96", "64:ff9b:1::/48", "2002::/16", "2001::/32", "192.88.99.0/24",
@@ -52,19 +46,13 @@ class EgressDeniedError(Exception):
     """Fixed public diagnostic; never exposes credentials or upstream payloads."""
 
 
-async def _resolve_dns(host: str, port: int, **kwargs: Any) -> Any:
-    return await asyncio.get_running_loop().run_in_executor(
-        _DNS_EXECUTOR, partial(socket.getaddrinfo, host, port, **kwargs),
-    )
-
-
 async def resolve_destination(
     destination: WebDestination,
     protected_cidrs: tuple[str, ...],
     *,
     resolver: Callable[..., Awaitable[Any]] | None = None,
 ) -> tuple[str, ...]:
-    resolve = resolver or _resolve_dns
+    resolve = resolver or asyncio.get_running_loop().getaddrinfo
     try:
         async with asyncio.timeout(5):
             answers = await resolve(destination.host, destination.port, type=socket.SOCK_STREAM)

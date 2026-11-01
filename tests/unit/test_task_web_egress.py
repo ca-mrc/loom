@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import socket
 from unittest.mock import AsyncMock
 
@@ -22,49 +21,6 @@ from loom.service_execution_materialization import (
 from loom_llm_gateway.task_egress import EgressDeniedError, resolve_destination
 from tests.unit.test_service_execution_materialization import _REVISION, _provenance
 from tests.unit.test_service_execution_terminus_plan import _inputs
-
-
-def test_task_dns_progresses_while_object_storage_occupies_default_executor(monkeypatch) -> None:
-    import threading
-    from concurrent.futures import ThreadPoolExecutor
-
-    from loom.trajectory.storage import MinioObjectStore
-
-    async def exercise() -> None:
-        loop = asyncio.get_running_loop()
-        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
-        entered = threading.Event()
-        release = threading.Event()
-        resolved = threading.Event()
-        store = MinioObjectStore(
-            endpoint_url="http://127.0.0.1:9", access_key="synthetic-local",
-            secret_key="synthetic-local", operation_timeout=15, operation_attempts=1,
-        )
-
-        def blocked_sdk(_client):
-            entered.set()
-            assert release.wait(12)
-
-        def public_dns(*_args, **_kwargs):
-            resolved.set()
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))]
-
-        monkeypatch.setattr(socket, "getaddrinfo", public_dns)
-        storage = asyncio.create_task(store._run_client_call("HeadObject", blocked_sdk))
-        try:
-            while not entered.is_set():
-                await asyncio.sleep(0.001)
-            assert await resolve_destination(
-                WebDestination(host="example.org", protocol="https"), (),
-            ) == ("8.8.8.8",)
-            assert resolved.is_set()
-            assert not storage.done()
-        finally:
-            release.set()
-            await storage
-            store.close()
-
-    asyncio.run(exercise())
 
 
 def policy() -> WebAllowlist:
