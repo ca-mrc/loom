@@ -149,6 +149,51 @@ async def rows(sessions, image_id):
         return row, attempts
 
 
+async def test_effective_requests_and_exact_pod_absence_are_persisted_before_release(controller_setup, monkeypatch):
+    controller, sessions, team_id, kube = controller_setup
+    controller.settings = controller.settings.model_copy(update={"cpu_millis": 8000, "cpu_request_millis": 2500})
+    image_id, _ = await seed_image(sessions, team_id)
+
+    async def reserve(session, *, attempt_id, **kwargs):
+        attempt = await session.get(TaskImageMaterializationAttempt, attempt_id)
+        native = dict(attempt.native_build)
+        assert native["resources"]["vcpu_millis"] == 2500
+        native["capacity_reserved_at"] = datetime.now(UTC).isoformat()
+        attempt.native_build = native
+        return native
+
+    monkeypatch.setattr(MODULE + ".reserve_native_task_image_capacity", reserve)
+    await controller.run_once()
+    _, attempts = await rows(sessions, image_id)
+    native = attempts[0].native_build
+    pod = native["job"]["spec"]["template"]["spec"]
+    assert pod["containers"][0]["resources"]["requests"]["cpu"] == "2500m"
+    assert pod["containers"][0]["resources"]["limits"]["cpu"] == "8000m"
+    kube.finish()
+    absent = False
+    checked = []
+
+    async def confirm(**identity):
+        checked.append(identity)
+        return absent
+
+    monkeypatch.setattr(kube, "confirm_pod_absence", confirm, raising=False)
+    await controller.run_once()
+    _, attempts = await rows(sessions, image_id)
+    assert not attempts[0].native_build.get("capacity_released_at")
+    absent = True
+    await controller.run_once()
+    _, attempts = await rows(sessions, image_id)
+    native = attempts[0].native_build
+    receipt = native["capacity_release_receipt"]
+    assert receipt == {
+        "pod_uid": "pod-uid", "job_uid": native["job_uid"],
+        "target_id": native["target_id"], "lease_epoch": 1,
+        "pods_absent": True, "confirmed_at": native["capacity_released_at"],
+    }
+    assert checked[-1] == {"namespace": native["namespace"], "pod_uid": "pod-uid", "job_uid": native["job_uid"]}
+
+
 async def test_claim_reserve_transaction_rolls_back_without_job_or_attempt(controller_setup, monkeypatch):
     controller, sessions, team_id, kube = controller_setup
     image_id, _ = await seed_image(sessions, team_id)

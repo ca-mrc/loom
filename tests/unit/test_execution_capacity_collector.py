@@ -866,6 +866,9 @@ def test_collector_manifest_is_active_configured_and_strictly_read_only() -> Non
     config = next(row for row in documents if row["kind"] == "ConfigMap")
     assert config["metadata"]["namespace"] == "loom-nebius-development"
     assert config["data"] == {
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_SAMPLE_WINDOW_SECONDS": "50",
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_SAMPLE_INTERVAL_SECONDS": "15",
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_SAMPLE_STOP_BEFORE_MINUTE_SECONDS": "5",
         "LOOM_EXECUTION_CAPACITY_COLLECTOR_TARGET_ID": "nebius-eu-north1-development",
         "LOOM_EXECUTION_CAPACITY_COLLECTOR_POOL_ID": "nebius-cpu",
         "LOOM_EXECUTION_CAPACITY_COLLECTOR_NAMESPACE": "loom-nebius-development",

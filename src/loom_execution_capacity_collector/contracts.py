@@ -5,7 +5,16 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 
 class ResourceTotals(BaseModel):
@@ -32,6 +41,21 @@ class QuotaResource(BaseModel):
     used: int = Field(ge=0)
 
 
+class PodPendingCounts(BaseModel):
+    """This Pod's exact contribution to the collector's admission counters."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    pending: bool
+    unschedulable: bool
+    image_pull_backoff: bool
+
+    @model_validator(mode="after")
+    def _pending_subcategories(self) -> PodPendingCounts:
+        if (self.unschedulable or self.image_pull_backoff) and not self.pending:
+            raise ValueError("pending subcategories require a pending Pod")
+        return self
+
+
 class ManagedPodPlacement(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -39,6 +63,15 @@ class ManagedPodPlacement(BaseModel):
     lease_id: str = Field(min_length=1)
     generation: int = Field(gt=0)
     requests: ResourceTotals
+    # Omission preserves the exact canonical payload of historical observations.
+    pending_counts: PodPendingCounts | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_historical_pending_counts(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        value: dict[str, Any] = handler(self)
+        if self.pending_counts is None:
+            value.pop("pending_counts", None)
+        return value
 
 
 class NodeIOPressure(BaseModel):

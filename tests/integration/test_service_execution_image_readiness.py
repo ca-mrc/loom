@@ -188,7 +188,9 @@ async def test_scheduler_waits_for_x86_image_then_reserves_frozen_revision(
             await _assert_no_execution(session, trial_id)
             trial = await session.get(Trial, trial_id)
             assert trial is not None and trial.state == "queued"
-            assert trial.next_attempt_at is not None and trial.next_attempt_at > now
+            # Unready images never consume the candidate wave or write a
+            # polling backoff; becoming ready makes this Trial eligible now.
+            assert trial.next_attempt_at is None
             x86 = await session.get(TaskImageMaterialization, ids["x86_64"])
             arm = await session.get(TaskImageMaterialization, ids["arm64"])
             assert x86 is not None and arm is not None
@@ -207,7 +209,7 @@ async def test_scheduler_waits_for_x86_image_then_reserves_frozen_revision(
             lease = await reserve_next_service_execution(
                 session, environment="staging", pool_id="nebius-cpu",
                 image_admission_keyring=fixtures.IMAGE_ADMISSION_KEYRING,
-                now=now + timedelta(seconds=16),
+                now=now,
             )
             await session.commit()
             assert lease is not None

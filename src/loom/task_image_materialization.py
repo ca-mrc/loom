@@ -551,7 +551,27 @@ async def get_trial_task_image_execution_grant(
             )
         )
         if has_prerequisite:
-            raise RuntimeError("claimed trial no longer has a ready task-image materialization")
+            # An unused architecture must not turn a genuinely prebuilt task
+            # into a build wait. Requested-architecture pins remain authority,
+            # including historical snapshots and mismatched bindings: none may
+            # be downgraded to a catalog image because it is no longer ready.
+            required_arch_prerequisite = bool(await session.scalar(
+                select(exists().where(
+                    TrialTaskImageMaterialization.trial_id == trial_id,
+                    TrialTaskImageMaterialization.materialization_id == TaskImageMaterialization.id,
+                    or_(
+                        TaskImageMaterialization.cpu_arch.in_(cpu_arches),
+                        TaskImageMaterialization.task_id != Trial.task_id,
+                    ),
+                    Trial.id == trial_id,
+                ))
+            ))
+            task_config = await session.scalar(select(Task.config).join(
+                Trial, Trial.task_id == Task.id,
+            ).where(Trial.id == trial_id))
+            if (required_arch_prerequisite or task_config is None
+                    or required_task_image_components(TaskConfig.model_validate(task_config))):
+                raise RuntimeError("claimed trial no longer has a ready task-image materialization")
         return None
     try:
         await admit_task_image_source(session, row=row)

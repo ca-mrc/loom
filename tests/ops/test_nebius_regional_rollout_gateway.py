@@ -375,6 +375,183 @@ def add_build_scope(scope):
     return build
 
 
+@pytest.fixture
+def builder_installation(scope, regional_inputs, monkeypatch):
+    from scripts.ops import install_nebius_regional_rollout_gateway as installer
+
+    config, candidate, _ = regional_inputs
+    target = config["regional_execution_targets"][0]
+    target["cluster_id"] = "mk8s-west"
+    target["task_image_builder"] = {
+        "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
+        "cache_bucket": "reviewed-shared-cache", "cpu_millis": 8000,
+        "cpu_request_millis": 2000, "memory_mib": 8192, "ephemeral_storage_mib": 65536,
+        "archive_secret_name": "reviewed-archive-writer",
+    }
+    region = scope["regions"][0]
+    old = region["namespace"]
+    region["api_server"] = target["kubernetes_api_server"]
+    region["namespace"] = target["execution_namespace"]
+    region["namespace_uids"] = {region["namespace"]: region["namespace_uids"][old]}
+    for resource in region["resources"]:
+        if resource["name"] == old:
+            resource["name"] = region["namespace"]
+        elif resource["name"].startswith(old + "-"):
+            resource["name"] = resource["name"].replace(old, region["namespace"], 1)
+        if resource["namespace"] == old:
+            resource["namespace"] = region["namespace"]
+    region["resources"].append({"kind": "RoleBinding", "name": "loom-execution-actuator", "namespace": region["namespace"]})
+    native = FakeKubectl(scope)
+    native.view["clusters"][0]["cluster"]["server"] = region["api_server"]
+    state = {"namespace": None, "secrets_present": False, "writes": [], "calls": [],
+             "actuator_identity": target["service_account_ids"]["actuator"],
+             "saved_platform_config": copy.deepcopy(config)}
+
+    def run(scope, args, *, payload=None, timeout=30):
+        state["calls"].append(args)
+        if args == ["config", "view", "-o", "json"] or "--dry-run=client" in args:
+            return native(scope, args, payload=payload, timeout=timeout)
+        if "create" in args:
+            doc = json.loads(payload)
+            assert doc["kind"] == "Namespace" and doc["metadata"]["name"] == region["namespace"] + "-build"
+            assert doc["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] == "restricted"
+            state["writes"].append(copy.deepcopy(doc))
+            state["namespace"] = {**doc, "metadata": {**doc["metadata"], "uid": "22222222-2222-2222-2222-222222222222"}}
+            data = state["namespace"]
+        elif "get" in args:
+            kind, name = args[args.index("get") + 1:args.index("get") + 3]
+            if kind == "secret":
+                assert args[-1] == gateway.SECRET_KEY_TEMPLATE
+                keys = b"access-key\nsecret-key\ncredentials.json\n" if state["secrets_present"] else b"access-key\n"
+                return subprocess.CompletedProcess(args, 0, keys, b"private-error-never-forwarded")
+            if kind == "configmap":
+                data = {"metadata": {"name": name}, "data": {"environment.json": json.dumps(state["saved_platform_config"])}}
+            elif kind.lower() == "namespace" and name.endswith("-build"):
+                data = state["namespace"]
+                if data is None:
+                    return subprocess.CompletedProcess(args, 0, b"", b"")
+            else:
+                data = {"metadata": {"name": name}}
+                if kind.lower() == "namespace":
+                    data["metadata"]["uid"] = region["namespace_uids"][name]
+                elif kind == "RoleBinding" and name == "loom-execution-actuator":
+                    data["subjects"] = [{"kind": "User", "apiGroup": "rbac.authorization.k8s.io", "name": state["actuator_identity"]}]
+        else:
+            data = {"accepted": True}
+        return subprocess.CompletedProcess(args, 0, json.dumps(data).encode(), b"")
+
+    monkeypatch.setattr(installer, "_run", run)
+    monkeypatch.setattr(gateway, "_run", run)
+    return installer, config, candidate, state, native
+
+
+def test_builder_installer_breaks_scope_cycle_without_creating_work_or_copying_credentials(scope, builder_installation):
+    installer, config, candidate, state, _ = builder_installation
+    before = copy.deepcopy(scope)
+    kwargs = dict(source_sha=candidate["candidate_sha"], repo_root=Path(__file__).resolve().parents[2])
+    desired, plan = installer.prepare_builder_scope(scope, config, candidate, **kwargs)
+    assert desired is None and plan["status"] == "planned_builder_bootstrap"
+    assert state["writes"] == [] and scope == before
+    desired, blocked = installer.prepare_builder_scope(scope, config, candidate, apply=True, **kwargs)
+    assert desired is None and blocked["status"] == "blocked_build_secret_keys"
+    assert len(state["writes"]) == 1
+    assert {v["name"] for v in blocked["missing_secret_keys"]} == {
+        "loom-task-build-source", "loom-task-build-registry", "loom-task-build-cache", "reviewed-archive-writer"}
+    assert "private-error" not in json.dumps(blocked)
+    state["secrets_present"] = True
+    desired, ready = installer.prepare_builder_scope(scope, config, candidate, apply=True, **kwargs)
+    assert ready["missing_secret_keys"] == [] and len(state["writes"]) == 1
+    assert scope == before
+    region = desired["regions"][0]
+    assert {k: region[k] for k in ("context", "cluster_name", "api_server", "namespace")} == {
+        k: before["regions"][0][k] for k in ("context", "cluster_name", "api_server", "namespace")}
+    assert all(v in region["resources"] for v in before["regions"][0]["resources"])
+    assert len(region["builder_documents"]["documents"]) == 6
+    assert region["builder_documents"]["candidate_sha"] == candidate["candidate_sha"]
+    # The new build Role/Quota need not exist before the normal deploy creates
+    # them. All old identities, the build UID and Secret keys remain qualified.
+    installer.qualify_retained_scope(desired)
+    assert not any("get" in c and "loom-task-image-builder" in c for c in state["calls"])
+    role = next(d for d in region["builder_documents"]["documents"] if d["kind"] == "Role")
+    assert gateway.handle(desired, regional(desired, "apply", "-f", "-"), stdin=json.dumps(role).encode())[0] == 0
+    malicious = copy.deepcopy(role)
+    malicious["rules"].append({"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]})
+    with pytest.raises(gateway.ScopeError, match="reviewed fixed candidate"):
+        gateway.handle(desired, regional(desired, "apply", "-f", "-"), stdin=json.dumps(malicious).encode())
+    assert not any("exec" in c or "--as" in c or "--raw" in c for c in state["calls"])
+
+
+@pytest.mark.parametrize("failure", ["candidate", "api", "new-region", "ca", "namespace-owner", "actuator-identity", "stale-config"])
+def test_builder_installer_rejects_identity_drift_before_any_write(scope, builder_installation, failure):
+    installer, config, candidate, state, native = builder_installation
+    source = candidate["candidate_sha"]
+    if failure == "candidate":
+        source = "e" * 40
+    elif failure == "api":
+        scope["regions"][0]["api_server"] = "https://foreign.test"
+    elif failure == "new-region":
+        scope["regions"][0]["namespace"] = "foreign"
+    elif failure == "ca":
+        native.view["clusters"][0]["cluster"]["insecure-skip-tls-verify"] = True
+    elif failure == "actuator-identity":
+        state["actuator_identity"] = "unreviewed-runtime-user"
+    elif failure == "stale-config":
+        state["saved_platform_config"]["task_image_builder"] = {}
+    else:
+        build = config["regional_execution_targets"][0]["execution_namespace"] + "-build"
+        state["namespace"] = {"metadata": {"name": build, "uid": "unknown-owner", "labels": {}}}
+    with pytest.raises((ValueError, gateway.ScopeError)):
+        installer.prepare_builder_scope(scope, config, candidate, source_sha=source,
+            repo_root=Path(__file__).resolve().parents[2], apply=True)
+    assert state["writes"] == []
+
+
+def test_builder_installer_cli_plans_bootstraps_then_installs_only_after_credential_keys(scope, builder_installation, tmp_path, monkeypatch, capsys):
+    installer, config, candidate, state, _ = builder_installation
+    tmp_path.chmod(0o700)
+    private_scope, saved, publication = (tmp_path / n for n in ("scope.json", "platform.json", "candidate.json"))
+    for path, value in ((private_scope, scope), (saved, config), (publication, candidate)):
+        path.write_text(json.dumps(value))
+        path.chmod(0o600)
+    wrapper = tmp_path / "github-kubectl.py"
+    original = (f'expected = {scope["kubeconfig"]!r}\nimport os\n'
+                f'if False: os.execv({scope["kubectl"]!r}, [])\nprint("old grant")\n').encode()
+    wrapper.write_bytes(original)
+    wrapper.chmod(0o600)
+    args = ["regional-installer", "--root", str(tmp_path), "--scope", str(private_scope),
+            "--source-sha", candidate["candidate_sha"], "--builder-platform-config", str(saved),
+            "--candidate", str(publication)]
+    monkeypatch.setattr(sys, "argv", args)
+    assert installer.main() == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "planned_builder_bootstrap"
+    assert wrapper.read_bytes() == original and state["writes"] == []
+    args.append("--apply")
+    assert installer.main() == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "blocked_build_secret_keys"
+    assert wrapper.read_bytes() == original and len(state["writes"]) == 1
+    state["secrets_present"] = True
+    assert installer.main() == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "installed" and result["controllers_started"] is False
+    assert len(state["writes"]) == 1
+    installed = json.loads((tmp_path / "regional-compatibility" / candidate["candidate_sha"] / "scope.json").read_text())
+    assert installed["regions"][0]["builder_documents"]["candidate_sha"] == candidate["candidate_sha"]
+    assert wrapper.read_bytes().endswith(original)
+    assert json.loads(private_scope.read_text()) == scope
+
+
+def test_default_archive_reference_reuses_source_instead_of_inventing_a_fourth_secret(scope, builder_installation):
+    installer, config, candidate, state, _ = builder_installation
+    config["regional_execution_targets"][0]["task_image_builder"].pop("archive_secret_name")
+    state["saved_platform_config"] = copy.deepcopy(config)
+    state["secrets_present"] = True
+    desired, result = installer.prepare_builder_scope(scope, config, candidate,
+        source_sha=candidate["candidate_sha"], repo_root=Path(__file__).resolve().parents[2], apply=True)
+    assert desired is not None
+    assert {s["name"] for s in result["required_secret_keys"]} == {
+        "loom-task-build-source", "loom-task-build-cache", "loom-task-build-registry"}
+
+
 def test_combined_namespace_identity_and_permission_scope(scope, native):
     build = add_build_scope(scope)
     native.namespace_uids[build] = scope["regions"][0]["namespace_uids"][build]
@@ -552,6 +729,10 @@ def test_combined_preflight_through_installed_wrapper_and_native_kubectl(regiona
                        "namespace_uids": {d["metadata"]["name"]: "11111111-1111-1111-1111-111111111111" for d in documents if d["kind"] == "Namespace"},
                        "resources": [{"kind": d["kind"], "name": d["metadata"]["name"], "namespace": d["metadata"].get("namespace")} for d in documents],
                        "secret_key_reads": [{"namespace": ns, "name": name, "required_keys": sorted(keys)} for (ns, name), keys in required.items()]})
+        build_namespace = target["execution_namespace"] + "-build"
+        region["builder_documents"] = {"candidate_sha": candidate["candidate_sha"], "documents": [
+            doc for doc in documents if doc["metadata"].get("namespace") == build_namespace
+            or (doc["kind"] == "Namespace" and doc["metadata"]["name"] == build_namespace)]}
         scope["kubectl"] = executable
         gateway.validate_scope(scope)
         for document in documents:
@@ -561,6 +742,9 @@ def test_combined_preflight_through_installed_wrapper_and_native_kubectl(regiona
             if row not in resources.setdefault(version, []):
                 resources[version].append(row)
         Path(scope["kubeconfig"]).write_text(json.dumps({"apiVersion": "v1", "kind": "Config", "clusters": [{"name": region["cluster_name"], "cluster": {"server": endpoint, "certificate-authority": str(ca)}}], "contexts": [{"name": "existing-west", "context": {"cluster": region["cluster_name"], "user": "synthetic"}}], "users": [{"name": "synthetic", "user": {"token": "synthetic-token-never-over-ssh"}}], "current-context": "existing-west"}))
+        # Real client dry-run serialization must preserve exact reviewed build
+        # bodies, including harmless empty metadata/status fields it adds.
+        gateway._manifest(scope, region, yaml.safe_dump_all(documents).encode(), dry_run=False)
         tmp_path.chmod(0o700)
         wrapper = tmp_path / "github-kubectl.py"
         wrapper.write_text(f'import os\ntry:\n    expected = {scope["kubeconfig"]!r}\nexcept Exception:\n    raise\nos.execv({executable!r}, ["kubectl"])\n')
@@ -663,3 +847,103 @@ def test_observer_readiness_wait_and_read_have_exact_scoped_commands(scope, nati
         assert gateway.handle(scope, regional(scope, *args))[0] == 0
     with pytest.raises(gateway.ScopeError):
         gateway.handle(scope, regional(scope, "rollout", "status", "daemonset/foreign", "-n", namespace, "--timeout=300s"))
+
+
+def _installed_builder(scope, installation):
+    installer, config, candidate, state, _ = installation
+    target = config['regional_execution_targets'][0]
+    target['task_image_builder']['max_concurrent'] = 2
+    state['saved_platform_config'] = copy.deepcopy(config)
+    installer.prepare_builder_scope(scope, config, candidate, source_sha=candidate['candidate_sha'],
+                                    repo_root=Path(__file__).resolve().parents[2], apply=True)
+    state['secrets_present'] = True
+    prepared, _ = installer.prepare_builder_scope(scope, config, candidate, source_sha=candidate['candidate_sha'],
+                                                  repo_root=Path(__file__).resolve().parents[2], apply=True)
+    return prepared
+
+
+def test_installed_builder_quota_patch_is_cas_and_bounded_by_retained_original_ceilings(scope, builder_installation):
+    prepared = _installed_builder(scope, builder_installation)
+    region = prepared['regions'][0]
+    quota = next(d for d in region['builder_documents']['documents'] if d['kind'] == 'ResourceQuota')
+    hard = copy.deepcopy(quota['spec']['hard'])
+    hard.update({'requests.cpu': '2000m', 'requests.ephemeral-storage': '98304Mi',
+                 'limits.ephemeral-storage': '98304Mi'})
+    operations = [{'op': 'test', 'path': '/metadata/resourceVersion', 'value': '123'},
+                  {'op': 'replace', 'path': '/spec/hard', 'value': hard}]
+    args = ['patch', 'resourcequota', 'loom-task-image-build-capacity', '-n', region['namespace'] + '-build',
+            '--type=json', '-p', json.dumps(operations)]
+    assert gateway._quota_patch(region, args)
+    assert gateway.handle(prepared, regional(prepared, *args))[0] == 0
+    restored = copy.deepcopy(quota)
+    gateway._manifest(prepared, region, json.dumps(restored).encode(), dry_run=False)
+    lowered = copy.deepcopy(quota)
+    lowered['spec']['hard'] = hard
+    gateway._manifest(prepared, region, json.dumps(lowered).encode(), dry_run=False)
+    for field, value in [('limits.cpu', '16001m'), ('pods', '99'), ('requests.memory', '512Mi'),
+                         ('limits.ephemeral-storage', '131073Mi')]:
+        changed = copy.deepcopy(operations)
+        changed[1]['value'][field] = value
+        assert not gateway._quota_patch(region, [*args[:-1], json.dumps(changed)])
+        with pytest.raises(gateway.ScopeError):
+            gateway.handle(prepared, regional(prepared, *args[:-1], json.dumps(changed)))
+    no_cas = [operations[1]]
+    assert not gateway._quota_patch(region, [*args[:-1], json.dumps(no_cas)])
+
+
+def test_builder_job_snapshot_projects_only_uid_deadline_and_resource_envelopes(scope, builder_installation, monkeypatch):
+    prepared = _installed_builder(scope, builder_installation)
+    region = prepared['regions'][0]
+    normal = gateway._run
+    def run(current, args, **kwargs):
+        if 'jobs' in args:
+            return subprocess.CompletedProcess(args, 0, json.dumps({'items': [{
+                'metadata': {'name': 'in-flight', 'uid': 'retained-uid', 'annotations': {'secret': 'private'}},
+                'spec': {'activeDeadlineSeconds': 2700, 'template': {'spec': {'containers': [
+                    {'name': 'build', 'image': 'private/image', 'env': [{'name': 'KEY', 'value': 'private-token'}],
+                     'resources': {'requests': {'cpu': '8'}, 'limits': {'cpu': '8'}}}],
+                    'initContainers': [], 'volumes': [{'secret': {'secretName': 'private-secret'}}]}}},
+            }]}).encode(), b'')
+        return normal(current, args, **kwargs)
+    monkeypatch.setattr(gateway, '_run', run)
+    for ns in (region['namespace'], region['namespace'] + '-build'):
+        code, output, _ = gateway.handle(prepared, regional(prepared, 'get', 'jobs', '-n', ns, '-o', 'json'))
+        assert code == 0
+        assert 'private' not in output.decode() and 'image' not in output.decode() and 'env' not in output.decode()
+        assert json.loads(output)['items'][0]['metadata'] == {'name': 'in-flight', 'uid': 'retained-uid'}
+    with pytest.raises(gateway.ScopeError):
+        gateway.handle(prepared, regional(prepared, 'get', 'jobs', '-n', 'other', '-o', 'json'))
+
+
+def test_installer_supplies_private_material_only_after_bound_namespace_bootstrap(scope, builder_installation, monkeypatch, tmp_path):
+    from scripts.ops import nebius_regional_builder_material as material
+
+    installer, config, candidate, state, _ = builder_installation
+    old_namespace = installer._namespace_observation
+    primary = config['execution_namespace'] + '-build'
+    def observe(current, prefix, name):
+        if name == primary:
+            assert prefix == []
+            return {'metadata': {'uid': '33333333-3333-3333-3333-333333333333'}}
+        return old_namespace(current, prefix, name)
+    monkeypatch.setattr(installer, '_namespace_observation', observe)
+    calls = []
+    private_handles = {'owner-file-handles': 'never-serialized'}
+    def supply(current, saved, fixed, **kwargs):
+        assert state['namespace'] is not None
+        assert saved == config and fixed == candidate and kwargs['material_files'] is private_handles
+        assert kwargs['source_namespace_uid'] == '33333333-3333-3333-3333-333333333333'
+        assert kwargs['source_sha'] == candidate['candidate_sha'] and kwargs['apply'] is True
+        assert kwargs['journal_path'] == tmp_path / candidate['candidate_sha'] / (config['regional_execution_targets'][0]['target_id'] + '.json')
+        assert kwargs['run'] is installer._run
+        assert current['regions'][0]['namespace_uids'][state['namespace']['metadata']['name']] == state['namespace']['metadata']['uid']
+        calls.append(kwargs['target_id'])
+        state['secrets_present'] = True
+        return {'status': 'material_installed', 'controllers_started': False}
+    monkeypatch.setattr(material, 'supply_builder_material', supply)
+    prepared, details = installer.prepare_builder_scope(scope, config, candidate,
+        source_sha=candidate['candidate_sha'], repo_root=Path(__file__).resolve().parents[2], apply=True,
+        material_files=private_handles, material_journal_root=tmp_path)
+    assert prepared is not None and calls == [config['regional_execution_targets'][0]['target_id']]
+    assert details['materials'] == [{'status': 'material_installed', 'controllers_started': False}]
+    assert 'owner-file-handles' not in json.dumps(details) and 'never-serialized' not in json.dumps(details)

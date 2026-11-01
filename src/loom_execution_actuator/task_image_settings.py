@@ -7,7 +7,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 if TYPE_CHECKING:
     from loom_execution_actuator.task_image_renderer import TaskImageJobConfig
@@ -31,6 +38,9 @@ class NativeTaskImageSettings(BaseModel):
     cpu_millis: int = Field(default=4000, ge=100, le=64000)
     memory_mib: int = Field(default=4096, ge=512, le=262144)
     ephemeral_storage_mib: int = Field(default=32768, ge=16384, le=524288)
+    # Omission preserves the historical Guaranteed envelope. Memory and scratch
+    # retain requests equal to limits; CPU sharing is an explicit operator choice.
+    cpu_request_millis: int | None = Field(default=None, ge=100, strict=True, exclude_if=lambda value: value is None)
     max_processes: int = Field(default=512, ge=64, le=4096)
     active_deadline_seconds: int = Field(default=1800, ge=60, le=7200)
     # Optional operator guard; physical resource/quota admission always applies.
@@ -51,6 +61,12 @@ class NativeTaskImageSettings(BaseModel):
     # BuildKit OCI export shape; archive is today's path, directory is measure-gated.
     oci_export_format: Literal["archive", "directory"] = "archive"
 
+    @model_validator(mode="after")
+    def bounded_requests(self) -> NativeTaskImageSettings:
+        if self.cpu_request_millis is not None and self.cpu_request_millis > self.cpu_millis:
+            raise ValueError("native build request exceeds its hard limit")
+        return self
+
     @model_serializer(mode="wrap")
     def serialize_settings(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         settings: dict[str, Any] = handler(self)
@@ -66,6 +82,7 @@ class NativeTaskImageSettings(BaseModel):
         return TaskImageJobConfig(**{key: getattr(self, key) for key in (
             "service_image", "source_secret_name", "cache_secret_name", "archive_secret_name", "registry_secret_name", "registry_auth_kind",
             "cpu_millis", "memory_mib", "ephemeral_storage_mib", "max_processes", "active_deadline_seconds",
+            "cpu_request_millis",
             "snapshotter", "export_cache_mode", "oci_export_format",
         )})
 

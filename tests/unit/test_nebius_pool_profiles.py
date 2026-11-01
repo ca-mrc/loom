@@ -117,3 +117,24 @@ def test_workload_service_cannot_enable_management_profiles(tmp_path):
     LoomServiceSettings(**common)
     with pytest.raises(ValueError):
         LoomServiceSettings(**common, pool_profiles_file=tmp_path / "profiles.json")
+
+
+def test_global_build_profile_accounts_the_actual_cpu_request_and_runtime_overhead(tmp_path):
+    from loom_service.pool_management.profiles import load_pool_profiles
+
+    participant, body, config = document()
+    settings = config["task_images"][0]["settings"]
+    settings["cpu_request_millis"] = 1000
+    # The shared adapter must count RuntimeClass overhead once, in addition
+    # to the maximum sequential prepare/build/publish request.
+    config["task_images"][0]["target"]["runtime_class_name"] = "qualified-build"
+    config["task_images"][0]["runtime_class_overhead"] = {"cpu_millis": 100, "memory_mib": 32, "storage_mib": 16}
+    file = tmp_path / "profiles.json"
+    file.write_text(json.dumps(config))
+    profiles = load_pool_profiles(file)
+    native = render(participant, body, profiles.task_images[participant.targets[0].profile_id])
+    assert native.resources.model_dump() == {"cpu_millis": 1100, "memory_mib": 4128, "storage_mib": 32784}
+    for phase in [*native.job["spec"]["template"]["spec"]["initContainers"],
+                  *native.job["spec"]["template"]["spec"]["containers"]]:
+        assert phase["resources"]["requests"]["cpu"] == "1000m"
+        assert phase["resources"]["limits"]["cpu"] == "4000m"

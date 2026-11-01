@@ -18,10 +18,22 @@ ROOT = Path(__file__).resolve().parents[2]
 if __package__ in {None, ""}:
     sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
-from scripts.ops.deploy_nebius_platform import DeploymentError, Kubectl  # noqa: E402
+from scripts.ops.deploy_nebius_platform import (  # noqa: E402
+    DeploymentError,
+    Kubectl,
+    verify_cluster_identity,
+)
 
-from loom.nebius_platform_render import postgres_settings, validate_environment  # noqa: E402
+from loom.nebius_platform_render import (  # noqa: E402
+    _regional_config,
+    _task_image_builder_documents,
+    _task_image_builder_settings,
+    postgres_settings,
+    task_image_builder_resource_ceiling,
+    validate_environment,
+)
 from loom.nebius_rollout_guard import LOCK_KEY  # noqa: E402
+from loom_execution_actuator.task_image_settings import NativeTaskImageSettings  # noqa: E402
 
 _API = '''import json,os,sys,tomllib,urllib.request,urllib.error
 from pathlib import Path
@@ -109,6 +121,19 @@ def _owners(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }}
 
 
+def _builders(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Expose resource intent without storage locations or credential contents."""
+    result = {}
+    for target, owner in _owners(config).items():
+        builder = owner.get("task_image_builder")
+        result[target] = {"enabled": builder is not None}
+        if builder is not None:
+            result[target].update({key: builder.get(key) for key in (
+                "cpu_request_millis", "cpu_millis", "memory_mib", "ephemeral_storage_mib", "max_concurrent", "resource_ceiling",
+            )})
+    return result
+
+
 def _env(deployment: dict[str, Any]) -> dict[str, str]:
     return {row["name"]: row["value"] for row in
             deployment["spec"]["template"]["spec"]["containers"][0].get("env", [])
@@ -135,8 +160,14 @@ def _runtime(kube: Kubectl, controller: dict[str, Any]) -> dict[str, Any]:
                   "print(json.dumps({'placement_policy':s.service_execution_placement_policy}))")
     else:
         script = ("import json; from loom_execution_actuator.config import ExecutionActuatorSettings; "
-                  "s=ExecutionActuatorSettings(); "
-                  "print(json.dumps({'command_concurrency':getattr(s,'command_concurrency',None)}))")
+                  "s=ExecutionActuatorSettings(); b=s.task_image_builder; "
+                  "print(json.dumps({'command_concurrency':getattr(s,'command_concurrency',None), "
+                  "'builder_enabled':b is not None, "
+                  "'builder_request_support':b is not None and hasattr(b,'cpu_request_millis'), "
+                  "'builder_resources':None if b is None else {"
+                  "'effective_cpu_request_millis':getattr(b,'cpu_request_millis',None) or b.cpu_millis, "
+                  "'cpu_millis':b.cpu_millis,'memory_mib':b.memory_mib,"
+                  "'ephemeral_storage_mib':b.ephemeral_storage_mib,'namespace':b.namespace}}))")
     return cast(dict[str, Any], json.loads(kube.run(
         "exec", "-n", ns, "deployment/" + name, "--", "python", "-c", script,
     )))
@@ -189,6 +220,7 @@ def inspect(kube: Kubectl, namespace: str) -> dict[str, Any]:
         "persisted": {
             "placement_policy": config.get("execution_placement_policy", "environment-local-health-first"),
             "command_concurrency": config.get("execution_command_concurrency", 1),
+            "builders": _builders(config),
             "create_rates": {key: row["capacity_policy"]["max_create_per_minute"]
                              for key, row in _owners(config).items()},
         },
@@ -201,6 +233,69 @@ def inspect(kube: Kubectl, namespace: str) -> dict[str, Any]:
         "live_create_rates": {row["target_id"]: row["policy"]["max_create_per_minute"]
                               for row in policies if row["target_id"] in _owners(config) and row.get("policy")},
     }
+
+
+def _updated_builders(
+    config: dict[str, Any], resources: dict[str, dict[str, int]], enable_regional: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    if not resources and not enable_regional:
+        raise DeploymentError("at least one build setting is required")
+    updated = deepcopy(config)
+    owners = _owners(updated)
+    regional_ids = {row["target_id"] for row in updated.get("regional_execution_targets", [])}
+    if len(set(enable_regional)) != len(enable_regional) or any(target not in regional_ids for target in enable_regional):
+        raise DeploymentError("builder activation intent requires a distinct configured regional target")
+    primary = config.get("task_image_builder")
+    for target in enable_regional:
+        if primary is None:
+            raise DeploymentError("regional builder requires reviewed primary build/storage settings")
+        if owners[target].get("task_image_builder") is None:
+            owners[target]["task_image_builder"] = deepcopy(primary)
+    limits = {"cpu_millis", "memory_mib", "ephemeral_storage_mib"}
+    for target, values in resources.items():
+        if (target not in owners or owners[target].get("task_image_builder") is None
+                or not values or set(values) - (limits | {"cpu_request_millis"})
+                or any(type(value) is not int for value in values.values())):
+            raise DeploymentError("build resources require a configured builder and integer resource settings")
+        owner = owners[target]
+        effective_config = updated if target == updated["target_id"] else _regional_config(updated, owner)
+        settings = _task_image_builder_settings(effective_config, service_image="test.invalid/service@sha256:" + "a" * 64)
+        ceiling = task_image_builder_resource_ceiling(owner["task_image_builder"], settings)
+        if any(key in values and values[key] > ceiling[key] for key in limits):
+            raise DeploymentError("build tuning must preserve existing hard resource ceilings")
+        owner["task_image_builder"]["resource_ceiling"] = ceiling
+        owner["task_image_builder"].update(values)
+    validate_environment(updated)
+    return updated
+
+
+def _stage_builders_locked(
+    kube: Kubectl, namespace: str, *, expected_candidate: str,
+    resources: dict[str, dict[str, int]], enable_regional: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Persist future build intent; installation and permission checks own activation.
+
+    Existing Jobs retain their frozen settings. Enabling a regional builder must
+    go through the normal reviewed regional namespace/Secret/RBAC rollout.
+    """
+    cm, config, profile, _ = _read(kube, namespace)
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_candidate) or profile["candidate_sha"] != expected_candidate:
+        raise DeploymentError("build settings candidate differs from installed platform")
+    updated = _updated_builders(config, resources, enable_regional)
+    if updated != config:
+        kube.run("patch", "configmap", "loom-platform-config", "-n", namespace, "--type=json", "-p",
+                 json.dumps([
+                     {"op": "test", "path": "/metadata/resourceVersion", "value": cm["metadata"]["resourceVersion"]},
+                     {"op": "replace", "path": "/data/environment.json", "value": json.dumps(updated)},
+                 ]))
+    saved = json.loads(kube.get("configmap", "loom-platform-config", namespace)["data"]["environment.json"])
+    if any(_owners(saved)[target].get("task_image_builder") != owner.get("task_image_builder")
+           for target, owner in _owners(updated).items()):
+        raise DeploymentError("saved build settings differ")
+    return {"candidate_sha": profile["candidate_sha"], "builders": _builders(saved),
+            "controllers_restarted": False, "task_jobs_replaced": False,
+            "effective_on_next_deployment": True,
+            "regional_preflight_required": list(enable_regional)}
 
 
 def _apply_locked(
@@ -306,6 +401,165 @@ def stage_postgres(
         return _stage_postgres_locked(kube, namespace, expected_candidate=expected_candidate, settings=settings)
 
 
+def stage_builders(
+    kube: Kubectl, namespace: str, *, expected_candidate: str,
+    resources: dict[str, dict[str, int]], enable_regional: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    with _tuning_guard(kube, namespace, expected_candidate):
+        return _stage_builders_locked(kube, namespace, expected_candidate=expected_candidate,
+                                      resources=resources, enable_regional=enable_regional)
+
+
+def _builder_kube(kube: Kubectl, config: dict[str, Any], target: str) -> Kubectl:
+    if target == config["target_id"]:
+        return kube
+    owner = _owners(config)[target]
+    view = json.loads(kube.run("config", "view", "-o", "json"))
+    clusters = {row["name"]: row["cluster"] for row in view.get("clusters", [])}
+    contexts = [row["name"] for row in view.get("contexts", [])
+                if clusters.get(row["context"].get("cluster"), {}).get("server") == owner["kubernetes_api_server"]]
+    if len(contexts) != 1:
+        raise DeploymentError("existing builder requires its unique retained regional operator context")
+    remote = Kubectl(kube.kubeconfig, context=contexts[0], local_executable=kube.local_executable)
+    verify_cluster_identity(remote, owner, owner["cluster_id"])
+    return remote
+
+
+def _job_envelopes(kube: Kubectl, namespace: str) -> dict[str, Any]:
+    jobs = json.loads(kube.run("get", "jobs", "-n", namespace, "-o", "json"))["items"]
+    return {row["metadata"]["name"]: {
+        "uid": row["metadata"]["uid"], "deadline": row["spec"].get("activeDeadlineSeconds"),
+        "containers": [{"name": c["name"], "resources": c.get("resources", {})}
+                       for c in row["spec"]["template"]["spec"].get("containers", [])],
+        "init_containers": [{"name": c["name"], "resources": c.get("resources", {})}
+                            for c in row["spec"]["template"]["spec"].get("initContainers", [])],
+    } for row in jobs}
+
+
+def _same_quota(actual: dict[str, Any], expected: dict[str, Any]) -> bool:
+    from kubernetes.utils.quantity import parse_quantity
+
+    return set(actual) == set(expected) and all(parse_quantity(actual[key]) == parse_quantity(value)
+                                               for key, value in expected.items())
+
+
+def _retain_live_quota(
+    actual: dict[str, Any], desired: dict[str, Any], ceiling: dict[str, int], count: int | None,
+) -> dict[str, Any]:
+    """Old frozen attempts may still create Jobs; tighten quota only after idle."""
+    from kubernetes.utils.quantity import parse_quantity
+
+    if set(actual) != set(desired):
+        raise DeploymentError("existing build quota shape differs from configured builder")
+    if count is None:
+        return desired
+    retained = deepcopy(desired)
+    for key in ("pods", "count/jobs.batch", "count/configmaps"):
+        if parse_quantity(actual[key]) != parse_quantity(desired[key]):
+            raise DeploymentError("existing build quota object-count limit differs")
+    for resource, field, unit in (("cpu", "cpu_millis", "m"), ("memory", "memory_mib", "Mi"),
+                                  ("ephemeral-storage", "ephemeral_storage_mib", "Mi")):
+        request, limit = (parse_quantity(actual[kind + "." + resource]) for kind in ("requests", "limits"))
+        if (not 0 < request <= limit <= parse_quantity(str(ceiling[field] * count) + unit)
+                or (resource != "cpu" and request != limit)):
+            raise DeploymentError("existing build quota exceeds retained resource ceilings")
+        for kind in ("requests", "limits"):
+            key = kind + "." + resource
+            if parse_quantity(actual[key]) > parse_quantity(desired[key]):
+                amount = parse_quantity(actual[key]) / parse_quantity("1" + unit)
+                if amount != int(amount):
+                    raise DeploymentError("existing build quota unit differs from integer resource settings")
+                retained[key] = str(int(amount)) + unit
+    return retained
+
+
+def _apply_builders_locked(
+    kube: Kubectl, namespace: str, *, expected_candidate: str, resources: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    cm, config, profile, controllers = _read(kube, namespace)
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_candidate) or profile["candidate_sha"] != expected_candidate:
+        raise DeploymentError("build settings candidate differs from installed platform")
+    updated = _updated_builders(config, resources)
+    allowed = {"cpu_request_millis", "cpu_millis", "memory_mib", "ephemeral_storage_mib"}
+    prepared = {}
+    for target in resources:
+        matches = [row for row in controllers if _env(row).get("LOOM_EXECUTION_ACTUATOR_TARGET_ID") == target]
+        if len(matches) != 1 or matches[0]["spec"].get("replicas", 1) < 1:
+            raise DeploymentError("live build tuning requires one running existing actuator")
+        controller = matches[0]
+        runtime = _runtime(kube, controller)
+        if not runtime.get("builder_enabled") or not runtime.get("builder_request_support"):
+            raise DeploymentError("live build tuning requires an already enabled supporting builder; use staged protected deployment first")
+        raw = _env(controller).get("LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER")
+        if not raw:
+            raise DeploymentError("existing actuator builder configuration unavailable")
+        current = NativeTaskImageSettings.model_validate_json(raw)
+        owner = _owners(updated)[target]
+        regional = updated if target == updated["target_id"] else _regional_config(updated, owner)
+        desired = _task_image_builder_settings(regional, service_image=current.service_image, storage_config=updated)
+        if desired is None or any(getattr(current, key) != getattr(desired, key)
+                                  for key in NativeTaskImageSettings.model_fields if key not in allowed):
+            raise DeploymentError("live build tuning cannot change namespace, credential references, runtime or identity settings")
+        desired.job_config()
+        remote = _builder_kube(kube, config, target)
+        before = {ns: _job_envelopes(remote, ns) for ns in (owner["execution_namespace"], desired.namespace)}
+        quota = remote.get("resourcequota", "loom-task-image-build-capacity", desired.namespace)
+        if not quota or not quota["metadata"].get("resourceVersion"):
+            raise DeploymentError("existing build quota identity unavailable")
+        quota_doc = next(d for d in _task_image_builder_documents(regional, desired) if d["kind"] == "ResourceQuota")
+        hard = _retain_live_quota(quota["spec"].get("hard", {}), quota_doc["spec"]["hard"],
+            task_image_builder_resource_ceiling(owner["task_image_builder"], desired), desired.max_concurrent)
+        prepared[target] = (controller, remote, current, desired, before, quota, hard)
+    if updated != config:
+        kube.run("patch", "configmap", "loom-platform-config", "-n", namespace, "--type=json", "-p", json.dumps([
+            {"op": "test", "path": "/metadata/resourceVersion", "value": cm["metadata"]["resourceVersion"]},
+            {"op": "replace", "path": "/data/environment.json", "value": json.dumps(updated)},
+        ]))
+    restarted = []
+    snapshots = {}
+    for target, (controller, remote, current, desired, before, quota, hard) in prepared.items():
+        if not _same_quota(quota["spec"].get("hard", {}), hard):
+            remote.run("patch", "resourcequota", "loom-task-image-build-capacity", "-n", desired.namespace,
+                       "--type=json", "-p", json.dumps([
+                           {"op": "test", "path": "/metadata/resourceVersion", "value": quota["metadata"]["resourceVersion"]},
+                           {"op": "replace", "path": "/spec/hard", "value": hard},
+                       ]))
+        name, ns = controller["metadata"]["name"], controller["metadata"]["namespace"]
+        if any(getattr(current, key) != getattr(desired, key) for key in allowed):
+            kube.run("set", "env", "deployment/" + name, "-n", ns,
+                     "LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER=" + desired.model_dump_json())
+            kube.run("rollout", "status", "deployment/" + name, "-n", ns, "--timeout=300s", timeout=330)
+            restarted.append(name)
+        observed = _runtime(kube, controller)
+        expected = {"effective_cpu_request_millis": desired.cpu_request_millis or desired.cpu_millis,
+                    "cpu_millis": desired.cpu_millis, "memory_mib": desired.memory_mib,
+                    "ephemeral_storage_mib": desired.ephemeral_storage_mib, "namespace": desired.namespace}
+        if observed.get("builder_resources") != expected:
+            raise DeploymentError("live builder resource readback differs; retry retained tuning intent")
+        actual_quota = remote.get("resourcequota", "loom-task-image-build-capacity", desired.namespace)
+        if not _same_quota(actual_quota.get("spec", {}).get("hard", {}), hard):
+            raise DeploymentError("live builder quota readback differs")
+        after = {ns: _job_envelopes(remote, ns) for ns in before}
+        for ns, jobs in before.items():
+            if any(name in after[ns] and after[ns][name] != job for name, job in jobs.items()):
+                raise DeploymentError("an existing Job UID or frozen resource envelope changed during tuning")
+        snapshots[target] = {"before": {ns: {name: row["uid"] for name, row in jobs.items()} for ns, jobs in before.items()},
+                             "after": {ns: {name: row["uid"] for name, row in jobs.items()} for ns, jobs in after.items()}}
+    saved_cm = kube.get("configmap", "loom-platform-config", namespace)
+    if (json.loads(saved_cm["data"]["profile.json"])["candidate_sha"] != expected_candidate
+            or json.loads(saved_cm["data"]["environment.json"]) != updated):
+        raise DeploymentError("saved builder intent changed during live tuning")
+    return {"candidate_sha": expected_candidate, "builders": _builders(updated),
+            "restarted_controllers": restarted, "job_uid_snapshots": snapshots, "task_jobs_replaced": False}
+
+
+def apply_builders(
+    kube: Kubectl, namespace: str, *, expected_candidate: str, resources: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    with _tuning_guard(kube, namespace, expected_candidate):
+        return _apply_builders_locked(kube, namespace, expected_candidate=expected_candidate, resources=resources)
+
+
 def apply(
     kube: Kubectl, namespace: str, *, expected_candidate: str,
     placement_policy: str | None = None, command_concurrency: int | None = None,
@@ -320,13 +574,19 @@ def apply(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("inspect", "apply", "stage-postgres"))
+    parser.add_argument("operation", choices=("inspect", "apply", "stage-postgres", "stage-builders", "apply-builders"))
     parser.add_argument("--kubeconfig", type=Path, required=True)
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--expected-candidate")
     parser.add_argument("--placement-policy", choices=("environment-local-health-first", "environment-local-capacity-balanced"))
     parser.add_argument("--command-concurrency", type=int, choices=range(1, 9))
     parser.add_argument("--create-rate", action="append", default=[], metavar="TARGET=PER_MINUTE")
+    parser.add_argument("--enable-regional-builder", action="append", default=[], metavar="TARGET",
+                        help="stage explicit regional opt-in for the next normal protected deployment")
+    build_fields = {"cpu-request-millis": "cpu_request_millis", "cpu-limit-millis": "cpu_millis",
+                    "memory-mib": "memory_mib", "storage-mib": "ephemeral_storage_mib"}
+    for name in build_fields:
+        parser.add_argument("--build-" + name, action="append", default=[], metavar="TARGET=VALUE")
     for name in ("cpu-request-millis", "cpu-limit-millis", "memory-request-mib", "memory-limit-mib", "shared-buffers-mib"):
         parser.add_argument("--postgres-" + name, type=int)
     args = parser.parse_args()
@@ -335,7 +595,27 @@ def main() -> None:
         database_settings = {name: getattr(args, "postgres_" + name) for name in (
             "cpu_request_millis", "cpu_limit_millis", "memory_request_mib", "memory_limit_mib", "shared_buffers_mib",
         ) if getattr(args, "postgres_" + name) is not None}
-        if args.operation == "stage-postgres":
+        build_resources: dict[str, dict[str, int]] = {}
+        for argument, field in build_fields.items():
+            for value in getattr(args, "build_" + argument.replace("-", "_")):
+                target, amount = value.split("=", 1)
+                selected = build_resources.setdefault(target, {})
+                if field in selected:
+                    raise ValueError
+                selected[field] = int(amount)
+        if args.operation in {"stage-builders", "apply-builders"}:
+            if database_settings or args.placement_policy is not None or args.command_concurrency is not None or args.create_rate:
+                raise DeploymentError("stage build settings separately from database or live execution tuning")
+            if args.operation == "apply-builders":
+                if args.enable_regional_builder:
+                    raise DeploymentError("new regional builders require staged protected deployment")
+                result = apply_builders(kube, args.namespace, expected_candidate=args.expected_candidate or "", resources=build_resources)
+            else:
+                result = stage_builders(kube, args.namespace, expected_candidate=args.expected_candidate or "",
+                                        resources=build_resources, enable_regional=tuple(args.enable_regional_builder))
+        elif build_resources or args.enable_regional_builder:
+            raise DeploymentError("build settings require stage-builders and a normal protected deployment")
+        elif args.operation == "stage-postgres":
             if args.placement_policy is not None or args.command_concurrency is not None or args.create_rate:
                 raise DeploymentError("stage database settings separately from ordinary live tuning")
             result = stage_postgres(kube, args.namespace, expected_candidate=args.expected_candidate or "",

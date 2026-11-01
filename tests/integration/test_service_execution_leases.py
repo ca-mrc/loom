@@ -1298,7 +1298,7 @@ async def test_parent_cancellation_fences_queued_execution_before_http_delivery(
 
 @pytest.mark.parametrize("parent_state", ["cancelled", "finished"])
 async def test_execution_reservation_rechecks_parent_after_candidate_lock(
-    postgres_url: str, monkeypatch: pytest.MonkeyPatch, parent_state: str,
+    postgres_url: str, parent_state: str,
 ) -> None:
     from loom_control_plane import service_execution_scheduler as scheduler
 
@@ -1307,14 +1307,16 @@ async def test_execution_reservation_rechecks_parent_after_candidate_lock(
     now = datetime.now(UTC)
     selected = asyncio.Event()
     parent_committed = asyncio.Event()
-    reserve_candidate = scheduler._reserve_service_candidate
 
-    async def delayed_reservation(*args: Any, **kwargs: Any) -> ServiceExecutionLease | None:
-        selected.set()
-        await parent_committed.wait()
-        return await reserve_candidate(*args, **kwargs)
+    class PauseAfterSelection(AsyncSession):
+        async def execute(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
+            result = await super().execute(statement, *args, **kwargs)
+            if statement is scheduler._NEXT_SERVICE_TRIAL:
+                selected.set()
+                await parent_committed.wait()
+            return result
 
-    monkeypatch.setattr(scheduler, "_reserve_service_candidate", delayed_reservation)
+    observed_sessions = async_sessionmaker(engine, class_=PauseAfterSelection, expire_on_commit=False)
     reservation: asyncio.Task[ServiceExecutionLease | None] | None = None
     try:
         async with sessions.begin() as session:
@@ -1328,7 +1330,7 @@ async def test_execution_reservation_rechecks_parent_after_candidate_lock(
             await _configure_scheduler_trial(session, trial_id=following_id, now=now)
 
         async def reserve() -> ServiceExecutionLease | None:
-            async with sessions.begin() as session:
+            async with observed_sessions.begin() as session:
                 return await reserve_next_service_execution(
                     session, environment="staging", pool_id="nebius-cpu",
                     image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=now,

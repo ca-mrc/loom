@@ -68,7 +68,10 @@ def test_single_collector_consumes_pool_mode_and_preserves_cloud_authority(colle
         monkeypatch.setenv(name, value)
     for row in container["env"]:
         monkeypatch.setenv(row["name"], row["value"])
-    assert CapacityCollectorModeSettings(_env_file=None).collection_mode == "pool"
+    mode = CapacityCollectorModeSettings(_env_file=None)
+    assert mode.collection_mode == "pool"
+    assert mode.sample_window_seconds == 50
+    assert mode.sample_interval_seconds == 15
     settings = PoolCapacityCollectorSettings(_env_file=None)
     assert settings.pool_id == request.registration.spec.pool_id
     assert settings.management_url == "https://manage.example.com"

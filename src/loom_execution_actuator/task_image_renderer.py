@@ -58,6 +58,7 @@ class TaskImageJobConfig:
     cpu_millis: int = 4000
     memory_mib: int = 4096
     ephemeral_storage_mib: int = 32768
+    cpu_request_millis: int | None = None
     max_processes: int = 512
     active_deadline_seconds: int = 1800
     # Authored builds may hardlink files from earlier layers (for example a
@@ -86,6 +87,10 @@ class TaskImageJobConfig:
                 raise ValueError(f"{name} must be a positive integer")
         if self.ephemeral_storage_mib < MIN_TASK_IMAGE_EPHEMERAL_STORAGE_MIB:
             raise ValueError("native task-image builds require at least 16 GiB ephemeral storage")
+        if self.cpu_request_millis is not None and (
+            type(self.cpu_request_millis) is not int or not 100 <= self.cpu_request_millis <= self.cpu_millis
+        ):
+            raise ValueError("cpu_request_millis must fit the native build hard limit")
         if self.snapshotter not in {"overlayfs", "native"}:
             raise ValueError("task-image snapshotter must be overlayfs or native")
         if self.export_cache_mode not in {"max", "min"}:
@@ -381,6 +386,10 @@ def render_native_image_job(
         "memory": f"{config.memory_mib}Mi",
         "ephemeral-storage": f"{config.ephemeral_storage_mib}Mi",
     }
+    requests = {
+        **resources,
+        "cpu": f"{config.cpu_request_millis if config.cpu_request_millis is not None else config.cpu_millis}m",
+    }
     security = {
         "runAsNonRoot": True,
         "runAsUser": 1000,
@@ -428,7 +437,7 @@ def render_native_image_job(
                 {"name": "TMPDIR", "value": "/tmp"},
                 {"name": "DOCKER_CONFIG", "value": "/tmp/docker-config"},
             ],
-            "resources": {"requests": resources.copy(), "limits": resources.copy()},
+            "resources": {"requests": requests.copy(), "limits": resources.copy()},
             "securityContext": copy.deepcopy(security),
             "volumeMounts": mounts,
             "terminationMessagePath": "/dev/termination-log",
@@ -467,7 +476,7 @@ def render_native_image_job(
                 ),
             },
         ],
-        "resources": {"requests": resources.copy(), "limits": resources.copy()},
+        "resources": {"requests": requests.copy(), "limits": resources.copy()},
         "securityContext": {
             **security,
             "allowPrivilegeEscalation": True,

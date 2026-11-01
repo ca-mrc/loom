@@ -32,6 +32,28 @@ from loom_execution_actuator.contracts import (
 from loom_execution_actuator.pool_execution_observation import qualify_execution_observation
 from loom_execution_actuator.resource_observations import read_resource_observation
 
+
+def exact_pods_absent(core: Any, *, namespace: str, pod_uid: str, job_uid: str) -> bool:
+    """A Job 404 or changed labels cannot hide its still-live dependent Pod."""
+    continuation = None
+    while True:
+        listing = core.list_namespaced_pod(
+            namespace=namespace, limit=1000, _continue=continuation, _request_timeout=20,
+        )
+        for pod in listing.items:
+            metadata = pod.get("metadata", {}) if isinstance(pod, dict) else pod.metadata
+            uid = metadata.get("uid") if isinstance(metadata, dict) else metadata.uid
+            owners = (metadata.get("ownerReferences", []) if isinstance(metadata, dict)
+                      else metadata.owner_references or [])
+            if str(uid) == pod_uid or any(
+                str(owner.get("uid") if isinstance(owner, dict) else owner.uid) == job_uid
+                for owner in owners
+            ):
+                return False
+        continuation = getattr(getattr(listing, "metadata", None), "_continue", None)
+        if not continuation:
+            return True
+
 _LEASE_LABEL = "loom.openai.com/lease-id"
 _GENERATION_LABEL = "loom.openai.com/generation"
 _TARGET_ANNOTATION = "loom.openai.com/target-id"
@@ -527,6 +549,11 @@ class InClusterKubernetesJobApi:
 
     async def get_job(self, *, namespace: str, job_name: str) -> KubernetesJobObservation | None:
         return await asyncio.to_thread(self._get_sync, namespace, job_name)
+
+    async def confirm_pod_absence(self, *, namespace: str, pod_uid: str, job_uid: str) -> bool:
+        return await asyncio.to_thread(
+            exact_pods_absent, self._core, namespace=namespace, pod_uid=pod_uid, job_uid=job_uid,
+        )
 
     def _pool_namespace(self, namespace: PoolNamespaceBindingV1) -> None:
         value = self._core.read_namespace(namespace.name, _request_timeout=20)

@@ -57,7 +57,11 @@ from loom_control_plane.service_execution_scheduler import (
     compile_verifier_candidate,
     verifier_candidates,
 )
-from loom_execution_actuator.contracts import KubernetesJobObservation, NormalizedJobState
+from loom_execution_actuator.contracts import (
+    KubernetesJobObservation,
+    NormalizedJobState,
+    PodCleanupReceipt,
+)
 from loom_execution_actuator.pool_outbox import PoolHandoffError
 
 
@@ -610,7 +614,10 @@ class PoolExecutionOutbox:
             observation = KubernetesJobObservation(namespace=lease.namespace_name, job_name=lease.job_name,
                 lease_id=str(lease.id), resource_generation=lease.resource_generation, target_id=lease.target_id,
                 execution_unit_key=str(lease.execution_unit_key), normalized_state=NormalizedJobState.DELETED,
-                job_uid=job_uid, reason="PoolCleanupConfirmed")
+                job_uid=job_uid, reason="PoolCleanupConfirmed",
+                cleanup_receipt=(PodCleanupReceipt(pod_uid=lease.pod_uid, job_uid=job_uid,
+                    resource_generation=lease.resource_generation, confirmed_at=await _clock(session))
+                    if lease.pod_uid and job_uid else None))
             await record_kubernetes_observation(session, lease_id=lease.id, generation=lease.generation,
                 payload=observation.event_payload(), observed_at=await _clock(session))
             row.phase, row.released_json = "released", receipt.model_dump(mode="json")

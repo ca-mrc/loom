@@ -88,6 +88,12 @@ class CapacityCollectorModeSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LOOM_EXECUTION_CAPACITY_COLLECTOR_", extra="ignore")
 
     collection_mode: Literal["target", "pool"] = "target"
+    # A bounded sampling window fits inside the existing minutely CronJob.
+    # Keep one-shot compatibility for other callers. IO qualification retains
+    # its own complete-window/freshness checks; these knobs do not relax them.
+    sample_window_seconds: float = Field(default=0.0, ge=0.0, le=55.0)
+    sample_interval_seconds: float = Field(default=15.0, ge=10.0, le=30.0)
+    sample_stop_before_minute_seconds: float | None = Field(default=None, ge=1.0, le=10.0)
 
 
 __all__ = ["CapacityCollectorModeSettings", "ExecutionCapacityCollectorSettings", "PoolCapacityCollectorSettings"]

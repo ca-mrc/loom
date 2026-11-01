@@ -124,6 +124,8 @@ def test_collector_binds_closed_pool_observer_and_ignores_ambient_authority(comp
     request = database_runtime(completed_pool)
     monkeypatch.setenv('LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_NODE_GROUP_ID', 'staging-group')
     monkeypatch.setenv('LOOM_EXECUTION_CAPACITY_COLLECTOR_KUBERNETES_ENDPOINT', 'https://staging.invalid')
+    monkeypatch.setenv('LOOM_EXECUTION_CAPACITY_COLLECTOR_SAMPLE_WINDOW_SECONDS', '55')
+    monkeypatch.setenv('LOOM_EXECUTION_CAPACITY_COLLECTOR_SAMPLE_INTERVAL_SECONDS', '30')
     value = prepare(request)
     spec = request.manager.retained.request.registration.spec
     observer, = [row for row in spec.machines if row.role == 'observer']
@@ -131,6 +133,8 @@ def test_collector_binds_closed_pool_observer_and_ignores_ambient_authority(comp
     data = value.configuration['data']
     prefix = 'LOOM_EXECUTION_CAPACITY_COLLECTOR_'
     assert data[prefix + 'COLLECTION_MODE'] == 'pool'
+    assert float(data[prefix + 'SAMPLE_WINDOW_SECONDS']) == 50
+    assert float(data[prefix + 'SAMPLE_INTERVAL_SECONDS']) == 15
     assert data[prefix + 'POOL_ID'] == str(spec.pool_id)
     assert data[prefix + 'NEBIUS_PROJECT_ID'] == 'project-compute'
     assert data[prefix + 'NEBIUS_QUOTA_PARENT_ID'] == 'tenant-test'

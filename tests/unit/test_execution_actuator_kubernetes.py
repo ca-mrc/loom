@@ -19,6 +19,29 @@ from loom_execution_actuator.kubernetes_api import InClusterKubernetesJobApi, _n
 _ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize("identity", ["exact-pod", "job-dependent", "absent"])
+async def test_cleanup_receipt_checks_exact_uid_across_all_pod_labels_and_pages(identity):
+    calls = []
+
+    def listing(**kwargs):
+        calls.append(kwargs)
+        if kwargs["_continue"] is None:
+            return _ns(items=[], metadata=_ns(_continue="next-page"))
+        metadata = _ns(uid="old-pod" if identity == "exact-pod" else "other-pod",
+                       labels={"job-name": "changed"}, owner_references=(
+                           [_ns(uid="old-job")] if identity == "job-dependent" else []))
+        return _ns(items=[] if identity == "absent" else [_ns(metadata=metadata)],
+                   metadata=_ns(_continue=None))
+
+    api = object.__new__(InClusterKubernetesJobApi)
+    api._core = _ns(list_namespaced_pod=listing)
+    assert await api.confirm_pod_absence(
+        namespace="executions", pod_uid="old-pod", job_uid="old-job",
+    ) is (identity == "absent")
+    assert len(calls) == 2
+    assert all("label_selector" not in call for call in calls)
+
+
 async def test_watch_persists_first_event_before_the_stream_finishes(monkeypatch: pytest.MonkeyPatch) -> None:
     from loom_execution_actuator.controller import ExecutionActuator
     from loom_execution_actuator.renderer import ExecutionTargetRuntime

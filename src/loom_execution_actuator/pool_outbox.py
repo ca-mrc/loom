@@ -490,7 +490,14 @@ class PoolBuildOutbox:
                 raise PoolHandoffError
             if native.get("capacity_released_at") is not None:
                 raise PoolHandoffError
-            native.update(state="released", capacity_released_at=(await _clock(session)).isoformat())
+            at = (await _clock(session)).isoformat()
+            native.update(state="released", capacity_released_at=at)
+            if native.get("pod_uid") and native.get("job_uid"):
+                native["capacity_release_receipt"] = {
+                    "pod_uid": native["pod_uid"], "job_uid": native["job_uid"],
+                    "target_id": native["target_id"], "lease_epoch": attempt.lease_epoch,
+                    "confirmed_at": at, "pods_absent": True,
+                }
             attempt.native_build = native
             row.phase, row.released_json = "released", receipt.model_dump(mode="json")
             await session.flush()

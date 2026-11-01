@@ -3033,8 +3033,132 @@ Populate these fields from the already approved configured target and current
 readback, including each existing rendered resource identity. Keep the file
 owner-only and out of Git/artifacts. Plan and apply verify the retained context
 mapping, existing resource identities, namespace UIDs and populated required
-Secret key names; this installer cannot bootstrap a new target, namespace,
-resource identity or Kubernetes grant.
+Secret key names; ordinary scope refresh cannot bootstrap a new target,
+namespace, resource identity or Kubernetes grant. The fixed sibling builder
+extension below is the limited exception for an already retained region.
+
+For an explicitly enabled builder in an already retained region, use the same
+operator-admin installer with the reviewed saved platform configuration and the
+fixed publication selected for the next deployment:
+
+```sh
+# Enter the existing operator-admin shell, using its normal identity rather
+# than the GitHub forced-command identity. Keep host verification unchanged.
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+  -o UserKnownHostsFile="$OPERATOR_KNOWN_HOSTS_FILE" \
+  -i "$OPERATOR_ADMIN_SSH_KEY_FILE" "$OPERATOR_SSH_TARGET"
+
+# On that host, as the retained gateway wrapper's existing owner:
+cd "$REVIEWED_CANDIDATE_SOURCE_ROOT"
+uv sync --locked --no-dev --extra cluster
+uv run --no-sync python -m scripts.ops.install_nebius_regional_rollout_gateway \
+  --root "$RETAINED_GATEWAY_ROOT" \
+  --source-sha "$SELECTED_CANDIDATE_SHA" --scope /private/operator/regional-scope.json \
+  --builder-platform-config /private/operator/saved-platform.json \
+  --candidate /private/operator/publication/candidate.json \
+  --builder-material-refs /private/operator/builder-material-refs.json
+# Apply the same reviewed inputs through the established operator-admin route.
+uv run --no-sync python -m scripts.ops.install_nebius_regional_rollout_gateway \
+  --root "$RETAINED_GATEWAY_ROOT" \
+  --source-sha "$SELECTED_CANDIDATE_SHA" --scope /private/operator/regional-scope.json \
+  --builder-platform-config /private/operator/saved-platform.json \
+  --candidate /private/operator/publication/candidate.json \
+  --builder-material-refs /private/operator/builder-material-refs.json --apply
+```
+
+`REVIEWED_CANDIDATE_SOURCE_ROOT` is the complete reviewed source for that fixed
+publication, including `src`, `scripts`, `deploy`, `pyproject.toml` and `uv.lock`.
+The locked project environment supplies the renderer's Python dependencies and
+source imports; a bare system Python with no installed project is insufficient.
+Use the normal operator host's existing `uv`/Python tooling or its equivalently
+prepared locked project environment, without installing global host packages.
+`RETAINED_GATEWAY_ROOT` is the existing wrapper directory, normally
+`~/.loom/nebius-auto-rollout` for its owner. A different user's home or a root
+session with a different owner fails private-path qualification. All private
+input/material paths refer to files on this operator host, supplied through the
+existing owner channel; workstation paths do not become remote file handles.
+The restricted GitHub key cannot perform this shell entry or upgrade itself.
+
+The published candidate must match `--source-sha`; its reviewed source renderer
+derives the six fixed build documents. The configured region must already have
+the retained namespace, context, cluster and trusted CA. No caller-supplied
+manifest, new region or connection override is accepted. The supplied platform
+configuration must equal the saved ConfigMap intent, and the new build binding
+must retain the installed execution actuator's exact IAM User subject. The installer verifies
+all old scope identities before writing. A missing exact `-build` sibling is
+reported during plan; apply bootstraps only that Namespace with restricted PSS
+and rereads its UID. It does not start a builder or grant a runtime identity new
+access. The material owner can add `--builder-material-refs
+/private/operator/builder-material-refs.json` to that same protected installer
+invocation to supply the existing primary builder's exact credential roles from
+current private files. The owner-only JSON maps each derived Secret name to
+`source_secret_uid`, its `roles` list and a `files` map of required key names to
+absolute owner-private file paths. A current owner `s3.json` from the existing
+builder provisioner can be reused without splitting its values into new files:
+for `access-key` and `secret-key`, use
+`{"path":"/private/operator/current-builder/s3.json","json_key":"access-key"}`
+(respectively `secret-key`). The JSON file must have exactly those two nonempty
+string fields; no arbitrary JSON selector is supported. Registry
+`credentials.json` remains a raw private-file handle. The same owner S3 handle
+can serve the existing source/cache roles when their qualified identity is
+already shared. Existing files are usable after current identity/validity and
+primary Secret UID/role metadata qualification; their age or mere existence
+does not establish that qualification. Default archive/source reuse requires three
+physical references; an explicitly configured separate archive writer remains
+a separate role/reference. The helper derives names and keys from saved primary
+and regional settings and requires the same storage/registry contract. Plan
+stats file handles without reading contents; apply rechecks source/destination
+Namespace UIDs, current primary Secret UID/resourceVersion and populated key
+names, then creates only absent destination Secrets with opaque stdin. It never
+reads online Secret values, grants IAM authority, exports material or accepts
+arbitrary Secret names/writes. The runtime gateway gains no Secret-write grant.
+Existing unrelated destination material is never adopted or rotated. Before its
+first Secret create, apply saves a locked owner-private metadata journal at
+`$RETAINED_GATEWAY_ROOT/builder-material/<candidate>/<target>.json`, binding the
+operation UUID, candidate, source namespace/Secret UID and resourceVersion,
+destination namespace UID and exact roles/keys. It contains no values or private
+material paths. Each create intent is durable before the API call. Repeating the
+same installer inputs resumes only this journal's immutable Opaque Secrets,
+matching their UID and operation/binding annotations plus populated key names.
+An uncertain create response can therefore be recovered by metadata readback
+without a second create. Missing/replaced recorded objects, source rotation,
+different candidate/namespace, or foreign preexisting Secrets remain blocked.
+Keep the journal after success; it is the normal state needed to recover a
+partial installation, not permission to rotate credentials. Later ordinary
+scope refresh may omit the material flag. Do not delete or edit the journal to
+force adoption of an existing Secret.
+Do not reuse old private files merely because they exist: the material owner
+must bind current files to the exact primary UID/role declarations. Without
+that current private material or the installed operator's fixed create/read
+permissions, the installer reports a blocked prerequisite; it cannot substitute
+actor or main-cluster authority. Missing populated key names stop the
+installation with a precise list, leave the namespace restricted and leave the
+old gateway scope unchanged. Results contain only references, key names and UIDs.
+
+Once those prerequisites pass, the installer retains the build namespace UID,
+exact fixed-candidate build documents and their key-name reads in the extension.
+The five namespaced build resources may still be absent: the existing guarded
+deployment creates them, removing the former requirement that they already exist
+before their names can enter the scope. Build-resource applies must equal the
+reviewed documents; a different Role, RoleBinding, network policy or
+namespace policy is rejected even under the same name. Legacy resources and
+connection grants are preserved. Native parser-added empty status/timestamp
+fields do not change that comparison. Quota hard-resource scalar tuning may
+vary within the retained original per-target ceilings with the same concurrency
+and object-count limits; memory/storage requests equal their limits. Its live
+patch is limited to resource-version test plus replacement of `spec.hard`.
+Existing Job reads project only names, UIDs, deadline and container resource
+envelopes for in-flight preservation checks, never environment or source data.
+
+Complete this supported operator-admin installation before the normal GitHub
+idle rollout for that fixed candidate. The current restricted GitHub SSH key
+cannot install or widen its own command wrapper, and `stage-builders` only saves
+intent. A deployment that still has the old extension is missing this specific
+installer upgrade, rather than runtime actuator or collector authority. Do not
+edit `scope.json` directly, bypass the wrapper with raw kubectl, or substitute an
+administrator/actor credential. The ordinary deployment still checks exact CA,
+namespace UIDs, operator permissions and populated key names before activating
+the loop, then uses its existing backup/idle guard and scoped regional apply.
 
 Also include the already installed policy-bootstrap ServiceAccount in `resources`:
 `{"kind":"ServiceAccount","name":"loom-execution-policy-probe","namespace":"<retained-execution-namespace>"}`.

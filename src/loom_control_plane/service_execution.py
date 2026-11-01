@@ -2398,6 +2398,36 @@ def _equivalent_missing_job_diagnostics(
     )
 
 
+def _equivalent_cleanup_receipt_replay(
+    previous: dict[str, Any], incoming: dict[str, Any], *, lease: ServiceExecutionLease,
+) -> bool:
+    """Keep the first committed absence timestamp when replicas repeat its probe."""
+    old, new = previous.get("cleanup_receipt"), incoming.get("cleanup_receipt")
+    if (previous.get("normalized_state") != "deleted" or incoming.get("normalized_state") != "deleted"
+            or (old is None and new is None)
+            or {key: value for key, value in previous.items() if key != "cleanup_receipt"}
+            != {key: value for key, value in incoming.items() if key != "cleanup_receipt"}):
+        return False
+    for receipt in (old, new):
+        if receipt is None:
+            continue
+        if (not isinstance(receipt, dict) or receipt.get("pods_absent") is not True
+                or set(receipt) != {"pod_uid", "job_uid", "resource_generation", "confirmed_at", "pods_absent"}
+                or type(receipt.get("resource_generation")) is not int
+                or not lease.pod_uid or receipt.get("pod_uid") != lease.pod_uid
+                or not lease.job_uid or receipt.get("job_uid") != lease.job_uid
+                or receipt.get("resource_generation") != lease.resource_generation):
+            return False
+        try:
+            if _optional_datetime(receipt.get("confirmed_at"), "cleanup receipt time") is None:
+                return False
+        except ServiceExecutionConflict:
+            return False
+    # Probe order and commit order can differ. Always retain the first committed
+    # payload: neither upgrade a legacy event nor discard an existing receipt.
+    return True
+
+
 async def record_kubernetes_observation(
     session: AsyncSession,
     *,
@@ -2444,7 +2474,8 @@ async def record_kubernetes_observation(
     if existing is not None:
         ordinal = existing.ordinal
         previous = await _resolve_execution_event_payload(session, existing)
-        if _equivalent_missing_job_diagnostics(previous, payload):
+        if (_equivalent_missing_job_diagnostics(previous, payload)
+                or _equivalent_cleanup_receipt_replay(previous, payload, lease=lease)):
             # Replay the exact retained payload through the unchanged consistency
             # guard. Do not rewrite history or accept other diagnostic changes.
             payload = previous
