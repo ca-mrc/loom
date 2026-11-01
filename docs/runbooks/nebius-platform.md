@@ -1505,6 +1505,13 @@ their future progress cannot be predicted from create timestamps. This retry
 time grants no capacity: health, rate, placement, quotas and authority are all
 checked again under the shared transaction lock.
 
+When a current observation lacks an allocatable template sample, admission and
+waiting eligibility read compatible historical observations newest first. The
+reader streams one full inventory at a time and stops at the first compatible
+sample, closing the cursor on success, exhaustion, invalid data or cancellation.
+The existing 100-observation search bound and template/DaemonSet compatibility
+checks remain unchanged; this does not cache or replace live capacity authority.
+
 Queued execution heads are read in bounded pages per target. Expired hints are
 skipped in PostgreSQL; invalid heads advance to the next page without treating
 their cached inputs as authority. Once a valid oldest head is found, younger

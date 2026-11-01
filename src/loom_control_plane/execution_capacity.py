@@ -418,12 +418,22 @@ async def native_allocatable_sample(
     target_id = (await resolve_capacity_targets(session, target_id)).owner.id
     # Reuse the same compatible immutable history for actual admission and
     # waiting eligibility. A zero-node observation need not carry a new sample.
-    history = (await session.scalars(select(ExecutionCapacityObservation.observation_json)
+    history = await session.stream_scalars(select(ExecutionCapacityObservation.observation_json)
         .where(ExecutionCapacityObservation.target_id == target_id,
                ExecutionCapacityObservation.observation_json["placement"]["template_samples"].astext != "[]")
-        .order_by(ExecutionCapacityObservation.observed_at.desc()).limit(100))).all()
-    return cold_sample(current, (CapacityPlacement.model_validate(row["placement"])
-                                for row in history if row.get("placement")))
+        .order_by(ExecutionCapacityObservation.observed_at.desc()).limit(100)
+        .execution_options(yield_per=1))
+    try:
+        # A compatible sample is commonly the newest row. Do not transfer and
+        # JSON-decode another 99 complete inventories just to discard them.
+        async for row in history:
+            if row.get("placement"):
+                sample = cold_sample(current, [CapacityPlacement.model_validate(row["placement"])])
+                if sample is not None:
+                    return sample
+    finally:
+        await history.close()
+    return None
 
 
 @dataclass(frozen=True)
