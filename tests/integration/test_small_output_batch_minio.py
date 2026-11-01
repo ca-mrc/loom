@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
+import logging
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -231,7 +233,11 @@ async def test_small_batch_recovers_a_durable_group_with_lost_response(
 async def test_small_batch_real_http_sql_s3_commit_and_generation_fence(
     postgres_url: str,
     shared_minio: MinioContainer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    caplog.set_level(logging.INFO, logger="loom.upload_observation")
+    monkeypatch.setattr(logging.getLogger("loom.upload_observation"), "propagate", True)
     engine = create_async_engine(postgres_url)
     commits = 0
 
@@ -329,9 +335,20 @@ async def test_small_batch_real_http_sql_s3_commit_and_generation_fence(
                 ],
             }
             before_batch = commits
+            caplog.clear()
             response = await client.post(path + "/small-files", json=batch, headers=headers)
             assert response.status_code == 200, response.text
             assert commits - before_batch <= 2
+            observations = [json.loads(record.message) for record in caplog.records
+                            if record.name == "loom.upload_observation"]
+            for stage in ("database_pool", "database"):
+                saves = [value for value in observations if value["stage"] == stage
+                         and value["operation"] == "save_files" and value["event"] == "finished"]
+                assert len(saves) == 2
+                assert all(value["outcome"] == "success" for value in saves)
+            serialized = json.dumps(observations)
+            for sensitive in (grant["upload_token"], "synthetic output", bucket):
+                assert sensitive not in serialized
             assert [item["sha256"] for item in response.json()["files"]] == [
                 digest_bytes(body) for body in payloads.values()
             ]

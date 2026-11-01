@@ -26,7 +26,7 @@ _S3_OPERATION: ContextVar[str] = ContextVar("upload_s3_operation", default="othe
 Stage = Literal["gateway", "authorization", "processing", "database_pool", "database", "spool", "sdk_worker", "s3_transport", "materialization"]
 _OPERATIONS = frozenset({
     "prepare", "part", "complete", "small_files", "commit", "materialize", "copy",
-    "load_session", "save_session", "save_file",
+    "load_session", "save_session", "save_file", "save_files",
     "create_multipart_upload", "resume_multipart_upload", "upload_part",
     "upload_part_stream", "complete_multipart_upload", "abort_multipart_upload",
     "put_object", "get_object", "stat_object", "stream_object",
