@@ -63,7 +63,7 @@ export function BatchesView({
       providerModelFilter,
       page.current,
     ),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.listBatches({
         state: stateFilter || undefined,
         q: debouncedSearch || undefined,
@@ -76,7 +76,7 @@ export function BatchesView({
         provider_model_id: providerModelFilter || undefined,
         cursor: page.current ?? undefined,
         limit: "50",
-      }),
+      }, signal),
     refetchInterval: (q) => {
       const data = q.state.data as { items: BatchRow[] } | undefined;
       if (!data) return polling.refetchInterval;

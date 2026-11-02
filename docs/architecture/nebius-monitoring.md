@@ -6,14 +6,19 @@ scheduling authorities. The state=stage:image_preparation filter (and the other
 public stages) uses the same SQL expression as summary counts.
 Raw Trial state filters remain supported.
 
-Public stages are image preparation, execution wait, environment startup,
-execution, output archival and terminal outcome. Task verifier activity must not
-be inferred from output upload or archival. Shared image counts are distinct
-from affected Trial counts. Terminal Trial outcomes take precedence over later
-shared cache changes.
+Public stages are waiting for image, execution wait, environment startup,
+execution, independent verification, output archival, terminal outcome and
+unknown. The current attempt is bound to `Trial.attempt_count`; an independent
+verifier is bound to that parent and the recorded verifier lease/retry identity.
+Verifier activity is never inferred from output upload or archival. Shared image
+counts are distinct from affected Trial counts. Terminal Trial outcomes take
+precedence over later shared cache changes.
 
 The build container includes scratch cleanup after BuildKit exits. Its running
-state is displayed as building/cleanup, not a measured BuildKit-only duration.
+state is displayed as **Build container active**, with the internal substep
+explicitly unobserved, rather than a measured BuildKit-only duration. The separate
+image cleanup stage means release of owned build resources. Only existing
+structured observations determine these stages; no log polling is added.
 The per-command build budget and whole-Job lifecycle deadline introduced by
 PR #2020 remain distinct: timeout wording uses structured exit/Job conditions,
 falls back to a generic deadline if those are absent, and never parses logs to
@@ -40,6 +45,45 @@ The UI retains adaptive polling and fetches node detail only while expanded.
 Observation freshness is explicit. A build concurrency limit observed from an
 active native build is shown only while fresh and unambiguous; missing evidence
 is unavailable, never a hardcoded node count or inferred zero capacity.
+
+## Trial and image pipeline drilldown
+
+Monitor and Batch detail display stage cards by default. Trial lists show one
+main stage, safe waiting reason, region and elapsed stage time. An absent stage
+entry timestamp remains unknown. In particular, the mutable phase age of a
+shared image is never used as an individual Trial's waiting time, and submission
+age is not a phase duration. The image list labels its own phase duration at the
+last refresh. Missing and stale observations are explicit.
+
+Output submission and execution resource cleanup are independent of the main
+stage. A succeeded Trial may still show output submitted and resources being
+released. Cleanup includes unreleased older attempts; its freshness is evaluated
+separately from the durable result. `state=output:uploading`,
+`state=output:unavailable` and the `state=cleanup:pending`,
+`state=cleanup:in_progress` and `state=cleanup:blocked` filters drill
+into the same projection used for the corresponding summary counts. These
+read-only filters do not change persistent business state or delay a result
+until cleanup completes.
+
+Image cards count unique materializations and distinguish queued, waiting to
+retry, capacity wait, preparing context, build container active, publishing,
+resource cleanup, ready, failed and unknown. Unreleased older build attempts stay
+visible as cleanup even if an administrative retry advances the current image
+epoch; each materialization is still counted once. Retry waits retain a safe failure
+explanation. Selecting a card loads `GET /api/v1/monitor/images` on demand,
+with a maximum of 100 entries per page (default 50). Each row reports affected
+and image-waiting Trials within the authorized filter scope. `image_id` drills
+into those Trials, and `batch_q` preserves batch-name scope when moving from a
+batch search to Trial details. Neither the list nor the aggregate reveals other
+teams' Trial counts or private native manifests.
+
+The existing Monitor 4-second and Batch 5-second adaptive queries carry the
+small summary. There is no added full summary poll. Image details use a shared
+query key, explicit refresh and cursor pagination; obsolete scope/stage requests
+are aborted. Routine refresh keeps the current selection, row identities and
+scroll position. Lease reads project lifecycle columns and image reads project
+only phase/status fields; heavyweight diagnosis and build contracts stay out of
+the regular response. No new telemetry collector or history store is involved.
 
 Focused verification uses API/database fixtures, a build/failure/cache-reuse
 path and browser interactions. These checks do not replace the ordinary-member

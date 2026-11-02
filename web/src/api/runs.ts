@@ -99,11 +99,13 @@ export const runsApi = {
     apiFetch<components["schemas"]["MonitorPlacement"]>(`/api/v1/monitor/placement${qs(q)}`, {
       cache: "no-store",
     }),
-  getMonitorSummary: (q: Record<string, string | undefined> = {}) =>
+  getMonitorSummary: (q: Record<string, string | undefined> = {}, signal?: AbortSignal) =>
     apiFetch<MonitorSummary>(`/api/v1/monitor/summary${qs(q)}`, {
-      cache: "no-store",
+      cache: "no-store", signal,
     }),
-  listTrials: (q: Record<string, string | undefined> = {}) => apiFetch<TrialList>(`/api/v1/trials${qs(q)}`),
+  listMonitorImages: (q: Record<string, string | undefined> = {}, signal?: AbortSignal) =>
+    apiFetch<components["schemas"]["MonitorImages"]>(`/api/v1/monitor/images${qs(q)}`, { cache: "no-store", signal }),
+  listTrials: (q: Record<string, string | undefined> = {}, signal?: AbortSignal) => apiFetch<TrialList>(`/api/v1/trials${qs(q)}`, { signal }),
   getTrial: (id: string) => apiFetch<TrialDetail>(`/api/v1/trials/${id}`),
   submitTrial: (body: {
     task_id: string;
@@ -127,8 +129,8 @@ export const runsApi = {
     apiDownload(`/api/v1/trials/${id}/bundle/download`, `${id}-complete-trial-bundle.tar.gz`),
   downloadArtifact: (id: string, key: string, filename: string) =>
     apiDownload(`/api/v1/trials/${id}/artifacts/download${qs({ key })}`, filename),
-  listBatches: (q: Record<string, string | undefined> = {}) => apiFetch<BatchList>(`/api/v1/batches${qs(q)}`),
-  getBatch: (id: string) => apiFetch<BatchDetail>(`/api/v1/batches/${id}`),
+  listBatches: (q: Record<string, string | undefined> = {}, signal?: AbortSignal) => apiFetch<BatchList>(`/api/v1/batches${qs(q)}`, { signal }),
+  getBatch: (id: string, signal?: AbortSignal) => apiFetch<BatchDetail>(`/api/v1/batches/${id}`, { signal }),
   getBatchDebug: (id: string) => apiFetch<DebugEvidence>(`/api/v1/batches/${id}/debug`),
   getBatchDiagnosis: (id: string) => apiFetch<DiagnosisReport>(`/api/v1/batches/${id}/diagnosis`),
   getBatchDeliveryExport: (id: string) => apiFetch<DeliveryExport>(`/api/v1/batches/${id}/delivery-export`),

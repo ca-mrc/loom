@@ -12,9 +12,17 @@ from uuid import UUID
 from sqlalchemy import String, cast, func, or_, select
 
 from loom.auth import AuthContext
-from loom.db.schema import Batch, Task, Team, Trial, User
+from loom.db.schema import (
+    Batch,
+    Task,
+    TaskImageMaterialization,
+    Team,
+    Trial,
+    TrialTaskImageMaterialization,
+    User,
+)
 from loom_service.auth_guards import is_admin, require_team_or_admin
-from loom_service.trial_progress import progress_stage_case
+from loom_service.trial_progress import progress_state_filter
 
 
 def resolve_monitor_team_filter(
@@ -117,6 +125,7 @@ def apply_trial_monitor_filters(
     q: str | None = None,
     trial_q: str | None = None,
     task_id: str | None = None,
+    image_id: UUID | None = None,
     batch_id: UUID | None = None,
     benchmark_id: str | None = None,
     agent_name: str | None = None,
@@ -149,6 +158,13 @@ def apply_trial_monitor_filters(
             Trial.team_id.in_(select(Team.id).where(Team.name.ilike(pattern, escape="\\"))),
             Trial.submitted_by_user_id.in_(select(User.id).where(User.username.ilike(pattern, escape="\\"))),
         ))
+    if image_id is not None:
+        stmt = stmt.where(Trial.id.in_(select(TrialTaskImageMaterialization.trial_id)
+            .join(TaskImageMaterialization,
+                  TaskImageMaterialization.id == TrialTaskImageMaterialization.materialization_id)
+            .where(TaskImageMaterialization.id == image_id,
+                   TaskImageMaterialization.task_id == Trial.task_id,
+                   TaskImageMaterialization.cpu_arch == "x86_64").correlate(Trial)))
     if task_id is not None:
         stmt = stmt.where(Trial.task_id == task_id)
     if benchmark_id is not None:
@@ -190,6 +206,18 @@ def apply_trial_monitor_filters(
     wanted = split_state_filter(state)
     if wanted:
         stages = [value.removeprefix("stage:") for value in wanted if value.startswith("stage:")]
-        states = [value for value in wanted if not value.startswith("stage:")]
-        stmt = stmt.where(or_(Trial.state.in_(states), progress_stage_case().in_(stages)))
+        cleanups = [value.removeprefix("cleanup:") for value in wanted if value.startswith("cleanup:")]
+        outputs = [value.removeprefix("output:") for value in wanted if value.startswith("output:")]
+        states = [value for value in wanted if ":" not in value]
+        # Carry authorized non-state predicates into every projection aggregate;
+        # an outer tenant filter alone must not scan unrelated historical work.
+        scope = stmt.with_only_columns(Trial.id, maintain_column_froms=True).order_by(None)
+        predicates = [Trial.state.in_(states)]
+        if stages:
+            predicates.append(progress_state_filter("stage", stages, scope))
+        if cleanups:
+            predicates.append(progress_state_filter("cleanup", cleanups, scope))
+        if outputs:
+            predicates.append(progress_state_filter("output", outputs, scope))
+        stmt = stmt.where(or_(*predicates))
     return stmt

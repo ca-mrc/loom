@@ -699,6 +699,22 @@ describe("Monitor human-readable labels", () => {
     expect(await screen.findByText("3 queued")).toBeInTheDocument();
   });
 
+  it("clears Trial-only drilldown scope when switching back to the batch list", async () => {
+    const fetchMock = mockMonitorEndpoints();
+    renderWithProviders(<Monitor />, { route: "/monitor?view=trials&batch_q=large&image_id=image-a&batch_id=batch-a" });
+    await screen.findByRole("table", { name: "Trials" });
+    await userEvent.click(screen.getByRole("button", { name: "Batches" }));
+    await screen.findByRole("table", { name: "Batches" });
+    await waitFor(() => {
+      const summaryCalls = fetchMock.mock.calls.filter(([input]) => String(input).includes("/monitor/summary"));
+      const url = new URL(String(summaryCalls.at(-1)?.[0]), "http://local");
+      expect(url.searchParams.get("view")).toBe("batches");
+      expect(url.searchParams.has("batch_q")).toBe(false);
+      expect(url.searchParams.has("image_id")).toBe(false);
+      expect(url.searchParams.has("batch_id")).toBe(false);
+    });
+  });
+
   it("does not display legacy missing occupancy or draining observations as zero", async () => {
     const target = monitorSummaryPayload.service_execution.targets[0];
     mockMonitorEndpoints({

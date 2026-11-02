@@ -973,6 +973,7 @@ class Team(TypedDict):
 
 @with_config(ConfigDict(extra="allow"))
 class ProgressSummaryImages(TypedDict):
+    stages: NotRequired[dict[str, int | float]]
     states: dict[str, int | float]
     image_count: int | float
     waiting_trials: int | float
@@ -980,6 +981,8 @@ class ProgressSummaryImages(TypedDict):
 
 @with_config(ConfigDict(extra="allow"))
 class ProgressSummary(TypedDict):
+    output_states: NotRequired[dict[str, int | float]]
+    cleanup_states: NotRequired[dict[str, int | float]]
     oldest_wait_since_submission_seconds: NotRequired[dict[str, int | float]]
     stages: dict[str, int | float]
     trial_count: int | float
@@ -1281,6 +1284,14 @@ class TrialProgressTimelineItem(TypedDict):
 
 @with_config(ConfigDict(extra="allow"))
 class TrialProgress(TypedDict):
+    stage_started_at: NotRequired[str | None]
+    stage_seconds: NotRequired[int | float | None]
+    region: NotRequired[str | None]
+    output_state: NotRequired[str]
+    cleanup_state: NotRequired[str]
+    cleanup_observed_at: NotRequired[str | None]
+    cleanup_observation_stale: NotRequired[bool]
+    observation_missing: NotRequired[bool]
     stage: str
     label: str
     detail: str | None
@@ -1817,3 +1828,28 @@ class ArtifactSummary(TypedDict):
 
 
 OverviewActionKind = Literal["user"] | Literal["operator"]
+
+
+@with_config(ConfigDict(extra="allow"))
+class ImageProgress(TypedDict):
+    id: str
+    task_id: str
+    stage: str
+    label: str
+    state: str
+    affected_trials: int
+    waiting_trials: int
+    wait_message: str | None
+    stage_started_at: str | None
+    stage_seconds: int | None
+    region: str | None
+    observed_at: str | None
+    observation_stale: bool
+    observation_missing: bool
+    resources_released: bool | None
+
+
+@with_config(ConfigDict(extra="allow"))
+class MonitorImages(TypedDict):
+    items: list[ImageProgress]
+    next_cursor: str | None

@@ -21,12 +21,16 @@ export function TaskImagePreparationCard({ preparations }: { preparations: Prepa
               <ul className="mt-2 stack-y-1">
                 {item.phases.map((phase) => (
                   <li key={phase.name}>
-                    {phase.name === "build" ? "Build / scratch cleanup" : phase.name}: {phase.state}
+                    {phase.name === "build" ? "Build" : phase.name === "prepare" ? "Prepare context" : "Publish"}: {phase.name === "publish" && phase.state === "waiting" && item.phases.some(p => p.name !== "publish" && p.state === "running") ? "not started" : phase.state}
                     {phase.exit_code != null ? ` · exit code ${phase.exit_code}` : ""}
                   </li>
                 ))}
               </ul>
             ) : null}
+            {item.diagnostic ? <details className="mt-2">
+              <summary className="cursor-pointer text-xs font-medium">Preparation diagnostic</summary>
+              <p className="mt-1 whitespace-pre-wrap break-words text-xs">{item.diagnostic.summary}</p>
+            </details> : null}
             {item.resources_released === true ? <p className="mt-2 text-slate-500">Build resources released</p> : null}
           </div>
         ))}

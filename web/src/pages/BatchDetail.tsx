@@ -1,6 +1,6 @@
 import { CommandActions } from "../components/CommandActions";
 import { queryKeys } from "../api/queryKeys";
-import { ProgressSummary } from "../components/TrialProgress";
+import { ProgressSummary } from "../components/ProgressSummary";
 /**
  * Batch detail — one batch's aggregate stats + per-state trial
  * counts + the original filter/config that submitted it. Live-polls
@@ -49,6 +49,8 @@ function needsRefresh(batch: components["schemas"]["BatchDetail"]): boolean {
   if (ACTIVE_STATES.has(batch.state)) return true;
   if (Object.entries(batch.trial_summary).some(([state, count]) => count > 0 && !TERMINAL_TRIAL_STATES.has(state))) return true;
   if (Object.entries(batch.progress?.stages ?? {}).some(([stage, count]) => count > 0 && !TERMINAL_TRIAL_STATES.has(stage))) return true;
+  if (["pending", "in_progress", "blocked"].some(stage => (batch.progress?.cleanup_states?.[stage] ?? 0) > 0)) return true;
+  if ((batch.progress?.output_states?.uploading ?? 0) > 0) return true;
   const execution = batch.service_execution_summary;
   if (!execution) return false;
   return Object.entries(execution.lifecycle_stages).some(([stage, count]) => count > 0 && !TERMINAL_TRIAL_STATES.has(stage) && stage !== "output_unavailable")
@@ -139,7 +141,7 @@ export default function BatchDetail(): JSX.Element {
 
   const query = useQuery({
     queryKey: queryKeys["batch"](batchId),
-    queryFn: () => api.getBatch(batchId!),
+    queryFn: ({ signal }) => api.getBatch(batchId!, signal),
     enabled: !!batchId,
     refetchInterval: (q) => {
       const data = q.state.data;
@@ -312,6 +314,8 @@ export default function BatchDetail(): JSX.Element {
               })}
             </div>
           ) : null}
+
+          {c.progress ? <ProgressSummary progress={c.progress} batchId={c.id} /> : null}
 
           {c.network_policy ? (
             <section aria-label="Task network policy" className="border-y border-slate-200 py-3">
@@ -688,8 +692,6 @@ export default function BatchDetail(): JSX.Element {
           </Card.Body>
         </Card>
       ) : null}
-
-      {c.progress ? <Card><Card.Body><ProgressSummary progress={c.progress} batchId={c.id} /></Card.Body></Card> : null}
 
       {c.backend === "nebius" && c.service_execution_summary ? (
         <Card>

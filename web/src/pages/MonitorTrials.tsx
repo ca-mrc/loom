@@ -26,6 +26,8 @@ export function TrialsView({
   search,
   stateFilter,
   batchId,
+  batchSearch,
+  imageId,
   teamFilter,
   benchmarkFilter,
   agentFilter,
@@ -37,6 +39,8 @@ export function TrialsView({
   search: string;
   stateFilter: string;
   batchId?: string;
+  batchSearch?: string;
+  imageId?: string;
   teamFilter: string;
   benchmarkFilter: string;
   agentFilter: string;
@@ -71,12 +75,16 @@ export function TrialsView({
       providerConnectionFilter,
       providerModelFilter,
       page.current,
+      batchSearch,
+      imageId,
     ),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.listTrials({
         q: debouncedSearch || undefined,
         state: stateFilter || undefined,
         batch_id: batchId,
+        batch_q: batchSearch,
+        image_id: imageId,
         team_id: teamFilter || undefined,
         benchmark_id: benchmarkFilter || undefined,
         agent_name: agentFilter || undefined,
@@ -86,7 +94,7 @@ export function TrialsView({
         provider_model_id: providerModelFilter || undefined,
         cursor: page.current ?? undefined,
         limit: "50",
-      }),
+      }, signal),
     refetchInterval: (q) => {
       const data = q.state.data as { items: TrialRow[] } | undefined;
       if (!data) return polling.refetchInterval;
@@ -135,7 +143,7 @@ export function TrialsView({
                         title={
                           h === "Evaluator score"
                             ? "Reward reported by the evaluator; platform success or failure is shown in State."
-                            : h === "LLM usage"
+                        : h === "LLM usage"
                               ? "Recorded model calls and prompt/completion tokens for this trial."
                               : undefined
                         }

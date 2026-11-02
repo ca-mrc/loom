@@ -49,7 +49,7 @@ test("member can distinguish image preparation and shared-node scheduling", asyn
   await expect(page.getByText("1 build Pods · 1 execution Pods")).toBeVisible();
   await expect(page.getByRole("link", { name: "example/task" })).toHaveAttribute(
     "href", `${browserHarness.routePrefix}/trials/build-trial`);
-  await expect(page.getByRole("link", { name: "Preparing image 2" })).toHaveAttribute(
+  await expect(page.getByRole("link", { name: "Waiting for image 2" })).toHaveAttribute(
     "href", `${browserHarness.routePrefix}/monitor?view=trials&state=stage%3Aimage_preparation`);
   await page.screenshot({ path: testInfo.outputPath("nebius-monitor.png"), fullPage: true });
 });
