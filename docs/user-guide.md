@@ -1432,10 +1432,15 @@ and verifier without model calls; it is not a model-generated evaluation.
 {
   "purpose": "evaluation",
   "task_filter": {"subset_kind": "explicit", "task_ids": ["REPLACE_WITH_TASK_ID"]},
-  "combinations": [{"agent_name": "oracle", "n_per_task": 1}],
+  "combinations": [{"agent_name": "oracle", "agent_model": null, "n_per_task": 1}],
   "trial_config": {}
 }
 ```
+
+`agent_model` is required in every combination; Oracle takes `null`. An
+`evaluation` batch runs only native benchmark tasks: for tasks from your own
+TaskSet, use `"purpose": "trajectory_generation"` instead, or the request is
+rejected with `evaluation_disallows_task_set`.
 
 Save this as `batch.json`. A signed-in CLI can submit the same request using
 `loom eval batch create --request-json @batch.json`. Model-based work instead
