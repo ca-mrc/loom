@@ -255,7 +255,7 @@ class PoolNativeBuildController:
     async def _reconcile_pending(self) -> bool:
         errors: list[Exception] = []
         slots = asyncio.Semaphore(self.reconcile_concurrency)
-        outstanding = 0
+        self._outstanding = 0
 
         async def reconcile(key: PoolRequestKeyV1) -> None:
             try:
@@ -271,11 +271,10 @@ class PoolNativeBuildController:
         # selection lock, so different keys may advance concurrently.
         async with asyncio.TaskGroup() as group:
             async for pending in self.driver.outbox.iter_pending():
-                outstanding += 1
+                self._outstanding += 1
                 # Read further pages only as slots free up.
                 await slots.acquire()
                 group.create_task(reconcile(pending.request.key))
-        self._outstanding = outstanding
         if errors:
             raise errors[0]
         return False

@@ -968,3 +968,90 @@ async def test_observe_captures_only_owned_failed_phase_logs(monkeypatch, failed
     if failed_phase in {"prepare", "publish"}:
         assert observed["builder_log"].startswith(f"[{failed_phase}]\n")
     assert "phase failure" in observed["builder_log"] and 16384 < len(observed["builder_log"]) <= 256 * 1024
+
+
+async def test_pool_running_reconcile_reports_current_outstanding(caplog):
+    pending = ["slow"]
+    controller = _pool_controller(pending=pending)
+    controller._reconciler = ReconcileRunner(grace_seconds=0.01)
+    blocked = asyncio.Event()
+
+    async def reconcile(key):
+        await blocked.wait()
+
+    controller._reconcile = reconcile
+    try:
+        with caplog.at_level("INFO", logger="loom_execution_actuator.metrics"):
+            await controller.run_once()
+            await controller.run_once()
+        assert controller.reconciler.running
+        assert _cycle_samples("pool")("loom_execution_actuator_task_image_build_outstanding") == 1
+        assert "outstanding=1 reconcile_s=running" in caplog.text
+    finally:
+        await controller.close()
+    pending.clear()
+    await controller.run_once()
+    assert _cycle_samples("pool")("loom_execution_actuator_task_image_build_outstanding") == 0
+    await controller.close()
+
+
+async def test_pool_background_error_is_collected_once_before_next_reconcile():
+    controller = _pool_controller(pending=["bad"], selected=["n1", "n2"])
+    controller._reconciler = ReconcileRunner(grace_seconds=0.01)
+    release = asyncio.Event()
+    calls = 0
+    original = controller._reconcile
+
+    async def reconcile(key):
+        nonlocal calls
+        if getattr(key, "local_work_id", None) == "bad":
+            calls += 1
+            if calls == 1:
+                await release.wait()
+                raise LookupError("background")
+        await original(key)
+
+    controller._reconcile = reconcile
+    try:
+        await controller.run_once()
+        assert calls == 1 and controller.reconciler.running
+        release.set()
+        async with asyncio.timeout(1):
+            while controller.reconciler.running:
+                await asyncio.sleep(0)
+        with pytest.raises(LookupError, match="background"):
+            await controller.run_once()
+        assert calls == 1
+        await controller.run_once()
+        assert calls == 2
+        assert controller.reconciled == ["n1", "n2", "bad"]
+    finally:
+        await controller.close()
+
+
+async def test_pool_stall_still_selects_and_close_drains_reconcile_children():
+    controller = _pool_controller(pending=["stuck"], selected=["n1"])
+    controller._reconciler = ReconcileRunner(grace_seconds=0.01, stall_seconds=0)
+    release, stopped = asyncio.Event(), asyncio.Event()
+    original = controller._reconcile
+
+    async def reconcile(key):
+        if getattr(key, "local_work_id", None) == "stuck":
+            try:
+                await release.wait()
+            finally:
+                await asyncio.sleep(0)
+                stopped.set()
+        else:
+            await original(key)
+
+    controller._reconcile = reconcile
+    try:
+        with pytest.raises(RuntimeError, match="has not finished"):
+            await controller.run_once()
+        assert controller.reconciled == ["n1"]
+        assert not stopped.is_set()
+    finally:
+        await controller.close()
+    assert stopped.is_set() and not release.is_set()
+    assert not controller.reconciler.running

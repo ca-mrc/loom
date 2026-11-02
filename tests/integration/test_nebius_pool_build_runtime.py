@@ -350,3 +350,44 @@ async def test_ordinary_pool_publication_rejects_unissued_or_malformed_archives(
     assert not attempt.native_build["pool_output"]["registry_images"]
     assert not attempt.native_build.get("capacity_released_at")
     assert (await journal.get(request.key)).phase == "stop_pending"
+
+
+async def test_real_pool_queue_keeps_selecting_across_a_blocked_observation(sessions, tmp_path):
+    from loom_execution_actuator.build_reconcile import ReconcileRunner
+    from loom_execution_actuator.pool_build_runtime import PoolNativeBuildController
+    from tests.integration.test_nebius_pool_build_outbox import counts, local_setup
+    from tests.integration.test_nebius_pool_build_selection import selector
+
+    app, token, participant, first, journal = await selected(sessions, tmp_path, max_nodes=3)
+    queued = [(await local_setup(sessions, environment_id=participant.environment_id))[1] for _ in range(2)]
+    started, release = asyncio.Event(), asyncio.Event()
+    observations = 0
+
+    class SlowReader:
+        async def observe_pool(self, runtime, *, capture_logs=False):
+            nonlocal observations
+            assert runtime.receipt.request_key == first.key
+            observations += 1
+            started.set()
+            await release.wait()
+            return first_job
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as http:
+        driver = PoolBuildDriver(outbox=journal, management=client(http, token))
+        first_job = await gateway_job(sessions, await driver.advance(first.key))
+        controller = PoolNativeBuildController(driver=driver, kubernetes=SlowReader(),
+            selector=selector(journal), admissions_per_pass=1)
+        controller._reconciler = ReconcileRunner(grace_seconds=0.1)
+        try:
+            for expected in (2, 3):
+                async with asyncio.timeout(10):
+                    await controller.run_once()
+                assert started.is_set() and controller.reconciler.running
+                assert len(await journal.pending()) == expected and observations == 1
+            # The fixture has two build slots: selection continues, but the
+            # final queued source still waits without consuming an attempt.
+            results = [await counts(sessions, request.key.local_work_id) for request in queued]
+            assert sorted(results) == [(0, 0, 2), (1, 1, 2)]
+        finally:
+            release.set()
+            await controller.close()

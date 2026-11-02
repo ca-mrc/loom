@@ -1625,7 +1625,9 @@ The `Native build cycle` log line and the
 blocked reason instead, such as `execution_capacity_native_io_feedback_pending`.
 The log line appears only for passes with outstanding or claimed builds. It
 shows `reconcile_s=running` while the reconciliation is still in flight; the
-reconcile duration is recorded once, when it finishes.
+reconcile duration is recorded once, when it finishes. The global-pool
+outstanding count updates as the bounded pending scan progresses, including
+while reconciliation is still running.
 
 `snapshotter` selects the BuildKit OCI worker snapshotter (`overlayfs` or
 `native`). It defaults to `native` so unchanged Dockerfiles can hardlink files
