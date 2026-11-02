@@ -41,6 +41,7 @@ from loom.trajectory.object_identity import (
     TrajectoryObjectFilename,
     resolve_trajectory_object_key,
 )
+from loom_service.combination_summary import combination_label
 from loom_service.delivery_export_errors import (
     CorruptDeliveryObjectsError as CorruptDeliveryObjectsError,
 )
@@ -957,6 +958,70 @@ def _list_s3_prefix_objects(
     return sorted(out, key=lambda row: str(row["Key"]))
 
 
+def _combination_identity(item: SelectedTrial) -> dict[str, Any]:
+    """Export safe identity from the selected source, with frozen Trial routes first."""
+    trial, batch = item.trial, item.batch
+    config = trial.config if isinstance(trial.config, dict) else {}
+    defaults = batch.trial_config if isinstance(batch.trial_config, dict) else {}
+    combinations = batch.combinations or []
+    idx = int(trial.combination_idx)
+    selection = combinations[idx] if 0 <= idx < len(combinations) else {}
+    model = config.get("agent_model", selection.get("agent_model", defaults.get("agent_model")))
+    no_model = model is None and any(
+        "agent_model" in source for source in (config, selection, defaults)
+    )
+    model = model if isinstance(model, dict) else {}
+    connection = (
+        None
+        if no_model
+        else (
+            trial.provider_connection_id
+            or selection.get("provider_connection_id")
+            or batch.provider_connection_id
+        )
+    )
+    provider_model = (
+        None
+        if no_model
+        else (
+            trial.provider_model_id or selection.get("provider_model_id") or batch.provider_model_id
+        )
+    )
+    agent_name = config.get("agent_name", selection.get("agent_name", defaults.get("agent_name")))
+    agent_version = config.get(
+        "agent_version",
+        selection.get("agent_version", defaults.get("agent_version")),
+    )
+    label = combination_label(
+        {
+            "label": selection.get("label"),
+            "agent_name": agent_name,
+            "agent_version": agent_version,
+            "agent_model": model or None,
+            "provider_model_id": provider_model,
+        }
+    )
+    return {
+        "selected_batch_id": str(batch.id),
+        "combination_idx": idx,
+        "combination_label": label,
+        "agent_name": agent_name,
+        "agent_version": agent_version,
+        "model_provider": model.get("provider"),
+        "model_name": model.get("name"),
+        "provider_connection_id": str(connection) if connection is not None else None,
+        "provider_model_id": provider_model,
+    }
+
+
+def _selected_combination_routes(selected: list[SelectedTrial]) -> list[dict[str, Any]]:
+    routes: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for item in selected:
+        identity = _combination_identity(item)
+        routes.setdefault(tuple(identity.values()), identity)
+    return list(routes.values())
+
+
 def _ledger_rows(selected: list[SelectedTrial]) -> list[dict[str, Any]]:
     rows = []
     for index, item in enumerate(selected, start=1):
@@ -966,9 +1031,8 @@ def _ledger_rows(selected: list[SelectedTrial]) -> list[dict[str, Any]]:
             {
                 "task_id": item.trial.task_id,
                 "sample_idx": int(item.trial.sample_idx),
-                "combination_idx": int(item.trial.combination_idx),
+                **_combination_identity(item),
                 "selected_trial_id": str(item.trial.id),
-                "selected_batch_id": str(item.batch.id),
                 "selection_priority": item.priority,
                 "selection_source": item.selection_source,
                 "state": item.trial.state,
@@ -1003,6 +1067,13 @@ def _csv_bytes(rows: list[dict[str, Any]]) -> bytes:
         "atif_key",
         "trajectory_file",
         "atif_file",
+        "combination_label",
+        "agent_name",
+        "agent_version",
+        "model_provider",
+        "model_name",
+        "provider_connection_id",
+        "provider_model_id",
     ]
     out = io.StringIO()
     writer = csv.DictWriter(out, fieldnames=fieldnames, lineterminator="\n")
@@ -1055,6 +1126,7 @@ def _summary(
         "reward_distribution": dict(sorted(reward_distribution.items())),
         "model_provider": provider,
         "model_name": model,
+        "combination_routes": _selected_combination_routes(selected),
         "object_counts": object_counts,
         "object_validation": object_validation,
         "created_at": datetime.now(UTC).isoformat(),
