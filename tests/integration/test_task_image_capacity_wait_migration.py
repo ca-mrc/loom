@@ -5,9 +5,9 @@ from uuid import uuid4
 
 import pytest
 from alembic import command
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, undefer
 
 from loom.db.schema import (
     ServiceExecutionClass,
@@ -106,21 +106,29 @@ def test_wait_constraints_reject_invalid_rows(wait_migration, column, value, con
             session.flush()
 
 
-def test_wait_has_one_head_per_target_and_materialization(wait_migration):
+@pytest.mark.parametrize("preview_runtime", [None, {"namespace": "retained-preview"}])
+def test_wait_has_one_head_per_target_and_materialization(wait_migration, preview_runtime):
     _, engine, values = wait_migration
     with Session(engine) as session, session.begin():
         session.add(TaskImageCapacityWait(**values))
+        if preview_runtime is not None:
+            session.execute(update(ServiceExecutionTarget).where(
+                ServiceExecutionTarget.id == values["target_id"]
+            ).values(preview_runtime_json=preview_runtime))
     with pytest.raises(IntegrityError, match="task_image_capacity_waits_pkey"):
         with Session(engine) as session, session.begin():
             session.add(TaskImageCapacityWait(**values))
             session.flush()
     with Session(engine) as session, session.begin():
-        first = session.get(ServiceExecutionTarget, values["target_id"])
+        first = session.get(ServiceExecutionTarget, values["target_id"], options=[undefer("*")])
         second_id = "second-target"
         session.add(ServiceExecutionTarget(**{
             column.name: second_id if column.name == "id" else getattr(first, column.name)
             for column in ServiceExecutionTarget.__table__.columns
         }))
+    with Session(engine) as session:
+        second = session.get(ServiceExecutionTarget, second_id, options=[undefer("*")])
+        assert second.preview_runtime_json == preview_runtime
     with pytest.raises(IntegrityError, match="task_image_capacity_waits_materialization_key"):
         with Session(engine) as session, session.begin():
             session.add(TaskImageCapacityWait(**{**values, "target_id": second_id}))

@@ -119,6 +119,11 @@
     "default": "PydanticUndefined",
     "required": true
   },
+  "prefer_incoming_warm_fit": {
+    "annotation": "<class 'bool'>",
+    "default": "False",
+    "required": false
+  },
   "service_execution_global_pool_json": {
     "annotation": "str | None",
     "default": "None",

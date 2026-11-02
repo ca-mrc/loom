@@ -64,6 +64,7 @@ from loom.db.nebius_application_schema import NebiusDeploymentNameClaim as Nebiu
 from loom.db.nebius_application_source_schema import (
     NebiusApplicationSourceUpload as NebiusApplicationSourceUpload,
 )
+from loom.db.nebius_cache_policy_schema import NebiusCacheRuntimePolicy as NebiusCacheRuntimePolicy
 from loom.db.nebius_environment_schema import NebiusEnvironment as NebiusEnvironment
 from loom.db.nebius_environment_schema import (
     NebiusEnvironmentNamespace as NebiusEnvironmentNamespace,
@@ -4168,6 +4169,7 @@ class ServiceExecutionTarget(Base):
     health_status: Mapped[str] = mapped_column(Text, nullable=False, default="unknown")
     health_observed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     health_error_code: Mapped[str | None] = mapped_column(Text)
+    preview_runtime_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, deferred=True, deferred_raiseload=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )

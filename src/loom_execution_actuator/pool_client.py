@@ -25,13 +25,14 @@ from loom.nebius_pool_contract import (
 from loom.nebius_pool_execution_runtime import PoolExecutionRuntimeV1
 from loom.nebius_pool_lifecycle import PoolDrainV1, PoolStopV1
 from loom.nebius_pool_native_runtime import PoolNativeRuntimeV1
+from loom.nebius_pool_placement_preview import PoolExecutionPreviewRequestV1, PoolExecutionPreviewV1
 from loom.nebius_pool_task_image import PoolTaskImagePrepareV1
 from loom.nebius_pool_workload import PoolExecutionPrepareV1
 from loom.pipeline.keys import canonical_digest
 from loom_execution_capacity_collector.control_plane import read_owner_only_secret
 
 PoolResult = PoolReceiptV1 | PoolWaitingV1
-PoolOperation = Literal["prepare", "status", "activate", "cancel-unstarted", "stop", "drain", "native-runtime", "execution-runtime", "node-allocation"]
+PoolOperation = Literal["prepare", "status", "activate", "cancel-unstarted", "stop", "drain", "native-runtime", "execution-runtime", "node-allocation", "execution-preview"]
 _RESULT: TypeAdapter[PoolResult] = TypeAdapter(Annotated[PoolResult, Field(discriminator="schema_version")])
 
 
@@ -54,7 +55,7 @@ class PoolClient:
         self._owns_client, self._closed = client is None, False
         self._client = client or httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=False, trust_env=False)
 
-    async def _exchange(self, action: PoolRequestActionV1 | PoolNodeAllocationRequestV1,
+    async def _exchange(self, action: PoolRequestActionV1 | PoolNodeAllocationRequestV1 | PoolExecutionPreviewRequestV1,
                         operation: PoolOperation, body: bytes) -> bytes:
         if self._closed or len(body) > MAX_POOL_REQUEST_BYTES:
             raise PoolRequestUnconfirmedError
@@ -170,6 +171,20 @@ class PoolClient:
             result = PoolNodeAllocationV1.model_validate_json(
                 await self._exchange(scope, "node-allocation", scope.model_dump_json().encode()))
             if result.scope != scope:
+                raise PoolRequestUnconfirmedError
+            return result
+        except ValueError:
+            raise PoolRequestUnconfirmedError from None
+
+
+    async def execution_preview(self, body: PoolExecutionPreviewRequestV1) -> PoolExecutionPreviewV1:
+        body = PoolExecutionPreviewRequestV1.model_validate_json(body.model_dump_json())
+        try:
+            result = PoolExecutionPreviewV1.model_validate_json(
+                await self._exchange(body, "execution-preview", body.model_dump_json().encode()))
+            request = body.request
+            if (result.pool_id, result.participant_id, result.target_id, result.admission_epoch, result.participant_revision) != (
+                    request.pool_id, request.key.participant_id, request.target_id, request.admission_epoch, request.participant_revision):
                 raise PoolRequestUnconfirmedError
             return result
         except ValueError:

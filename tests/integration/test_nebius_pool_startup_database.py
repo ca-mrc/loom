@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
-from sqlalchemy import insert, select, update
+from sqlalchemy import insert, literal_column, select, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ProgrammingError
 
@@ -441,7 +441,7 @@ async def test_participant_registry_reader_rejects_drift_during_staged_release(s
     assert await snapshot(sessions) == before
 
 
-def observe(url, spec, *, mode='closed'):
+def observe(url, spec, *, mode='closed', manager_revision='0176'):
     from scripts.ops.nebius_pool_startup_database import (
         pool_startup_closed_sql,
         qualify_startup_closed_report,
@@ -458,7 +458,7 @@ def observe(url, spec, *, mode='closed'):
 
     with psycopg.connect(make_url(url).set(drivername='postgresql').render_as_string(hide_password=False), autocommit=True) as connection:
         with connection.cursor() as cursor:
-            cursor.execute(query(spec), prepare=False)
+            cursor.execute(query(spec, manager_revision=manager_revision), prepare=False)
             rows = []
             while True:
                 if cursor.description:
@@ -468,6 +468,42 @@ def observe(url, spec, *, mode='closed'):
     assert len(rows) == 1
     qualify(spec, rows[0][0])
     return rows[0][0]
+
+
+@pytest.mark.parametrize(('revision', 'prefer_warm'), [
+    ('0186', None), ('0187', False), ('0187', True), ('0188', False), ('0188', True),
+])
+async def test_startup_authority_excludes_only_independent_preference(
+    isolated_migration_postgres_url, revision, prefer_warm,
+):
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    url = isolated_migration_postgres_url
+    if revision != '0188':
+        config = Config('database/migrations/alembic.ini')
+        config.set_main_option('sqlalchemy.url', url.replace('%', '%%'))
+        await asyncio.to_thread(command.downgrade, config, revision)
+    engine = create_async_engine(url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    spec = PoolInstallation.model_validate(installation(('development',))[0])
+    try:
+        async with factory.begin() as session:
+            await register_installation(session, spec)
+            if prefer_warm is not None:
+                await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == spec.pool_id)
+                    .values(prefer_incoming_warm_fit=prefer_warm))
+        report = await asyncio.to_thread(observe, url, spec, manager_revision=revision)
+        assert report['qualified'] is True
+        # Do not turn the one known independent-field exception into a column
+        # whitelist that would silently accept unrelated future authority drift.
+        async with engine.begin() as connection:
+            await connection.exec_driver_sql('ALTER TABLE nebius_pool_bindings ADD COLUMN unrelated_authority_probe boolean DEFAULT false')
+        with pytest.raises(ValueError, match='pool_startup_closed_registration_unqualified'):
+            await asyncio.to_thread(observe, url, spec, manager_revision=revision)
+    finally:
+        await engine.dispose()
 
 
 async def test_dedicated_builder_scope_survives_startup_and_qualified_retirement(sessions, build_inputs):
@@ -574,7 +610,7 @@ async def test_active_authority_allows_unfinished_work_without_changing_it(sessi
 
     async def snapshot():
         async with sessions() as session:
-            return [list((await session.execute(select(model.__table__))).mappings())
+            return [list((await session.execute(select(literal_column('*')).select_from(model.__table__))).mappings())
                 for model in (NebiusPoolRequest, NebiusPoolBinding, NebiusPoolParticipant, NebiusPoolMachine, Token, NebiusPoolEffect)]
 
     before = await snapshot()

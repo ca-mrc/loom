@@ -10,6 +10,7 @@ import json
 import os
 import re
 import ssl
+import subprocess
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -66,6 +67,37 @@ pytestmark = pytest.mark.skipif(os.environ.get('LOOM_RUN_DISPOSABLE_K3S') != '1'
     reason='requires explicitly disposable Kubernetes')
 
 
+def _safe_bootstrap_diagnostic(raw: str) -> dict:
+    """Only finite error categories/revisions/SQLSTATE, never diagnostic text."""
+    safe = {}
+    for line in raw.splitlines()[-8:]:
+        try:
+            diagnostic = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(diagnostic, dict):
+            continue
+        error_type = diagnostic.get("error_type")
+        if isinstance(error_type, str) and error_type in {"MigrationError", "OperationalError", "ProgrammingError", "IntegrityError"}:
+            safe["error_type"] = error_type
+        revision = diagnostic.get("migration_revision")
+        if isinstance(revision, str) and (revision == "unknown" or re.fullmatch(r"[0-9]{4}", revision)):
+            safe["migration_revision"] = revision
+        database_error = diagnostic.get("database_error")
+        if isinstance(database_error, str) and database_error in {
+            "OperationalError", "ProgrammingError", "IntegrityError",
+            "LockNotAvailable", "QueryCanceled", "DeadlockDetected",
+            "InsufficientPrivilege", "UndefinedTable", "UndefinedColumn",
+            "UndefinedObject", "CheckViolation", "DuplicateTable", "InvalidPassword",
+        }:
+            safe["database_error"] = database_error
+        sqlstate = diagnostic.get("sqlstate")
+        if "sqlstate" in diagnostic and (sqlstate is None or
+                (isinstance(sqlstate, str) and re.fullmatch(r"[0-9A-Z]{5}", sqlstate))):
+            safe["sqlstate"] = sqlstate
+    return safe
+
+
 def _add_rendered_job_failure(core, namespace: str, name: str, error: AssertionError) -> None:
     """Retain bounded termination facts and finite codes, never raw Pod logs."""
     rows = []
@@ -102,35 +134,98 @@ def _add_rendered_job_failure(core, namespace: str, name: str, error: AssertionE
                 # Bootstrap already emits bounded JSON diagnostics. Retain only
                 # finite database codes and numeric revisions, never messages,
                 # connection strings, arbitrary JSON fields or Pod log text.
-                for line in raw.splitlines()[-8:]:
-                    try:
-                        diagnostic = json.loads(line)
-                    except ValueError:
-                        continue
-                    if not isinstance(diagnostic, dict):
-                        continue
-                    error_type = diagnostic.get("error_type")
-                    if isinstance(error_type, str) and error_type in {"MigrationError", "OperationalError", "ProgrammingError", "IntegrityError"}:
-                        row["error_type"] = error_type
-                    revision = diagnostic.get("migration_revision")
-                    if isinstance(revision, str) and (revision == "unknown" or re.fullmatch(r"[0-9]{4}", revision)):
-                        row["migration_revision"] = revision
-                    database_error = diagnostic.get("database_error")
-                    if isinstance(database_error, str) and database_error in {
-                        "OperationalError", "ProgrammingError", "IntegrityError",
-                        "LockNotAvailable", "QueryCanceled", "DeadlockDetected",
-                        "InsufficientPrivilege", "UndefinedTable", "UndefinedColumn",
-                        "UndefinedObject", "CheckViolation", "DuplicateTable", "InvalidPassword",
-                    }:
-                        row["database_error"] = database_error
-                    sqlstate = diagnostic.get("sqlstate")
-                    if isinstance(sqlstate, str) and re.fullmatch(r"[0-9A-Z]{5}", sqlstate):
-                        row["sqlstate"] = sqlstate
+                diagnostic = _safe_bootstrap_diagnostic(raw)
+                # Request the final record independently of the broad read;
+                # retain only its whitelist projection, never raw text.
+                tail = core.read_namespaced_pod_log(pod.metadata.name, namespace,
+                    container=status.name, tail_lines=4, limit_bytes=2048, _request_timeout=(2, 3))
+                diagnostic.update(_safe_bootstrap_diagnostic(tail))
+                row.update(diagnostic)
+                for field in ('started_at', 'finished_at'):
+                    value = getattr(terminated, field, None)
+                    if value is not None:
+                        row[field] = value.isoformat()
                 row["trace_modules"] = re.findall(r'File "[^"\n]*/([A-Za-z0-9_.-]+\.py)", line ([0-9]+)', raw)[-6:]
                 rows.append(row)
         error.add_note("rendered Job termination: " + json.dumps(rows))
     except Exception as diagnostic_error:
         error.add_note("rendered Job diagnostics unavailable: " + type(diagnostic_error).__name__)
+
+
+@pytest.mark.timeout(90)
+def test_rendered_postgres_probe_rejects_temporary_init_server(management_inputs, tmp_path):
+    """A socket-only init server must not qualify the rendered TCP database."""
+    from tests.integration.test_execution_actuator_k3s import _docker
+    from tests.unit.test_nebius_management_render import render
+
+    rendered = render(management_inputs)
+    statefulset = next(doc for doc in rendered.files['20-database.yaml'] if doc['kind'] == 'StatefulSet')
+    probe = statefulset['spec']['template']['spec']['containers'][0]['readinessProbe']['exec']['command']
+    control = tmp_path / 'control'
+    control.mkdir(mode=0o777)
+    control.chmod(0o777)
+    script = tmp_path / 'init-barrier.sh'
+    script.write_text("""#!/bin/sh
+set -eu
+touch /control/entered
+count=0
+while [ ! -f /control/release ]; do
+    count=$((count + 1))
+    [ "$count" -lt 600 ] || exit 1
+    sleep 0.05
+done
+""")
+    script.chmod(0o644)
+    name = 'loom-pg-init-barrier-' + uuid4().hex
+    started = False
+    try:
+        _docker('pull', 'postgres:16')
+        image_id = _docker('image', 'inspect', 'postgres:16', '--format', '{{.Id}}')
+        _docker('create', '--name', name, '--cpus', '1', '--memory', '512m',
+            '--network', 'none', '--tmpfs', '/var/lib/postgresql/data:rw,size=256m',
+            '--mount', f'type=bind,src={control},dst=/control',
+            '--env', 'POSTGRES_HOST_AUTH_METHOD=trust', '--env', 'POSTGRES_DB=loom', image_id)
+        started = True
+        # Copy into the disposable layer so host bind-mount execute/noexec
+        # semantics cannot change entrypoint's executable-vs-sourced branch.
+        _docker('cp', str(script), name + ':/docker-entrypoint-initdb.d/00-barrier.sh')
+        _docker('start', name)
+        host_config = json.loads(_docker('inspect', name, '--format', '{{json .HostConfig}}'))
+        assert host_config['NanoCpus'] == 1_000_000_000
+        assert host_config['Memory'] == 512 * 1024 * 1024
+        assert host_config['NetworkMode'] == 'none'
+        assert not host_config['PortBindings']
+        deadline = time.monotonic() + 45
+        while not (control / 'entered').exists():
+            assert time.monotonic() < deadline, 'PostgreSQL temporary init server barrier not reached'
+            time.sleep(0.05)
+        def readiness(command):
+            return subprocess.run(['docker', 'exec', name, *command], capture_output=True,
+                text=True, timeout=5, check=False).returncode
+
+        socket_probe = ['pg_isready', '-U', 'postgres', '-d', 'loom', '-t', '1']
+        tcp_probe = ['pg_isready', '-h', '127.0.0.1', '-p', '5432', '-U', 'postgres', '-d', 'loom', '-t', '1']
+        assert readiness(socket_probe) == 0
+        assert readiness(tcp_probe) == 2
+        print(json.dumps({'postgres_image_id': image_id, 'init_socket_ready': True,
+            'init_tcp_exit_code': 2, 'rendered_probe': probe}))
+        assert readiness(probe) == 2, 'rendered probe accepted socket-only temporary init server'
+        (control / 'release').touch()
+        deadline = time.monotonic() + 20
+        while readiness(tcp_probe) != 0:
+            assert time.monotonic() < deadline, 'final PostgreSQL TCP server did not become ready'
+            time.sleep(0.05)
+        assert readiness(probe) == 0
+        print(json.dumps({'final_tcp_exit_code': 0, 'final_rendered_exit_code': 0}))
+    finally:
+        try:
+            if started:
+                _docker('rm', '--force', '--volumes', name)
+        finally:
+            for filename in ('entered', 'release'):
+                (control / filename).unlink(missing_ok=True)
+            control.rmdir()
+            script.unlink()
 
 
 def _add_refresh_diagnostics(core, apps, namespace, iteration: int | None, error):
@@ -545,3 +640,43 @@ def test_rendered_refresh_probes_and_migration_execute_against_real_tls_database
         subprocess.run(['docker', 'image', 'rm', service_tag, postgres_tag], capture_output=True, check=False)
         for ordinal in (0, 1):
             (tmp_path / f'image-{ordinal}.tar').unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize('sqlstate', ['08006', None])
+def test_rendered_job_diagnostics_recovers_safe_final_record(sqlstate):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    calls = []
+    terminated = SimpleNamespace(exit_code=1, reason='Error', started_at=datetime(2026, 11, 2, tzinfo=UTC),
+        finished_at=datetime(2026, 11, 2, 0, 0, 1, tzinfo=UTC))
+    pod = SimpleNamespace(metadata=SimpleNamespace(name='fixture-pod'), status=SimpleNamespace(init_container_statuses=[],
+        container_statuses=[SimpleNamespace(name='loom-management-migrate', state=SimpleNamespace(terminated=terminated))]))
+    diagnostic = {'error_type': 'OperationalError', 'sqlstate': sqlstate,
+        'migration_revision': '0187', 'message': 'private-message',
+        'dsn': 'postgresql://private-user:private-password@private-host/loom'}
+
+    class Core:
+        def list_namespaced_pod(self, *args, **kwargs):
+            return SimpleNamespace(items=[pod])
+
+        def read_namespaced_pod_log(self, *args, **kwargs):
+            calls.append(kwargs)
+            return '{"error_type": "Operational' if len(calls) == 1 else json.dumps(diagnostic) + '\n'
+
+    error = AssertionError('rendered Job failed')
+    _add_rendered_job_failure(Core(), 'fixture-namespace', 'fixture-job', error)
+    assert [(call['tail_lines'], call['limit_bytes']) for call in calls] == [(80, 16384), (4, 2048)]
+    note = error.__notes__[0]
+    row, = json.loads(note.removeprefix('rendered Job termination: '))
+    assert row['sqlstate'] == sqlstate and row['error_type'] == 'OperationalError'
+    assert row['migration_revision'] == '0187'
+    assert row['started_at'] == '2026-11-02T00:00:00+00:00'
+    assert row['finished_at'] == '2026-11-02T00:00:01+00:00'
+    assert all(private not in note for private in ('private-message', 'private-user', 'private-password', 'private-host', 'dsn'))
+
+
+@pytest.mark.parametrize('raw', ['null', '[]', 'garbage', '{',
+    '{"error_type": "private", "sqlstate": "private", "migration_revision": "private", "message": "private"}'])
+def test_rendered_job_diagnostics_invalid_payload_has_no_private_fields(raw):
+    assert _safe_bootstrap_diagnostic(raw) == {}

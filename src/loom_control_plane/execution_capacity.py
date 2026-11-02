@@ -30,6 +30,7 @@ from loom_control_plane.execution_placement import (
     PlacementConstraint,
     PlacementUnavailableError,
     cold_sample,
+    incoming_warm_nodes,
     plan_placement,
     quota_identity,
     require_provider_quota_headroom,
@@ -628,6 +629,10 @@ async def admit_capacity_resources(
     exclude_lease_id: UUID | None = None,
     exclude_native_attempt_id: UUID | None = None,
     capacity_wait_inputs: dict[str, Any] | None = None,
+    preview: bool = False,
+    preview_trial_id: UUID | None = None,
+    preview_node_selector: dict[str, str] | None = None,
+    preview_runtime_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Shared admission arithmetic under the caller's capacity transaction lock.
 
@@ -641,7 +646,7 @@ async def admit_capacity_resources(
     group = await resolve_capacity_targets(session, target.id)
     if group.owner.desired_state != "active":
         raise ExecutionProvisioningBlockedError("execution_capacity_owner_not_active")
-    policy = await session.get(ExecutionCapacityPolicy, group.owner.id, with_for_update=True)
+    policy = await session.get(ExecutionCapacityPolicy, group.owner.id, with_for_update=not preview)
     if policy is None or not policy.enabled:
         raise ExecutionProvisioningBlockedError("execution_capacity_policy_unavailable")
     observation = await _latest_observation(session, group.owner.id)
@@ -711,6 +716,8 @@ async def admit_capacity_resources(
     execution_waiting, execution_order = ([], None) if already_reserved else await read_execution_capacity_waits(
         session, now=current_time, claiming_lease_id=exclude_lease_id,
         claiming_inputs=capacity_wait_inputs,
+        preview_trial_id=preview_trial_id, preview_target_id=target.id, preview_resources=resources,
+        preview_runtime_sha256=preview_runtime_sha256,
     )
     # Both kinds of incoming demand yield only to older renewable waiting
     # heads. A new claim has no inherited queue age. Real authority stays first.
@@ -1007,6 +1014,29 @@ async def admit_capacity_resources(
     }
     if io_binding is not None:
         payload["io_binding"] = io_binding
+    if preview:
+        # Prove this actual demand on a Ready UID; old pressure/cold hints do
+        # not describe the incoming. This never changes an admission guard.
+        uids = incoming_warm_nodes(placement, protected_demands, incoming_id=demand_id,
+                                   sample=sample, constraints=constraints)
+        if preview_node_selector:
+            # Bind the incoming selector to the actual observed UID's labels.
+            # A template cannot prove labels on an already existing Node.
+            uids = uids & frozenset(node.uid for node in placement.nodes
+                if node.labels is not None and all(node.labels.get(key) == value
+                    for key, value in preview_node_selector.items()))
+        try:
+            budget = min((row.native["io_full_avg10_max"] for row in native_active
+                          if row.target_id in group.target_ids and "io_full_avg10_max" in row.native), default=100.0)
+            choices = native_io_candidates(placement,
+                [(row.demand_id, row.native) for row in native_active if row.target_id in group.target_ids],
+                now=current_time, max_age_seconds=min(60, policy.observation_max_age_seconds),
+                max_full_avg10=budget, eligible_node_uids=uids)
+            uids = uids & frozenset(choice["node_uid"] for choice in choices if choice["mode"] == "node")
+        except NativeIOUnavailable:
+            uids = frozenset()
+        payload["warm_node_uids"] = sorted(uids)
+        payload["prefer_incoming_warm_fit"] = bool(uids)
     return payload
 
 

@@ -124,6 +124,10 @@ class FakeS3:
         key = kwargs["Key"]
         self.deletes.append(key)
         self.objects.pop(key, None)
+        if self.listing is not None:
+            # A subsequent accounting LIST must reflect completed deletions,
+            # like the real strongly-consistent S3/MinIO backend.
+            self.listing = [row for row in self.listing if row['Key'] != key]
 
     def close(self) -> None:
         self.closed = True
@@ -1786,7 +1790,8 @@ def test_trim_cache_deletes_unreferenced_old_blob(tmp_path) -> None:
 def _cache_data_deletes(cache: FakeS3) -> list[str]:
     # Lock/probe cleanup is not eviction of user cache data.
     return [key for key in cache.deletes if key != "task-build-cache/.mutation-lock"
-            and not key.startswith("task-build-cache/.conditional-probe/")]
+            and not key.startswith("task-build-cache/.conditional-probe/")
+            and not key.startswith(runtime._CACHE_GC_CONTROL)]
 
 
 def _digest(marker: str) -> str:
@@ -1826,6 +1831,8 @@ def _blob_key(digest: str) -> str:
 
 class _UnreadableGet(FakeS3):
     def get_object(self, **kwargs):
+        if not runtime._V2_MANIFEST.fullmatch(kwargs['Key']):
+            return super().get_object(**kwargs)
         raise ClientError(
             {"Error": {"Code": "InternalError", "Message": "secret sdk detail"}},
             "GetObject",
@@ -1835,6 +1842,8 @@ class _UnreadableGet(FakeS3):
 class _BrokenStream(FakeS3):
     def get_object(self, **kwargs):
         result = super().get_object(**kwargs)
+        if not runtime._V2_MANIFEST.fullmatch(kwargs['Key']):
+            return result
         stream = result["Body"]
 
         def read(_size=-1):
@@ -2034,7 +2043,10 @@ def test_trim_old_malformed_manifest_still_defers_collection(capsys):
         "Key": key, "Size": 1, "LastModified": datetime.now(UTC) - timedelta(days=8),
     }])
     runtime.trim_cache(cache, "cache", 0)
-    assert cache.objects == {key: b"{"}
+    assert cache.objects[key] == b'{'
+    checkpoint = json.loads(cache.objects[runtime._CACHE_GC_CHECKPOINT])
+    assert checkpoint['version'] == 2 and checkpoint['inventory_complete'] is False
+    assert _cache_data_deletes(cache) == []
     assert "manifest_unreadable" in capsys.readouterr().out
 
 

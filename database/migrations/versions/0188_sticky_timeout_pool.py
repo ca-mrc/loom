@@ -1,13 +1,13 @@
 """Sticky request-pool bindings, shared timeout health, and in-flight caps.
 
-Revision ID: 0187
-Revises: 0186
+Revision ID: 0188
+Revises: 0187
 """
 
 from alembic import op
 
-revision = "0187"
-down_revision = "0186"
+revision = "0188"
+down_revision = "0187"
 branch_labels = None
 depends_on = None
 

@@ -24,12 +24,15 @@ PoolActivationState = Literal["closed", "global", "fenced"]
 # nullable dispatch attribution columns. 0184 changes only the benchmark
 # insert default to pending; 0185 extends only the native resource observation
 # source CHECK; 0186 adds generated native-build metadata and indexes. 0187 adds
-# sticky pool bindings, shared timeout health, and an optional in-flight cap.
-# These migrations do
-# not change the pool guard/read columns or grants. Role
-# qualification separately denies access to the newer management tables.
+# advisory placement, independent cache policy and the independent warm-fit
+# preference; the latter is excluded by name from physical registration
+# comparisons, not adopted into historical installation bytes. No runtime grants
+# are added. 0188 adds sticky pool bindings, shared timeout health, and an
+# optional in-flight cap. These migrations do not change the pool guard/read
+# columns or grants. Role qualification separately denies access to the newer
+# management tables.
 # This is an audited set, never an automatic migration head or runtime upgrade.
-PARTICIPANT_SCHEMA_REVISIONS = ("0175", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187")
+PARTICIPANT_SCHEMA_REVISIONS = ("0175", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187", "0188")
 # 0175 changes an Oracle archival trigger; 0176 adds Harbor sessions; 0177 adds
 # source-publication retention; 0178 adds separate catalog/lifecycle tables.
 # 0179 extends only the participant execution-outbox guard; 0180 adds only
@@ -38,13 +41,15 @@ PARTICIPANT_SCHEMA_REVISIONS = ("0175", "0176", "0177", "0178", "0179", "0180", 
 # and 0183 adds separate provider pool tables and nullable dispatch attribution,
 # 0184 changes only the benchmark insert default and 0185 extends only the
 # native resource observation source CHECK; 0186 adds generated native-build metadata
-# and indexes; 0187 adds sticky pool bindings, shared timeout health, and an optional
+# and indexes. 0187 adds separate advisory/cache-policy state and an independent
+# preference; it preserves every physical authority field compared below.
+# 0188 adds sticky pool bindings, shared timeout health, and an optional
 # in-flight cap without changing the manager ledgers below.
 # None changes these legacy manager ledger/read predicates. A scoped-v1 binding
 # still fails the exact legacy binding comparison, regardless of schema revision.
 # A refresh must select ONE revision from its bound migration phase; this is not
 # a startup or write compatibility set and is never an automatic schema fallback.
-MANAGER_OBSERVATION_REVISIONS = ("0174", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187")
+MANAGER_OBSERVATION_REVISIONS = ("0174", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187", "0188")
 
 
 def _binding_hex(spec: PoolInstallation) -> str:
@@ -77,7 +82,7 @@ END $pool_activation_schema$;
 
 def _header(*, read_only: bool, manager_revision: str = '0176') -> str:
     """Exact installed revision; newer writes require an explicit bound successor."""
-    if manager_revision not in ('0176', '0177', '0178', '0179', '0180', '0181', '0182', '0183', '0184', '0185', '0186', '0187'):
+    if manager_revision not in ('0176', '0177', '0178', '0179', '0180', '0181', '0182', '0183', '0184', '0185', '0186', '0187', '0188'):
         raise ValueError('pool manager mutation revision unqualified')
     return _transaction_header(read_only=read_only,
         schema_unqualified=f"(SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '{manager_revision}'")
@@ -98,7 +103,7 @@ def _report_sql(spec: PoolInstallation) -> str:
     return f"""WITH expected AS (SELECT convert_from(decode('{_binding_hex(spec)}','hex'),'UTF8')::jsonb AS value)
 SELECT json_build_object('schema','loom.pool-activation-state.v1',
     'operation_id','{spec.operation_id}', 'installation_sha256','{digest(spec.model_dump(mode='json'))}',
-    'state',(SELECT CASE WHEN to_jsonb(b)-'mode'-'policy_revision'=value THEN
+    'state',(SELECT CASE WHEN to_jsonb(b)-'mode'-'policy_revision'-'prefer_incoming_warm_fit'=value THEN
         CASE WHEN b.policy_revision={spec.policy_revision} AND b.mode IN ('closed','global') THEN b.mode
              WHEN b.policy_revision={spec.policy_revision + 1} AND b.mode='closed' THEN 'fenced' END
         END FROM public.nebius_pool_bindings b WHERE b.pool_id='{spec.pool_id}'::uuid)) AS report FROM expected;
@@ -125,7 +130,7 @@ DECLARE
 BEGIN
     SELECT * INTO current_binding FROM public.nebius_pool_bindings
         WHERE pool_id='{spec.pool_id}'::uuid FOR UPDATE;
-    IF NOT FOUND OR to_jsonb(current_binding)-'mode'-'policy_revision' IS DISTINCT FROM expected
+    IF NOT FOUND OR to_jsonb(current_binding)-'mode'-'policy_revision'-'prefer_incoming_warm_fit' IS DISTINCT FROM expected
         OR NOT ((current_binding.policy_revision={spec.policy_revision} AND current_binding.mode IN ('closed','global'))
             OR (current_binding.policy_revision={spec.policy_revision + 1} AND current_binding.mode='closed'))
     THEN RAISE EXCEPTION 'pool activation fence unqualified'; END IF;

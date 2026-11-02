@@ -12,7 +12,10 @@ from loom.nebius_pool_application_image import PoolApplicationImagePrepareV1
 from loom.nebius_pool_contract import PoolParticipantV1
 from loom.nebius_pool_priority import PoolWorkOriginV1
 from loom.pipeline.keys import canonical_digest
-from loom_service.application_management.build_registry import retained_build_claim
+from loom_service.application_management.build_registry import (
+    load_attempt_cache_policy,
+    retained_build_claim,
+)
 
 
 async def qualify_application_build_history(session: AsyncSession, origin: PoolWorkOriginV1, *,
@@ -32,6 +35,7 @@ async def qualify_application_build_history(session: AsyncSession, origin: PoolW
         with_for_update=lock, populate_existing=True)
     source = await session.get(NebiusApplicationSourceUpload, row.upload_id,
         with_for_update=lock, populate_existing=True)
+    await load_attempt_cache_policy(session, attempt)
     binding, claim = retained_build_claim(row, attempt, source)
     target = participant.target(binding.target_id, "application_image_build")
     if (row.installation_id, row.data_environment_id, row.cluster_id, binding.pool_id,

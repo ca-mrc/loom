@@ -38,6 +38,100 @@ async def verified(sources, owner, key="source"):
     return await sources.complete(source.upload_id, principal=owner)
 
 
+@pytest.mark.parametrize('explicit', [False, True])
+async def test_cache_policy_survives_database_restart_without_rewriting_historical_claims(
+    environment_registry, build_inputs, explicit,
+):
+    from loom.db.nebius_application_build_schema import (
+        NebiusApplicationBuild,
+        NebiusApplicationBuildAttempt,
+    )
+    from loom.db.nebius_application_source_schema import NebiusApplicationSourceUpload
+    from loom_service.application_management.build_registry import retained_build_claim
+
+    _, factory, (alice, _), _ = environment_registry
+    sources = upload_registry(factory)
+    source = await verified(sources, alice)
+    options = {'cache_total_mib': 65536, 'cache_gc_policy': 'budget-pressure'} if explicit else {}
+    registry = build_registry(factory, sources, build_inputs[0], **options)
+    first = await registry.create(principal=alice, upload_id=source.upload_id, idempotency_key='cache-policy')
+    async with factory() as session:
+        row = await session.get(NebiusApplicationBuild, first.build_id)
+        attempt = await session.get(NebiusApplicationBuildAttempt, (first.build_id, 1))
+        before = dict(attempt.claim_json)
+        source_row = await session.get(NebiusApplicationSourceUpload, source.upload_id)
+        _, retained = retained_build_claim(row, attempt, source_row)
+        assert retained.model_dump(mode='json') == before
+        for field in ('cache_total_mib', 'cache_gc_policy'):
+            assert (field in before) is explicit
+            assert (field in row.binding_json) is explicit
+    # New current policy never changes the retained raw claim/status proof.
+    changed = build_registry(factory, sources, build_inputs[0], cache_total_mib=65536, cache_gc_policy='budget-pressure')
+    assert await changed.status(first.build_id, principal=alice) == first
+    async with factory() as session:
+        attempt = await session.get(NebiusApplicationBuildAttempt, (first.build_id, 1))
+        assert attempt.claim_json == before
+
+
+async def test_independent_policy_freezes_each_new_app_attempt_without_rewriting_prior_history(environment_registry, build_inputs):
+    from loom.db.nebius_application_build_schema import NebiusApplicationBuildAttempt
+    from loom.db.nebius_cache_policy_schema import NebiusCacheRuntimePolicy
+    from loom_service.application_management.build_dispatch import ApplicationBuildDispatch
+    from loom_service.application_management.build_journal import ApplicationBuildJournal
+
+    _, factory, (alice, _), _ = environment_registry
+    sources = upload_registry(factory)
+    source = await verified(sources, alice)
+    registry = build_registry(factory, sources, build_inputs[0], cache_bucket='shared-cache')
+    binding = registry.binding
+    scope = (binding.storage_endpoint, binding.storage_region, binding.cache_bucket)
+    async with factory.begin() as session:
+        session.add(NebiusCacheRuntimePolicy(storage_endpoint=scope[0], storage_region=scope[1], cache_bucket=scope[2],
+            installation_id=binding.source.installation_id, cache_total_mib=65536,
+            cache_gc_policy='legacy-seven-day', reuse_task_cache_for_verifier=True))
+    first = await registry.create(principal=alice, upload_id=source.upload_id, idempotency_key='runtime-cache')
+    frozen = await ApplicationBuildDispatch(registry).freeze(first.build_id, attempt=1)
+    assert frozen.build.cache_total_mib == 65536
+    assert 'reuse_task_cache_for_verifier' not in frozen.build.model_dump()
+    async with factory() as session:
+        attempt = await session.get(NebiusApplicationBuildAttempt, (first.build_id, 1))
+        old = dict(attempt.claim_json)
+    # Natural cancellation of an unstarted disposable attempt enables ordinary
+    # retry; no existing claim or source/recipe is rewritten by a policy change.
+    await registry.cancel(first.build_id, principal=alice, attempt=1)
+    journal = ApplicationBuildJournal(registry)
+    lease = await journal.claim(first.build_id, attempt=1)
+    # Request was frozen but never admitted: give the normal cancellation path
+    # its exact cancelled-unstarted receipt rather than editing SQL state.
+    from loom.nebius_pool_contract import PoolReceiptV1
+    from loom.pipeline.keys import canonical_digest
+    receipt = PoolReceiptV1(reservation_id=uuid4(), pool_id=frozen.pool_id, request_key=frozen.key,
+        admission_epoch=frozen.admission_epoch, request_sha256=canonical_digest(frozen.model_dump(mode='json')).removeprefix('sha256:'),
+        phase='cancelled_unstarted', plan_sha256=None, job_uid=None, cleanup_observation_id=None)
+    await journal.cancelled_unstarted(lease, receipt)
+    async with factory.begin() as session:
+        policy = await session.get(NebiusCacheRuntimePolicy, scope)
+        policy.cache_total_mib = 131072
+    second = await registry.retry(first.build_id, principal=alice, attempt=1)
+    latest = await ApplicationBuildDispatch(registry).freeze(first.build_id, attempt=2)
+    assert second.attempt == 2 and latest.build.cache_total_mib == 131072
+    assert latest.build.recipe == frozen.build.recipe and latest.build.source == frozen.build.source
+    assert await registry.status(first.build_id, principal=alice) == second
+    async with factory() as session:
+        prior = await session.get(NebiusApplicationBuildAttempt, (first.build_id, 1))
+        assert prior.claim_json == old
+
+
+@pytest.mark.parametrize('environment_registry', ['0176'], indirect=True)
+async def test_unenabled_legacy_app_history_does_not_select_or_insert_new_policy_column(environment_registry, build_inputs):
+    _, factory, (alice, _), _ = environment_registry
+    sources = upload_registry(factory)
+    source = await verified(sources, alice)
+    registry = build_registry(factory, sources, build_inputs[0])
+    created = await registry.create(principal=alice, upload_id=source.upload_id, idempotency_key='legacy-cache-shape')
+    assert await registry.status(created.build_id, principal=alice) == created
+
+
 async def test_concurrent_build_intents_freeze_one_attempt_and_replay_after_restart(environment_registry, build_inputs):
     from loom.db.nebius_application_build_schema import (
         NebiusApplicationBuild,

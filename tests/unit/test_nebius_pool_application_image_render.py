@@ -77,6 +77,26 @@ def test_personal_pool_job_keeps_real_claim_isolation_absolute_deadline_and_reso
     assert claim.model_dump(mode="json") == body["build"]
 
 
+@pytest.mark.parametrize("field,value", [("cache_total_mib", 65536), ("cache_gc_policy", "budget-pressure")])
+def test_application_cache_policy_is_frozen_and_cannot_drift_from_selected_profile(build_inputs, field, value):
+    from dataclasses import replace
+
+    from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
+
+    participant, body, profile = pool_inputs(build_inputs)
+    settings = profile.settings.model_dump()
+    settings.update(cache_bucket="shared-cache", cache_secret_name="cache", **{field: value})
+    profile = replace(profile, settings=NativeTaskImageSettings.model_validate(settings))
+    body["build"]["cache_bucket"] = "shared-cache"
+    with pytest.raises(ValueError, match="storage_mismatch"):
+        render(participant, body, profile)
+    body["build"][field] = value
+    result = render(participant, body, profile)
+    import json
+    frozen = json.loads(result.configmap["data"]["claim.json"])
+    assert frozen[field] == value
+
+
 @pytest.mark.parametrize("damage", ["key", "generation", "origin", "origin-data", "kind", "revision", "epoch",
     "installation", "data", "profile", "namespace", "architecture", "recipe", "source", "cache", "registry",
     "endpoint", "deadline", "overhead"])

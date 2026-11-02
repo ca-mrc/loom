@@ -6,6 +6,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.db.nebius_pool_schema import NebiusPoolBinding
@@ -231,3 +232,39 @@ async def native_runtime(request: Request, pool_id: UUID) -> Response:
 @router.post("/{pool_id}/execution-runtime")
 async def read_execution_runtime(request: Request, pool_id: UUID) -> Response:
     return await _participant(request, pool_id, "execution-runtime")
+
+
+@router.post("/{pool_id}/execution-preview")
+async def execution_preview(request: Request, pool_id: UUID) -> Response:
+    from loom.nebius_pool_placement_preview import PoolExecutionPreviewRequestV1
+    from loom_service.pool_management.placement_preview import preview_execution
+
+    raw = await request.body()
+    if len(raw) > MAX_POOL_REQUEST_BYTES:
+        raise _error(413, "pool_request_too_large")
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+        raise _error(415, "pool_json_required")
+    try:
+        body = PoolExecutionPreviewRequestV1.model_validate_json(raw)
+        if body.pool_id != pool_id:
+            raise _error(403, "pool_participant_scope_unavailable")
+        async with request.app.state.session_factory.begin() as session:
+            # Must precede the first auth/catalog SELECT. No external calls or
+            # mutation locks exist in this coherent, non-mutable transaction.
+            await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+            principal = await resolve_pool_machine(session, request.headers.get("authorization"))
+            if principal is None:
+                raise _error(401, "pool_machine_authority_unavailable")
+            if (principal.pool_id, principal.participant_id, principal.role) != (
+                    pool_id, body.request.key.participant_id, "participant"):
+                raise _error(403, "pool_participant_scope_unavailable")
+            result = await preview_execution(session, principal, body,
+                profiles=getattr(request.app.state, "pool_profiles", None))
+            encoded = result.model_dump_json().encode()
+            if len(encoded) > MAX_POOL_REQUEST_BYTES:
+                raise _error(503, "pool_response_too_large")
+        return Response(encoded, media_type="application/json", headers={"Cache-Control": "no-store"})
+    except PoolAuthenticationError:
+        raise _error(401, "pool_machine_authority_unavailable") from None
+    except ValueError:
+        raise _error(422, "pool_preview_unavailable") from None

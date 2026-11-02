@@ -92,3 +92,34 @@ def test_cache_budget_rejects_coercion_and_out_of_range_values(budget):
         NativeTaskImageSettings(namespace="builds", service_image="registry.example/service",
             storage_endpoint="https://storage.example", storage_region="eu-north1",
             source_bucket="source", registry_repository="registry.example/tasks", cache_total_mib=budget)
+
+
+@pytest.mark.parametrize("options", [
+    {}, {"cache_gc_policy": "legacy-seven-day", "reuse_task_cache_for_verifier": False},
+    {"cache_gc_policy": "budget-pressure", "reuse_task_cache_for_verifier": True},
+])
+def test_cache_optimizations_keep_legacy_shape_and_freeze_explicit_choices(options):
+    payload = {"namespace": "builds", "service_image": "registry.example/service",
+               "storage_endpoint": "https://storage.example", "storage_region": "eu-north1",
+               "source_bucket": "source", "registry_repository": "registry.example/tasks", **options}
+    original = NativeTaskImageSettings.model_validate(payload)
+    restored = NativeTaskImageSettings.model_validate_json(original.model_dump_json())
+    assert restored.cache_gc_policy == options.get("cache_gc_policy", "legacy-seven-day")
+    assert restored.reuse_task_cache_for_verifier is options.get("reuse_task_cache_for_verifier", False)
+    for value in (original.model_dump(mode="json"), restored.model_dump(mode="json"),
+                  restored.runtime_configuration()):
+        for key in ("cache_gc_policy", "reuse_task_cache_for_verifier"):
+            assert (key in value) is (key in options)
+            if key in options:
+                assert value[key] == options[key]
+
+
+@pytest.mark.parametrize("options", [
+    {"cache_gc_policy": "off"}, {"cache_gc_policy": None},
+    {"reuse_task_cache_for_verifier": 1}, {"reuse_task_cache_for_verifier": "true"},
+])
+def test_cache_optimization_settings_reject_invalid_or_coerced_choices(options):
+    with pytest.raises(ValidationError):
+        NativeTaskImageSettings(namespace="builds", service_image="registry.example/service",
+            storage_endpoint="https://storage.example", storage_region="eu-north1",
+            source_bucket="source", registry_repository="registry.example/tasks", **options)

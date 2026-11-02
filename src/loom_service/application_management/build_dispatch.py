@@ -26,9 +26,12 @@ from loom.nebius_pool_priority import PoolWorkOriginV1
 from loom.pipeline.keys import canonical_digest
 from loom_service.application_management.build_registry import (
     ApplicationBuildRegistry,
+    load_attempt_cache_policy,
     retained_build_claim,
 )
 from loom_service.environment_management.registry import ManagementError
+from loom_service.pool_management.application_builder_authority import builder_dispatch_allowed
+from loom_service.pool_management.locks import acquire_pool_mutation_lock
 
 
 def _request(binding: ApplicationImageBuildBindingV1, claim: ApplicationImageBuildClaimV1,
@@ -58,8 +61,8 @@ class ApplicationBuildDispatch:
             raise ManagementError("invalid_application_build_attempt", 422)
         scope = self.registry.binding.source
         async with self.registry.session_factory.begin() as session:
-            # No pool call or lock acquisition while holding history locks. Pool
-            # admission later takes its own pool-first locks in another transaction.
+            # Serialize new intake with pause before taking history locks.
+            await acquire_pool_mutation_lock(session)
             row = await session.scalar(select(NebiusApplicationBuild).where(
                 NebiusApplicationBuild.build_id == build_id, NebiusApplicationBuild.current_attempt == attempt,
                 NebiusApplicationBuild.installation_id == scope.installation_id,
@@ -70,6 +73,7 @@ class ApplicationBuildDispatch:
             saved = await session.get(NebiusApplicationBuildAttempt, (build_id, attempt), with_for_update=True)
             source = await session.get(NebiusApplicationSourceUpload, row.upload_id, with_for_update={"read": True})
             try:
+                await load_attempt_cache_policy(session, saved)
                 binding, claim = retained_build_claim(row, saved, source)
                 assert saved is not None
                 if saved.pool_request_json is not None:
@@ -82,6 +86,8 @@ class ApplicationBuildDispatch:
                 raise ManagementError("application_build_dispatch_conflict") from None
             if row.desired_state != "running" or saved.phase != "queued":
                 raise ManagementError("application_build_not_dispatchable")
+            if not await builder_dispatch_allowed(session, binding):
+                raise ManagementError('application_builder_not_active', 503)
             now: datetime = (await session.execute(select(func.clock_timestamp()))).scalar_one()
             request = _request(binding, claim, now + timedelta(seconds=self.request_lifetime_seconds))
             saved.pool_request_json = request.model_dump(mode="json")

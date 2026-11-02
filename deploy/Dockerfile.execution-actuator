@@ -35,7 +35,7 @@ COPY src/loom/agent_runtime.py src/loom/request_params.py src/loom/service_execu
     src/loom/harbor_task_import.py src/loom/task_runtime_compatibility.py src/loom/artifact_contract.py ./src/loom/
 COPY src/loom/nebius_pool_allocation.py src/loom/nebius_pool_contract.py \
     src/loom/nebius_pool_execution_runtime.py src/loom/nebius_pool_lifecycle.py \
-    src/loom/nebius_pool_native_runtime.py src/loom/nebius_pool_priority.py \
+    src/loom/nebius_pool_native_runtime.py src/loom/nebius_pool_priority.py src/loom/nebius_pool_placement_preview.py \
     src/loom/nebius_pool_settings.py src/loom/nebius_pool_task_image.py \
     src/loom/nebius_pool_workload.py src/loom/execution_resource_allocation.py ./src/loom/
 COPY src/loom/application_image_build.py src/loom/application_session.py \
@@ -59,6 +59,7 @@ COPY src/loom_control_plane/__init__.py src/loom_control_plane/execution_admissi
     src/loom_control_plane/execution_capacity.py src/loom_control_plane/execution_finance.py \
     src/loom_control_plane/execution_capacity_reconciliation.py \
     src/loom_control_plane/execution_capacity_targets.py src/loom_control_plane/execution_capacity_wait.py \
+    src/loom_control_plane/execution_capacity_ordering.py src/loom_control_plane/incoming_capacity_preview.py \
     src/loom_control_plane/execution_placement.py \
     src/loom_control_plane/task_image_materializations.py src/loom_control_plane/task_image_capacity.py \
     src/loom_control_plane/task_image_archive_retention.py \
@@ -82,6 +83,9 @@ import loom_execution_capacity_collector.__main__
 import loom.task_bundle_source_journal
 import loom.execution_diagnosis_store
 import loom_control_plane.task_image_archive_retention
+import loom_control_plane.execution_capacity_ordering
+import loom_control_plane.incoming_capacity_preview
+import loom_execution_actuator.pool_placement_advice
 from loom.models.task import EnvironmentConfig, TaskSidecarConfig, TaskConfig
 from loom.harbor_task_import import project_harbor_task
 from loom.task_runtime_compatibility import task_runtime_rejections

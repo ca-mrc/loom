@@ -211,9 +211,11 @@ validates CPU-only intent but cannot prove native inventory or Kubernetes
 version compatibility. Confirm those through the read-only native catalog
 before reviewing an activation plan, and use the matching regional price SKU.
 
-Regional entries may override `execution_preset` (default `16vcpu-64gb`) and
-`execution_disk_gib` (default 80 GiB, `NETWORK_SSD`). The preset must use the
-CPU `<vCPU>vcpu-<GiB>gb` form; the disk must be an integer of at least 80 GiB.
+Regional entries may override `execution_preset` (default `16vcpu-64gb`),
+`execution_disk_gib` (default 80 GiB), and `execution_disk_type` (default
+`NETWORK_SSD`). Only `NETWORK_SSD` and `NETWORK_SSD_NON_REPLICATED` are accepted.
+The preset must use the CPU `<vCPU>vcpu-<GiB>gb` form; the disk must be an integer
+of at least 80 GiB, and NRD sizes must be multiples of 93 GiB.
 These syntax checks do not qualify regional platform/preset compatibility,
 provider disk limits, quota, supply or Kubernetes scheduling fit. Verify those
 against the destination catalog and saved plan. For a reviewed 32-vCPU/128-GiB
@@ -241,6 +243,32 @@ new physical shape. After a reviewed apply replaces the affected nodes, obtain
 a fresh compatible Ready-node/DaemonSet allocatable sample before treating
 that shape as usable workload capacity. Use the same existing platform state
 and saved-plan procedure; an application rollout does not apply Terraform.
+
+An explicitly approved NRD migration can instead select `execution_disk_type =
+"NETWORK_SSD_NON_REPLICATED"` and `execution_disk_gib = 279` (three 93-GiB units),
+preserving the existing CPU/memory preset and node ceiling. Do not silently round
+a 300-GiB SSD up to 372 GiB. Only execution worker boot disks change; system
+disks remain 80-GiB SSD, and the existing rollout strategy remains zero surge
+and one unavailable node. Provider disk type is immutable and disk size cannot
+shrink in place, so this updates the existing NodeGroup template and replaces
+its workers; it does not reformat a live disk. Wait for healthy work to finish
+and prefer an idle maintenance window. Do not migrate PG/PVs or persisted
+registry/S3/results into non-replicated scratch storage.
+
+Coordinate the saved regional runtime `execution_disk_type` and collector quota
+class (`compute.disk.size.network-ssd-non-replicated`) with the cloud change.
+Keep its shape/quota mismatch check intact. Recalculate scheduling fit from the
+new Ready Node's actual filesystem/allocatable sample; raw279Gi is not usable
+ephemeral capacity. Old300Gi samples are incompatible, and 53-GiB builder
+reservations must not shrink just to preserve an earlier packing count. A
+zero-node group needs a fresh compatible sample through the normal qualification
+route before claiming cold-build capacity; do not borrow another region's sample.
+Reconcile the authoritative full state inputs first: historical tfvars can omit
+the current CPU/disk shape or retain an obsolete node ceiling. Review an exact
+saved plan with no unrelated state/resources, quota increase, system disk, CPU,
+memory or node-limit change. Existing backup, guard and normal owner execution
+remain required; this syntax support alone neither activates a region nor
+proves NRD supply or throughput.
 
 Set `suspended = true` in a regional target to keep both node groups at fixed
 zero nodes with autoscaling disabled. The cluster, node-group identities, IAM
