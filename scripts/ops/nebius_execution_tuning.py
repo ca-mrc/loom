@@ -131,6 +131,7 @@ def _builders(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
             result[target].update({key: builder.get(key) for key in (
                 "cpu_request_millis", "cpu_millis", "memory_mib", "ephemeral_storage_mib", "max_concurrent", "resource_ceiling",
             )})
+            result[target]["cache_total_mib"] = builder.get("cache_total_mib", 4096)
     return result
 
 
@@ -153,7 +154,7 @@ def _runtime(kube: Kubectl, controller: dict[str, Any]) -> dict[str, Any]:
             raise DeploymentError("control-plane has no running replicas")
         return {"command_concurrency": None, "configured_command_concurrency": int(
             _env(controller).get("LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY", "1"),
-        )}
+        ), "builder_configuration_source": "unknown"}
     if name == "loom-control-plane":
         script = ("import json; from loom_control_plane.config import ControlPlaneSettings; "
                   "s=ControlPlaneSettings(); "
@@ -164,10 +165,13 @@ def _runtime(kube: Kubectl, controller: dict[str, Any]) -> dict[str, Any]:
                   "print(json.dumps({'command_concurrency':getattr(s,'command_concurrency',None), "
                   "'builder_enabled':b is not None, "
                   "'builder_request_support':b is not None and hasattr(b,'cpu_request_millis'), "
+                  "'builder_cache_budget_support':b is not None and hasattr(b,'cache_total_mib'), "
+                  "'builder_configuration_source':'management-profile' if getattr(s,'global_pool',None) is not None else 'actuator', "
                   "'builder_resources':None if b is None else {"
                   "'effective_cpu_request_millis':getattr(b,'cpu_request_millis',None) or b.cpu_millis, "
                   "'cpu_millis':b.cpu_millis,'memory_mib':b.memory_mib,"
-                  "'ephemeral_storage_mib':b.ephemeral_storage_mib,'namespace':b.namespace}}))")
+                  "'ephemeral_storage_mib':b.ephemeral_storage_mib,'namespace':b.namespace,"
+                  "'cache_total_mib':getattr(b,'cache_total_mib',None)}}))")
     return cast(dict[str, Any], json.loads(kube.run(
         "exec", "-n", ns, "deployment/" + name, "--", "python", "-c", script,
     )))
@@ -254,7 +258,7 @@ def _updated_builders(
     limits = {"cpu_millis", "memory_mib", "ephemeral_storage_mib"}
     for target, values in resources.items():
         if (target not in owners or owners[target].get("task_image_builder") is None
-                or not values or set(values) - (limits | {"cpu_request_millis"})
+                or not values or set(values) - (limits | {"cpu_request_millis", "cache_total_mib"})
                 or any(type(value) is not int for value in values.values())):
             raise DeploymentError("build resources require a configured builder and integer resource settings")
         owner = owners[target]
@@ -263,8 +267,21 @@ def _updated_builders(
         ceiling = task_image_builder_resource_ceiling(owner["task_image_builder"], settings)
         if any(key in values and values[key] > ceiling[key] for key in limits):
             raise DeploymentError("build tuning must preserve existing hard resource ceilings")
-        owner["task_image_builder"]["resource_ceiling"] = ceiling
+        if set(values) & (limits | {"cpu_request_millis"}):
+            owner["task_image_builder"]["resource_ceiling"] = ceiling
         owner["task_image_builder"].update(values)
+    # This is a bucket-wide limit. Controllers sharing it must use one saved
+    # budget, including during independent regional tuning operations.
+    budgets: dict[str, int] = {}
+    for owner in owners.values():
+        builder = owner.get("task_image_builder")
+        if builder is None or builder.get("cache_bucket") is None:
+            continue
+        budget = builder.get("cache_total_mib", 4096)
+        bucket = builder["cache_bucket"]
+        if bucket in budgets and budgets[bucket] != budget:
+            raise DeploymentError("builders sharing a cache bucket require the same total budget; tune them together")
+        budgets[bucket] = budget
     validate_environment(updated)
     return updated
 
@@ -278,10 +295,15 @@ def _stage_builders_locked(
     Existing Jobs retain their frozen settings. Enabling a regional builder must
     go through the normal reviewed regional namespace/Secret/RBAC rollout.
     """
-    cm, config, profile, _ = _read(kube, namespace)
+    cm, config, profile, controllers = _read(kube, namespace)
     if not re.fullmatch(r"[0-9a-f]{40}", expected_candidate) or profile["candidate_sha"] != expected_candidate:
         raise DeploymentError("build settings candidate differs from installed platform")
     updated = _updated_builders(config, resources, enable_regional)
+    for target in set(resources) | set(enable_regional):
+        matches = [row for row in controllers if _env(row).get("LOOM_EXECUTION_ACTUATOR_TARGET_ID") == target]
+        sources = [_runtime(kube, row).get("builder_configuration_source", "unknown") for row in matches]
+        if "management-profile" in sources:
+            raise DeploymentError("global native build settings are owned by management profiles; use normal management configuration")
     if updated != config:
         kube.run("patch", "configmap", "loom-platform-config", "-n", namespace, "--type=json", "-p",
                  json.dumps([
@@ -480,7 +502,7 @@ def _apply_builders_locked(
     if not re.fullmatch(r"[0-9a-f]{40}", expected_candidate) or profile["candidate_sha"] != expected_candidate:
         raise DeploymentError("build settings candidate differs from installed platform")
     updated = _updated_builders(config, resources)
-    allowed = {"cpu_request_millis", "cpu_millis", "memory_mib", "ephemeral_storage_mib"}
+    allowed = {"cpu_request_millis", "cpu_millis", "memory_mib", "ephemeral_storage_mib", "cache_total_mib"}
     prepared = {}
     for target in resources:
         matches = [row for row in controllers if _env(row).get("LOOM_EXECUTION_ACTUATOR_TARGET_ID") == target]
@@ -488,8 +510,14 @@ def _apply_builders_locked(
             raise DeploymentError("live build tuning requires one running existing actuator")
         controller = matches[0]
         runtime = _runtime(kube, controller)
+        if runtime.get("builder_configuration_source") == "management-profile":
+            raise DeploymentError("global native build settings are owned by management profiles; use normal management configuration")
+        if "cache_total_mib" in resources[target] and runtime.get("builder_configuration_source") != "actuator":
+            raise DeploymentError("cache budget tuning requires a known standalone builder configuration source")
         if not runtime.get("builder_enabled") or not runtime.get("builder_request_support"):
             raise DeploymentError("live build tuning requires an already enabled supporting builder; use staged protected deployment first")
+        if "cache_total_mib" in resources[target] and not runtime.get("builder_cache_budget_support"):
+            raise DeploymentError("installed builder lacks cache budget support; stage and deploy the supporting candidate first")
         raw = _env(controller).get("LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER")
         if not raw:
             raise DeploymentError("existing actuator builder configuration unavailable")
@@ -497,9 +525,14 @@ def _apply_builders_locked(
         owner = _owners(updated)[target]
         regional = updated if target == updated["target_id"] else _regional_config(updated, owner)
         desired = _task_image_builder_settings(regional, service_image=current.service_image, storage_config=updated)
+        if (desired is not None and not runtime.get("builder_cache_budget_support")
+                and "cache_total_mib" in desired.model_dump()):
+            raise DeploymentError("saved cache budget requires a supporting builder candidate before live tuning")
         if desired is None or any(getattr(current, key) != getattr(desired, key)
                                   for key in NativeTaskImageSettings.model_fields if key not in allowed):
             raise DeploymentError("live build tuning cannot change namespace, credential references, runtime or identity settings")
+        if any(getattr(current, key) != getattr(desired, key) for key in allowed - resources[target].keys()):
+            raise DeploymentError("saved and live unrequested builder settings differ; include the intended changes explicitly or deploy staged settings first")
         desired.job_config()
         remote = _builder_kube(kube, config, target)
         before = {ns: _job_envelopes(remote, ns) for ns in (owner["execution_namespace"], desired.namespace)}
@@ -531,10 +564,20 @@ def _apply_builders_locked(
             kube.run("rollout", "status", "deployment/" + name, "-n", ns, "--timeout=300s", timeout=330)
             restarted.append(name)
         observed = _runtime(kube, controller)
+        if observed.get("builder_configuration_source") != "actuator":
+            raise DeploymentError("live builder configuration source changed; inspect management ownership before continuing")
         expected = {"effective_cpu_request_millis": desired.cpu_request_millis or desired.cpu_millis,
                     "cpu_millis": desired.cpu_millis, "memory_mib": desired.memory_mib,
                     "ephemeral_storage_mib": desired.ephemeral_storage_mib, "namespace": desired.namespace}
-        if observed.get("builder_resources") != expected:
+        observed_resources = deepcopy(observed.get("builder_resources"))
+        if observed.get("builder_cache_budget_support"):
+            expected["cache_total_mib"] = desired.cache_total_mib
+        elif "cache_total_mib" in resources[target]:
+            raise DeploymentError("live builder lost cache budget support; inspect before continuing")
+        elif isinstance(observed_resources, dict):
+            if observed_resources.pop("cache_total_mib", None) is not None:
+                raise DeploymentError("builder cache budget capability readback differs")
+        if observed_resources != expected:
             raise DeploymentError("live builder resource readback differs; retry retained tuning intent")
         actual_quota = remote.get("resourcequota", "loom-task-image-build-capacity", desired.namespace)
         if not _same_quota(actual_quota.get("spec", {}).get("hard", {}), hard):
@@ -584,7 +627,8 @@ def main() -> None:
     parser.add_argument("--enable-regional-builder", action="append", default=[], metavar="TARGET",
                         help="stage explicit regional opt-in for the next normal protected deployment")
     build_fields = {"cpu-request-millis": "cpu_request_millis", "cpu-limit-millis": "cpu_millis",
-                    "memory-mib": "memory_mib", "storage-mib": "ephemeral_storage_mib"}
+                    "memory-mib": "memory_mib", "storage-mib": "ephemeral_storage_mib",
+                    "cache-total-mib": "cache_total_mib"}
     for name in build_fields:
         parser.add_argument("--build-" + name, action="append", default=[], metavar="TARGET=VALUE")
     for name in ("cpu-request-millis", "cpu-limit-millis", "memory-request-mib", "memory-limit-mib", "shared-buffers-mib"):

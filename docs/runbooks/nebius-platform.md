@@ -1369,6 +1369,51 @@ images and first regional enablement require `stage-builders` followed by the
 normal protected installer/deployment. Those stage changes do not restart any
 controller. Builder tuning cannot be mixed with database or execution knobs.
 
+The bucket-wide BuildKit cache budget is independently configurable as
+`task_image_builder.cache_total_mib`. Omission preserves the historical 4096 MiB
+budget; an explicit integer from 1024 through 1048576 MiB is supported. This is
+object-store cache capacity, separate from Pod memory, scratch and the unchanged
+1 GiB per-component cache-export limit. For a 64 GiB total budget, save and apply
+65536 MiB to every enabled builder sharing that cache bucket in one operation:
+
+```bash
+python scripts/ops/nebius_execution_tuning.py apply-builders \
+  --kubeconfig "$KUBECONFIG_PATH" --namespace "$PLATFORM_NAMESPACE" \
+  --expected-candidate "$INSTALLED_CANDIDATE_SHA" \
+  --build-cache-total-mib "$PRIMARY_TARGET_ID=65536" \
+  --build-cache-total-mib "$REGIONAL_TARGET_ID=65536"
+```
+
+This requires a supporting installed builder image; use `stage-builders` and
+the normal deployment for its first installation. Afterward the same command
+changes and persists the budget without another PR, image build or database
+restart. Only affected actuator controllers roll. Both the saved builder intent
+and actual in-container budget are read back; existing task Jobs and their
+frozen claims retain their original settings. A budget-only change preserves
+CPU, memory, scratch, resource ceilings and quotas. Normal deployments reuse the
+saved configuration. Reapply the same intent after a partial failure; a saved
+budget alone is not proof that every controller has converged.
+
+These stage/apply commands own standalone actuator configuration. Runtime
+readback reports `builder_configuration_source`. In global pool mode the
+management build profile owns the actual frozen claim; changing the actuator's
+environment would not update it. The standalone commands reject known global
+builders before saving or applying settings. Staging intent for a new or stopped
+standalone target remains available for its next normal protected installation;
+it does not claim that a live builder or management profile has changed.
+Use the normal management profile
+configuration path for global builders, preserving global mode. The shared
+profile renderer supports the same explicit `cache_total_mib` field.
+
+The total applies to recognized cache objects in the configured bucket, rather
+than independently per Task or region. Controllers sharing a bucket must use
+the same budget. The existing seven-day retention protection remains: lowering
+the budget does not immediately reclaim protected objects, and over-budget
+publication can be deferred while final image publication still succeeds.
+Choose the budget from observed resident bytes, actual operation cache hits,
+transfer/GC costs and end-to-end completion throughput; 64 GiB is an operator
+choice rather than a universal performance optimum.
+
 The existing minutely capacity-collector Job normally publishes complete
 feedback at wall-start offsets 0, 15, 30 and 45 seconds within a 50-second
 sampling window when it starts promptly. Its budget also ends five seconds

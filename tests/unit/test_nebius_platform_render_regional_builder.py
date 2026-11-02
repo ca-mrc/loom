@@ -17,6 +17,7 @@ from loom.nebius_platform_render import (
     build_platform,
     build_regional_execution,
 )
+from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
 from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.support.nebius_platform import regional_inputs as regional_inputs
 
@@ -45,6 +46,34 @@ def builder() -> dict:
             "cache_bucket": "loom-shared-build-cache", "max_concurrent": 2,
             "cpu_millis": 8000, "memory_mib": 8192, "ephemeral_storage_mib": 65536,
             "archive_secret_name": "loom-task-image-archive-writer"}
+
+
+def test_explicit_shared_cache_budget_renders_both_actuators_without_changing_pod_envelopes(regional_inputs: tuple) -> None:
+    config, candidate, profile = regional_inputs
+    config["task_image_builder"] = {**builder(), "cache_total_mib": 65536, "ephemeral_storage_mib": 51200}
+    target = config["regional_execution_targets"][0]
+    target["task_image_builder"] = {**builder(), "cache_total_mib": 65536, "ephemeral_storage_mib": 54272}
+    original = deepcopy(config)
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    deployments = {doc["metadata"]["name"]: doc for doc in files["60-execution.yaml"] if doc["kind"] == "Deployment"}
+    for name, storage in (("loom-execution-actuator", 51200), (target["target_id"] + "-actuator", 54272)):
+        env = {row["name"]: row.get("value") for row in deployments[name]["spec"]["template"]["spec"]["containers"][0]["env"]}
+        rendered = json.loads(env["LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER"])
+        assert rendered["cache_total_mib"] == 65536
+        settings = NativeTaskImageSettings.model_validate(rendered)
+        assert settings.runtime_configuration()["cache_total_mib"] == 65536
+        assert settings.job_config().ephemeral_storage_mib == storage
+        assert settings.job_config().memory_mib == 8192
+        assert settings.job_config().cpu_millis == 8000
+    assert config == original
+
+
+@pytest.mark.parametrize("budget", [0, 1023, 1048577, True, "65536", 65536.0])
+def test_renderer_rejects_invalid_cache_budget(regional_inputs: tuple, budget: object) -> None:
+    config, candidate, profile = regional_inputs
+    config["task_image_builder"] = {**builder(), "cache_total_mib": budget}
+    with pytest.raises(NebiusPlatformError, match="invalid task image build"):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)
 
 
 def test_regional_builder_is_opt_in_and_uses_canonical_shared_storage(regional_inputs: tuple) -> None:

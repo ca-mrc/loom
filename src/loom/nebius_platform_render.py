@@ -998,6 +998,7 @@ def _task_image_builder_settings(
     allowed = {
         "registry_repository",
         "cache_bucket",
+        "cache_total_mib",
         "cpu_millis",
         "memory_mib",
         "ephemeral_storage_mib",
