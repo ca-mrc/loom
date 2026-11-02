@@ -531,10 +531,15 @@ BEGIN
         'nebius_pool_machines','nebius_pool_machine_credentials','nebius_pool_captures','nebius_pool_observations',
         'nebius_pool_effects','nebius_pool_cleanup_observations','nebius_pool_cancellations',
         'nebius_pool_participant_catalogs','nebius_pool_profile_documents',
-        'nebius_pool_lifecycle_operations','nebius_pool_participant_lifecycle']) AS name LOOP
+        'nebius_pool_lifecycle_operations','nebius_pool_participant_lifecycle',
+        'nebius_cache_runtime_policies','nebius_pool_placement_advice']) AS name LOOP
         IF item.name IN ('nebius_pool_participant_catalogs','nebius_pool_profile_documents',
             'nebius_pool_lifecycle_operations','nebius_pool_participant_lifecycle')
           AND (SELECT version_num FROM public.alembic_version) IN ('0175','0176','0177')
+          AND to_regclass('public.' || item.name) IS NULL THEN CONTINUE; END IF;
+        IF item.name IN ('nebius_cache_runtime_policies','nebius_pool_placement_advice')
+          AND (SELECT version_num FROM public.alembic_version) IN (
+            '0175','0176','0177','0178','0179','0180','0181','0182','0183','0184','0185','0186')
           AND to_regclass('public.' || item.name) IS NULL THEN CONTINUE; END IF;
         IF has_table_privilege('loom_actuator',item.name,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
           OR has_any_column_privilege('loom_actuator',item.name,'SELECT,INSERT,UPDATE,REFERENCES')

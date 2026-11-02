@@ -57,7 +57,7 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM public.nebius_pool_bindings b
         WHERE b.pool_id='{spec.pool_id}'::uuid AND b.mode='closed'
         AND b.policy_revision={spec.policy_revision + 1}
-        AND to_jsonb(b)-'mode'-'policy_revision'=convert_from(decode('{_binding_hex(spec)}','hex'),'UTF8')::jsonb)
+        AND to_jsonb(b)-'mode'-'policy_revision'-'prefer_incoming_warm_fit'=convert_from(decode('{_binding_hex(spec)}','hex'),'UTF8')::jsonb)
     THEN RAISE EXCEPTION 'pool recovery fence unqualified'; END IF;
 END $pool_recovery_binding$;
 SELECT json_build_object('schema','loom.pool-recovery-drain.v1',

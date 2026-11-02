@@ -115,6 +115,12 @@ actual warm fit; cover explicit and target-specific node-share envelopes, init/
 RuntimeClass overhead, foreign/stale/unknown evidence, cleanup/quota races,
 old/mixed managers, cancellation and normal owner Job replay. Migration 0187
 preserves physical identity protection when changing only the preference.
+Normal owner refresh, activation, recovery, machine retirement and lease census
+explicitly support revision 0187 while retaining older audited revisions and
+rejecting unknown revisions. Physical registration comparisons exclude only the
+independent warm-fit preference; unknown columns still reject the operation.
+Restricted actuator qualification denies both table and column access to the
+new cache-policy and placement-advice tables, without adding runtime grants.
 
 These prove functionality, not a throughput gain. The bounded positive comparison
 keeps the same original 40 Task revisions ×3, Oracle/no-model and explicit shared

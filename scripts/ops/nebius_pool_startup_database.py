@@ -66,8 +66,11 @@ def _expected_authority(spec: PoolInstallation, *, mode: Literal['closed', 'glob
 
 def _authority_condition(pool_id: UUID) -> str:
     """Exact row maps; every caller uses one READ ONLY snapshot and fixed input."""
+    # This independently managed preference is not physical registration
+    # authority. JSON subtraction also works on retained schemas lacking it;
+    # every other existing or unknown column remains part of the exact match.
     return f"""COALESCE(
-        (SELECT to_jsonb(b) FROM public.nebius_pool_bindings b WHERE b.pool_id='{pool_id}'::uuid) = value->'binding'
+        (SELECT to_jsonb(b) - 'prefer_incoming_warm_fit' FROM public.nebius_pool_bindings b WHERE b.pool_id='{pool_id}'::uuid) = value->'binding'
         AND (SELECT jsonb_object_agg(p.participant_id::text,to_jsonb(p)) FROM public.nebius_pool_participants p
             WHERE p.pool_id='{pool_id}'::uuid) = value->'participants'
         AND (SELECT jsonb_object_agg(m.machine_id::text,to_jsonb(m)) FROM public.nebius_pool_machines m

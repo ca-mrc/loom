@@ -43,7 +43,7 @@ credentials AS (SELECT c.*,t.revoked_at FROM public.nebius_pool_machine_credenti
 SELECT CASE WHEN
     EXISTS (SELECT 1 FROM public.nebius_pool_bindings b WHERE b.pool_id='{spec.pool_id}'::uuid
         AND ({binding_state})
-        AND to_jsonb(b)-'mode'-'policy_revision'=convert_from(decode('{_binding_hex(spec)}','hex'),'UTF8')::jsonb)
+        AND to_jsonb(b)-'mode'-'policy_revision'-'prefer_incoming_warm_fit'=convert_from(decode('{_binding_hex(spec)}','hex'),'UTF8')::jsonb)
     AND (SELECT jsonb_object_agg(p.participant_id::text,to_jsonb(p)) FROM public.nebius_pool_participants p
         WHERE p.pool_id='{spec.pool_id}'::uuid)=value->'participants'
     AND (SELECT jsonb_object_agg(m.machine_id::text,to_jsonb(m)-'phase') FROM machines m)=value->'machines'

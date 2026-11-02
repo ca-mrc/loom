@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import func, insert, literal_column, select, update
 
 from loom.db.nebius_pool_schema import (
     NebiusPoolBinding,
@@ -155,8 +155,10 @@ async def reserved(sessions, request, participant, *, phase='reserved'):
 
 async def snapshot(sessions):
     async with sessions() as session:
-        return {table.__tablename__: [{column.name: getattr(row, column.name) for column in table.__table__.columns}
-            for row in await session.scalars(select(table).order_by(*table.__table__.primary_key))]
+        # SELECT * snapshots every actual database column, including deferred
+        # features at head, without asking retained schemas for absent columns.
+        return {table.__tablename__: [dict(row) for row in (await session.execute(
+            select(literal_column('*')).select_from(table.__table__).order_by(*table.__table__.primary_key))).mappings()]
             for table in (NebiusPoolBinding, NebiusPoolParticipant, NebiusPoolRequest,
                 NebiusPoolMachine, NebiusPoolMachineCredential, Token)}
 
