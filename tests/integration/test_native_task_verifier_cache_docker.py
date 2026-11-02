@@ -52,6 +52,10 @@ class Build:
 class Harness:
     def __init__(self, client, subids: Path):
         self.client, self.subids = client, subids
+        cpu_count = client.info()["NCPU"]
+        if type(cpu_count) is not int or cpu_count <= 0:
+            raise ValueError("local Docker daemon CPU count must be a positive integer")
+        self.cpu_millis = min(8000, cpu_count * 1000)
         self.volumes = []
         self.containers = []
 
@@ -65,7 +69,7 @@ class Harness:
         host = self.client.api.create_host_config(
             binds=volumes,
             network_mode="none",
-            nano_cpus=8_000_000_000,
+            nano_cpus=self.cpu_millis * 1_000_000,
             mem_limit="8g",
             pids_limit=1024,
             security_opt=["seccomp=unconfined", "apparmor=unconfined"],
@@ -146,7 +150,7 @@ class Harness:
                 source_secret_name="fixture-source",
                 registry_secret_name="fixture-registry",
                 cache_secret_name="fixture-cache",
-                cpu_millis=8000,
+                cpu_millis=self.cpu_millis,
                 memory_mib=8192,
                 ephemeral_storage_mib=65536,
                 reuse_task_cache_for_verifier=sibling,
