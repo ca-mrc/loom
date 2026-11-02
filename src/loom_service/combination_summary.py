@@ -160,7 +160,8 @@ def _model_display(combo: dict[str, Any]) -> str:
     return "no model"
 
 
-def _combination_label(combo: dict[str, Any]) -> str:
+def combination_label(combo: dict[str, Any]) -> str:
+    """Use the same readable identity in API summaries and delivery exports."""
     label = combo.get("label")
     if isinstance(label, str) and label.strip():
         return label
@@ -367,7 +368,7 @@ async def combination_summary_for_batch(
         )
         row = {
             "combination_idx": idx,
-            "label": _combination_label(combo),
+            "label": combination_label(combo),
             "agent_name": combo.get("agent_name"),
             "agent_version": combo.get("agent_version"),
             "agent_model": combo.get("agent_model"),

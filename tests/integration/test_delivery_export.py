@@ -479,6 +479,86 @@ async def delivery_setup(
         sync_engine.dispose()
 
 
+async def test_delivery_export_preserves_selected_source_combination_routes(
+    delivery_setup: dict[str, object],
+    postgres_url: str,
+) -> None:
+    batch_ids = [
+        delivery_setup[key]
+        for key in (
+            "main_batch_id",
+            "supplemental_batch_id",
+            "targeted_batch_id",
+        )
+    ]
+    routes = {str(batch_id): (f"source-{i}", str(uuid4())) for i, batch_id in enumerate(batch_ids)}
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            for batch_id in batch_ids:
+                label, connection = routes[str(batch_id)]
+                session.execute(
+                    update(Batch)
+                    .where(Batch.id == batch_id)
+                    .values(
+                        combinations=[
+                            {
+                                "label": label,
+                                "agent_name": "opencode",
+                                "n_per_task": 1,
+                                "agent_model": {"provider": "yibu", "name": "glm-5.1-thinking"},
+                                "provider_connection_id": connection,
+                                "provider_model_id": "glm-5.1-thinking",
+                            }
+                        ]
+                    )
+                )
+            session.commit()
+    finally:
+        engine.dispose()
+    transport = httpx.ASGITransport(app=delivery_setup["app"])  # type: ignore[arg-type]
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as client:
+        response = await client.post(
+            f"/api/v1/batches/{batch_ids[0]}/delivery-export",
+            headers={"Authorization": f"Bearer {delivery_setup['raw']}"},
+            json={"supplemental_batch_ids": [str(value) for value in batch_ids[1:]]},
+        )
+        assert response.status_code == 201, response.text
+        downloaded = await client.get(
+            response.json()["download_url"],
+            headers={
+                "Authorization": f"Bearer {delivery_setup['read_only_raw']}",
+            },
+        )
+    assert downloaded.status_code == 200
+    with tarfile.open(fileobj=io.BytesIO(downloaded.content), mode="r:gz") as tar:
+        ledger = [json.loads(line) for line in tar.extractfile("ledger/trials.jsonl")]  # type: ignore[union-attr]
+        csv_rows = list(
+            csv.DictReader(
+                io.StringIO(
+                    tar.extractfile("ledger/trials.csv").read().decode(),  # type: ignore[union-attr]
+                )
+            )
+        )
+        for rows in [ledger, csv_rows]:
+            assert len(rows) == 4
+            for row in rows:
+                label, connection = routes[row["selected_batch_id"]]
+                assert row["combination_label"] == label
+                assert row["provider_connection_id"] == connection
+                assert row["provider_model_id"] == "glm-5.1-thinking"
+        for name in ["manifest.json", "summary.json"]:
+            manifest = json.load(tar.extractfile(name))  # type: ignore[arg-type]
+            assert len(manifest["combination_routes"]) == 3
+            assert {row["selected_batch_id"] for row in manifest["combination_routes"]} == set(
+                routes
+            )
+            for row in manifest["combination_routes"]:
+                assert (row["combination_label"], row["provider_connection_id"]) == (
+                    routes[row["selected_batch_id"]]
+                )
+
+
 async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
     delivery_setup: dict[str, object],
     postgres_url: str,
