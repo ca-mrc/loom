@@ -882,6 +882,12 @@ class ExecutionActuator:
             KUBERNETES_WATCH_RESTARTS_TOTAL.labels(outcome="completed").inc()
         except KubernetesApiError as exc:
             self._watch_resource_version = None
+            if exc.status_code == 410:
+                # An expired resource version is routine: the next watch starts
+                # from a fresh list, and full reconciliation covers the gap.
+                KUBERNETES_WATCH_RESTARTS_TOTAL.labels(outcome="expired").inc()
+                _LOG.info("execution actuator watch resource version expired; restarting from a fresh list")
+                return persisted
             KUBERNETES_WATCH_RESTARTS_TOTAL.labels(outcome="error").inc()
             status_class = (
                 f"{exc.status_code // 100}xx" if exc.status_code is not None else "transport"

@@ -70,3 +70,17 @@ def test_user_guide_documents_current_batch_create_command() -> None:
     assert "--provider smoke-openai" in user_guide
     assert "--model gpt-4o-mini" in user_guide
     assert "--agent direct-completion" in user_guide
+
+
+def test_user_guide_batch_json_example_is_a_valid_request() -> None:
+    import json
+    import re
+
+    from loom_service.routes.batches import _CreateBatch
+
+    guide = _read("docs/user-guide.md")
+    section = guide[guide.index("### Quickstart: submit through the API"):]
+    example = re.search(r"```json\n(.*?)\n```", section, re.DOTALL)
+    assert example is not None
+    request = _CreateBatch.model_validate(json.loads(example.group(1)))
+    assert [(c.agent_name, c.agent_model) for c in request.combinations] == [("oracle", None)]
