@@ -611,6 +611,11 @@ must cover that exact service DNS name. The PostgreSQL superuser is `postgres`;
 the four application usernames are `loom_service`, `loom_control_plane`,
 `loom_gateway`, and `loom_actuator`.
 
+PostgreSQL readiness checks the local TCP listener on `127.0.0.1:5432`.
+The image's temporary Unix-socket server during first-time initialization must
+not expose the Pod as Ready before its final TCP server starts. Readiness does
+not replace the bootstrap Job's authenticated, certificate-verified SQL checks.
+
 Generate the batch-runner token once as `loom_br_` plus at least 32 random
 URL-safe bytes and keep it in the protected Secret provisioning input. On a
 fresh install, database bootstrap registers it as a non-expiring worker token

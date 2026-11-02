@@ -1801,7 +1801,7 @@ def _build_platform(
     if "shared_buffers_mib" in config.get("postgres_settings", {}):
         pg["args"] += ["-c", f"shared_buffers={database_settings['shared_buffers_mib']}MB"]
     pg["readinessProbe"] = {
-        "exec": {"command": ["pg_isready", "-U", "postgres", "-d", "loom"]},
+        "exec": {"command": ["pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "postgres", "-d", "loom"]},
         "periodSeconds": 5,
     }
     pg["volumeMounts"] = [{"name": "data", "mountPath": "/var/lib/postgresql/data"}]
