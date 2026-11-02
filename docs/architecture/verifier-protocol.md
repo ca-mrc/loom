@@ -271,7 +271,7 @@ The runtime result provides the phase return code, duration, truncation and
 stream hashes; no synthetic `script.log.meta.json` is generated. Export binds
 every file to the owning team, Trial, attempt and single canonical bundle,
 checks indexed bytes against runtime evidence and persisted outcome, and keeps
-sharing blocks, bounded reads and secret scanning. Missing or inconsistent
+sharing blocks and bounded reads. Missing or inconsistent
 evidence still rejects the export. Legacy log/meta pairs retain their existing
 validation. Scored timeouts keep their original failed outcome and score;
 export does not promote them to successful executions.

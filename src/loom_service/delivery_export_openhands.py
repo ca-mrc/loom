@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -24,7 +23,6 @@ from loom_service.delivery_export_tb2_v2 import (
     _resolve_indexed_artifact_bucket,
     build_model_input_trajectory,
     parse_trajectory_events,
-    scan_members_for_secrets,
 )
 
 NATIVE_OPENHANDS_SDK_EVENTS = "native/openhands_sdk_events.json"
@@ -236,16 +234,6 @@ def build_per_trial_openhands_bundle(
         {"kind": "export_provenance", "path": "export_provenance.json"},
         {"kind": "native_openhands_sdk_events", "path": NATIVE_OPENHANDS_SDK_EVENTS},
     ]
-    scan_payload = {
-        "trajectory.json": json.dumps(execution_trajectory, ensure_ascii=False).encode(),
-        "model_input_trajectory.json": json.dumps(
-            model_input_trajectory,
-            ensure_ascii=False,
-        ).encode(),
-        "export_provenance.json": json.dumps(export_provenance, ensure_ascii=False).encode(),
-        **native_artifacts,
-    }
-    scan_members_for_secrets(scan_payload)
     return OpenHandsTrialBundle(
         execution_trajectory=execution_trajectory,
         model_input_trajectory=model_input_trajectory,

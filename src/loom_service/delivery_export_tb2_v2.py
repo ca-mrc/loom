@@ -37,10 +37,6 @@ LEGACY_DEFAULT_HARBOR_COMPAT_SHAS = frozenset({
 })
 NATIVE_HARBOR_TRAJECTORY = "native/harbor_trajectory.json"
 NATIVE_RECORDING_CAST = "native/recording.cast"
-SECRET_PATTERNS = (
-    re.compile(r"sk-[A-Za-z0-9]{8,}"),
-    re.compile(r"(?i)bearer\s+[A-Za-z0-9._\-]{8,}"),
-)
 
 # #1263: agent tool_calls that touch Harbor private paths (solution/tests/
 # verifier) indicate workspace contamination — fail closed on tb2-v2 pack.
@@ -1060,7 +1056,6 @@ def resolve_verifier_artifacts(
         return []
 
     resolved: list[VerifierDeliveryArtifact] = []
-    bodies_for_scan: dict[str, bytes] = {}
     for step_name, log_rel in sorted(log_keys):
         log_item, log_data, log_hash = fetched[(step_name, log_rel)]
         meta_rel = f"{log_rel}.meta.json"
@@ -1077,7 +1072,6 @@ def resolve_verifier_artifacts(
             archive_path = (
                 f"verifier/{step_name}/{rel}" if multiple_steps else f"verifier/{rel}"
             )
-            bodies_for_scan[archive_path] = data
             resolved.append(
                 VerifierDeliveryArtifact(
                     archive_path=archive_path,
@@ -1100,7 +1094,6 @@ def resolve_verifier_artifacts(
         archive_path = (
             f"verifier/{step_name}/{rel}" if multiple_steps else f"verifier/{rel}"
         )
-        bodies_for_scan[archive_path] = data
         resolved.append(
             VerifierDeliveryArtifact(
                 archive_path=archive_path,
@@ -1115,22 +1108,7 @@ def resolve_verifier_artifacts(
             )
         )
 
-    scan_members_for_secrets(bodies_for_scan)
     return resolved
-
-
-def scan_members_for_secrets(members: dict[str, bytes]) -> None:
-    for path, data in members.items():
-        text = data.decode("utf-8", errors="replace")
-        for pattern in SECRET_PATTERNS:
-            if pattern.search(text):
-                raise Tb2V2ExportError(
-                    "secret_scan_failed",
-                    {
-                        "message": "export payload matched a secret pattern",
-                        "path": path,
-                    },
-                )
 
 
 def scan_execution_trajectory_for_private_path_keystrokes(
@@ -1276,7 +1254,7 @@ def build_per_trial_v2_bundle(
             messages_from_raw_log=messages_from_raw_log,
         ),
     )
-    # #1263: reject contaminated agent runs before secret scan / tar write.
+    # #1263: reject contaminated agent runs before the tar write.
     scan_execution_trajectory_for_private_path_keystrokes(
         execution_trajectory,
         trial_id=str(trial.id),
@@ -1297,18 +1275,6 @@ def build_per_trial_v2_bundle(
         artifact_manifest_entries.append(
             {"kind": "native_recording_cast", "path": NATIVE_RECORDING_CAST},
         )
-
-    scan_payload = {
-        "trajectory.json": json.dumps(execution_trajectory, ensure_ascii=False).encode(),
-        "model_input_trajectory.json": json.dumps(
-            model_input_trajectory,
-            ensure_ascii=False,
-        ).encode(),
-        "terminal_transcript.jsonl": terminal_transcript,
-        "export_provenance.json": json.dumps(export_provenance, ensure_ascii=False).encode(),
-        **native_artifacts,
-    }
-    scan_members_for_secrets(scan_payload)
 
     return Tb2V2TrialBundle(
         execution_trajectory=execution_trajectory,

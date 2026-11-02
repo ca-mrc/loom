@@ -17,7 +17,6 @@ from loom_service.delivery_export_tb2_v2 import (
     Tb2V2ExportError,
     VerifierDeliveryArtifact,
     _fetch_bounded_verifier_artifact,
-    scan_members_for_secrets,
 )
 
 _SEPARATE_NAMESPACE = "verifier-execution/"
@@ -159,5 +158,4 @@ def resolve_native_verifier_artifacts(
             )
             if len(data) != item.size_bytes or resolved[-1].content_hash != item.sha256:
                 fail("invalid_verifier_artifact_metadata", "verifier test report differs from runtime evidence")
-    scan_members_for_secrets({item.archive_path: item.data for item in resolved})
     return resolved

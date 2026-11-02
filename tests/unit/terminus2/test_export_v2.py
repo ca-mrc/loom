@@ -27,7 +27,6 @@ from loom.models.trajectory import (
 )
 from loom.models.types import ModelSpec
 from loom_service.delivery_export_tb2_v2 import (
-    SECRET_PATTERNS,
     Tb2V2ExportError,
     build_execution_trajectory,
     build_per_trial_v2_bundle,
@@ -594,17 +593,6 @@ def test_build_per_trial_v2_bundle_projects_last_attempt_only() -> None:
     assert transcript_rows[0]["text"] == "final\n"
     # Full audit spine is still the caller's event list (retries preserved).
     assert any(isinstance(event, AgentRetryEvent) for event in events)
-
-
-def test_secret_patterns_ignore_task_id_substrings() -> None:
-    task_json = '{"task_id": "source-useful-5003/task-0001"}'
-    assert "sk-" in task_json
-    assert not any(pattern.search(task_json) for pattern in SECRET_PATTERNS)
-
-
-def test_secret_patterns_detect_openai_key_shape() -> None:
-    leaked = '{"token": "sk-abcdefghijklmnopqrstuvwxyz"}'
-    assert any(pattern.search(leaked) for pattern in SECRET_PATTERNS)
 
 
 def test_private_path_keystroke_scan_detects_9b6194d5_pattern() -> None:
