@@ -26,6 +26,7 @@ from loom.nebius_pool_lifecycle import PoolDrainV1, PoolStopV1
 from loom.nebius_pool_native_runtime import PoolNativeRuntimeV1
 from loom.pipeline.keys import canonical_digest
 from loom_control_plane.task_image_materializations import heartbeat_task_image_materialization
+from loom_execution_actuator.build_reconcile import ReconcileRunner
 from loom_execution_actuator.metrics import record_build_cycle
 from loom_execution_actuator.pool_build_driver import PoolBuildDriver
 from loom_execution_actuator.pool_build_selection import PoolBuildSelector
@@ -33,6 +34,7 @@ from loom_execution_actuator.pool_native_observation import qualify_native_obser
 from loom_execution_actuator.pool_origins import preferred_task_image_origin
 from loom_execution_actuator.pool_outbox import PoolHandoffError, _clock, _snapshot, _source_matches
 from loom_execution_actuator.task_image_controller import (
+    ADMISSION_GRACE_SECONDS,
     ADMISSIONS_PER_PASS,
     RECONCILE_CONCURRENCY,
     fail_native_build,
@@ -238,10 +240,22 @@ class PoolNativeBuildController:
             await self.driver.management.stop(stop)
             await self.driver.management.drain(drain)
 
-    async def run_once(self) -> None:
-        started, outstanding = time.monotonic(), 0
+    _reconciler: ReconcileRunner | None = None
+    _outstanding = 0
+
+    @property
+    def reconciler(self) -> ReconcileRunner:
+        if self._reconciler is None:
+            self._reconciler = ReconcileRunner(grace_seconds=ADMISSION_GRACE_SECONDS)
+        return self._reconciler
+
+    async def close(self) -> None:
+        await self.reconciler.close()
+
+    async def _reconcile_pending(self) -> bool:
         errors: list[Exception] = []
         slots = asyncio.Semaphore(self.reconcile_concurrency)
+        self._outstanding = 0
 
         async def reconcile(key: PoolRequestKeyV1) -> None:
             try:
@@ -257,12 +271,21 @@ class PoolNativeBuildController:
         # selection lock, so different keys may advance concurrently.
         async with asyncio.TaskGroup() as group:
             async for pending in self.driver.outbox.iter_pending():
-                outstanding += 1
+                self._outstanding += 1
                 # Read further pages only as slots free up.
                 await slots.acquire()
                 group.create_task(reconcile(pending.request.key))
-        first_error = errors[0] if errors else None
-        reconciled, outcome, claimed = time.monotonic(), "no_selector", 0
+        if errors:
+            raise errors[0]
+        return False
+
+    async def run_once(self) -> None:
+        # Selection does not wait behind a slow pending key past the grace, in
+        # this pass or later ones: at most one reconcile is in flight, and the
+        # per-key selection lock serializes any overlap with a selected key.
+        await self.reconciler.advance(self._reconcile_pending)
+        started, outcome, claimed = time.monotonic(), "no_selector", 0
+        selection_error: Exception | None = None
         if self.selector is not None:
             outcome = "batch_full"
             try:
@@ -274,11 +297,15 @@ class PoolNativeBuildController:
                     claimed += 1
                     await self._reconcile(selected.request.key)
             except Exception as error:
-                outcome = "error"
-                if first_error is None:
-                    first_error = error
+                outcome, selection_error = "error", error
                 _LOG.warning("Global native build selection deferred error=%s", type(error).__name__)
-        record_build_cycle("pool", outstanding=outstanding, reconcile_seconds=reconciled - started,
-                           outcome=outcome, admission_seconds=time.monotonic() - reconciled, claimed=claimed)
-        if first_error is not None:
-            raise first_error
+        admission_seconds = time.monotonic() - started
+        reconcile_seconds, reconciled = self.reconciler.collect()
+        record_build_cycle("pool", outstanding=self._outstanding, reconcile_seconds=reconcile_seconds,
+                           outcome=outcome, admission_seconds=admission_seconds, claimed=claimed)
+        if isinstance(reconciled, BaseException):
+            raise reconciled
+        if selection_error is not None:
+            raise selection_error
+        if self.reconciler.stalled():
+            raise RuntimeError("Global native build reconciliation has not finished; inspect bounded actuator diagnostics")

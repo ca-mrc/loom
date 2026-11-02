@@ -231,6 +231,9 @@ async def _run() -> None:
             else:
                 builder = NativeTaskImageController(sessions=sessions, kubernetes=build_kubernetes,
                     target=target, settings=settings.task_image_builder)
+        if builder is not None:
+            # A reconcile may outlive its pass; stop it before its clients close.
+            resources.push_async_callback(builder.close)
         runtime_health = ActuatorRuntimeHealth(
             stale_after_seconds=max(15.0, settings.full_reconcile_seconds * 3),
             task_image_builder_enabled=builder is not None,

@@ -95,14 +95,17 @@ def blocked_outcome(reason: object) -> str:
     return reason if isinstance(reason, str) and _REASON.fullmatch(reason) else "blocked_other"
 
 
-def record_build_cycle(controller: str, *, outstanding: int, reconcile_seconds: float,
+def record_build_cycle(controller: str, *, outstanding: int, reconcile_seconds: float | None,
                        outcome: str, admission_seconds: float, claimed: int = 0) -> None:
+    """`reconcile_seconds` is None while the pass's reconcile is still running."""
     TASK_IMAGE_BUILD_OUTSTANDING.labels(controller).set(outstanding)
-    TASK_IMAGE_BUILD_CYCLE_SECONDS.labels(controller, "reconcile").observe(reconcile_seconds)
+    if reconcile_seconds is not None:
+        TASK_IMAGE_BUILD_CYCLE_SECONDS.labels(controller, "reconcile").observe(reconcile_seconds)
     TASK_IMAGE_BUILD_CYCLE_SECONDS.labels(controller, "admission").observe(admission_seconds)
     TASK_IMAGE_BUILD_ADMISSIONS_TOTAL.labels(controller, outcome).inc()
     TASK_IMAGE_BUILD_CLAIMS_TOTAL.labels(controller).inc(claimed)
     # Idle cycles repeat every poll; keep logs to cycles that carry work.
     if outstanding or claimed:
-        _LOG.info("Native build cycle controller=%s outstanding=%d reconcile_s=%.3f claimed=%d admission=%s "
-                  "admission_s=%.3f", controller, outstanding, reconcile_seconds, claimed, outcome, admission_seconds)
+        reconcile = "running" if reconcile_seconds is None else f"{reconcile_seconds:.3f}"
+        _LOG.info("Native build cycle controller=%s outstanding=%d reconcile_s=%s claimed=%d admission=%s "
+                  "admission_s=%.3f", controller, outstanding, reconcile, claimed, outcome, admission_seconds)
