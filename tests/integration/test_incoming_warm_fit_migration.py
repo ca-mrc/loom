@@ -40,12 +40,18 @@ def test_0187_refuses_busy_relations_before_any_schema_change(
                 else:
                     command.downgrade(config, '0186')
         with engine.connect() as connection:
-            expected = '0186' if direction == 'upgrade' else '0187'
+            # 0188's binding foreign key also references trials, so a busy
+            # trials lock stops that downgrade before 0187 runs.
+            if direction == 'downgrade' and table == 'trials':
+                expected = '0188'
+            else:
+                expected = '0186' if direction == 'upgrade' else '0187'
             assert connection.scalar(text('SELECT version_num FROM alembic_version')) == expected
-            assert inspect(connection).has_table('nebius_cache_runtime_policies') == (expected == '0187')
-            assert inspect(connection).has_table('nebius_pool_placement_advice') == (expected == '0187')
+            warm_fit_present = expected != '0186'
+            assert inspect(connection).has_table('nebius_cache_runtime_policies') == warm_fit_present
+            assert inspect(connection).has_table('nebius_pool_placement_advice') == warm_fit_present
             assert ('cache_policy_json' in {column['name'] for column in
-                inspect(connection).get_columns('nebius_application_build_attempts')}) == (expected == '0187')
+                inspect(connection).get_columns('nebius_application_build_attempts')}) == warm_fit_present
     finally:
         engine.dispose()
 

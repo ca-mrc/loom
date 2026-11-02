@@ -55,6 +55,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("SET LOCAL lock_timeout = '5s'")
+    # Dropping the binding foreign key locks trials. Refuse a busy reader
+    # before any drop, matching the 0187 preflight.
+    op.execute("LOCK TABLE trials IN SHARE ROW EXCLUSIVE MODE NOWAIT")
     op.execute("""
         DROP INDEX gateway_receipt_admitted_connection_idx;
         DROP TABLE provider_connection_timeout_observations;
