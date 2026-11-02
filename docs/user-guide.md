@@ -513,7 +513,17 @@ Each archive contains:
   and the `.sha256` sidecar rather than self-referentially inside the tarball.
 - `summary.json` with the same high-level delivery metadata for automation.
 - `ledger/trials.jsonl` and `ledger/trials.csv` for reviewer-friendly trial
-  lineage, rewards, object paths, and checksums.
+  lineage, rewards, object paths, and checksums. Each row also includes its
+  `combination_label`, agent name/version, model provider/name, and effective
+  `provider_connection_id` / `provider_model_id`. Frozen Trial routes take
+  precedence over the selected source Batch's defaults; no-model selections
+  have null provider fields (empty cells in CSV).
+- `combination_routes` in both manifest and summary maps each selected
+  source Batch and combination index to those same safe identity fields.
+  Supplemental batches keep their own labels/routes, even when an index or
+  model name matches the main batch. Provider credentials and endpoints are
+  excluded. These additive fields are present in every export mode; older
+  archives remain immutable and must be regenerated to include them.
 - `checksums/SHA256SUMS` with SHA-256 digests for the archive payload files.
 - `trajectories/<task>/<trial-id>.events.jsonl` and
   `atif/<task>/<trial-id>.atif.json` for the selected final trials.
