@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime
 from uuid import uuid4
 
@@ -27,6 +28,7 @@ from loom.nebius_pool_contract import (
     PoolReceiptV1,
     PoolRequestActionV1,
 )
+from loom.nebius_pool_task_image import PoolTaskImagePrepareV1
 from loom_service.pool_management.auth import PoolPrincipal, authorize_pool_machine
 from loom_service.pool_management.capacity import digest, resources
 from loom_service.pool_management.early_cancellation import read_early_cancellation
@@ -165,6 +167,13 @@ async def activate_pool_request(session: AsyncSession, principal: PoolPrincipal,
         now = await _clock(session)
         if not now < activation.not_after <= row.deadline_at:
             raise PoolControlError("pool_activation_expired")
+        if isinstance(request, PoolTaskImagePrepareV1):
+            from loom_service.pool_management.cache_policy import effective_task_profile
+            profile_id = original.target(request.target_id, request.key.workload_kind).profile_id
+            effective = await effective_task_profile(session, installation_id=pool.installation_id,
+                profile=selected_profiles.task_images[profile_id])
+            selected_profiles = replace(selected_profiles,
+                task_images={**selected_profiles.task_images, profile_id: effective})
         prepared = _render(request, original, selected_profiles, row.request_id, now)
         if (prepared.request_sha256 != row.request_sha256 or prepared.resources != resources(row)
                 or prepared.pod_slots != row.pod_slots or prepared.namespace_uid != row.namespace_uid

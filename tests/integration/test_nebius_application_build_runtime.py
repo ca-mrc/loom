@@ -219,6 +219,7 @@ async def test_real_lifespan_starts_builder_for_closed_registered_pool_and_super
 
 @pytest.mark.parametrize("damage", ["unregistered", "ordinary-token", "public-token", "missing-token",
     "profile-missing", "profile-recipe", "profile-target", "profile-storage", "profile-unrelated",
+    "profile-cache-budget", "profile-cache-policy",
     "pool", "epoch", "revision", "target",
     "foreign-origin", "no-catalog"])
 async def test_startup_rejects_unregistered_or_mismatched_build_authority_and_closes_resources(
@@ -251,6 +252,10 @@ async def test_startup_rejects_unregistered_or_mismatched_build_authority_and_cl
             # Even an unchanged selected profile cannot bless a different
             # installed catalog (for example another target's resource charge).
             catalog["task_images"][0]["settings"]["cpu_millis"] += 100
+        elif damage == "profile-cache-budget":
+            profile["settings"]["cache_total_mib"] = 65536
+        elif damage == "profile-cache-policy":
+            profile["settings"]["cache_gc_policy"] = "budget-pressure"
         else:
             profile["settings"]["source_bucket"] = "foreign-source"
         profiles.write_text(json.dumps(catalog))

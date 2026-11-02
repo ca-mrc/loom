@@ -198,6 +198,62 @@ def test_builder_refresh_preserves_independently_revisioned_source_credentials(b
     assert request == original
 
 
+def application_reader_successor(request):
+    from uuid import uuid5
+
+    from loom_service.environment_management.deployment import ManagementDeployment
+
+    raw = request.after.model_dump(mode='json')
+    operation = uuid4()
+    raw['pool_catalog_operation_id'] = str(operation)
+    binding = raw['installation']['applications']['runtime']['build']['binding']
+    from uuid import UUID
+    binding['profile_id'] = str(uuid5(operation, str(UUID(binding['profile_id']))))
+    binding['participant_revision'] += 1
+    binding['recipe']['trusted_image_ref'] = request.candidate['images']['service']['image_ref']
+    return ManagementDeployment.model_validate(raw)
+
+
+def test_app_reader_normal_image_refresh_switches_config_catalog_and_image_atomically(builder_refresh_request):
+    request = builder_refresh_request
+    after = application_reader_successor(request)
+    original = request.before.model_dump(mode='json')
+    result = build(replace(request, after=after))
+    frozen = json.loads(result.config['data']['installation.json'])
+    binding = frozen['applications']['runtime']['build']['binding']
+    assert binding['recipe']['trusted_image_ref'] == request.candidate['images']['service']['image_ref']
+    pod = result.deployment['spec']['template']['spec']
+    assert next(v for v in pod['volumes'] if v['name']=='pool-profiles')['configMap']['name'] == 'loom-pool-profiles-'+after.pool_catalog_operation_id.hex
+    assert next(v for v in pod['volumes'] if v['name']=='management-config')['configMap']['name'] == result.config['metadata']['name']
+    assert [v for v in pod['volumes'] if 'secret' in v] == [v for v in request.active['spec']['template']['spec']['volumes'] if 'secret' in v]
+    assert request.before.model_dump(mode='json') == original
+
+
+@pytest.mark.parametrize('damage', ['unpublished-image','profile','revision','cache_total_mib','cache_gc_policy','source','target'])
+def test_app_reader_image_refresh_rejects_every_non_image_binding_delta(builder_refresh_request, damage):
+    from loom_service.environment_management.deployment import ManagementDeployment
+    after = application_reader_successor(builder_refresh_request)
+    raw = after.model_dump(mode='json')
+    binding = raw['installation']['applications']['runtime']['build']['binding']
+    if damage == 'unpublished-image':
+        binding['recipe']['trusted_image_ref'] = binding['recipe']['trusted_image_ref'].split('@')[0]+'@sha256:'+'7'*64
+    elif damage == 'profile':
+        binding['profile_id'] = str(uuid4())
+    elif damage == 'revision':
+        binding['participant_revision'] += 1
+    elif damage == 'cache_total_mib':
+        binding['cache_total_mib'] = 65536
+    elif damage == 'cache_gc_policy':
+        binding['cache_gc_policy'] = 'budget-pressure'
+    elif damage == 'source':
+        binding['source']['upload_ttl_seconds'] -= 1
+        raw['installation']['applications']['runtime']['source_upload']['upload_ttl_seconds'] -= 1
+    elif damage == 'target':
+        binding['target_id'] = 'foreign'
+    with pytest.raises(ValueError, match='refresh'):
+        build(replace(builder_refresh_request, after=ManagementDeployment.model_validate(raw)))
+
+
 @pytest.mark.parametrize('name', ['foreign-secret', 'loom-applications-source-0123456789a',
                                 'loom-applications-source-0123456789az'])
 def test_builder_refresh_rejects_unqualified_source_material_names(builder_refresh_request, name):

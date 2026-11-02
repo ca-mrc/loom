@@ -120,9 +120,11 @@ def test_legacy_tar_stream_download_still_checks_its_physical_limit(tmp_path, mo
     monkeypatch.setattr(runtime, "_CACHE_BYTES", 512)
     monkeypatch.setattr(runtime, "_cache_tar_byte_limit", lambda: 1024)
     client = FakeS3({f"task-build-cache/{'a' * 64}/0.tar": b"x" * 1025})
-    with pytest.raises(runtime.BuildPreparationError, match="input exceeds"):
-        runtime._try_import_legacy_tar(client, {"cache_bucket": "cache"}, source="exact",
-            key="a" * 64, index=0, work=tmp_path / "work", archive_parent=tmp_path / "download")
+    assert not runtime._try_import_legacy_tar(client, {"cache_bucket": "cache"}, source="exact",
+        key="a" * 64, index=0, work=tmp_path / "work", archive_parent=tmp_path / "download")
+    assert not (tmp_path / "work/cache-in/0").exists()
+    assert not (tmp_path / "download/exact.tar").exists(), "declared overrun is rejected before writing"
+    assert all(body.closed for body in client.bodies)
 
 
 def test_streaming_download_without_declared_length_still_rejects_overrun(tmp_path, monkeypatch):
@@ -136,9 +138,10 @@ def test_streaming_download_without_declared_length_still_rejects_overrun(tmp_pa
         return response
 
     client.get_object = no_length
-    with pytest.raises(runtime.BuildPreparationError, match="input exceeds"):
-        runtime._try_import_legacy_tar(client, {"cache_bucket": "cache"}, source="exact",
-            key="a" * 64, index=0, work=tmp_path / "work", archive_parent=tmp_path / "download")
+    assert not runtime._try_import_legacy_tar(client, {"cache_bucket": "cache"}, source="exact",
+        key="a" * 64, index=0, work=tmp_path / "work", archive_parent=tmp_path / "download")
+    assert not (tmp_path / "work/cache-in/0").exists()
+    assert (tmp_path / "download/exact.tar").stat().st_size <= 1024
     assert all(body.closed for body in client.bodies)
 
 

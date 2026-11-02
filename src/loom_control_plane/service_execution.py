@@ -5,13 +5,14 @@ from __future__ import annotations
 import ipaddress
 import json
 import re
+import typing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import Text, cast, exists, func, literal, or_, select
+from sqlalchemy import Table, Text, cast, exists, func, insert, literal, or_, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -353,8 +354,10 @@ async def persist_execution_catalog(
         target_json = target.model_dump(mode="json")
         existing_target = await session.get(ServiceExecutionTarget, target.target_id)
         if existing_target is None:
-            session.add(
-                ServiceExecutionTarget(
+            # Explicit Core columns preserve the legacy catalog insertion on
+            # retained pre-preview schemas; a nullable feature is not an
+            # unconditional ORM INSERT/RETURNING requirement.
+            await session.execute(insert(typing.cast(Table, ServiceExecutionTarget.__table__)).values(
                     id=target.target_id,
                     logical_pool_id=target.logical_pool_id,
                     execution_class_id=target.execution_class_id,
@@ -369,8 +372,7 @@ async def persist_execution_catalog(
                     desired_state="disabled",
                     observed_state="unknown",
                     health_status="unknown",
-                )
-            )
+            ))
         elif ExecutionTargetV1.model_validate(existing_target.spec_json) != target:
             raise ServiceExecutionConflict(
                 "execution target identity already has different content"
@@ -412,6 +414,7 @@ async def refresh_execution_target_health(
     *,
     target_id: str,
     observed_at: datetime,
+    preview_runtime: dict[str, Any] | None = None,
 ) -> ServiceExecutionTarget:
     """Refresh actuator-owned readiness without changing operator intent.
 
@@ -434,6 +437,10 @@ async def refresh_execution_target_health(
     target.observed_state = "ready"
     target.health_status = "healthy"
     target.health_observed_at = observed_at
+    if preview_runtime is not None:
+        from loom_control_plane.incoming_capacity_preview import runtime_projection_available
+        if await runtime_projection_available(session):
+            target.preview_runtime_json = {**preview_runtime, "observed_at": observed_at.isoformat()}
     target.health_error_code = None
     target.updated_at = datetime.now(UTC)
     await session.flush()

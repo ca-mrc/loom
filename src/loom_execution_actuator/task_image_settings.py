@@ -37,6 +37,8 @@ class NativeTaskImageSettings(BaseModel):
     # Total retained cache-object bytes in the shared bucket, not Pod scratch.
     # An explicit policy is frozen in claims; omitted legacy profiles stay 4 GiB.
     cache_total_mib: int = Field(default=4096, ge=1024, le=1048576, strict=True)
+    cache_gc_policy: Literal["legacy-seven-day", "budget-pressure"] = "legacy-seven-day"
+    reuse_task_cache_for_verifier: bool = Field(default=False, strict=True)
     registry_repository: str
     cpu_millis: int = Field(default=4000, ge=100, le=64000)
     memory_mib: int = Field(default=4096, ge=512, le=262144)
@@ -77,8 +79,9 @@ class NativeTaskImageSettings(BaseModel):
         # actuator still uses the runtime default; explicit policies stay frozen.
         if "io_full_avg10_max" not in self.model_fields_set:
             settings.pop("io_full_avg10_max", None)
-        if "cache_total_mib" not in self.model_fields_set:
-            settings.pop("cache_total_mib", None)
+        for key in ("cache_total_mib", "cache_gc_policy", "reuse_task_cache_for_verifier"):
+            if key not in self.model_fields_set:
+                settings.pop(key, None)
         return settings
 
     def job_config(self) -> TaskImageJobConfig:
@@ -89,6 +92,7 @@ class NativeTaskImageSettings(BaseModel):
             "cpu_millis", "memory_mib", "ephemeral_storage_mib", "max_processes", "active_deadline_seconds",
             "cpu_request_millis",
             "snapshotter", "export_cache_mode", "oci_export_format",
+            "reuse_task_cache_for_verifier",
         )})
 
     def runtime_configuration(self) -> dict[str, Any]:
@@ -96,6 +100,7 @@ class NativeTaskImageSettings(BaseModel):
             "storage_endpoint", "storage_region", "source_bucket", "cache_bucket", "registry_repository",
             "cache_transfer", "oci_export_format",
         )}
-        if "cache_total_mib" in self.model_fields_set:
-            configuration["cache_total_mib"] = self.cache_total_mib
+        for key in ("cache_total_mib", "cache_gc_policy", "reuse_task_cache_for_verifier"):
+            if key in self.model_fields_set:
+                configuration[key] = getattr(self, key)
         return configuration

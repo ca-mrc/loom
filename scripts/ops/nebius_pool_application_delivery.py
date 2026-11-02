@@ -162,7 +162,8 @@ def derive_application_build_deployment(before: ManagementDeployment, pool: Pool
             storage_region=profile.settings.storage_region, cache_bucket=profile.settings.cache_bucket,
             registry_repository=profile.settings.registry_repository, pool_id=pool.pool_id,
             participant_id=participant.participant_id, profile_id=target.profile_id, target_id=target.target_id,
-            admission_epoch=pool.admission_epoch, participant_revision=participant.binding_revision),
+            admission_epoch=pool.admission_epoch, participant_revision=participant.binding_revision,
+            **profile.settings.model_dump(include={'cache_total_mib', 'cache_gc_policy'})),
             management_origin='https://' + before.public_host, bearer_token_file=Path('/var/run/loom-pool-token/token'))
         value = before.model_dump(mode='json')
         value.update(pool_catalog_operation_id=str(pool.operation_id), application_builder_machine_id=str(machine.machine_id))

@@ -60,8 +60,12 @@ async def installed_catalog(sessions, catalog_request):
     return catalog_request, sessions.kw['bind'].url.render_as_string(hide_password=False)
 
 
-async def test_closed_builder_catalog_commits_once_and_preserves_neighbor_and_credentials(sessions, installed_catalog):
+@pytest.mark.parametrize('prefer_warm', [False, True])
+async def test_closed_builder_catalog_commits_once_and_preserves_neighbor_and_credentials(sessions, installed_catalog, prefer_warm):
     request, url = installed_catalog
+    async with sessions.begin() as session:
+        await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == request.before.pool_id)
+            .values(prefer_incoming_warm_fit=prefer_warm))
     before = await snapshot(sessions)
     report = await asyncio.to_thread(read_sql, url, closed_development_catalog_state_sql(request))
     assert qualify_closed_development_catalog_report(request, report, read_only=True) == 'ready'
@@ -71,6 +75,8 @@ async def test_closed_builder_catalog_commits_once_and_preserves_neighbor_and_cr
     for table in ('nebius_pool_machines', 'nebius_pool_machine_credentials', 'tokens', 'nebius_pool_requests'):
         assert before[table] == after[table]
     pool, = after['nebius_pool_bindings']
+    assert before['nebius_pool_bindings'][0]['prefer_incoming_warm_fit'] is prefer_warm
+    assert pool['prefer_incoming_warm_fit'] is prefer_warm
     assert pool['mode'] == 'closed' and pool['admission_epoch'] == request.before.admission_epoch
     assert pool['binding_json']['profile_catalog_sha256'] == digest(request.after.profiles.model_dump(mode='json'))
     neighbor_id = request.before.participants[1].participant_id

@@ -2,10 +2,17 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Self
+from typing import Any, Literal, Self, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 from loom.application_source_upload import (
     ApplicationSourceUploadBindingV1,
@@ -45,7 +52,23 @@ class ApplicationImageRecipeV1(BaseModel):
             "components": [row.model_dump(mode="json") for row in application_image_components()]})
 
 
-class ApplicationImageBuildClaimV1(BaseModel):
+class _CachePolicy(BaseModel):
+    cache_total_mib: int = Field(default=4096, ge=1024, le=1048576, strict=True)
+    cache_gc_policy: Literal["legacy-seven-day", "budget-pressure"] = "legacy-seven-day"
+
+    @model_serializer(mode="wrap")
+    def _historical_cache_shape(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        value = cast(dict[str, Any], handler(self))
+        for key in ("cache_total_mib", "cache_gc_policy"):
+            if key not in self.model_fields_set:
+                value.pop(key, None)
+        return value
+
+    def cache_configuration(self) -> dict[str, Any]:
+        return self.model_dump(include={"cache_total_mib", "cache_gc_policy"})
+
+
+class ApplicationImageBuildClaimV1(_CachePolicy):
     """Manager-frozen build input, never accepted directly from an owner route."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
@@ -119,7 +142,7 @@ class ApplicationImagePublicationV1(BaseModel):
         return self
 
 
-class ApplicationImageBuildBindingV1(BaseModel):
+class ApplicationImageBuildBindingV1(_CachePolicy):
     """Protected management build configuration, never owner request fields."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)

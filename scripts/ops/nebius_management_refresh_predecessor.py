@@ -276,9 +276,13 @@ def _load_completed_refresh(selector: RefreshPredecessorV1, *, original: Complet
                     if path != state / 'completion.json')):
             raise ValueError
         setup = original.upgrade.setup
+        from loom_service.pool_management.lifecycle_contracts import PoolParticipantReleaseV2
+
         render = ManagementRefreshRenderRequest(ManagementDeployment.model_validate(contract['before']),
             ManagementDeployment.model_validate(contract['after']), contract['active'],
-            contract['candidate'], contract['profile'], setup.repo_root)
+            contract['candidate'], contract['profile'], setup.repo_root,
+            contract.get('application_catalog'),
+            PoolParticipantReleaseV2.model_validate(contract['application_release']) if 'application_release' in contract else None)
         resources = ManagementRefreshResourcesRequest(ManagementRefreshSwitchRequest(render, selector.operation_id,
             contract.get('initial_stopped')),
             setup.binding, setup.shared_namespace_uid, contract['manager_revision'], contract['target_manager_revision'])

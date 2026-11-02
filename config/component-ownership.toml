@@ -454,6 +454,7 @@ source_paths = [
   "src/loom/nebius_pool_execution_runtime.py",
   "src/loom/nebius_pool_lifecycle.py",
   "src/loom/nebius_pool_native_runtime.py",
+  "src/loom/nebius_pool_placement_preview.py",
   "src/loom/nebius_pool_priority.py",
   "src/loom/nebius_pool_settings.py",
   "src/loom/nebius_pool_task_image.py",
@@ -499,12 +500,14 @@ source_paths = [
   "src/loom_control_plane/__init__.py",
   "src/loom_control_plane/execution_admission.py",
   "src/loom_control_plane/execution_capacity.py",
+  "src/loom_control_plane/execution_capacity_ordering.py",
   "src/loom_control_plane/execution_capacity_reconciliation.py",
   "src/loom_control_plane/execution_capacity_targets.py",
   "src/loom_control_plane/execution_capacity_wait.py",
   "src/loom_control_plane/execution_finance.py",
   "src/loom_control_plane/execution_placement.py",
   "src/loom_control_plane/execution_resource_allocation.py",
+  "src/loom_control_plane/incoming_capacity_preview.py",
   "src/loom_control_plane/metrics.py",
   "src/loom_control_plane/pool_execution_handoff.py",
   "src/loom_control_plane/service_execution.py",
@@ -1153,6 +1156,7 @@ include_paths = [
 ]
 exclude_paths = [
   "tests/integration/test_task_image_cache_storage.py",
+  "tests/integration/test_native_task_verifier_cache_docker.py",
   "tests/integration/test_nebius_application_native_build.py",
   "tests/integration/test_nebius_native_builder_owner_ids.py",
   "tests/integration/test_nebius_build_deadline.py",
@@ -1252,6 +1256,7 @@ language = "python"
 lane = "integration-docker"
 include_paths = [
   "tests/integration/test_task_image_cache_storage.py",
+  "tests/integration/test_native_task_verifier_cache_docker.py",
   "tests/integration/test_nebius_application_native_build.py",
   "tests/integration/test_nebius_native_builder_owner_ids.py",
   "tests/integration/test_nebius_build_deadline.py",

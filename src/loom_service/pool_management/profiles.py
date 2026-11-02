@@ -112,6 +112,27 @@ class PoolProfileCatalog(_Strict):
     task_images: tuple[_TaskImage, ...] = Field(max_length=128)
     application_images: tuple[_ApplicationImage, ...] = Field(default=(), max_length=128, exclude_if=lambda value: not value)
 
+    def validate_cache_policy_consistency(
+        self, overrides: dict[tuple[str, str, str], tuple[int, str]] | None = None,
+    ) -> None:
+        """Validate new effective configuration without rejecting old catalogs.
+
+        Legacy immutable catalogs may predate a common budget. Their normal
+        owner must be able to inspect and repair this through a runtime policy;
+        merely loading historical bytes is not a policy activation.
+        """
+        scopes: dict[tuple[str, str, str], tuple[int, str]] = {}
+        builders: tuple[_TaskImage | _ApplicationImage, ...] = (*self.task_images, *self.application_images)
+        for row in builders:
+            settings = row.settings
+            if settings.cache_bucket is None:
+                continue
+            scope = (settings.storage_endpoint, settings.storage_region, settings.cache_bucket)
+            policy = (overrides or {}).get(scope, (settings.cache_total_mib, settings.cache_gc_policy))
+            if scope in scopes and scopes[scope] != policy:
+                raise ValueError("shared cache scope requires consistent budget and GC policy")
+            scopes[scope] = policy
+
     def profiles(self) -> PoolProfiles:
         if ((not self.execution and not self.task_images and not self.application_images)
                 or len({row.profile_id for row in self.execution}) != len(self.execution)

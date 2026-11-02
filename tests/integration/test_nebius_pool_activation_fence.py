@@ -309,3 +309,80 @@ async def test_revision_fence_preserves_charged_effects_and_real_closed_mode_cle
     async with sessions() as session:
         row = await session.get(NebiusPoolRequest, receipt.reservation_id)
         assert row.phase == 'cleanup_intent' and row.cleanup_observation_id is None
+
+
+@pytest.mark.parametrize(('revision', 'preference'), [('0186', None), ('0187', False), ('0187', True)])
+async def test_normal_owner_lifecycle_uses_exact_schema_and_independent_policy(
+    isolated_migration_postgres_url, tmp_path, revision, preference,
+):
+    from alembic import command
+    from alembic.config import Config
+    from scripts.ops.nebius_pool_activation_database import (
+        fence_pool_activation_sql,
+        pool_activation_state_sql,
+        qualify_pool_activation_report,
+    )
+    from scripts.ops.nebius_pool_machine_database import (
+        pool_machine_retirement_sql,
+        pool_recovery_machine_state_sql,
+        qualify_machine_retirement_report,
+        qualify_recovery_machine_state_report,
+    )
+    from scripts.ops.nebius_pool_recovery_database import (
+        pool_recovery_drain_sql,
+        qualify_pool_recovery_drain,
+    )
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from tests.integration.test_nebius_pool_startup_database import observe as observe_authority
+
+    url = isolated_migration_postgres_url
+    if revision == '0186':
+        config = Config('database/migrations/alembic.ini')
+        config.set_main_option('sqlalchemy.url', url.replace('%', '%%'))
+        await asyncio.to_thread(command.downgrade, config, revision)
+    engine = create_async_engine(url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        prepared = await prepare_startup_capacity(factory, tmp_path)
+        spec = prepared[0]
+        if preference is not None:
+            async with factory.begin() as session:
+                await session.execute(update(NebiusPoolBinding).values(prefer_incoming_warm_fit=preference))
+        def observe():
+            return qualify_pool_activation_report(spec, read_sql(url, pool_activation_state_sql(spec, manager_revision=revision)))
+        assert await asyncio.to_thread(observe) == 'closed'
+        opened = await open_pool(prepared, tmp_path)
+        assert opened.returncode == 0 and opened.stdout == b'{"status": "global"}\n'
+        assert await asyncio.to_thread(observe) == 'global'
+        authority = await asyncio.to_thread(observe_authority, url, spec, mode='global', manager_revision=revision)
+        assert authority['qualified'] is True
+        fenced = await asyncio.to_thread(read_sql, url, fence_pool_activation_sql(spec, manager_revision=revision))
+        assert qualify_pool_activation_report(spec, fenced) == 'fenced'
+        assert await asyncio.to_thread(read_sql, url, fence_pool_activation_sql(spec, manager_revision=revision)) == fenced
+        assert qualify_pool_recovery_drain(spec, await asyncio.to_thread(read_sql, url,
+            pool_recovery_drain_sql(spec, manager_revision=revision))) is True
+        before = await asyncio.to_thread(read_sql, url, pool_recovery_machine_state_sql(spec, manager_revision=revision))
+        assert qualify_recovery_machine_state_report(spec, before) == 'active'
+        retired = await asyncio.to_thread(read_sql, url, pool_machine_retirement_sql(spec, action='revoke', manager_revision=revision))
+        assert qualify_machine_retirement_report(spec, retired) == 'revoked'
+        assert await asyncio.to_thread(read_sql, url, pool_machine_retirement_sql(spec, action='revoke', manager_revision=revision)) == retired
+        async with factory() as session:
+            assert (await session.execute(text('SELECT mode,policy_revision,admission_epoch FROM nebius_pool_bindings'))).one() == (
+                'closed', spec.policy_revision + 1, spec.admission_epoch)
+            if preference is not None:
+                assert await session.scalar(text('SELECT prefer_incoming_warm_fit FROM nebius_pool_bindings')) is preference
+        # The one named independent preference is not permission to ignore
+        # arbitrary future registration columns or schema revisions.
+        async with engine.begin() as connection:
+            await connection.exec_driver_sql('ALTER TABLE nebius_pool_bindings ADD COLUMN unexpected_owner_authority boolean DEFAULT false')
+        with pytest.raises(ValueError, match='pool_activation_state_unqualified'):
+            await asyncio.to_thread(observe)
+        for query in (pool_recovery_drain_sql(spec, manager_revision=revision),
+                      fence_pool_activation_sql(spec, manager_revision=revision)):
+            with pytest.raises(psycopg.Error):
+                await asyncio.to_thread(read_sql, url, query)
+        with pytest.raises(ValueError):
+            pool_activation_state_sql(spec, manager_revision='0199')
+    finally:
+        await engine.dispose()

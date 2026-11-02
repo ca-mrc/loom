@@ -13,6 +13,52 @@ variables {
   region                                = "eu-north1"
   kubernetes_version                    = "1.33"
 }
+run "root_preserves_nrd279_execution_only" {
+  command = plan
+  variables {
+    regional_execution_targets = { west = {
+      target_id                             = "nebius-eu-west1-integration", cluster_scope_id = "nebius-eu-west1-execution",
+      project_id                            = "project-e00test", subnet_id = "vpcsubnet-e00test", region = "eu-west1",
+      node_platform                         = "cpu-d3", kubernetes_version = "1.33", service_cidr = "172.27.0.0/16",
+      node_registry_pull_service_account_id = "serviceaccount-e00test", execution_preset = "32vcpu-128gb",
+      execution_max_nodes                   = 6, execution_disk_type = "NETWORK_SSD_NON_REPLICATED", execution_disk_gib = 279
+    } }
+  }
+  assert {
+    condition = (
+      var.regional_execution_targets["west"].execution_disk_type == "NETWORK_SSD_NON_REPLICATED" &&
+      var.regional_execution_targets["west"].execution_disk_gib == 279 &&
+      var.regional_execution_targets["west"].execution_preset == "32vcpu-128gb" &&
+      var.regional_execution_targets["west"].execution_max_nodes == 6 && output.integration_platform == null
+    )
+    error_message = "The root must forward NRD279 without enabling/changing the primary platform or losing regional sizing."
+  }
+}
+run "root_rejects_nrd_wrong_granularity" {
+  command = plan
+  variables {
+    regional_execution_targets = { west = {
+      target_id                             = "nebius-eu-west1-integration", cluster_scope_id = "nebius-eu-west1-execution",
+      project_id                            = "project-e00test", subnet_id = "vpcsubnet-e00test", region = "eu-west1",
+      node_platform                         = "cpu-d3", kubernetes_version = "1.33", service_cidr = "172.27.0.0/16",
+      node_registry_pull_service_account_id = "serviceaccount-e00test",
+      execution_disk_type                   = "NETWORK_SSD_NON_REPLICATED", execution_disk_gib = 300
+    } }
+  }
+  expect_failures = [var.regional_execution_targets]
+}
+run "root_rejects_unapproved_disk_type" {
+  command = plan
+  variables {
+    regional_execution_targets = { west = {
+      target_id                             = "nebius-eu-west1-integration", cluster_scope_id = "nebius-eu-west1-execution",
+      project_id                            = "project-e00test", subnet_id = "vpcsubnet-e00test", region = "eu-west1",
+      node_platform                         = "cpu-d3", kubernetes_version = "1.33", service_cidr = "172.27.0.0/16",
+      node_registry_pull_service_account_id = "serviceaccount-e00test", execution_disk_type = "NETWORK_HDD"
+    } }
+  }
+  expect_failures = [var.regional_execution_targets]
+}
 run "no_regional_resources_by_default" {
   command = plan
   assert {

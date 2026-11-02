@@ -24,6 +24,7 @@ variable "target" {
     node_platform       = string
     system_preset       = optional(string, "4vcpu-16gb")
     execution_preset    = optional(string, "16vcpu-64gb")
+    execution_disk_type = optional(string, "NETWORK_SSD")
     execution_disk_gib  = optional(number, 80)
   })
   validation {
@@ -55,9 +56,11 @@ variable "target" {
       contains(["4vcpu-16gb", "8vcpu-32gb"], var.target.system_preset) &&
       can(regex("^[1-9][0-9]*vcpu-[1-9][0-9]*gb$", var.target.execution_preset)) &&
       var.target.execution_disk_gib >= 80 &&
-      floor(var.target.execution_disk_gib) == var.target.execution_disk_gib
+      floor(var.target.execution_disk_gib) == var.target.execution_disk_gib &&
+      contains(["NETWORK_SSD", "NETWORK_SSD_NON_REPLICATED"], var.target.execution_disk_type) &&
+      (var.target.execution_disk_type != "NETWORK_SSD_NON_REPLICATED" || var.target.execution_disk_gib % 93 == 0)
     )
-    error_message = "Regional execution needs EU placement, an explicit CPU platform, valid optional API CIDRs, network, integer node ceiling 1..100, a CPU execution preset in <vCPU>vcpu-<GiB>gb format, and an integer execution disk of at least 80 GiB."
+    error_message = "Regional execution needs EU placement, an explicit CPU platform, valid optional API CIDRs, network, integer node ceiling 1..100, a CPU execution preset in <vCPU>vcpu-<GiB>gb format, and an integer execution disk of at least 80 GiB: NETWORK_SSD or NETWORK_SSD_NON_REPLICATED with a size divisible by 93 GiB."
   }
 }
 locals {
@@ -146,7 +149,7 @@ resource "nebius_mk8s_v1_node_group" "regional" {
       { key = "loom.nebius/platform", value = "integration", effect = "NO_SCHEDULE" },
       { key = "loom.nebius/execution", value = "true", effect = "NO_SCHEDULE" }
     ] : []
-    boot_disk          = { type = "NETWORK_SSD", size_gibibytes = each.value.disk_gib }
+    boot_disk          = { type = each.key == "execution" ? var.target.execution_disk_type : "NETWORK_SSD", size_gibibytes = each.value.disk_gib }
     network_interfaces = [{ subnet_id = var.target.subnet_id }]
     resources          = { platform = var.target.node_platform, preset = each.value.preset }
     reservation_policy = { policy = "FORBID" }

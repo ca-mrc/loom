@@ -29,6 +29,7 @@ from loom.db.nebius_pool_lifecycle_schema import (
 from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolParticipant
 from loom.db.schema_startup import assert_schema_at_head
 from loom.nebius_pool_contract import PoolParticipantV1
+from loom_service.pool_management.cache_policy import PoolCachePolicyV1, cache_policy
 from loom_service.pool_management.capacity import digest
 from loom_service.pool_management.control import _clock
 from loom_service.pool_management.inspection import PoolInspectionV2, inspect_pool
@@ -48,8 +49,9 @@ from loom_service.pool_management.participant_lifecycle import (
 from loom_service.pool_management.platform_installation import register_platform
 from loom_service.pool_management.platform_lifecycle import transition_platform
 from loom_service.pool_management.profiles import _object
+from loom_service.pool_management.routing_policy import PoolRoutingPreferenceV1, routing_preference
 
-_Request = PoolPlatformInstallationV2 | PoolPlatformOperationV2 | PoolParticipantEnrollmentV2 | PoolParticipantOperationV2 | PoolLegacyAdoptionV2 | PoolInspectionV2
+_Request = PoolPlatformInstallationV2 | PoolPlatformOperationV2 | PoolParticipantEnrollmentV2 | PoolParticipantOperationV2 | PoolLegacyAdoptionV2 | PoolInspectionV2 | PoolRoutingPreferenceV1 | PoolCachePolicyV1
 _REQUEST: TypeAdapter[_Request] = TypeAdapter(Annotated[_Request, Field(discriminator='schema_version')])
 _MAX_REQUEST = 4 * 1024 * 1024
 
@@ -88,7 +90,7 @@ async def _authorize(session: AsyncSession, request: _Request, grant: PoolAdmini
                 request.environment_class or 'platform'):
             raise ValueError('pool_administration_scope_unavailable')
         return request.participant_id
-    if isinstance(request, (PoolPlatformInstallationV2, PoolPlatformOperationV2, PoolLegacyAdoptionV2)):
+    if isinstance(request, (PoolPlatformInstallationV2, PoolPlatformOperationV2, PoolLegacyAdoptionV2, PoolRoutingPreferenceV1, PoolCachePolicyV1)):
         spec = request.before if isinstance(request, PoolLegacyAdoptionV2) else request
         if grant.authority != 'platform' or (grant.pool_id, grant.installation_id) != (spec.pool_id, spec.installation_id):
             raise ValueError('pool_administration_scope_unavailable')
@@ -111,7 +113,7 @@ async def _authorize(session: AsyncSession, request: _Request, grant: PoolAdmini
 
 
 async def administer(session: AsyncSession, content: bytes, authorization: PoolAdministrationAuthorizationV2, *,
-                      action: Literal['apply', 'status']) -> dict[str, Any]:
+                      action: Literal['apply', 'status'], trusted_reader_image: str | None = None) -> dict[str, Any]:
     if (session.new or session.dirty or session.deleted or type(content) is not bytes
             or not 0 < len(content) <= _MAX_REQUEST or action not in {'apply', 'status'}):
         raise ValueError('pool_administration_input_unqualified')
@@ -134,6 +136,16 @@ async def administer(session: AsyncSession, content: bytes, authorization: PoolA
     audit = dict(schema_version='loom.pool-administration-audit.v2', operation_id=str(grant.authorization_id),
         authorization=grant.model_dump(mode='json'), authorized_operation_id=str(request.operation_id))
     retained_audit = await replay(session, grant.authorization_id, audit) if action == 'apply' else None
+    if isinstance(request, (PoolRoutingPreferenceV1, PoolCachePolicyV1)):
+        result = (await routing_preference(session, request, apply=action == 'apply') if isinstance(request, PoolRoutingPreferenceV1)
+                  else await cache_policy(session, request, apply=action == 'apply', trusted_reader_image=trusted_reader_image))
+        if action == 'apply' and await _clock(session) >= grant.expires_at:
+            raise ValueError('pool_administration_authorization_expired')
+        if action == 'apply' and retained_audit is None:
+            await retain_operation(session, audit, dict(operation_id=str(request.operation_id), request_sha256=grant.request_sha256),
+                pool_id=grant.pool_id, participant_id=None)
+        return dict(schema_version='loom.pool-administration-result.v2', authorization_id=str(grant.authorization_id),
+            request_sha256=grant.request_sha256, **result)
     receipt = None
     if action == 'status':
         history = await session.get(NebiusPoolLifecycleOperation, request.operation_id, populate_existing=True)
@@ -181,7 +193,8 @@ def _read(path: Path, limit: int) -> bytes:
 
 
 async def run_administration(*, request_file: Path, authorization_file: Path,
-        authorization_sha256: str, db_url: str, action: Literal['apply', 'status']) -> dict[str, Any]:
+        authorization_sha256: str, db_url: str, action: Literal['apply', 'status'],
+        trusted_reader_image: str | None = None) -> dict[str, Any]:
     raw = _read(authorization_file, 16384)
     if re.fullmatch(r'[0-9a-f]{64}', authorization_sha256) is None or hashlib.sha256(raw).hexdigest() != authorization_sha256:
         raise ValueError('pool_administration_authorization_unqualified')
@@ -195,7 +208,7 @@ async def run_administration(*, request_file: Path, authorization_file: Path,
                 from sqlalchemy import text
 
                 await session.execute(text('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY'))
-            result = await administer(session, content, grant, action=action)
+            result = await administer(session, content, grant, action=action, trusted_reader_image=trusted_reader_image)
         return result  # No success before the transaction committed.
     finally:
         await engine.dispose()
@@ -210,7 +223,8 @@ def main() -> int:
             request_file=Path(os.environ['LOOM_POOL_ADMINISTRATION_FILE']),
             authorization_file=Path(os.environ['LOOM_POOL_ADMINISTRATION_AUTHORIZATION_FILE']),
             authorization_sha256=os.environ['LOOM_POOL_ADMINISTRATION_AUTHORIZATION_SHA256'],
-            db_url=os.environ['LOOM_POOL_ADMINISTRATION_DB_URL'], action='apply' if action == 'apply' else 'status'))
+            db_url=os.environ['LOOM_POOL_ADMINISTRATION_DB_URL'], action='apply' if action == 'apply' else 'status',
+            trusted_reader_image=os.environ.get('LOOM_POOL_ADMINISTRATION_SERVICE_IMAGE')))
         print(json.dumps(result, sort_keys=True))
         return 0
     except Exception:

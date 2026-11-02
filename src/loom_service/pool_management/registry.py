@@ -37,6 +37,7 @@ from loom_service.pool_management.application_images import (
 from loom_service.pool_management.auth import PoolPrincipal, authorize_pool_machine
 from loom_service.pool_management.capacity import (
     CHARGED_PHASES,
+    PoolCapacity,
     demand_id,
     digest,
     read_connected_capacity,
@@ -71,7 +72,8 @@ def _render(request: PoolPrepareWorkload, participant: PoolParticipantV1, profil
                                       reservation_id=reservation_id, now=now)
     if isinstance(request, PoolApplicationImagePrepareV1):
         return prepare_pool_application_image(request, participant=participant, profile=profiles.application_images[profile_id],
-                                               reservation_id=reservation_id, now=now)
+                                               reservation_id=reservation_id, now=now,
+                                               frozen_cache_policy=request.build.cache_configuration())
     return prepare_pool_task_image(request, participant=participant, profile=profiles.task_images[profile_id],
                                    reservation_id=reservation_id, now=now)
 
@@ -236,6 +238,31 @@ async def _prepare_request(session: AsyncSession, principal: PoolPrincipal, requ
                 or row.namespace_uid != prepared.namespace_uid):
             raise PoolAdmissionError
         await session.execute(update(NebiusPoolRequest).where(NebiusPoolRequest.request_id == row.request_id).values(renewed_at=now))
+    try:
+        await qualify_waiting_capacity(session, capacities=capacities, row=row, request=request,
+            profiles=profiles, original=original, selected_profiles=selected_profiles, now=now, work=work)
+    except PlacementUnavailableError as error:
+        return PoolWaitingV1(request_key=request.key, pool_id=request.pool_id,
+                             request_sha256=request_sha, reason=str(error))
+    granted = (await session.scalars(update(NebiusPoolRequest).where(
+        NebiusPoolRequest.request_id == row.request_id,
+    ).values(phase="reserved", granted_at=now).returning(NebiusPoolRequest).execution_options(populate_existing=True))).one()
+    return _receipt(granted)
+
+
+async def qualify_waiting_capacity(
+    session: AsyncSession, *, capacities: dict[UUID, PoolCapacity], row: NebiusPoolRequest,
+    request: PoolPrepareWorkload, profiles: PoolProfiles | None, original: PoolParticipantV1,
+    selected_profiles: PoolProfiles, now: datetime, work: AdmissionWork, lock_history: bool = True,
+) -> tuple[list[NebiusPoolRequest], list[NebiusPoolRequest], dict[UUID, int]]:
+    """The same charged/wait/render arithmetic for locked admission and RO preview.
+
+    No request is inserted, renewed, granted or cancelled here. Snapshot callers
+    supply a transient candidate and keep history reads unlocked.
+    """
+    pool = capacities[row.pool_id].pool
+    participant = next(value for value in capacities[row.pool_id].participants
+                       if value.participant_id == row.participant_id)
     # Charged work is never omitted, even when its caller is fenced or expired.
     # Placement needs resource/identity columns, not every retained workload JSON.
     envelope = (NebiusPoolRequest.request_id, NebiusPoolRequest.pool_id,
@@ -249,8 +276,7 @@ async def _prepare_request(session: AsyncSession, principal: PoolPrincipal, requ
     if len(active) > 200_000:
         # Keep accepted demand and its age; the participant retries this exact
         # durable request. Never hide charged work to make a reservation fit.
-        return PoolWaitingV1(request_key=request.key, pool_id=request.pool_id,
-            request_sha256=request_sha, reason="pool_admission_charged_backpressure")
+        raise PlacementUnavailableError("pool_admission_charged_backpressure")
     recent_grants = {key: count for key, count in (await session.execute(select(NebiusPoolRequest.pool_id, func.count()).where(
         NebiusPoolRequest.pool_id.in_(capacities), NebiusPoolRequest.granted_at >= now - timedelta(minutes=1),
     ).group_by(NebiusPoolRequest.pool_id))).all()}
@@ -261,8 +287,7 @@ async def _prepare_request(session: AsyncSession, principal: PoolPrincipal, requ
         require_policy_fit(capacities, candidate=row, active=active,
                            protected_waits=[], recent_grants=recent_grants)
     except PlacementUnavailableError as error:
-        return PoolWaitingV1(request_key=request.key, pool_id=request.pool_id,
-                             request_sha256=request_sha, reason=str(error))
+        raise PlacementUnavailableError(str(error)) from error
     participants = {value.participant_id: value for capacity in capacities.values() for value in capacity.participants}
     active_rows = (await session.scalars(select(NebiusPoolParticipant).where(
         NebiusPoolParticipant.pool_id.in_(capacities), NebiusPoolParticipant.phase == "active",
@@ -325,8 +350,7 @@ async def _prepare_request(session: AsyncSession, principal: PoolPrincipal, requ
             reason = fit_memo[fit_key]
             if reason is not None:
                 if current:
-                    return PoolWaitingV1(request_key=request.key, pool_id=request.pool_id,
-                                         request_sha256=request_sha, reason=reason)
+                    raise PlacementUnavailableError(reason)
                 continue
             if not current:
                 # These fields are deliberately deferred by the envelope query.
@@ -343,10 +367,10 @@ async def _prepare_request(session: AsyncSession, principal: PoolPrincipal, requ
                         if len(profile_memo) > 128:
                             profile_memo.popitem(last=False)
                     original_waiter, waiter_profiles = profile_memo[profile_key]
-                    if isinstance(prior, PoolApplicationImagePrepareV1):
-                        await qualify_retained_pool_origin(session, prior.origin, participant=original_waiter,
+                    await qualify_retained_pool_origin(session, prior.origin, participant=original_waiter,
                             cluster_id=capacities[candidate.pool_id].pool.cluster_id,
-                            workload_kind=prior.key.workload_kind, lock_history=True, application_build=prior)
+                            workload_kind=prior.key.workload_kind, lock_history=lock_history,
+                            application_build=prior if isinstance(prior, PoolApplicationImagePrepareV1) else None)
                     work.operations["renders"] += 1
                     measured = _render(prior, original_waiter, waiter_profiles, candidate.request_id, now)
                     if measured.request_sha256 != candidate.request_sha256 or measured.resources != resources(candidate):
@@ -356,10 +380,7 @@ async def _prepare_request(session: AsyncSession, principal: PoolPrincipal, requ
                 except (ValueError, KeyError, TypeError):
                     continue
             if current:
-                granted = (await session.scalars(update(NebiusPoolRequest).where(
-                    NebiusPoolRequest.request_id == row.request_id,
-                ).values(phase="reserved", granted_at=now).returning(NebiusPoolRequest).execution_options(populate_existing=True))).one()
-                return _receipt(granted)
+                return active, protected_waits, recent_grants
             protected_waits.append(candidate)
             try:
                 work.operations["policy_checks"] += 1
@@ -368,8 +389,9 @@ async def _prepare_request(session: AsyncSession, principal: PoolPrincipal, requ
             except PlacementUnavailableError as error:
                 # The already-qualified earlier promises saturate a necessary
                 # budget; no later candidate can remove them in this snapshot.
-                return PoolWaitingV1(request_key=request.key, pool_id=request.pool_id,
-                                     request_sha256=request_sha, reason=str(error))
+                raise PlacementUnavailableError(str(error)) from error
     finally:
         await waiting.close()
-    raise PoolAdmissionError  # A fresh, non-expired request must have been visited.
+    # Read-only previews use a transient candidate, so it is not in the stream.
+    require_fit(capacities, candidate=row, active=active, protected_waits=protected_waits, recent_grants=recent_grants)
+    return active, protected_waits, recent_grants

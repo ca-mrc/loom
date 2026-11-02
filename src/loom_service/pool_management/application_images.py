@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, replace
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from loom.application_image_build import ApplicationImageRecipeV1
@@ -29,11 +30,18 @@ class PoolApplicationImageProfile:
 
 def prepare_pool_application_image(request: PoolApplicationImagePrepareV1, *, participant: PoolParticipantV1,
                                    profile: PoolApplicationImageProfile, reservation_id: UUID,
-                                   now: datetime) -> PreparedPoolNativeBuild:
+                                   now: datetime, frozen_cache_policy: dict[str, Any] | None = None) -> PreparedPoolNativeBuild:
     """Pure renderer; admission must additionally verify management build history."""
     request = PoolApplicationImagePrepareV1.model_validate_json(request.model_dump_json())
     participant = PoolParticipantV1.model_validate(participant.model_dump())
     settings = NativeTaskImageSettings.model_validate(profile.settings.model_dump())
+    if frozen_cache_policy is not None:
+        if set(frozen_cache_policy) - {'cache_total_mib', 'cache_gc_policy'}:
+            raise ValueError('pool_application_build_storage_mismatch')
+        # Only the internal admission path supplies this, after qualifying the
+        # exact manager-frozen App attempt. Never read today's policy here.
+        settings = NativeTaskImageSettings.model_validate({**settings.model_dump(),
+            'cache_total_mib': 4096, 'cache_gc_policy': 'legacy-seven-day', **frozen_cache_policy})
     claim = request.build
     if (not reservation_id.int or now.utcoffset() is None or request.deadline_at <= now
             or (request.pool_id, request.key.participant_id, request.admission_epoch, request.participant_revision,
@@ -49,7 +57,8 @@ def prepare_pool_application_image(request: PoolApplicationImagePrepareV1, *, pa
         raise ValueError("pool_application_build_profile_mismatch")
     pool_request_priority(participant, request.origin, workload_kind=request.key.workload_kind)
     if any(getattr(claim, field) != getattr(settings, field) for field in (
-            "storage_endpoint", "storage_region", "source_bucket", "cache_bucket", "registry_repository")):
+            "storage_endpoint", "storage_region", "source_bucket", "cache_bucket", "registry_repository",
+            "cache_total_mib", "cache_gc_policy")):
         raise ValueError("pool_application_build_storage_mismatch")
     remaining = min(settings.active_deadline_seconds, math.ceil((request.deadline_at - now).total_seconds()))
     config = replace(settings.job_config(), active_deadline_seconds=remaining)

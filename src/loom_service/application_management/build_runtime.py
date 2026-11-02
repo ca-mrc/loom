@@ -13,9 +13,9 @@ from loom_service.application_management.build_worker import ApplicationBuildWor
 from loom_service.application_management.installation import ApplicationInstallation
 from loom_service.application_management.manager import ApplicationManager
 from loom_service.environment_management.kubernetes_credentials import create_projected_api_client
+from loom_service.pool_management.application_builder_authority import qualified_builder_profiles
 from loom_service.pool_management.auth import authorize_pool_machine, resolve_pool_machine
 from loom_service.pool_management.locks import acquire_pool_mutation_lock
-from loom_service.pool_management.observations import read_pool_registration
 from loom_service.pool_management.registry import PoolProfiles
 
 
@@ -31,7 +31,8 @@ async def _qualify(installation: ApplicationInstallation, manager: ApplicationMa
     profile = profiles.application_images[binding.profile_id]
     if (profile.recipe != binding.recipe or profile.target.target_id != binding.target_id
             or any(getattr(binding, name) != getattr(profile.settings, name) for name in (
-                "storage_endpoint", "storage_region", "cache_bucket", "registry_repository"))
+                "storage_endpoint", "storage_region", "cache_bucket", "registry_repository",
+                "cache_total_mib", "cache_gc_policy"))
             or binding.source.source_bucket != profile.settings.source_bucket):
         raise ValueError("unbound builder profile")
     token = read_owner_only_secret(settings.bearer_token_file)
@@ -44,19 +45,20 @@ async def _qualify(installation: ApplicationInstallation, manager: ApplicationMa
             raise ValueError("unregistered builder")
         principal = await authorize_pool_machine(session, principal, role="participant", pool_id=binding.pool_id,
             participant_id=binding.participant_id, workload_kind="application_image_build")
-        if ((principal.installation_id, principal.environment_id, principal.pool_epoch,
-             principal.participant_revision, principal.participant_phase) != (
-                binding.source.installation_id, binding.source.data_environment_id, binding.admission_epoch,
-                binding.participant_revision, "active") or principal.pool_mode not in {"closed", "global"}):
+        if ((principal.installation_id, principal.environment_id, principal.pool_epoch) != (
+                binding.source.installation_id, binding.source.data_environment_id, binding.admission_epoch)
+                or principal.pool_mode not in {"closed", "global"}):
             raise ValueError("stale builder registration")
         pool = await session.get(NebiusPoolBinding, binding.pool_id)
-        if (pool is None or pool.cluster_id != binding.source.cluster_id
-                or pool.binding_json.get("profile_catalog_sha256") != profiles.catalog_sha256):
+        if pool is None or pool.cluster_id != binding.source.cluster_id:
             raise ValueError("unbound builder catalog")
-        participants, _ = await read_pool_registration(session, pool)
-        participant = next(row for row in participants if row.participant_id == binding.participant_id)
+        participant, authoritative = await qualified_builder_profiles(session, binding, profiles)
+        if (binding.profile_id not in authoritative.application_images
+                or authoritative.application_images[binding.profile_id] != profile):
+            raise ValueError('unbound builder profile')
         target = participant.target(binding.target_id, "application_image_build")
         if (participant.environment_class != "development" or target.profile_id != binding.profile_id
+                or participant.binding_revision != binding.participant_revision
                 or target.workload_kinds != ("application_image_build",)
                 or profile.target.namespace != participant.build_namespace.name
                 or profile.settings.namespace != participant.build_namespace.name

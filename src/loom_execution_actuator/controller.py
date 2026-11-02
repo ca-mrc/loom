@@ -795,6 +795,9 @@ class ExecutionActuator:
                 session,
                 target_id=self._target.target_id,
                 observed_at=current_time,
+                preview_runtime={"namespace_name": self._target.namespace,
+                    "runtime_class_name": self._target.runtime_class_name,
+                    "node_selector": self._target.node_selector or {}},
             )
             await session.commit()
         return drift
@@ -805,7 +808,10 @@ class ExecutionActuator:
         await resources.probe()
         # Qualified namespace reachability remains fresh even with an empty queue.
         async with self._sessions.begin() as session:
-            await refresh_execution_target_health(session, target_id=self._target.target_id, observed_at=now)
+            await refresh_execution_target_health(session, target_id=self._target.target_id, observed_at=now,
+                preview_runtime={"namespace_name": self._target.namespace,
+                    "runtime_class_name": self._target.runtime_class_name,
+                    "node_selector": self._target.node_selector or {}})
         drift = 0
         async for pending in resources.driver.outbox.iter_pending(target_id=self._target.target_id):
             try:

@@ -41,6 +41,8 @@ class NebiusApplicationBuild(Base):
 class NebiusApplicationBuildAttempt(Base):
     __tablename__ = "nebius_application_build_attempts"
     __table_args__ = (
+        CheckConstraint("cache_policy_json IS NULL OR jsonb_typeof(cache_policy_json) = 'object'",
+                        name="nebius_application_build_attempt_cache_policy_check"),
         CheckConstraint("attempt > 0 AND phase IN ('queued','running','settling','ready','failed','cancelled')",
             name="nebius_application_build_attempt_state_check"),
         CheckConstraint("runner_epoch >= 0 AND ((lease_token IS NULL) = (lease_expires_at IS NULL)) AND "
@@ -60,6 +62,7 @@ class NebiusApplicationBuildAttempt(Base):
             "jsonb_typeof(pool_request_json) = 'object' AND pool_request_sha256 ~ '^[0-9a-f]{64}$')",
             name="nebius_application_build_pool_request_check"),
     )
+    cache_policy_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, deferred=True, deferred_raiseload=True)
     build_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("nebius_application_builds.build_id", ondelete="RESTRICT"), primary_key=True)
     attempt: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     claim_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)

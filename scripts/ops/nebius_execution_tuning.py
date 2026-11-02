@@ -25,6 +25,7 @@ from scripts.ops.deploy_nebius_platform import (  # noqa: E402
 )
 
 from loom.nebius_platform_render import (  # noqa: E402
+    EXECUTION_DISK_STORAGE_QUOTAS,
     _regional_config,
     _task_image_builder_documents,
     _task_image_builder_settings,
@@ -82,6 +83,80 @@ except Exception:
  raise SystemExit(1)
 '''
 
+# Only counts leave the installed CP. The tuning guard pauses new admission;
+# incompatible frozen builds finish naturally before pressure GC is enabled.
+_CACHE_READER_STATE = '''import asyncio,json,sys
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
+from loom_control_plane.config import ControlPlaneSettings
+async def main():
+ s=ControlPlaneSettings();e=create_async_engine(s.db_engine_url,connect_args=s.db_engine_connect_args)
+ totals={'native_incompatible':0,'application_incompatible':0,'management_owned':0}
+ try:
+  async with e.connect() as c, c.begin():
+   await c.execute(text('SET TRANSACTION READ ONLY'))
+   await c.execute(text("SET LOCAL statement_timeout='10s'"))
+   for scope in json.loads(sys.argv[1]):
+    params={k:scope[k] for k in ('endpoint','region','bucket','image','budget')}
+    native="""WITH live AS (
+     SELECT a.native_build,nullif(a.native_build#>>'{configmap,data,claim.json}','')::jsonb claim
+     FROM task_image_materialization_attempts a
+     WHERE a.native_build IS NOT NULL AND a.native_capacity_released_at IS NULL
+     AND (a.native_capacity_reserved_at IS NOT NULL OR EXISTS (
+      SELECT 1 FROM task_image_materializations m WHERE m.id=a.materialization_id
+      AND m.lease_epoch=a.lease_epoch AND m.state IN('claimed','running'))))
+     SELECT count(*) FROM live WHERE claim->>'storage_endpoint'=:endpoint
+     AND claim->>'storage_region'=:region AND claim->>'cache_bucket'=:bucket
+     AND (native_build#>>'{job,spec,template,spec,initContainers,0,image}' IS DISTINCT FROM :image
+      OR coalesce(claim->>'cache_total_mib','4096')::int <> :budget)"""
+    app="""SELECT count(*) FROM nebius_application_build_attempts a
+     WHERE a.phase IN('queued','running','settling')
+     AND a.claim_json->>'storage_endpoint'=:endpoint AND a.claim_json->>'storage_region'=:region
+     AND a.claim_json->>'cache_bucket'=:bucket
+     AND (a.claim_json#>>'{recipe,trusted_image_ref}' IS DISTINCT FROM :image
+      OR coalesce(a.claim_json->>'cache_total_mib','4096')::int <> :budget)"""
+    totals['native_incompatible']+=int(await c.scalar(text(native),params) or 0)
+    totals['application_incompatible']+=int(await c.scalar(text(app),params) or 0)
+    managed="""SELECT EXISTS (
+     SELECT 1 FROM nebius_cache_runtime_policies WHERE storage_endpoint=:endpoint
+      AND storage_region=:region AND cache_bucket=:bucket
+     UNION ALL
+     SELECT 1 FROM nebius_pool_profile_documents d JOIN nebius_pool_participants p
+      ON p.pool_id=d.pool_id WHERE d.family IN('task_images','application_images')
+      AND d.document_json#>>'{profile,settings,storage_endpoint}'=:endpoint
+      AND d.document_json#>>'{profile,settings,storage_region}'=:region
+      AND d.document_json#>>'{profile,settings,cache_bucket}'=:bucket
+      AND jsonb_path_exists(p.binding_json,'$.targets[*] ? (@.profile_id == $selected)'::jsonpath,
+       jsonb_build_object('selected',d.profile_id::text)))"""
+    totals['management_owned']+=int(bool(await c.scalar(text(managed),params)))
+  print(json.dumps(totals))
+ finally:await e.dispose()
+try:asyncio.run(main())
+except Exception:
+ print('Cache reader compatibility unavailable; no successful policy convergence recorded',file=sys.stderr)
+ raise SystemExit(1)
+'''
+
+_IDLE_STATE = '''import asyncio,json,sys
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
+from loom.nebius_rollout_guard import ACTIVITY_SQL
+from loom_control_plane.config import ControlPlaneSettings
+async def main():
+ s=ControlPlaneSettings();e=create_async_engine(s.db_engine_url,connect_args=s.db_engine_connect_args)
+ try:
+  async with e.connect() as c, c.begin():
+   await c.execute(text('SET TRANSACTION READ ONLY'))
+   await c.execute(text("SET LOCAL statement_timeout='10s'"))
+   counts=dict((await c.execute(text(ACTIVITY_SQL))).mappings().one())
+  print(json.dumps({'idle':not any(counts.values())}))
+ finally:await e.dispose()
+try:asyncio.run(main())
+except Exception:
+ print('Disk maintenance idle readback unavailable',file=sys.stderr)
+ raise SystemExit(1)
+'''
+
 
 @contextmanager
 def _tuning_guard(kube: Kubectl, namespace: str, candidate: str) -> Iterator[None]:
@@ -132,6 +207,8 @@ def _builders(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 "cpu_request_millis", "cpu_millis", "memory_mib", "ephemeral_storage_mib", "max_concurrent", "resource_ceiling",
             )})
             result[target]["cache_total_mib"] = builder.get("cache_total_mib", 4096)
+            result[target]["cache_gc_policy"] = builder.get("cache_gc_policy", "legacy-seven-day")
+            result[target]["reuse_task_cache_for_verifier"] = builder.get("reuse_task_cache_for_verifier", False)
     return result
 
 
@@ -156,9 +233,14 @@ def _runtime(kube: Kubectl, controller: dict[str, Any]) -> dict[str, Any]:
             _env(controller).get("LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY", "1"),
         ), "builder_configuration_source": "unknown"}
     if name == "loom-control-plane":
-        script = ("import json; from loom_control_plane.config import ControlPlaneSettings; "
+        script = ("import json; import loom.nebius_platform_render as renderer; from loom_control_plane.config import ControlPlaneSettings; "
                   "s=ControlPlaneSettings(); "
-                  "print(json.dumps({'placement_policy':s.service_execution_placement_policy}))")
+                  "print(json.dumps({'placement_policy':s.service_execution_placement_policy, "
+                  "'warm_fit_support':hasattr(s,'prefer_incoming_warm_fit'), "
+                  "'regional_disk_configuration_support':getattr(renderer,'REGIONAL_DISK_CONFIGURATION_SUPPORTED',False), "
+                  "'prefer_incoming_warm_fit':getattr(s,'prefer_incoming_warm_fit',None), "
+                  "'warm_fit_configuration_source':'control-plane', "
+                  "'warm_fit_requires_manager_policy':getattr(s,'global_pool',None) is not None}))")
     else:
         script = ("import json; from loom_execution_actuator.config import ExecutionActuatorSettings; "
                   "s=ExecutionActuatorSettings(); b=s.task_image_builder; "
@@ -166,12 +248,15 @@ def _runtime(kube: Kubectl, controller: dict[str, Any]) -> dict[str, Any]:
                   "'builder_enabled':b is not None, "
                   "'builder_request_support':b is not None and hasattr(b,'cpu_request_millis'), "
                   "'builder_cache_budget_support':b is not None and hasattr(b,'cache_total_mib'), "
+                  "'builder_cache_policy_support':b is not None and hasattr(b,'cache_gc_policy') and hasattr(b,'reuse_task_cache_for_verifier'), "
                   "'builder_configuration_source':'management-profile' if getattr(s,'global_pool',None) is not None else 'actuator', "
                   "'builder_resources':None if b is None else {"
                   "'effective_cpu_request_millis':getattr(b,'cpu_request_millis',None) or b.cpu_millis, "
                   "'cpu_millis':b.cpu_millis,'memory_mib':b.memory_mib,"
                   "'ephemeral_storage_mib':b.ephemeral_storage_mib,'namespace':b.namespace,"
-                  "'cache_total_mib':getattr(b,'cache_total_mib',None)}}))")
+                  "'cache_total_mib':getattr(b,'cache_total_mib',None), "
+                  "'cache_gc_policy':getattr(b,'cache_gc_policy',None), "
+                  "'reuse_task_cache_for_verifier':getattr(b,'reuse_task_cache_for_verifier',None)}}))")
     return cast(dict[str, Any], json.loads(kube.run(
         "exec", "-n", ns, "deployment/" + name, "--", "python", "-c", script,
     )))
@@ -223,6 +308,7 @@ def inspect(kube: Kubectl, namespace: str) -> dict[str, Any]:
         "candidate_sha": profile["candidate_sha"],
         "persisted": {
             "placement_policy": config.get("execution_placement_policy", "environment-local-health-first"),
+            "prefer_incoming_warm_fit": config.get("prefer_incoming_warm_fit", False),
             "command_concurrency": config.get("execution_command_concurrency", 1),
             "builders": _builders(config),
             "create_rates": {key: row["capacity_policy"]["max_create_per_minute"]
@@ -240,7 +326,7 @@ def inspect(kube: Kubectl, namespace: str) -> dict[str, Any]:
 
 
 def _updated_builders(
-    config: dict[str, Any], resources: dict[str, dict[str, int]], enable_regional: tuple[str, ...] = (),
+    config: dict[str, Any], resources: dict[str, dict[str, Any]], enable_regional: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     if not resources and not enable_regional:
         raise DeploymentError("at least one build setting is required")
@@ -256,11 +342,16 @@ def _updated_builders(
         if owners[target].get("task_image_builder") is None:
             owners[target]["task_image_builder"] = deepcopy(primary)
     limits = {"cpu_millis", "memory_mib", "ephemeral_storage_mib"}
+    numeric = limits | {"cpu_request_millis", "cache_total_mib"}
+    policies = {"cache_gc_policy", "reuse_task_cache_for_verifier"}
     for target, values in resources.items():
         if (target not in owners or owners[target].get("task_image_builder") is None
-                or not values or set(values) - (limits | {"cpu_request_millis", "cache_total_mib"})
-                or any(type(value) is not int for value in values.values())):
-            raise DeploymentError("build resources require a configured builder and integer resource settings")
+                or not values or set(values) - (numeric | policies)
+                or any(type(value) is not int for key, value in values.items() if key in numeric)
+                or ("cache_gc_policy" in values and (not isinstance(values["cache_gc_policy"], str)
+                    or values["cache_gc_policy"] not in {"legacy-seven-day", "budget-pressure"}))
+                or ("reuse_task_cache_for_verifier" in values and type(values["reuse_task_cache_for_verifier"]) is not bool)):
+            raise DeploymentError("build settings require a configured builder and strictly typed resource/cache values")
         owner = owners[target]
         effective_config = updated if target == updated["target_id"] else _regional_config(updated, owner)
         settings = _task_image_builder_settings(effective_config, service_image="test.invalid/service@sha256:" + "a" * 64)
@@ -272,15 +363,15 @@ def _updated_builders(
         owner["task_image_builder"].update(values)
     # This is a bucket-wide limit. Controllers sharing it must use one saved
     # budget, including during independent regional tuning operations.
-    budgets: dict[str, int] = {}
+    budgets: dict[str, tuple[int, str]] = {}
     for owner in owners.values():
         builder = owner.get("task_image_builder")
         if builder is None or builder.get("cache_bucket") is None:
             continue
-        budget = builder.get("cache_total_mib", 4096)
+        budget = (builder.get("cache_total_mib", 4096), builder.get("cache_gc_policy", "legacy-seven-day"))
         bucket = builder["cache_bucket"]
         if bucket in budgets and budgets[bucket] != budget:
-            raise DeploymentError("builders sharing a cache bucket require the same total budget; tune them together")
+            raise DeploymentError("builders sharing a cache bucket require the same total budget and GC policy; tune them together")
         budgets[bucket] = budget
     validate_environment(updated)
     return updated
@@ -288,7 +379,7 @@ def _updated_builders(
 
 def _stage_builders_locked(
     kube: Kubectl, namespace: str, *, expected_candidate: str,
-    resources: dict[str, dict[str, int]], enable_regional: tuple[str, ...] = (),
+    resources: dict[str, dict[str, Any]], enable_regional: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Persist future build intent; installation and permission checks own activation.
 
@@ -324,6 +415,7 @@ def _apply_locked(
     kube: Kubectl, namespace: str, *, expected_candidate: str,
     placement_policy: str | None = None, command_concurrency: int | None = None,
     create_rates: dict[str, int] | None = None,
+    prefer_incoming_warm_fit: bool | None = None,
 ) -> dict[str, Any]:
     """Save desired values first, then converge controllers/API; retry is safe.
 
@@ -337,11 +429,19 @@ def _apply_locked(
            for row in controllers if row["metadata"]["name"] != "loom-control-plane"
            and row["spec"].get("replicas", 1) > 0):
         raise DeploymentError("installed actuator lacks tuning support; deploy the combined candidate first")
-    if placement_policy is None and command_concurrency is None and not create_rates:
+    if prefer_incoming_warm_fit is not None:
+        if type(prefer_incoming_warm_fit) is not bool:
+            raise DeploymentError("warm-fit preference requires a boolean")
+        cp = next(row for row in controllers if row["metadata"]["name"] == "loom-control-plane")
+        if not _runtime(kube, cp).get("warm_fit_support"):
+            raise DeploymentError("installed control-plane lacks warm-fit support; deploy the combined candidate first")
+    if placement_policy is None and command_concurrency is None and not create_rates and prefer_incoming_warm_fit is None:
         raise DeploymentError("at least one tuning value is required")
     updated = deepcopy(config)
     if placement_policy is not None:
         updated["execution_placement_policy"] = placement_policy
+    if prefer_incoming_warm_fit is not None:
+        updated["prefer_incoming_warm_fit"] = prefer_incoming_warm_fit
     if command_concurrency is not None:
         updated["execution_command_concurrency"] = command_concurrency
     owners = _owners(updated)
@@ -384,6 +484,8 @@ def _apply_locked(
         changes = {}
         if placement_policy is not None and controller["metadata"]["name"] == "loom-control-plane":
             changes["LOOM_CP_SERVICE_EXECUTION_PLACEMENT_POLICY"] = placement_policy
+        if prefer_incoming_warm_fit is not None and controller["metadata"]["name"] == "loom-control-plane":
+            changes["LOOM_CP_PREFER_INCOMING_WARM_FIT"] = str(prefer_incoming_warm_fit).lower()
         if command_concurrency is not None and "LOOM_EXECUTION_ACTUATOR_TARGET_ID" in env:
             changes["LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY"] = str(command_concurrency)
         changes = {key: value for key, value in changes.items() if env.get(key) != value}
@@ -407,6 +509,10 @@ def _apply_locked(
         if controller["name"] == "loom-control-plane":
             if controller["placement_policy"] != result["persisted"]["placement_policy"]:
                 raise DeploymentError("saved and live placement differ")
+            if (prefer_incoming_warm_fit is not None or result["persisted"]["prefer_incoming_warm_fit"]) and (
+                    not controller.get("warm_fit_support")
+                    or controller.get("prefer_incoming_warm_fit") is not result["persisted"]["prefer_incoming_warm_fit"]):
+                raise DeploymentError("saved and live warm-fit preference differ")
         elif (controller["command_concurrency"] if controller["replicas"] > 0
               else controller["configured_command_concurrency"]) != result["persisted"]["command_concurrency"]:
             raise DeploymentError("saved and live command concurrency differ")
@@ -425,7 +531,7 @@ def stage_postgres(
 
 def stage_builders(
     kube: Kubectl, namespace: str, *, expected_candidate: str,
-    resources: dict[str, dict[str, int]], enable_regional: tuple[str, ...] = (),
+    resources: dict[str, dict[str, Any]], enable_regional: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     with _tuning_guard(kube, namespace, expected_candidate):
         return _stage_builders_locked(kube, namespace, expected_candidate=expected_candidate,
@@ -496,13 +602,14 @@ def _retain_live_quota(
 
 
 def _apply_builders_locked(
-    kube: Kubectl, namespace: str, *, expected_candidate: str, resources: dict[str, dict[str, int]],
+    kube: Kubectl, namespace: str, *, expected_candidate: str, resources: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     cm, config, profile, controllers = _read(kube, namespace)
     if not re.fullmatch(r"[0-9a-f]{40}", expected_candidate) or profile["candidate_sha"] != expected_candidate:
         raise DeploymentError("build settings candidate differs from installed platform")
     updated = _updated_builders(config, resources)
-    allowed = {"cpu_request_millis", "cpu_millis", "memory_mib", "ephemeral_storage_mib", "cache_total_mib"}
+    cache_policies = {"cache_gc_policy", "reuse_task_cache_for_verifier"}
+    allowed = {"cpu_request_millis", "cpu_millis", "memory_mib", "ephemeral_storage_mib", "cache_total_mib", *cache_policies}
     prepared = {}
     for target in resources:
         matches = [row for row in controllers if _env(row).get("LOOM_EXECUTION_ACTUATOR_TARGET_ID") == target]
@@ -518,6 +625,8 @@ def _apply_builders_locked(
             raise DeploymentError("live build tuning requires an already enabled supporting builder; use staged protected deployment first")
         if "cache_total_mib" in resources[target] and not runtime.get("builder_cache_budget_support"):
             raise DeploymentError("installed builder lacks cache budget support; stage and deploy the supporting candidate first")
+        if set(resources[target]) & cache_policies and not runtime.get("builder_cache_policy_support"):
+            raise DeploymentError("installed builder lacks cache policy support; stage and deploy the supporting candidate first")
         raw = _env(controller).get("LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER")
         if not raw:
             raise DeploymentError("existing actuator builder configuration unavailable")
@@ -528,6 +637,8 @@ def _apply_builders_locked(
         if (desired is not None and not runtime.get("builder_cache_budget_support")
                 and "cache_total_mib" in desired.model_dump()):
             raise DeploymentError("saved cache budget requires a supporting builder candidate before live tuning")
+        if desired is not None and not runtime.get("builder_cache_policy_support") and cache_policies & desired.model_fields_set:
+            raise DeploymentError("saved cache policy requires a supporting builder candidate before live tuning")
         if desired is None or any(getattr(current, key) != getattr(desired, key)
                                   for key in NativeTaskImageSettings.model_fields if key not in allowed):
             raise DeploymentError("live build tuning cannot change namespace, credential references, runtime or identity settings")
@@ -543,6 +654,40 @@ def _apply_builders_locked(
         hard = _retain_live_quota(quota["spec"].get("hard", {}), quota_doc["spec"]["hard"],
             task_image_builder_resource_ceiling(owner["task_image_builder"], desired), desired.max_concurrent)
         prepared[target] = (controller, remote, current, desired, before, quota, hard)
+    # The first pressure transition needs compatible readers, including frozen
+    # attempts which have not created a Job yet. Existing execution leases are
+    # unaffected and no workload is cancelled/re-submitted by this check.
+    scopes = {}
+    for _, remote, current, desired, _, _, _ in prepared.values():
+        if (desired.cache_gc_policy != "budget-pressure" or desired.cache_bucket is None
+                or (current.cache_gc_policy == "budget-pressure" and current.cache_total_mib == desired.cache_total_mib)):
+            continue
+        if desired.service_image != profile.get("task_image_ref"):
+            raise DeploymentError("pressure cache policy requires the published candidate service image; finish normal deployment convergence first")
+        service = kube.get("deployment", "loom-service", namespace)
+        images = [row.get("image") for row in service.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])]
+        if images != [desired.service_image]:
+            raise DeploymentError("pressure cache policy requires the installed supporting service image for future build readers")
+        jobs = json.loads(remote.run("get", "jobs", "-n", desired.namespace, "-o", "json"))["items"]
+        for job in jobs:
+            if any(row.get("type") in {"Complete", "Failed"} and row.get("status") == "True"
+                   for row in job.get("status", {}).get("conditions", [])):
+                continue
+            pod = job.get("spec", {}).get("template", {}).get("spec", {})
+            readers = [row for row in (*pod.get("initContainers", []), *pod.get("containers", []))
+                       if row.get("name") in {"prepare", "publish"}]
+            if len(readers) != 2 or any(row.get("image") != desired.service_image for row in readers):
+                raise DeploymentError("pressure cache policy requires incompatible or unknown build Jobs to finish naturally")
+        key = (desired.storage_endpoint, desired.storage_region, desired.cache_bucket)
+        scopes[key] = {"endpoint": key[0], "region": key[1], "bucket": key[2],
+                       "image": desired.service_image, "budget": desired.cache_total_mib}
+    if scopes:
+        readers = json.loads(kube.run("exec", "-n", namespace, "deployment/loom-control-plane", "--", "python", "-c",
+                                     _CACHE_READER_STATE, json.dumps(list(scopes.values()))))
+        if readers.get("management_owned"):
+            raise DeploymentError("shared cache scope is management-owned; use the normal management cache-policy owner")
+        if set(readers) != {"native_incompatible", "application_incompatible", "management_owned"} or any(type(value) is not int or value != 0 for value in readers.values()):
+            raise DeploymentError("pressure cache policy requires incompatible frozen cache readers to finish and clean up naturally")
     if updated != config:
         kube.run("patch", "configmap", "loom-platform-config", "-n", namespace, "--type=json", "-p", json.dumps([
             {"op": "test", "path": "/metadata/resourceVersion", "value": cm["metadata"]["resourceVersion"]},
@@ -577,6 +722,13 @@ def _apply_builders_locked(
         elif isinstance(observed_resources, dict):
             if observed_resources.pop("cache_total_mib", None) is not None:
                 raise DeploymentError("builder cache budget capability readback differs")
+        if observed.get("builder_cache_policy_support"):
+            expected.update({key: getattr(desired, key) for key in cache_policies})
+        elif set(resources[target]) & cache_policies:
+            raise DeploymentError("live builder lost cache policy support; inspect before continuing")
+        elif isinstance(observed_resources, dict):
+            if any(observed_resources.pop(key, None) is not None for key in cache_policies):
+                raise DeploymentError("builder cache policy capability readback differs")
         if observed_resources != expected:
             raise DeploymentError("live builder resource readback differs; retry retained tuning intent")
         actual_quota = remote.get("resourcequota", "loom-task-image-build-capacity", desired.namespace)
@@ -596,8 +748,84 @@ def _apply_builders_locked(
             "restarted_controllers": restarted, "job_uid_snapshots": snapshots, "task_jobs_replaced": False}
 
 
+def _apply_regional_disks_locked(
+    kube: Kubectl, namespace: str, *, expected_candidate: str, disk_types: dict[str, str],
+) -> dict[str, Any]:
+    """Align saved source and collector accounting under the caller's guard.
+
+    This never mutates cloud disks. An infrastructure maintenance caller retains
+    its normal idle rollout guard across Terraform, this step and fresh placement
+    qualification; ordinary callers use apply_regional_disks below.
+    """
+    cm, config, profile, controllers = _read(kube, namespace)
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_candidate) or profile["candidate_sha"] != expected_candidate:
+        raise DeploymentError("disk configuration candidate differs from installed platform")
+    cp = next(row for row in controllers if row["metadata"]["name"] == "loom-control-plane")
+    runtime = _runtime(kube, cp)
+    if not runtime.get("regional_disk_configuration_support"):
+        raise DeploymentError("installed renderer lacks regional disk configuration support")
+    if runtime.get("warm_fit_requires_manager_policy"):
+        raise DeploymentError("global disk accounting is owned by management profiles; use normal management maintenance")
+    idle = json.loads(kube.run(
+        "exec", "-n", namespace, "deployment/loom-control-plane", "--", "python", "-c", _IDLE_STATE,
+    ))
+    if idle.get("idle") is not True:
+        raise DeploymentError("disk configuration maintenance requires drained execution and build work")
+    regional = {row["target_id"]: row for row in config.get("regional_execution_targets", [])}
+    if not disk_types or any(target not in regional or kind not in EXECUTION_DISK_STORAGE_QUOTAS
+                             for target, kind in disk_types.items()):
+        raise DeploymentError("disk configuration requires existing regional targets and supported disk types")
+    updated = deepcopy(config)
+    for row in updated["regional_execution_targets"]:
+        if row["target_id"] in disk_types:
+            row["execution_disk_type"] = disk_types[row["target_id"]]
+    validate_environment(updated)
+    key = "LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME"
+    # All regional collectors execute in the primary namespace. Their existing
+    # node-group binding must agree before any source or accounting changes.
+    collectors = {}
+    for target in disk_types:
+        obj = kube.get("configmap", target + "-collector", config["execution_namespace"])
+        if (not obj or not obj.get("metadata", {}).get("uid")
+                or obj.get("data", {}).get("LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_NODE_GROUP_ID") != regional[target]["execution_node_group_id"]
+                or key not in obj.get("data", {})):
+            raise DeploymentError("regional collector binding unavailable or differs from saved owner")
+        collectors[target] = obj
+    if updated != config:
+        kube.run("patch", "configmap", "loom-platform-config", "-n", namespace, "--type=json", "-p",
+                 json.dumps([
+                     {"op": "test", "path": "/metadata/resourceVersion", "value": cm["metadata"]["resourceVersion"]},
+                     {"op": "replace", "path": "/data/environment.json", "value": json.dumps(updated)},
+                 ]))
+    for target, obj in collectors.items():
+        desired = EXECUTION_DISK_STORAGE_QUOTAS[disk_types[target]]
+        if obj["data"][key] != desired:
+            kube.run("patch", "configmap", target + "-collector", "-n", config["execution_namespace"],
+                     "--type=json", "-p", json.dumps([
+                         {"op": "test", "path": "/metadata/uid", "value": obj["metadata"]["uid"]},
+                         {"op": "test", "path": "/metadata/resourceVersion", "value": obj["metadata"]["resourceVersion"]},
+                         {"op": "replace", "path": "/data/" + key, "value": desired},
+                     ]))
+    saved_cm = kube.get("configmap", "loom-platform-config", namespace)
+    saved = json.loads(saved_cm["data"]["environment.json"])
+    if (saved != updated or json.loads(saved_cm["data"]["profile.json"])["candidate_sha"] != expected_candidate
+            or any(kube.get("configmap", target + "-collector", config["execution_namespace"])["data"][key]
+                   != EXECUTION_DISK_STORAGE_QUOTAS[kind] for target, kind in disk_types.items())):
+        raise DeploymentError("saved disk configuration or collector accounting differs; retry the same intent")
+    return {"candidate_sha": expected_candidate, "regional_disk_types": disk_types,
+            "cloud_disks_changed": False, "database_restarted": False, "task_jobs_replaced": False,
+            "placement_qualification_required": True}
+
+
+def apply_regional_disks(
+    kube: Kubectl, namespace: str, *, expected_candidate: str, disk_types: dict[str, str],
+) -> dict[str, Any]:
+    with _tuning_guard(kube, namespace, expected_candidate):
+        return _apply_regional_disks_locked(kube, namespace, expected_candidate=expected_candidate, disk_types=disk_types)
+
+
 def apply_builders(
-    kube: Kubectl, namespace: str, *, expected_candidate: str, resources: dict[str, dict[str, int]],
+    kube: Kubectl, namespace: str, *, expected_candidate: str, resources: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     with _tuning_guard(kube, namespace, expected_candidate):
         return _apply_builders_locked(kube, namespace, expected_candidate=expected_candidate, resources=resources)
@@ -607,28 +835,34 @@ def apply(
     kube: Kubectl, namespace: str, *, expected_candidate: str,
     placement_policy: str | None = None, command_concurrency: int | None = None,
     create_rates: dict[str, int] | None = None,
+    prefer_incoming_warm_fit: bool | None = None,
 ) -> dict[str, Any]:
     """Hold the deployment mutex through persistence, convergence and readback."""
     with _tuning_guard(kube, namespace, expected_candidate):
         return _apply_locked(kube, namespace, expected_candidate=expected_candidate,
                              placement_policy=placement_policy, command_concurrency=command_concurrency,
-                             create_rates=create_rates)
+                             create_rates=create_rates, prefer_incoming_warm_fit=prefer_incoming_warm_fit)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("inspect", "apply", "stage-postgres", "stage-builders", "apply-builders"))
+    parser.add_argument("operation", choices=("inspect", "apply", "stage-postgres", "stage-builders", "apply-builders", "apply-regional-disks"))
     parser.add_argument("--kubeconfig", type=Path, required=True)
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--expected-candidate")
     parser.add_argument("--placement-policy", choices=("environment-local-health-first", "environment-local-capacity-balanced"))
     parser.add_argument("--command-concurrency", type=int, choices=range(1, 9))
+    parser.add_argument("--prefer-incoming-warm-fit", choices=("true", "false"),
+                        help="persist the independent control-plane preference; global managers retain their own normal owner policy")
     parser.add_argument("--create-rate", action="append", default=[], metavar="TARGET=PER_MINUTE")
+    parser.add_argument("--regional-disk-type", action="append", default=[], metavar="TARGET=TYPE",
+                        help="configuration/accounting only; cloud disk maintenance and fresh placement qualification are separate")
     parser.add_argument("--enable-regional-builder", action="append", default=[], metavar="TARGET",
                         help="stage explicit regional opt-in for the next normal protected deployment")
     build_fields = {"cpu-request-millis": "cpu_request_millis", "cpu-limit-millis": "cpu_millis",
                     "memory-mib": "memory_mib", "storage-mib": "ephemeral_storage_mib",
-                    "cache-total-mib": "cache_total_mib"}
+                    "cache-total-mib": "cache_total_mib", "cache-gc-policy": "cache_gc_policy",
+                    "reuse-task-cache-for-verifier": "reuse_task_cache_for_verifier"}
     for name in build_fields:
         parser.add_argument("--build-" + name, action="append", default=[], metavar="TARGET=VALUE")
     for name in ("cpu-request-millis", "cpu-limit-millis", "memory-request-mib", "memory-limit-mib", "shared-buffers-mib"):
@@ -639,16 +873,38 @@ def main() -> None:
         database_settings = {name: getattr(args, "postgres_" + name) for name in (
             "cpu_request_millis", "cpu_limit_millis", "memory_request_mib", "memory_limit_mib", "shared_buffers_mib",
         ) if getattr(args, "postgres_" + name) is not None}
-        build_resources: dict[str, dict[str, int]] = {}
+        build_resources: dict[str, dict[str, Any]] = {}
         for argument, field in build_fields.items():
             for value in getattr(args, "build_" + argument.replace("-", "_")):
                 target, amount = value.split("=", 1)
                 selected = build_resources.setdefault(target, {})
                 if field in selected:
                     raise ValueError
-                selected[field] = int(amount)
-        if args.operation in {"stage-builders", "apply-builders"}:
-            if database_settings or args.placement_policy is not None or args.command_concurrency is not None or args.create_rate:
+                if field == "cache_gc_policy":
+                    if amount not in {"legacy-seven-day", "budget-pressure"}:
+                        raise ValueError
+                    selected[field] = amount
+                elif field == "reuse_task_cache_for_verifier":
+                    if amount not in {"true", "false"}:
+                        raise ValueError
+                    selected[field] = amount == "true"
+                else:
+                    selected[field] = int(amount)
+        if args.operation == "apply-regional-disks":
+            if (database_settings or build_resources or args.enable_regional_builder or args.placement_policy is not None
+                    or args.command_concurrency is not None or args.create_rate or args.prefer_incoming_warm_fit is not None):
+                raise DeploymentError("apply regional disk configuration separately from other settings")
+            disk_types = {}
+            for value in args.regional_disk_type:
+                target, kind = value.split("=", 1)
+                if target in disk_types:
+                    raise ValueError
+                disk_types[target] = kind
+            result = apply_regional_disks(kube, args.namespace, expected_candidate=args.expected_candidate or "", disk_types=disk_types)
+        elif args.regional_disk_type:
+            raise DeploymentError("regional disk configuration requires apply-regional-disks")
+        elif args.operation in {"stage-builders", "apply-builders"}:
+            if database_settings or args.placement_policy is not None or args.command_concurrency is not None or args.create_rate or args.prefer_incoming_warm_fit is not None:
                 raise DeploymentError("stage build settings separately from database or live execution tuning")
             if args.operation == "apply-builders":
                 if args.enable_regional_builder:
@@ -660,7 +916,7 @@ def main() -> None:
         elif build_resources or args.enable_regional_builder:
             raise DeploymentError("build settings require stage-builders and a normal protected deployment")
         elif args.operation == "stage-postgres":
-            if args.placement_policy is not None or args.command_concurrency is not None or args.create_rate:
+            if args.placement_policy is not None or args.command_concurrency is not None or args.create_rate or args.prefer_incoming_warm_fit is not None:
                 raise DeploymentError("stage database settings separately from ordinary live tuning")
             result = stage_postgres(kube, args.namespace, expected_candidate=args.expected_candidate or "",
                                     settings=database_settings)
@@ -677,7 +933,7 @@ def main() -> None:
                 rates[target] = int(rate)
             result = apply(kube, args.namespace, expected_candidate=args.expected_candidate or "",
                            placement_policy=args.placement_policy, command_concurrency=args.command_concurrency,
-                           create_rates=rates)
+                           create_rates=rates, prefer_incoming_warm_fit=None if args.prefer_incoming_warm_fit is None else args.prefer_incoming_warm_fit == "true")
         print(json.dumps(result, sort_keys=True))
     except DeploymentError as error:
         print(f"Execution tuning did not converge: {error}", file=sys.stderr)

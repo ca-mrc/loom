@@ -298,6 +298,7 @@ async def reserve_next_service_execution(
     pool_id: str,
     image_admission_keyring: ImageAdmissionKeyring,
     maximum_deadline_seconds: int = 7200,
+    prefer_incoming_warm_fit: bool = False,
     placement_policy: ExecutionPlacementPolicy = "environment-local-health-first",
     now: datetime | None = None,
 ) -> ServiceExecutionLease | None:
@@ -314,6 +315,7 @@ async def reserve_next_service_execution(
             image_admission_keyring=image_admission_keyring,
             maximum_deadline_seconds=maximum_deadline_seconds,
             placement_policy=placement_policy, now=current_time,
+            prefer_incoming_warm_fit=prefer_incoming_warm_fit,
         )
         if lease is not None or not continue_scan:
             return lease
@@ -327,6 +329,7 @@ async def _reserve_service_execution_candidate(
     pool_id: str,
     image_admission_keyring: ImageAdmissionKeyring,
     maximum_deadline_seconds: int = 7200,
+    prefer_incoming_warm_fit: bool = False,
     placement_policy: ExecutionPlacementPolicy = "environment-local-health-first",
     now: datetime | None = None,
 ) -> tuple[ServiceExecutionLease | None, bool]:
@@ -364,6 +367,7 @@ async def _reserve_service_execution_candidate(
                 maximum_deadline_seconds=maximum_deadline_seconds,
                 current_time=current_time,
                 placement_policy=placement_policy,
+                prefer_incoming_warm_fit=prefer_incoming_warm_fit,
             )
             return lease, False
     except ServiceExecutionParentTerminalError:
@@ -578,6 +582,7 @@ async def _reserve_service_candidate(
     image_admission_keyring: ImageAdmissionKeyring,
     maximum_deadline_seconds: int,
     current_time: datetime,
+    prefer_incoming_warm_fit: bool = False,
     placement_policy: ExecutionPlacementPolicy = "environment-local-health-first",
 ) -> ServiceExecutionLease | None:
     compiled = await _compile_service_candidate(session, row=row, environment=environment,
@@ -588,7 +593,14 @@ async def _reserve_service_candidate(
     runtime_plan, requirements = compiled.runtime_plan, compiled.requirements
     blocked: ExecutionProvisioningBlockedError | None = None
     policy_blocked: ServiceExecutionPolicyBlockedError | None = None
-    for target in compiled.targets:
+    targets = list(compiled.targets)
+    allocated: dict[str, ExecutionRuntimePlanV1] = {}
+    previews: dict[str, dict[str, object]] = {}
+    if prefer_incoming_warm_fit and len(targets) > 1:
+        from loom_control_plane.incoming_capacity_preview import order_incoming_targets
+        targets, allocated, previews = await order_incoming_targets(session, targets=targets, compiled=compiled,
+            trial_id=row["id"], now=current_time)
+    for target in targets:
         if requirements.data_residency and target.data_residency != requirements.data_residency:
             continue
         # A target's failed admission must not keep a route, cost reservation or
@@ -596,7 +608,7 @@ async def _reserve_service_candidate(
         target_id = target.id
         try:
             async with session.begin_nested():
-                allocated_plan = (await allocate_target_resources(
+                allocated_plan = allocated.get(target_id) or (await allocate_target_resources(
                     session, runtime_plan, target_id=target_id, now=current_time,
                 ) if compiled.allocate_resources else runtime_plan)
                 lease = await reserve_trial_execution(
@@ -632,6 +644,7 @@ async def _reserve_service_candidate(
                         "observed_at": current_time.isoformat(), "lease_id": str(lease.id),
                         "image_ready_at": compiled.image_ready_at.isoformat() if compiled.image_ready_at else None,
                         "image_mode": compiled.image_mode,
+                        **({"placement_preview": previews[target_id]} if target_id in previews else {}),
                     },
                 ))
                 return lease
@@ -860,6 +873,7 @@ async def run_service_execution_scheduler_loop(
     image_admission_keyring: ImageAdmissionKeyring,
     interval_seconds: float,
     maximum_deadline_seconds: int,
+    prefer_incoming_warm_fit: bool = False,
     placement_policy: ExecutionPlacementPolicy = "environment-local-health-first",
     global_selector: GlobalExecutionSelector | None = None,
 ) -> None:
@@ -890,6 +904,7 @@ async def run_service_execution_scheduler_loop(
                         image_admission_keyring=image_admission_keyring,
                         maximum_deadline_seconds=maximum_deadline_seconds,
                         placement_policy=placement_policy,
+                        prefer_incoming_warm_fit=prefer_incoming_warm_fit,
                     )
                     await session.commit()
                 if lease is not None:
