@@ -1657,6 +1657,9 @@ cluster = [
     { name = "kubernetes" },
     { name = "nebius" },
 ]
+control-plane = [
+    { name = "kubernetes" },
+]
 dev = [
     { name = "dnspython" },
     { name = "hypothesis" },
@@ -1718,6 +1721,7 @@ requires-dist = [
     { name = "jinja2", specifier = ">=3.1,<4.0" },
     { name = "jsonschema", specifier = ">=4.21,<5.0" },
     { name = "kubernetes", marker = "extra == 'cluster'", specifier = ">=28.1,<32.0" },
+    { name = "kubernetes", marker = "extra == 'control-plane'", specifier = ">=28.1,<32.0" },
     { name = "kubernetes", marker = "extra == 'dev'", specifier = ">=28.1,<32.0" },
     { name = "litellm", specifier = ">=1.92.2,<2.0" },
     { name = "loom-benchmark-terminal-bench-2", marker = "extra == 'rollout'", editable = "packages/loom-benchmark-terminal-bench-2" },
@@ -1756,7 +1760,7 @@ requires-dist = [
     { name = "vllm", marker = "extra == 'vllm'", specifier = ">=0.6,<1.0" },
     { name = "zstandard", specifier = ">=0.23,<1.0" },
 ]
-provides-extras = ["nebius-gateway", "modal", "cluster", "rollout", "vllm", "dev"]
+provides-extras = ["control-plane", "nebius-gateway", "modal", "cluster", "rollout", "vllm", "dev"]
 
 [package.metadata.requires-dev]
 ci-coverage = [{ name = "coverage", specifier = ">=7,<8" }]

@@ -16,8 +16,34 @@ COPY database/capacity_guard_migrations ./database/capacity_guard_migrations
 # loom-launcher's adapter registry. Without it they are silently unknown.
 RUN chmod -R a+rX ./src ./database/migrations ./database/capacity_guard_migrations ./packages/loom-bundle-checksum ./packages/loom-launcher && \
     pip install --no-cache-dir -e ./packages/loom-bundle-checksum && \
-    pip install --no-cache-dir -e . && \
+    pip install --no-cache-dir -e ".[control-plane]" && \
     pip install --no-cache-dir -e ./packages/loom-launcher && \
     python -c 'from loom.hosted_harness import NATIVE_EXECUTION_AGENT_NAMES as n; from loom_service.agent_catalog import known_names as k; missing = n - k(); assert not missing, missing'
+# Exercise lazy quantity parsing used by incoming placement, not only imports.
+RUN python - <<'PY'
+from loom_control_plane.incoming_capacity_preview import rendered_pod_resources
+from loom_execution_capacity_collector.kubernetes import KubernetesObservationError
+
+resources = rendered_pod_resources({
+    'containers': [
+        {'resources': {'requests': {'cpu': '1.25', 'memory': '2Gi', 'ephemeral-storage': '4Gi'}}},
+        {'resources': {'requests': {'cpu': '250m', 'memory': '128Mi', 'ephemeral-storage': '64Mi'}}},
+    ],
+    'initContainers': [
+        {'resources': {'requests': {'cpu': '1800m', 'memory': '3Gi', 'ephemeral-storage': '6Gi'}}},
+    ],
+    'overhead': {'cpu': '125m', 'memory': '16Mi', 'ephemeral-storage': '64Mi'},
+})
+assert (resources.cpu_millis, resources.memory_mib, resources.storage_mib) == (1925, 3088, 6208)
+try:
+    rendered_pod_resources({'containers': [{'resources': {'requests': {
+        'cpu': 'invalid', 'memory': '1Gi', 'ephemeral-storage': '1Gi',
+    }}}]})
+except KubernetesObservationError:
+    pass
+else:
+    raise AssertionError('invalid resource quantity was accepted')
+print('incoming-preview-resource-smoke: passed cpu=1925 memory_mib=3088 storage_mib=6208 invalid_quantity=rejected')
+PY
 EXPOSE 8080
 CMD ["python", "-m", "loom_control_plane"]

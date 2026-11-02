@@ -54,6 +54,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Incoming placement preview parses complete rendered Pod resource quantities.
+# Keep its SDK dependency in the control-plane image, outside library installs.
+control-plane = ["kubernetes>=28.1,<32.0"]
 # Gateway native Pod TokenReview needs IAM refresh, without the Kubernetes CLI/client.
 # Match the thin actuator and uv.lock so both images use the verified SDK API.
 nebius-gateway = ["nebius==0.6.1"]
