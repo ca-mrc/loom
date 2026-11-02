@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import sysconfig
+import tomllib
 from pathlib import Path
 
 from loom.dockerfile_instructions import dockerfile_instructions
@@ -174,3 +175,23 @@ from loom_control_plane.execution_capacity_wait import (
                              capture_output=True, text=True, timeout=30)
     assert missing.returncode != 0
     assert "missing image dependency: loom.artifact_contract" in missing.stderr
+
+
+def test_control_plane_image_executes_incoming_preview_resource_parser() -> None:
+    """A wide dev environment must not substitute for the image dependency set."""
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    assert project["optional-dependencies"]["control-plane"] == ["kubernetes>=28.1,<32.0"]
+    assert not any(dependency.startswith("kubernetes") for dependency in project["dependencies"])
+    text = (ROOT / "deploy/Dockerfile.control-plane").read_text()
+    install_commands = [shlex.split(line.strip().removesuffix("\\")) for line in text.splitlines()
+                        if "pip install" in line]
+    assert any(command[:5] == ["pip", "install", "--no-cache-dir", "-e", ".[control-plane]"]
+               for command in install_commands)
+    smoke = re.search(r"RUN python - <<'PY'\n(.*?)\nPY", text, re.DOTALL)
+    assert smoke is not None
+    assert "from loom_control_plane.incoming_capacity_preview import rendered_pod_resources" in smoke.group(1)
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "src"), "PYTHONDONTWRITEBYTECODE": "1"}
+    result = subprocess.run([sys.executable, "-B", "-c", smoke.group(1)], cwd=ROOT,
+                            env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "incoming-preview-resource-smoke: passed" in result.stdout
