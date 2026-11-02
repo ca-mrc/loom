@@ -6,6 +6,11 @@ import asyncio
 import json
 from time import monotonic, time
 
+from loom_execution_capacity_collector.capture_schedule import (
+    CURRENT_CAPTURE,
+    CaptureSchedule,
+    CaptureTiming,
+)
 from loom_execution_capacity_collector.collector import collect_capacity_observation
 from loom_execution_capacity_collector.config import (
     CapacityCollectorModeSettings,
@@ -31,7 +36,8 @@ async def _run() -> None:
         # relative window alone can otherwise make Forbid skip the next job.
         remaining_minute = 60 - time() % 60 - mode.sample_stop_before_minute_seconds
         deadline = min(deadline, started + remaining_minute)
-    next_sample = started
+    schedule = CaptureSchedule(interval=mode.sample_interval_seconds,
+                               margin=mode.sample_alignment_margin_seconds or 0.0)
     receipt: CapacityObservationReceipt | PoolObservationReceiptV1 | None = None
 
     async def capture() -> CapacityObservationReceipt | PoolObservationReceiptV1:
@@ -46,6 +52,8 @@ async def _run() -> None:
                 raise RuntimeError("collector sampling window elapsed before first capture")
             break
         budget = asyncio.timeout(remaining)
+        timing = CaptureTiming(started_monotonic=monotonic(), started_wall=time())
+        token = CURRENT_CAPTURE.set(timing)
         try:
             async with budget:
                 receipt = await capture()
@@ -57,16 +65,18 @@ async def _run() -> None:
             if not budget.expired() or receipt is None:
                 raise
             break
+        finally:
+            CURRENT_CAPTURE.reset(token)
         if not mode.sample_window_seconds:
             break
-        # Anchor starts to the job clock; a slow capture skips elapsed slots
-        # instead of issuing a burst of catch-up reads. No overlapping pass,
-        # hidden retry, or new collection begins beyond the sampling window.
+        # Starts keep at least the interval apart; a slow capture skips elapsed
+        # slots instead of issuing a burst of catch-up reads. No overlapping
+        # pass, hidden retry, or new collection begins beyond the sampling window.
+        if mode.sample_alignment_margin_seconds is None:
+            timing.read = None
         now = monotonic()
-        next_sample += mode.sample_interval_seconds
-        while next_sample < now:
-            next_sample += mode.sample_interval_seconds
-        if next_sample >= deadline:
+        next_sample = schedule.next_start(previous=timing, now=now, deadline=deadline)
+        if next_sample is None:
             break
         if next_sample > now:
             await asyncio.sleep(next_sample - now)

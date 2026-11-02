@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from datetime import UTC, datetime
 from typing import Any
 
 from loom.pipeline.keys import canonical_digest
+from loom_execution_capacity_collector.capture_schedule import NodeIORead, record_node_io_read
 from loom_execution_capacity_collector.config import ExecutionCapacityCollectorSettings
 from loom_execution_capacity_collector.contracts import (
     CapacityObservationReceipt,
     CapacityObservationV1,
     CapacityPlacement,
     KubernetesCapacitySnapshot,
+    NodeIOWindowPressure,
     NodeStateCounts,
     NodeTemplateSample,
     ProviderCapacitySnapshot,
@@ -33,12 +36,17 @@ async def _with_node_io(provider: Any, snapshot: KubernetesCapacitySnapshot) -> 
     read = getattr(provider, "capture_node_io", None)
     if read is None or not snapshot.nodes:
         return snapshot
+    requested = time.time()
     try:
         async with asyncio.timeout(10):
             windows = await read(snapshot.nodes)
     except Exception:
         # Do not retain HTTP bodies, labels, endpoints or credentials in errors.
         windows = {}
+    record_node_io_read(NodeIORead(requested_wall=requested, series=tuple(
+        (uid, window.sampled_at.timestamp(), (window.sampled_at - window.window_started_at).total_seconds())
+        for uid, window in sorted(windows.items()) if isinstance(window, NodeIOWindowPressure)
+    )))
     return snapshot.model_copy(update={"nodes": [
         node.model_copy(update={"io_stall_window": windows.get(node.uid)})
         for node in snapshot.nodes

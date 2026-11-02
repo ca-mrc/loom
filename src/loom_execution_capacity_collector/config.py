@@ -94,6 +94,9 @@ class CapacityCollectorModeSettings(BaseSettings):
     sample_window_seconds: float = Field(default=0.0, ge=0.0, le=55.0)
     sample_interval_seconds: float = Field(default=15.0, ge=10.0, le=30.0)
     sample_stop_before_minute_seconds: float | None = Field(default=None, ge=1.0, le=10.0)
+    # Unset keeps the fixed clock. When set, later captures in a window are timed
+    # to read each provider I/O point this long after its timestamp (#2750).
+    sample_alignment_margin_seconds: float | None = Field(default=None, ge=0.0, le=10.0)
 
 
 __all__ = ["CapacityCollectorModeSettings", "ExecutionCapacityCollectorSettings", "PoolCapacityCollectorSettings"]
