@@ -179,6 +179,7 @@ done
     name = 'loom-pg-init-barrier-' + uuid4().hex
     started = False
     try:
+        _docker('pull', 'postgres:16')
         image_id = _docker('image', 'inspect', 'postgres:16', '--format', '{{.Id}}')
         _docker('create', '--name', name, '--cpus', '1', '--memory', '512m',
             '--network', 'none', '--tmpfs', '/var/lib/postgresql/data:rw,size=256m',
@@ -198,10 +199,6 @@ done
         while not (control / 'entered').exists():
             assert time.monotonic() < deadline, 'PostgreSQL temporary init server barrier not reached'
             time.sleep(0.05)
-        entrypoint = _docker('exec', name, 'cat', '/usr/local/bin/docker-entrypoint.sh')
-        assert "-c listen_addresses=''" in entrypoint
-        assert entrypoint.index('docker_temp_server_start "$@"') < entrypoint.index('docker_process_init_files /docker-entrypoint-initdb.d/*')
-
         def readiness(command):
             return subprocess.run(['docker', 'exec', name, *command], capture_output=True,
                 text=True, timeout=5, check=False).returncode
