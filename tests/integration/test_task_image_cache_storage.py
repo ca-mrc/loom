@@ -69,8 +69,8 @@ def test_publication_preserves_cache_budget_with_real_storage(
         directory = work / "cache-out/0"
         directory.mkdir(parents=True)
         with (directory / "layer").open("wb") as output:
-            # Sparse metadata-only overflow: exercises the real unchanged1GiB
-            # boundary without allocating/uploading a GiB in this test.
+            # Sparse metadata-only overflow: exercises the real 8 GiB
+            # boundary without allocating/uploading that cache in this test.
             output.truncate(runtime._CACHE_BYTES + 1 if oversized else 32)
         registry_copies = []
 

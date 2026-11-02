@@ -220,7 +220,7 @@ failed command has one. The controller copies those fields onto the attempt as
 record as `diagnostic` for the current attempt. The summary is not retry
 authority. Dockerfile build logs remain on the attempt row.
 
-An optional BuildKit cache larger than 1 GiB is deferred during publish. The
+An optional BuildKit cache larger than 8 GiB is deferred during publish. The
 registry image, archives, runtime metadata, and receipt still succeed. Invalid
 cache content still fails publish. Import and unpack keep rejecting a stored
 cache over that limit.
@@ -351,7 +351,7 @@ These are independent limits, rather than multiples of a shared cache constant:
 
 | Budget | Current value | Owner |
 | --- | --- | --- |
-| Cache logical file bytes per component | 1 GiB | `task_image_runtime._CACHE_BYTES` |
+| Cache logical file bytes per component | 8 GiB | `task_image_runtime._CACHE_BYTES` |
 | OCI image bytes | 3 GiB | `task_image_oci` validators, including runtime-metadata reads |
 | Cache bucket GC target | 4 GiB | `task_image_runtime._CACHE_TOTAL_BYTES` |
 
@@ -360,9 +360,10 @@ bucket above it. It is neither a provider quota nor a per-Job disk budget.
 Verified cache reuse remains separately bounded at 256 MiB. Archive and blob
 cache transfer continue to enforce their existing limits.
 
-The 2026-10-28 assessment for [#2292](https://github.com/ca-mrc/loom/issues/2292)
-recommends **2 GiB per component as a pilot candidate**, retaining the 1 GiB
-default until actual cache sizes and the aggregate disk envelope are qualified.
+The component budget is 8 GiB. The 2026-10-28 assessment for
+[#2292](https://github.com/ca-mrc/loom/issues/2292) had recommended 2 GiB per
+component as a pilot and kept the earlier 1 GiB default until cache sizes were
+qualified. The OCI limit and the cache GC target stay at their own values.
 The successful `mp-checkpoint-consolidation` image build failed during cache
 publication above 1 GiB; its complete cache size was not retained. A separate
 local CPU vLLM verifier build produced a 1,249,129,984-byte OCI archive (about
@@ -372,26 +373,20 @@ establish that 2 GiB covers this cache or the whole task set. The local worker
 used the production-pinned rootless/native BuildKit under Docker Desktop with
 amd64 emulation; its timings do not establish Nebius transfer throughput.
 
-A blanket 4 GiB default is not justified by the current resource envelope.
 Prepare imports all components before the build starts, and cache inputs,
-cache outputs and OCI outputs remain until Job cleanup. At the maximum eight
-components, 4 GiB inputs plus 4 GiB outputs per component would occupy 64 GiB
-before OCI output, source, temporary transfers or native snapshots. This is a
-capacity illustration, not an export-enforced disk bound: BuildKit can create
-an oversized local cache before publication checks it. Even 2 GiB would raise
-the maximum imported-cache footprint from 8 to 16 GiB, while the supported
-minimum builder allocation remains 16 GiB. Larger builders do not make that
-safe for every component count or authored Dockerfile.
+cache outputs and OCI outputs remain until Job cleanup. One component at the
+8 GiB budget needs about 8 GiB in, 8 GiB out, 0.5 GiB of context and 3 GiB of
+OCI. Eight components at that size exceed a 64 GiB builder before OCI output,
+source, temporary transfers or native snapshots. The export check is not a disk
+quota: BuildKit can create an oversized local cache before publication defers
+it. The supported minimum builder allocation remains 16 GiB, so a full 8 GiB
+cache pair needs the larger configured scratch. The bucket GC target stays
+4 GiB unless a builder sets `cache_total_mib`.
 
-Before adopting the pilot, retain complete logical cache sizes, transfer bytes
-and stage durations, and measure peak disk use for the intended resource and
-component envelope. Keep the OCI limit and GC target unchanged. Also account
-for tar transport overhead: legacy download and unpack now use a separate,
-derived physical limit for bounded headers and padding. An exact-budget logical
-export can round-trip without increasing its logical capacity. Keep that
-transport headroom separate when evaluating a larger logical limit.
-This assessment changes no build resource, timeout, deployment or acceptance
-policy, and does not claim hosted task-set acceptance.
+Legacy download and unpack use a separate physical limit for bounded headers
+and padding. An exact-budget logical export can round-trip without increasing
+its logical capacity. Keep that transport headroom separate from the 8 GiB
+logical budget. The OCI limit and the GC target stay unchanged.
 
 ## Compatibility and verification
 

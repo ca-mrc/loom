@@ -34,8 +34,8 @@ _CLAIM = "/loom/claim/claim.json"
 _BUILD = "/loom/build"
 _CREDENTIALS = "/var/run/loom-task-build"
 MAX_NATIVE_BUILD_COMPONENTS = 8
-# One largest supported component needs 0.5 GiB context + 1 GiB cache in
-# + 1 GiB cache out + 3 GiB OCI, plus logs. Its native snapshots and the
+# One largest supported component needs 0.5 GiB context + 8 GiB cache in
+# + 8 GiB cache out + 3 GiB OCI, plus logs. Its native snapshots and the
 # publisher's extracted OCI require separate room. Larger multi-component
 # builds remain bounded by the explicitly configured aggregate Pod budget.
 MIN_TASK_IMAGE_EPHEMERAL_STORAGE_MIB = 16 * 1024

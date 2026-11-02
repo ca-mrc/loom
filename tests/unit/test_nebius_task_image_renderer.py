@@ -334,7 +334,7 @@ def test_job_bounds_resources_and_only_builder_has_rootless_exceptions(inputs) -
     assert 8192 + 1024 < inputs["config"].ephemeral_storage_mib
     assert all(container["resources"]["limits"]["ephemeral-storage"] == "32768Mi"
                for container in pod["initContainers"] + pod["containers"])
-    assert sizes["build"] > 512 + 1024 + 1024 + 3072
+    assert sizes["build"] > 512 + 8 * 1024 + 8 * 1024 + 3072
     assert sizes["prepare-tmp"] > 1024 and sizes["publish-tmp"] > 3072
     private_tmp = {
         next(
