@@ -1581,6 +1581,176 @@ def test_publish_tar_mode_writes_legacy_archive(source_bundle, tmp_path, publish
     assert cache.uploads[0][1] == f"task-build-cache/{claim['materialization_key']}/0.tar"
 
 
+@pytest.mark.parametrize("transfer", ["blobs", "tar"])
+@pytest.mark.parametrize("total_mib,expected_saved", [(None, False), (4096, False), (65536, True)])
+def test_frozen_total_cache_budget_controls_publication_into_same_recent_inventory(
+    source_bundle, tmp_path, publisher, capsys, transfer, total_mib, expected_saved,
+) -> None:
+    """Exercise the publisher/GC/checkpoint path, not a mocked admission result.
+
+    Listing sizes model the observed ~36.77 GiB retained store without allocating
+    those bytes in developer memory. Its recent referenced root is protected by
+    the unchanged seven-day policy in both the 4 GiB and 64 GiB cases.
+    """
+    claim, _ = source_bundle
+    claim = {**claim, "cache_transfer": transfer}
+    if total_mib is not None:
+        claim["cache_total_mib"] = total_mib
+    cache, calls = publisher
+    retained_key = _manifest_key("f")
+    retained_blob = _blob_key(_digest("e"))
+    cache.objects.update({retained_key: _manifest_body(_digest("e")), retained_blob: b"x"})
+    retained_bytes = 39_480_962_442
+    cache.listing = [
+        _listed(retained_key, len(cache.objects[retained_key]), _cache_moment(days=1)),
+        _listed(retained_blob, retained_bytes-len(cache.objects[retained_key]), _cache_moment(days=1)),
+    ]
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    _write_native_oci(work / "oci/0000.tar")
+    directory = work / "cache-out/0"
+    directory.mkdir(parents=True)
+    (directory / "index.json").write_bytes(b'{"schemaVersion":2}')
+    receipt = runtime.publish(claim, work, tmp_path / "secrets", receipt_path=tmp_path / "receipt.json")
+    saved = (runtime._v2_manifest_key(claim["materialization_key"], 0) if transfer == "blobs"
+             else f"task-build-cache/{claim['materialization_key']}/0.tar")
+    assert (saved in cache.objects) is expected_saved
+    assert len(calls) == 1 and set(receipt["registry_images"]) == {"task"}
+    assert retained_key in cache.objects and retained_blob in cache.objects
+    assert _cache_data_deletes(cache) == []
+    checkpoint = json.loads(cache.objects[runtime._CACHE_GC_CHECKPOINT])
+    assert checkpoint["retained_bytes"] == retained_bytes
+    assert (checkpoint["debt_bytes"] > 0) is expected_saved
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    expected_bytes = (total_mib or 4096) * 1024**2
+    inventory = next(row for row in events if row.get("event") == "inventory")
+    assert inventory["budget_bytes"] == expected_bytes
+    assert inventory["reclaimed_bytes"] == 0
+    assert any(row.get("reason") == "cache_budget_protected" for row in events) is not expected_saved
+
+
+@pytest.mark.parametrize("value", [None, True, False, 0, -1, 1023, 1048577, 65536.0, "65536", {}, []])
+def test_load_claim_rejects_invalid_total_cache_budget(source_bundle, tmp_path, value):
+    claim, _ = source_bundle
+    path = tmp_path / "claim.json"
+    path.write_text(json.dumps({**claim, "cache_total_mib": value}))
+    with pytest.raises(runtime.BuildPreparationError, match="cache total"):
+        runtime.load_claim(path)
+
+
+@pytest.mark.parametrize("value", [1024, 4096, 65536, 1048576])
+def test_load_claim_accepts_total_cache_budget_boundaries(source_bundle, tmp_path, value):
+    claim, _ = source_bundle
+    path = tmp_path / "claim.json"
+    path.write_text(json.dumps({**claim, "cache_total_mib": value}))
+    loaded = runtime.load_claim(path)
+    assert loaded["cache_total_mib"] == value
+    assert runtime._cache_total_bytes(loaded) == value * 1024**2
+
+
+def test_legacy_claim_omits_total_cache_budget_and_uses_current_default(source_bundle, tmp_path, monkeypatch):
+    claim, _ = source_bundle
+    path = tmp_path / "claim.json"
+    path.write_text(json.dumps(claim))
+    loaded = runtime.load_claim(path)
+    assert "cache_total_mib" not in loaded
+    assert runtime._cache_total_bytes(loaded) == 4096 * 1024**2
+    # Existing tests/tools override the old default; avoid a bound default arg
+    # silently freezing its former value in lower-level GC helper calls.
+    monkeypatch.setattr(runtime, "_CACHE_TOTAL_BYTES", 1234)
+    assert runtime._cache_total_bytes(loaded) == 1234
+    assert runtime._cache_total_bytes({**loaded, "cache_total_mib": 65536}) == 65536 * 1024**2
+
+
+def test_larger_frozen_budget_reuses_same_recent_checkpoint_after_old_budget_refusal(
+    source_bundle, tmp_path, capsys,
+):
+    claim, _ = source_bundle
+    retained = 39_480_962_442
+
+    class NoInventoryScan(FakeS3):
+        def get_paginator(self, name):
+            raise AssertionError("fresh checkpoint must not trigger another full inventory")
+
+    cache = NoInventoryScan({runtime._CACHE_GC_CHECKPOINT: json.dumps(runtime._cache_checkpoint(retained)).encode()})
+    directory = tmp_path / "cache-out"
+    directory.mkdir()
+    (directory / "layer").write_bytes(b"shared-layer")
+    manifest_key = runtime._v2_manifest_key(claim["materialization_key"], 0)
+    runtime._publish_cache_blobs(cache, {**claim, "cache_total_mib": 4096}, index=0, cache_dir=directory)
+    assert manifest_key not in cache.objects
+    refused = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    assert next(row for row in refused if row.get("reason") == "cache_budget_protected")["budget_bytes"] == 4096 * 1024**2
+    runtime._publish_cache_blobs(cache, {**claim, "cache_total_mib": 65536}, index=0, cache_dir=directory)
+    assert manifest_key in cache.objects
+    state = json.loads(cache.objects[runtime._CACHE_GC_CHECKPOINT])
+    assert state["retained_bytes"] == retained and state["publications"] == 1 and state["debt_bytes"] > 0
+    # Another component reusing the same content accounts only its manifest.
+    debt_before = state["debt_bytes"]
+    runtime._publish_cache_blobs(cache, {**claim, "cache_total_mib": 65536}, index=1, cache_dir=directory)
+    second_manifest = runtime._v2_manifest_key(claim["materialization_key"], 1)
+    state = json.loads(cache.objects[runtime._CACHE_GC_CHECKPOINT])
+    assert state["debt_bytes"]-debt_before == len(cache.objects[second_manifest])
+    assert len(cache.uploads) == 1
+    accepted = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    assert all(row["budget_bytes"] == 65536 * 1024**2 for row in accepted if row.get("event") == "debt")
+
+
+@pytest.mark.parametrize("transfer", ["blobs", "tar"])
+def test_large_total_cache_budget_does_not_raise_single_component_limit(
+    source_bundle, tmp_path, publisher, capsys, transfer,
+):
+    claim, _ = source_bundle
+    claim = {**claim, "cache_total_mib": 65536, "cache_transfer": transfer}
+    cache, calls = publisher
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    _write_native_oci(work / "oci/0000.tar")
+    directory = work / "cache-out/0"
+    directory.mkdir(parents=True)
+    with (directory / "layer").open("wb") as output:
+        output.truncate(1024**3 + 1)  # sparse: no GiB allocation/read required
+    runtime.publish(claim, work, tmp_path / "secrets", receipt_path=tmp_path / "receipt.json")
+    assert len(calls) == 1 and not cache.uploads
+    assert not any(key.endswith(("manifest.json", ".tar")) for key in cache.objects)
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    refused = next(row for row in events if row.get("reason") == "byte_budget_exceeded")
+    assert refused["budget_bytes"] == 1024**3
+
+
+@pytest.mark.parametrize("total_mib,kept", [(4096, False), (65536, True)])
+def test_claim_budget_reaches_gc_and_preserves_shared_blob_reference_accounting(
+    source_bundle, tmp_path, capsys, total_mib, kept,
+):
+    claim, _ = source_bundle
+    claim = {**claim, "cache_total_mib": total_mib}
+    shared, older_only, newer_only = _digest("a"), _digest("b"), _digest("c")
+    older, newer = _manifest_key("d"), _manifest_key("e")
+    objects = {older: _manifest_body(shared, older_only), newer: _manifest_body(shared, newer_only),
+               _blob_key(shared): b"s", _blob_key(older_only): b"a", _blob_key(newer_only): b"b"}
+    listing = [_listed(older, len(objects[older]), _cache_moment(days=12)),
+               _listed(newer, len(objects[newer]), _cache_moment(days=11)),
+               _listed(_blob_key(shared), 2500*1024**2, _cache_moment(days=10)),
+               _listed(_blob_key(older_only), 2000*1024**2, _cache_moment(days=10)),
+               _listed(_blob_key(newer_only), 2000*1024**2, _cache_moment(days=10))]
+    cache = FakeS3(objects, listing=listing)
+    directory = tmp_path / "cache-out"
+    directory.mkdir()
+    (directory / "layer").write_bytes(b"new cache")
+    runtime._publish_cache_blobs(cache, claim, index=0, cache_dir=directory)
+    assert runtime._v2_manifest_key(claim["materialization_key"], 0) in cache.objects
+    assert (older in cache.objects) is kept and (newer in cache.objects) is kept
+    assert (_blob_key(shared) in cache.objects) is kept
+    if not kept:
+        assert cache.deletes.index(_blob_key(shared)) > cache.deletes.index(newer)
+    else:
+        assert _cache_data_deletes(cache) == []
+    checkpoint = json.loads(cache.objects[runtime._CACHE_GC_CHECKPOINT])
+    assert checkpoint["retained_bytes"] == (sum(row["Size"] for row in listing) if kept else 0)
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    assert next(row for row in events if row.get("event") == "inventory")["budget_bytes"] == total_mib*1024**2
+
+
 def test_trim_cache_deletes_unreferenced_old_blob(tmp_path) -> None:
     from datetime import UTC, datetime, timedelta
 

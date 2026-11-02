@@ -61,6 +61,27 @@ def render(participant, body, profile, now=None, reservation_id=RESERVATION):
         profile=profile, reservation_id=reservation_id, now=now or datetime.now(UTC))
 
 
+@pytest.mark.parametrize("budget", [None, 65536])
+def test_global_native_profile_freezes_cache_budget_in_actual_rendered_claim(tmp_path, budget):
+    participant, body, profile = build_inputs()
+    if budget is not None:
+        profile = replace(profile, settings=profile.settings.model_copy(update={"cache_total_mib": budget}))
+    prepared = render(participant, body, profile)
+    encoded = prepared.configmap["data"]["claim.json"]
+    frozen = json.loads(encoded)
+    assert ("cache_total_mib" in frozen) is (budget is not None)
+    if budget is not None:
+        assert frozen["cache_total_mib"] == budget
+    path = tmp_path / "claim.json"
+    path.write_text(encoded)
+    assert load_claim(path).get("cache_total_mib", 4096) == (4096 if budget is None else budget)
+    # Cache retention is independent of the native Pod's physical reservation.
+    assert prepared.resources.model_dump() == {"cpu_millis": 4000, "memory_mib": 4096, "storage_mib": 32768}
+    changed = replace(profile, settings=profile.settings.model_copy(update={"cache_total_mib": 32768}))
+    assert json.loads(render(participant, body, changed).configmap["data"]["claim.json"])["cache_total_mib"] == 32768
+    assert prepared.configmap["data"]["claim.json"] == encoded
+
+
 def test_native_adapter_renders_actual_sequential_peak_and_loadable_protected_claim(tmp_path):
     participant, body, profile = build_inputs()
     prepared = render(participant, body, profile)

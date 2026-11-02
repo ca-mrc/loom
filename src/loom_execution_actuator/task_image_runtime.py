@@ -262,8 +262,19 @@ def load_claim(path: Path) -> dict[str, Any]:
     export_format = claim.get("oci_export_format", "archive")
     if export_format not in {"archive", "directory"}:
         raise BuildPreparationError("invalid OCI export format")
+    _cache_total_bytes(claim)
     _io_full_avg10_limit(claim)
     return claim
+
+
+def _cache_total_bytes(claim: dict[str, Any]) -> int:
+    """Read the frozen store budget; old claims retain the historical default."""
+    if "cache_total_mib" not in claim:
+        return _CACHE_TOTAL_BYTES
+    value = claim["cache_total_mib"]
+    if type(value) is not int or not 1024 <= value <= 1048576:
+        raise BuildPreparationError("invalid cache total budget")
+    return value * 1024 * 1024
 
 
 def _io_full_avg10_limit(claim: dict[str, Any]) -> float | None:
@@ -776,17 +787,19 @@ def _cache_checkpoint(retained_bytes: int) -> dict[str, Any]:
 
 def _reserve_cache_publication(
     client: Any, bucket: str, incoming_bytes: int, *, refresh_incoming: Callable[[], int] | None = None,
+    total_bytes: int | None = None,
 ) -> bool:
     """Under the mutation lock, pre-account an upper bound before writing data.
 
     Ordinary publication reads/writes one checkpoint, not the retained inventory.
     A crash or ambiguous PUT can overcount; only a complete sweep resets debt.
     """
+    budget = _CACHE_TOTAL_BYTES if total_bytes is None else total_bytes
     try:
         state = _read_cache_checkpoint(client, bucket)
         expired = state is not None and time.time() - state["scanned_at"] >= _CACHE_GC_SECONDS
         over_budget = state is not None and (
-            state["retained_bytes"] + state["debt_bytes"] + incoming_bytes > _CACHE_TOTAL_BYTES
+            state["retained_bytes"] + state["debt_bytes"] + incoming_bytes > budget
         )
         due = state is None or expired or (
             state["publications"] >= _CACHE_GC_PUBLICATIONS
@@ -798,7 +811,7 @@ def _reserve_cache_publication(
         if due and state is not None and not expired and state["publications"] == 0:
             due = False
         if due:
-            remaining = _trim_cache_locked(client, bucket, incoming_bytes)
+            remaining = _trim_cache_locked(client, bucket, incoming_bytes, total_bytes=budget)
             if remaining is None:
                 emit_stage("cache_export", "deferred", reason="cache_gc_incomplete")
                 return False
@@ -809,10 +822,10 @@ def _reserve_cache_publication(
             if refresh_incoming is not None:
                 incoming_bytes = refresh_incoming()
         assert state is not None
-        if state["retained_bytes"] + state["debt_bytes"] + incoming_bytes > _CACHE_TOTAL_BYTES:
+        if state["retained_bytes"] + state["debt_bytes"] + incoming_bytes > budget:
             emit_stage("cache_export", "deferred", reason="cache_budget_protected",
                        accounted_bytes=state["retained_bytes"] + state["debt_bytes"],
-                       incoming_bytes=incoming_bytes, budget_bytes=_CACHE_TOTAL_BYTES)
+                       incoming_bytes=incoming_bytes, budget_bytes=budget)
             return False
         state = {**state, "debt_bytes": state["debt_bytes"] + incoming_bytes,
                  "publications": state["publications"] + 1}
@@ -822,7 +835,8 @@ def _reserve_cache_publication(
         return False
     emit_stage("cache_gc", "debt", publications=state["publications"],
                debt_bytes=state["debt_bytes"], retained_bytes=state["retained_bytes"],
-               publication_limit=_CACHE_GC_PUBLICATIONS, byte_batch=_CACHE_GC_BYTES)
+               publication_limit=_CACHE_GC_PUBLICATIONS, byte_batch=_CACHE_GC_BYTES,
+               budget_bytes=budget)
     return True
 
 
@@ -916,6 +930,7 @@ def _publish_cache_blobs_locked(
     incoming = missing_bytes()
     if not _reserve_cache_publication(
         client, claim["cache_bucket"], incoming, refresh_incoming=missing_bytes,
+        total_bytes=_cache_total_bytes(claim),
     ):
         return
     uploaded_bytes = 0
@@ -1168,22 +1183,27 @@ def _delete_cache_object(client: Any, bucket: str, item: dict[str, Any], deleted
     deleted.add(item["Key"])
 
 
-def trim_cache(client: Any, bucket: str, incoming_bytes: int) -> None:
+def trim_cache(client: Any, bucket: str, incoming_bytes: int, *, total_bytes: int | None = None) -> None:
     """Bound disposable cache size/age while excluding concurrent publishers."""
     with _cache_mutation(client, bucket) as acquired:
         if acquired:
-            _trim_cache_locked(client, bucket, incoming_bytes)
+            _trim_cache_locked(client, bucket, incoming_bytes, total_bytes=total_bytes)
 
 
-def _trim_cache_locked(client: Any, bucket: str, incoming_bytes: int) -> int | None:
+def _trim_cache_locked(
+    client: Any, bucket: str, incoming_bytes: int, *, total_bytes: int | None = None,
+) -> int | None:
     with stage_span("cache_gc"), cache_request_counts(client, "cache_gc"):
-        remaining = _trim_cache_inventory(client, bucket, incoming_bytes)
+        remaining = _trim_cache_inventory(client, bucket, incoming_bytes, total_bytes=total_bytes)
         if remaining is not None:
             _write_cache_checkpoint(client, bucket, _cache_checkpoint(remaining))
         return remaining
 
 
-def _trim_cache_inventory(client: Any, bucket: str, incoming_bytes: int) -> int | None:
+def _trim_cache_inventory(
+    client: Any, bucket: str, incoming_bytes: int, *, total_bytes: int | None = None,
+) -> int | None:
+    budget = _CACHE_TOTAL_BYTES if total_bytes is None else total_bytes
     roots: list[dict[str, Any]] = []
     blobs: list[dict[str, Any]] = []
     for page in client.get_paginator("list_objects_v2").paginate(
@@ -1221,7 +1241,7 @@ def _trim_cache_inventory(client: Any, bucket: str, incoming_bytes: int) -> int 
         _delete_cache_object(client, bucket, blob, deleted)
         total -= blob["Size"]
     for root in sorted(roots, key=lambda row: row["LastModified"]):
-        if total <= _CACHE_TOTAL_BYTES:
+        if total <= budget:
             break
         if root["LastModified"] >= cutoff:
             continue
@@ -1245,8 +1265,8 @@ def _trim_cache_inventory(client: Any, bucket: str, incoming_bytes: int) -> int 
             owners.discard(root["Key"])
     emit_stage("cache_gc", "inventory", reclaimed_bytes=initial_total - total,
                remaining_bytes=total - incoming_bytes, incoming_bytes=incoming_bytes,
-               budget_bytes=_CACHE_TOTAL_BYTES)
-    if total > _CACHE_TOTAL_BYTES and any(
+               budget_bytes=budget)
+    if total > budget and any(
         item["LastModified"] >= cutoff and item["Key"] not in deleted
         for item in (*roots, *blobs)
     ):
@@ -1430,6 +1450,7 @@ def publish(
                             with _cache_mutation(cache, claim["cache_bucket"]) as acquired:
                                 if acquired is True and _reserve_cache_publication(
                                     cache, claim["cache_bucket"], cache_archive.stat().st_size,
+                                    total_bytes=_cache_total_bytes(claim),
                                 ):
                                     cache.upload_file(
                                         str(cache_archive), claim["cache_bucket"],

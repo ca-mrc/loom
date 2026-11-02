@@ -37,6 +37,7 @@ class FakeKube:
         self.guard_held = False
         self.tuning_owner = None
         self.builder_request_support = True
+        self.builder_cache_budget_support = True
 
     def get(self, kind, name, namespace):
         return deepcopy(self.objects.get((kind, namespace, name), {}))
@@ -82,8 +83,10 @@ class FakeKube:
             builder = json.loads(env['LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER']) if env.get('LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER') else None
             return json.dumps({'command_concurrency': int(env['LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY']),
                 'builder_enabled': builder is not None, 'builder_request_support': self.builder_request_support,
+                'builder_cache_budget_support': self.builder_cache_budget_support,
                 'builder_resources': None if builder is None else {
                     'effective_cpu_request_millis': builder.get('cpu_request_millis') or builder['cpu_millis'],
+                    'cache_total_mib': builder.get('cache_total_mib', 4096) if self.builder_cache_budget_support else None,
                     **{k: builder[k] for k in ('cpu_millis', 'memory_mib', 'ephemeral_storage_mib', 'namespace')},
                 }})
         if args[0] == 'patch':
@@ -615,3 +618,343 @@ def test_live_builder_detects_existing_uid_or_frozen_envelope_replacement(region
     with pytest.raises(DeploymentError, match='UID or frozen resource envelope changed'):
         tuning.apply_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
                               resources={config['target_id']: {'cpu_request_millis': 2000}})
+
+
+def test_cache_total_budget_64g_stages_both_regions_without_changing_resources(regional_inputs):
+    from loom.nebius_platform_render import build_regional_execution
+    from tests.unit.test_nebius_platform_render_regional_builder import builder
+
+    config, candidate, profile = regional_inputs
+    config['task_image_builder'] = builder()
+    west = config['regional_execution_targets'][0]
+    west['task_image_builder'] = builder()
+    kube = FakeKube(regional_inputs)
+    original = deepcopy(config)
+    deployments = {key: deepcopy(row) for key, row in kube.objects.items() if key[0] == 'deployment'}
+    resources = {target: {'cache_total_mib': 65536} for target in (config['target_id'], west['target_id'])}
+    result = tuning.stage_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+                                  resources=resources)
+    saved = json.loads(kube.cm['data']['environment.json'])
+    for target in resources:
+        expected = deepcopy(tuning._owners(original)[target]['task_image_builder'])
+        expected['cache_total_mib'] = 65536
+        assert tuning._owners(saved)[target]['task_image_builder'] == expected
+        assert result['builders'][target]['cache_total_mib'] == 65536
+    assert deployments == {key: row for key, row in kube.objects.items() if key[0] == 'deployment'}
+    assert not any(args[0] in {'set', 'rollout', 'apply', 'delete', 'create'} for args in kube.calls)
+    rendered = build_platform(saved, candidate, profile, {}, repo_root=ROOT)
+    actuators = [doc for docs in rendered.values() for doc in docs if doc['kind'] == 'Deployment'
+                 and 'LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER' in tuning._env(doc)]
+    assert len(actuators) == 2
+    for doc in actuators:
+        settings = json.loads(tuning._env(doc)['LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER'])
+        assert settings['cache_total_mib'] == 65536
+        assert (settings['cpu_millis'], settings['memory_mib'], settings['ephemeral_storage_mib']) == (8000, 8192, 65536)
+    remote = build_regional_execution(saved, candidate, repo_root=ROOT)[west['target_id']]
+    quota = next(doc for doc in remote if doc['kind'] == 'ResourceQuota'
+                 and doc['metadata']['name'] == 'loom-task-image-build-capacity')
+    assert quota['spec']['hard']['limits.ephemeral-storage'] == '131072Mi'
+    version = kube.cm['metadata']['resourceVersion']
+    tuning.stage_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'], resources=resources)
+    assert kube.cm['metadata']['resourceVersion'] == version
+
+
+def _active_shared_cache_builders(regional_inputs, monkeypatch):
+    from loom.nebius_platform_render import build_regional_execution
+    from tests.unit.test_nebius_platform_render_regional_builder import builder
+
+    config, candidate, profile = regional_inputs
+    config['task_image_builder'] = builder()
+    west = config['regional_execution_targets'][0]
+    west['task_image_builder'] = builder()
+    kube = FakeKube(regional_inputs)
+    for doc in build_regional_execution(config, candidate, repo_root=ROOT)[west['target_id']]:
+        if doc['kind'] == 'ResourceQuota':
+            doc['metadata']['resourceVersion'] = '1'
+            kube.objects['resourcequota', doc['metadata']['namespace'], doc['metadata']['name']] = deepcopy(doc)
+    for owner in tuning._owners(config).values():
+        for ns in (owner['execution_namespace'], owner['execution_namespace'] + '-build'):
+            kube.objects['job', ns, 'inflight-before-cache-tuning'] = {
+                'metadata': {'name': 'inflight-before-cache-tuning', 'namespace': ns, 'uid': ns + '-original'},
+                'spec': {'activeDeadlineSeconds': 2700, 'template': {'spec': {'containers': [
+                    {'name': 'task', 'resources': {'requests': {'cpu': '8', 'memory': '8Gi',
+                     'ephemeral-storage': '64Gi'}, 'limits': {'cpu': '8', 'memory': '8Gi',
+                     'ephemeral-storage': '64Gi'}}}], 'initContainers': []}}},
+            }
+    monkeypatch.setattr(tuning, '_builder_kube', lambda current, saved, target: kube)
+    targets = (config['target_id'], west['target_id'])
+    return config, candidate, profile, kube, targets
+
+
+def test_cache_total_budget_live_roundtrip_preserves_jobs_quota_and_resource_ceilings(regional_inputs, monkeypatch):
+    config, candidate, profile, kube, targets = _active_shared_cache_builders(regional_inputs, monkeypatch)
+    jobs = {key: deepcopy(value) for key, value in kube.objects.items() if key[0] == 'job'}
+    quotas = {key: deepcopy(value) for key, value in kube.objects.items() if key[0] == 'resourcequota'}
+    original = deepcopy(config)
+    resources = {target: {'cache_total_mib': 65536} for target in targets}
+    result = tuning.apply_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+                                  resources=resources)
+    assert set(result['restarted_controllers']) == {'loom-execution-actuator', targets[1] + '-actuator'}
+    assert result['task_jobs_replaced'] is False
+    saved = json.loads(kube.cm['data']['environment.json'])
+    for target in targets:
+        expected = deepcopy(tuning._owners(original)[target]['task_image_builder'])
+        expected['cache_total_mib'] = 65536
+        assert tuning._owners(saved)[target]['task_image_builder'] == expected
+        assert result['builders'][target]['cache_total_mib'] == 65536
+        assert result['job_uid_snapshots'][target]['before'] == result['job_uid_snapshots'][target]['after']
+    assert jobs == {key: value for key, value in kube.objects.items() if key[0] == 'job'}
+    assert quotas == {key: value for key, value in kube.objects.items() if key[0] == 'resourcequota'}
+    assert not any(args[0] in {'delete', 'create', 'apply'} for args in kube.calls)
+    assert not any(args[:2] == ('patch', 'resourcequota') for args in kube.calls)
+    assert all('loom-control-plane' not in args for args in kube.calls if args[0] in {'set', 'rollout'})
+    version = kube.cm['metadata']['resourceVersion']
+    again = tuning.apply_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'], resources=resources)
+    assert again['restarted_controllers'] == [] and kube.cm['metadata']['resourceVersion'] == version
+    # A later ordinary deployment retains the persisted 64Gi intent.
+    rendered = build_platform(saved, candidate, profile, {}, repo_root=ROOT)
+    for docs in rendered.values():
+        for doc in docs:
+            if doc['kind'] == 'Deployment' and 'LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER' in tuning._env(doc):
+                assert json.loads(tuning._env(doc)['LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER'])['cache_total_mib'] == 65536
+    restored = tuning.apply_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+                                    resources={target: {'cache_total_mib': 4096} for target in targets})
+    assert all(restored['builders'][target]['cache_total_mib'] == 4096 for target in targets)
+    assert jobs == {key: value for key, value in kube.objects.items() if key[0] == 'job'}
+
+
+@pytest.mark.parametrize('operation', ['stage', 'apply'])
+@pytest.mark.parametrize('invalid', [0, -1, 1023, 1048577, True, '65536'])
+def test_cache_total_budget_invalid_values_never_write(regional_inputs, monkeypatch, operation, invalid):
+    config, candidate, _, kube, targets = _active_shared_cache_builders(regional_inputs, monkeypatch)
+    before = deepcopy(kube.objects)
+    function = tuning.stage_builders if operation == 'stage' else tuning.apply_builders
+    with pytest.raises((DeploymentError, ValueError)):
+        function(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+                 resources={target: {'cache_total_mib': invalid} for target in targets})
+    assert kube.objects == before
+    assert kube.tuning_owner is None
+    assert not any(args[0] in {'patch', 'set', 'rollout', 'apply', 'delete', 'create'} for args in kube.calls)
+
+
+@pytest.mark.parametrize('operation', ['stage', 'apply'])
+@pytest.mark.parametrize('resources_kind', ['partial-shared', 'different-shared', 'unknown-target'])
+def test_cache_total_budget_requires_one_consistent_shared_bucket_intent(regional_inputs, monkeypatch, operation, resources_kind):
+    config, candidate, _, kube, targets = _active_shared_cache_builders(regional_inputs, monkeypatch)
+    resources = {targets[0]: {'cache_total_mib': 65536}}
+    if resources_kind == 'different-shared':
+        resources[targets[1]] = {'cache_total_mib': 32768}
+    elif resources_kind == 'unknown-target':
+        resources = {'unknown-builder': {'cache_total_mib': 65536}}
+    function = tuning.stage_builders if operation == 'stage' else tuning.apply_builders
+    with pytest.raises((DeploymentError, ValueError)):
+        function(kube, config['namespace'], expected_candidate=candidate['candidate_sha'], resources=resources)
+    assert kube.cm['metadata']['resourceVersion'] == '1'
+    assert kube.tuning_owner is None
+    assert not any(args[0] in {'patch', 'set', 'rollout', 'apply', 'delete', 'create'} for args in kube.calls)
+
+
+@pytest.mark.parametrize('support', ['false', 'missing'])
+def test_cache_total_budget_old_image_fails_before_persisting_intent(regional_inputs, monkeypatch, support):
+    config, candidate, _, kube, targets = _active_shared_cache_builders(regional_inputs, monkeypatch)
+    normal = kube.run
+
+    def run(*args, **kwargs):
+        response = normal(*args, **kwargs)
+        if args[0] == 'exec' and args[args.index('-c') + 1] not in {tuning._API, tuning._GUARD}:
+            value = json.loads(response)
+            if value.get('builder_enabled'):
+                if support == 'missing':
+                    value.pop('builder_cache_budget_support', None)
+                    value['builder_resources'].pop('cache_total_mib', None)
+                else:
+                    value['builder_cache_budget_support'] = False
+                    value['builder_resources']['cache_total_mib'] = None
+                return json.dumps(value)
+        return response
+
+    kube.run = run
+    with pytest.raises(DeploymentError):
+        tuning.apply_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+                              resources={target: {'cache_total_mib': 65536} for target in targets})
+    assert kube.cm['metadata']['resourceVersion'] == '1'
+    assert kube.tuning_owner is None
+    assert not any(args[0] in {'patch', 'set', 'rollout'} for args in kube.calls)
+
+
+def test_cache_total_budget_absence_does_not_break_existing_resource_only_tuning(regional_inputs):
+    config, candidate, _, kube = _active_builder(regional_inputs)
+    kube.builder_cache_budget_support = False
+    result = tuning.apply_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+                                  resources={config['target_id']: {'cpu_request_millis': 2000}})
+    assert result['builders'][config['target_id']]['cpu_request_millis'] == 2000
+    assert result['task_jobs_replaced'] is False
+    assert 'cache_total_mib' not in json.loads(kube.cm['data']['environment.json'])['task_image_builder']
+
+
+def test_cache_total_budget_partial_rollout_fails_and_retries_saved_intent(regional_inputs, monkeypatch, capsys):
+    config, candidate, _, kube, targets = _active_shared_cache_builders(regional_inputs, monkeypatch)
+    jobs = {key: deepcopy(value) for key, value in kube.objects.items() if key[0] == 'job'}
+    normal = kube.run
+    fail = True
+
+    def run(*args, **kwargs):
+        nonlocal fail
+        if fail and args[:3] == ('set', 'env', 'deployment/' + targets[1] + '-actuator'):
+            fail = False
+            raise DeploymentError('regional cache update interrupted after primary rollout')
+        return normal(*args, **kwargs)
+
+    kube.run = run
+    monkeypatch.setattr(tuning, 'Kubectl', lambda path: kube)
+    command = ['execution-tuning', 'apply-builders', '--kubeconfig', '/operator/config',
+               '--namespace', config['namespace'], '--expected-candidate', candidate['candidate_sha']]
+    for target in targets:
+        command += ['--build-cache-total-mib', target + '=65536']
+    monkeypatch.setattr('sys.argv', command)
+    with pytest.raises(SystemExit) as failure:
+        tuning.main()
+    assert failure.value.code == 1
+    output = capsys.readouterr()
+    assert output.out == '' and 'did not converge' in output.err
+    saved = json.loads(kube.cm['data']['environment.json'])
+    assert all(tuning._owners(saved)[target]['task_image_builder']['cache_total_mib'] == 65536 for target in targets)
+    assert kube.tuning_owner is None
+    version = kube.cm['metadata']['resourceVersion']
+    monkeypatch.setattr('sys.argv', command)
+    tuning.main()
+    result = json.loads(capsys.readouterr().out)
+    assert result['restarted_controllers'] == [targets[1] + '-actuator']
+    assert kube.cm['metadata']['resourceVersion'] == version
+    assert jobs == {key: value for key, value in kube.objects.items() if key[0] == 'job'}
+
+
+def test_cache_total_budget_stale_runtime_readback_cannot_report_success(regional_inputs, monkeypatch):
+    config, candidate, _, kube, targets = _active_shared_cache_builders(regional_inputs, monkeypatch)
+    normal = kube.run
+
+    def run(*args, **kwargs):
+        response = normal(*args, **kwargs)
+        if args[0] == 'exec' and args[args.index('-c') + 1] not in {tuning._API, tuning._GUARD}:
+            value = json.loads(response)
+            if value.get('builder_enabled'):
+                value['builder_resources']['cache_total_mib'] = 4096
+                return json.dumps(value)
+        return response
+
+    kube.run = run
+    with pytest.raises(DeploymentError, match='readback differs'):
+        tuning.apply_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+                              resources={target: {'cache_total_mib': 65536} for target in targets})
+    assert kube.cm['metadata']['resourceVersion'] != '1'
+    assert kube.tuning_owner is None
+
+
+@pytest.mark.parametrize('operation', ['stage-builders', 'apply-builders'])
+def test_cache_total_budget_cli_accepts_two_targets_in_one_saved_change(regional_inputs, monkeypatch, capsys, operation):
+    config, candidate, _, kube, targets = _active_shared_cache_builders(regional_inputs, monkeypatch)
+    monkeypatch.setattr(tuning, 'Kubectl', lambda path: kube)
+    command = ['execution-tuning', operation, '--kubeconfig', '/operator/config', '--namespace', config['namespace'],
+               '--expected-candidate', candidate['candidate_sha']]
+    for target in targets:
+        command += ['--build-cache-total-mib', target + '=65536']
+    monkeypatch.setattr('sys.argv', command)
+    tuning.main()
+    result = json.loads(capsys.readouterr().out)
+    assert all(result['builders'][target]['cache_total_mib'] == 65536 for target in targets)
+    assert kube.cm['metadata']['resourceVersion'] == '2'
+    assert result['task_jobs_replaced'] is False
+
+
+@pytest.mark.parametrize('support', [False, True])
+def test_cache_total_budget_runtime_probe_detects_actual_installed_settings_shape(monkeypatch, support):
+    from contextlib import redirect_stdout
+    from io import StringIO
+    from types import SimpleNamespace
+
+    import loom_execution_actuator.config as actuator_config
+
+    values = {'cpu_request_millis': 4000, 'cpu_millis': 8000, 'memory_mib': 8192,
+              'ephemeral_storage_mib': 51200, 'namespace': 'native-build'}
+    if support:
+        values['cache_total_mib'] = 65536
+    settings = SimpleNamespace(command_concurrency=1, task_image_builder=SimpleNamespace(**values))
+    monkeypatch.setattr(actuator_config, 'ExecutionActuatorSettings', lambda: settings)
+
+    def run(*args, **kwargs):
+        assert args[:2] == ('exec', '-n') and args[-2] == '-c'
+        output = StringIO()
+        # Execute the real fixed runtime probe against installed-model shapes;
+        # no external command or configuration/credential read is performed.
+        with redirect_stdout(output):
+            exec(args[-1], {})
+        return output.getvalue()
+
+    controller = {'metadata': {'name': 'builder-actuator', 'namespace': 'execution'},
+                  'spec': {'replicas': 1}}
+    observed = tuning._runtime(SimpleNamespace(run=run), controller)
+    assert observed['builder_cache_budget_support'] is support
+    assert observed['builder_resources']['cache_total_mib'] == (65536 if support else None)
+    assert observed['builder_resources']['effective_cpu_request_millis'] == 4000
+
+
+@pytest.mark.parametrize('other_bucket', [None, 'independent-native-cache'])
+def test_cache_total_budget_independent_or_disabled_buckets_are_not_coupled(regional_inputs, other_bucket):
+    from tests.unit.test_nebius_platform_render_regional_builder import builder
+
+    config, candidate, _ = regional_inputs
+    config['task_image_builder'] = builder()
+    west = config['regional_execution_targets'][0]
+    west['task_image_builder'] = {**builder(), 'cache_bucket': other_bucket}
+    kube = FakeKube(regional_inputs)
+    result = tuning.stage_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+                                  resources={config['target_id']: {'cache_total_mib': 65536}})
+    assert result['builders'][config['target_id']]['cache_total_mib'] == 65536
+    assert result['builders'][west['target_id']]['cache_total_mib'] == 4096
+    assert not any(args[0] in {'set', 'rollout'} for args in kube.calls)
+
+
+@pytest.mark.parametrize('staged_budget', [4096, 65536])
+def test_cache_total_budget_staged_explicit_value_blocks_resource_only_on_old_image(
+    regional_inputs, monkeypatch, staged_budget,
+):
+    config, candidate, _, kube, targets = _active_shared_cache_builders(regional_inputs, monkeypatch)
+    kube.builder_cache_budget_support = False
+    tuning.stage_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+                          resources={target: {'cache_total_mib': staged_budget} for target in targets})
+    before = deepcopy(kube.objects)
+    calls_before = len(kube.calls)
+    with pytest.raises(DeploymentError):
+        tuning.apply_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+                              resources={targets[0]: {'cpu_request_millis': 2000}})
+    assert kube.objects == before
+    assert kube.tuning_owner is None
+    assert not any(args[0] in {'patch', 'set', 'rollout'} for args in kube.calls[calls_before:])
+
+
+@pytest.mark.parametrize('staged_field,staged_value', [
+    ('cpu_request_millis', 2000), ('ephemeral_storage_mib', 49152),
+])
+def test_cache_total_budget_only_cannot_apply_unrequested_staged_resources(
+    regional_inputs, monkeypatch, staged_field, staged_value,
+):
+    config, candidate, _, kube, targets = _active_shared_cache_builders(regional_inputs, monkeypatch)
+    tuning.stage_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+                          resources={targets[0]: {staged_field: staged_value}})
+    before = deepcopy(kube.objects)
+    calls_before = len(kube.calls)
+    resources = {target: {'cache_total_mib': 65536} for target in targets}
+    with pytest.raises(DeploymentError):
+        tuning.apply_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'], resources=resources)
+    assert kube.objects == before
+    assert kube.tuning_owner is None
+    assert not any(args[0] in {'patch', 'set', 'rollout'} for args in kube.calls[calls_before:])
+    # Explicitly requesting the staged resource too is an intentional combined
+    # update, and keeps in-flight Jobs and the saved original hard ceiling.
+    resources[targets[0]][staged_field] = staged_value
+    result = tuning.apply_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'], resources=resources)
+    assert result['builders'][targets[0]][staged_field] == staged_value
+    assert result['builders'][targets[0]]['cache_total_mib'] == 65536
+    assert result['task_jobs_replaced'] is False
+    assert {key: value for key, value in kube.objects.items() if key[0] == 'job'} == {
+        key: value for key, value in before.items() if key[0] == 'job'}

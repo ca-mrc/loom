@@ -60,3 +60,35 @@ def test_cpu_request_rejects_unbounded_or_coerced_values(cpu_request):
         NativeTaskImageSettings(namespace="builds", service_image="registry.example/service",
             storage_endpoint="https://storage.example", storage_region="eu-north1",
             source_bucket="source", registry_repository="registry.example/tasks", cpu_request_millis=cpu_request)
+
+
+@pytest.mark.parametrize("budget", [None, 1024, 4096, 65536, 1048576])
+def test_cache_budget_preserves_legacy_omission_and_freezes_explicit_policy(budget):
+    payload = {"namespace": "builds", "service_image": "registry.example/service",
+               "storage_endpoint": "https://storage.example", "storage_region": "eu-north1",
+               "source_bucket": "source", "registry_repository": "registry.example/tasks"}
+    if budget is not None:
+        payload["cache_total_mib"] = budget
+    stored = StoredBuilder.model_validate({"settings": payload})
+    for current in (stored, copy.deepcopy(stored),
+            StoredBuilder.model_validate_json(stored.model_dump_json()),
+            StoredBuilder(settings=stored.settings.model_copy(update={"service_image": "registry.example/new"}))):
+        assert current.settings.cache_total_mib == (4096 if budget is None else budget)
+        for settings in (current.model_dump(mode="json")["settings"],
+                         json.loads(current.model_dump_json())["settings"],
+                         current.settings.runtime_configuration()):
+            assert ("cache_total_mib" in settings) is (budget is not None)
+            if budget is not None:
+                assert settings["cache_total_mib"] == budget
+
+    explicit_default = stored.settings.model_copy(update={"cache_total_mib": 4096})
+    assert explicit_default.model_dump(mode="json")["cache_total_mib"] == 4096
+    assert explicit_default.runtime_configuration()["cache_total_mib"] == 4096
+
+
+@pytest.mark.parametrize("budget", [None, True, False, 0, -1, 1023, 1048577, 2**63, "65536", 65536.0])
+def test_cache_budget_rejects_coercion_and_out_of_range_values(budget):
+    with pytest.raises(ValidationError):
+        NativeTaskImageSettings(namespace="builds", service_image="registry.example/service",
+            storage_endpoint="https://storage.example", storage_region="eu-north1",
+            source_bucket="source", registry_repository="registry.example/tasks", cache_total_mib=budget)
