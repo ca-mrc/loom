@@ -38,6 +38,10 @@ class FakeKube:
         self.tuning_owner = None
         self.builder_request_support = True
         self.builder_cache_budget_support = True
+        self.builder_cache_policy_support = True
+        self.warm_fit_support = True
+        self.incompatible_cache_readers = 0
+        self.management_owned_cache = 0
         self.builder_configuration_source = 'actuator'
 
     def get(self, kind, name, namespace):
@@ -77,18 +81,26 @@ class FakeKube:
                 target = path.rsplit('/', 1)[-1]
                 self.policies[target] = {**json.loads(body), 'version': self.policies[target]['version'] + 1}
                 return json.dumps(self.policies[target])
+            if program == getattr(tuning, '_CACHE_READER_STATE', None):
+                return json.dumps({'native_incompatible': self.incompatible_cache_readers, 'application_incompatible': 0,
+                                   'management_owned': self.management_owned_cache})
             name = next(value.removeprefix('deployment/') for value in args if value.startswith('deployment/'))
             env = tuning._env(self.objects['deployment', namespace, name])
             if name == 'loom-control-plane':
-                return json.dumps({'placement_policy': env['LOOM_CP_SERVICE_EXECUTION_PLACEMENT_POLICY']})
+                return json.dumps({'placement_policy': env['LOOM_CP_SERVICE_EXECUTION_PLACEMENT_POLICY'],
+                    'warm_fit_support': self.warm_fit_support,
+                    'prefer_incoming_warm_fit': env.get('LOOM_CP_PREFER_INCOMING_WARM_FIT', 'false') == 'true' if self.warm_fit_support else None})
             builder = json.loads(env['LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER']) if env.get('LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER') else None
             return json.dumps({'command_concurrency': int(env['LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY']),
                 'builder_enabled': builder is not None, 'builder_request_support': self.builder_request_support,
                 'builder_cache_budget_support': self.builder_cache_budget_support,
+                'builder_cache_policy_support': self.builder_cache_policy_support,
                 'builder_configuration_source': self.builder_configuration_source,
                 'builder_resources': None if builder is None else {
                     'effective_cpu_request_millis': builder.get('cpu_request_millis') or builder['cpu_millis'],
                     'cache_total_mib': builder.get('cache_total_mib', 4096) if self.builder_cache_budget_support else None,
+                    'cache_gc_policy': builder.get('cache_gc_policy', 'legacy-seven-day') if self.builder_cache_policy_support else None,
+                    'reuse_task_cache_for_verifier': builder.get('reuse_task_cache_for_verifier', False) if self.builder_cache_policy_support else None,
                     **{k: builder[k] for k in ('cpu_millis', 'memory_mib', 'ephemeral_storage_mib', 'namespace')},
                 }})
         if args[0] == 'patch':
@@ -164,6 +176,65 @@ def test_each_tuning_knob_persists_independently_and_survives_next_render(region
         assert all(not (args[0] == 'exec' and tuning._API in args and args[-3] == 'PUT') for args in kube.calls)
     assert all(args[0] in {'get', 'exec', 'patch', 'set', 'rollout'} for args in kube.calls)
     assert not any('cancel' in str(args) or 'delete' in str(args) for args in kube.calls)
+
+
+@pytest.mark.parametrize('enabled', [True, False])
+def test_warm_fit_persists_independently_and_only_rolls_control_plane(regional_inputs, enabled):
+    config, candidate, profile = regional_inputs
+    kube = FakeKube(regional_inputs)
+    before = deepcopy(kube.objects)
+    result = tuning.apply(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+                          prefer_incoming_warm_fit=enabled)
+    saved = json.loads(kube.cm['data']['environment.json'])
+    assert saved['prefer_incoming_warm_fit'] is enabled
+    assert result['persisted']['prefer_incoming_warm_fit'] is enabled
+    assert next(row for row in result['controllers'] if row['name'] == 'loom-control-plane')['prefer_incoming_warm_fit'] is enabled
+    assert all(name == 'loom-control-plane' for name in result['restarted_controllers'])
+    assert result['task_jobs_replaced'] is False
+    for key, value in before.items():
+        if key[0] == 'deployment' and key[2] != 'loom-control-plane':
+            assert kube.objects[key] == value
+    files = build_platform(saved, candidate, profile, {}, repo_root=ROOT)
+    cp = next(row for docs in files.values() for row in docs if row['kind'] == 'Deployment' and row['metadata']['name'] == 'loom-control-plane')
+    assert tuning._env(cp)['LOOM_CP_PREFER_INCOMING_WARM_FIT'] == str(enabled).lower()
+
+
+def test_warm_fit_old_image_fails_before_saving_intent(regional_inputs):
+    config, candidate, _ = regional_inputs
+    kube = FakeKube(regional_inputs)
+    kube.warm_fit_support = False
+    before = deepcopy(kube.objects)
+    with pytest.raises(DeploymentError, match='warm'):
+        tuning.apply(kube, config['namespace'], expected_candidate=candidate['candidate_sha'], prefer_incoming_warm_fit=True)
+    assert kube.objects == before and kube.tuning_owner is None
+
+
+def test_p1_operator_cli_independent_round_trip_retains_frozen_jobs(regional_inputs, monkeypatch, capsys):
+    config, candidate, _, kube, targets = _active_shared_cache_builders(regional_inputs, monkeypatch)
+    _compatible_native_reader_jobs(kube, candidate)
+    monkeypatch.setattr(tuning, 'Kubectl', lambda _: kube)
+    common = ['tuning', '--kubeconfig', '/unused', '--namespace', config['namespace'],
+              '--expected-candidate', candidate['candidate_sha']]
+    jobs = {key: deepcopy(value) for key, value in kube.objects.items() if key[0] == 'job'}
+    for enabled in ('true', 'false'):
+        gc = 'budget-pressure' if enabled == 'true' else 'legacy-seven-day'
+        flags = [flag for target in targets for flag in ('--build-cache-gc-policy', target + '=' + gc)]
+        monkeypatch.setattr('sys.argv', [common[0], 'apply-builders', *common[1:], *flags])
+        tuning.main()
+        assert all(row['cache_gc_policy'] == gc for row in json.loads(capsys.readouterr().out)['builders'].values())
+        monkeypatch.setattr('sys.argv', [common[0], 'apply-builders', *common[1:],
+            '--build-reuse-task-cache-for-verifier', targets[0] + '=' + enabled])
+        tuning.main()
+        builders = json.loads(capsys.readouterr().out)['builders']
+        assert builders[targets[0]]['reuse_task_cache_for_verifier'] is (enabled == 'true')
+        assert builders[targets[1]]['reuse_task_cache_for_verifier'] is False
+        assert all(row['cache_gc_policy'] == gc for row in builders.values())
+        monkeypatch.setattr('sys.argv', [common[0], 'apply', *common[1:], '--prefer-incoming-warm-fit', enabled])
+        tuning.main()
+        result = json.loads(capsys.readouterr().out)
+        assert result['persisted']['prefer_incoming_warm_fit'] is (enabled == 'true')
+        assert all(row['cache_gc_policy'] == gc for row in result['persisted']['builders'].values())
+    assert jobs == {key: value for key, value in kube.objects.items() if key[0] == 'job'}
 
 
 def test_interrupted_controller_update_can_converge_from_saved_values(regional_inputs):
@@ -686,6 +757,89 @@ def _active_shared_cache_builders(regional_inputs, monkeypatch):
     monkeypatch.setattr(tuning, '_builder_kube', lambda current, saved, target: kube)
     targets = (config['target_id'], west['target_id'])
     return config, candidate, profile, kube, targets
+
+
+def test_cache_policy_controls_are_independent_persistent_and_preserve_jobs(regional_inputs, monkeypatch):
+    config, candidate, profile, kube, targets = _active_shared_cache_builders(regional_inputs, monkeypatch)
+    _compatible_native_reader_jobs(kube, candidate)
+    before = deepcopy(kube.objects)
+    result = tuning.apply_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+        resources={target: {'cache_gc_policy': 'budget-pressure'} for target in targets})
+    assert result['task_jobs_replaced'] is False
+    saved = json.loads(kube.cm['data']['environment.json'])
+    for target in targets:
+        assert tuning._owners(saved)[target]['task_image_builder']['cache_gc_policy'] == 'budget-pressure'
+    result = tuning.apply_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+        resources={targets[0]: {'reuse_task_cache_for_verifier': True}})
+    assert result['builders'][targets[0]]['reuse_task_cache_for_verifier'] is True
+    assert result['builders'][targets[1]]['reuse_task_cache_for_verifier'] is False
+    assert {key: value for key, value in kube.objects.items() if key[0] in {'job', 'resourcequota'}} == {
+        key: value for key, value in before.items() if key[0] in {'job', 'resourcequota'}}
+    saved = json.loads(kube.cm['data']['environment.json'])
+    rendered = build_platform(saved, candidate, profile, {}, repo_root=ROOT)
+    cm = next(row for row in rendered['10-config-network.yaml'] if row['kind'] == 'ConfigMap')
+    assert json.loads(cm['data']['environment.json']) == saved
+
+
+@pytest.mark.parametrize('damage', ['old-image', 'incompatible-reader', 'management-owned', 'one-shared-writer'])
+def test_pressure_policy_rejects_incompatible_readers_or_partial_shared_scope_before_write(regional_inputs, monkeypatch, damage):
+    config, candidate, _, kube, targets = _active_shared_cache_builders(regional_inputs, monkeypatch)
+    _compatible_native_reader_jobs(kube, candidate)
+    if damage == 'old-image':
+        kube.builder_cache_policy_support = False
+    elif damage == 'incompatible-reader':
+        kube.incompatible_cache_readers = 1
+    elif damage == 'management-owned':
+        kube.management_owned_cache = 1
+    resources = {target: {'cache_gc_policy': 'budget-pressure'} for target in targets}
+    if damage == 'one-shared-writer':
+        resources.pop(targets[1])
+    before = deepcopy(kube.objects)
+    with pytest.raises(DeploymentError):
+        tuning.apply_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'], resources=resources)
+    assert kube.objects == before and kube.tuning_owner is None
+
+
+def _compatible_native_reader_jobs(kube, candidate):
+    for key, job in kube.objects.items():
+        if key[0] == 'job' and key[1].endswith('-build'):
+            pod = job['spec']['template']['spec']
+            pod['initContainers'] = [{'name': 'prepare', 'image': candidate['images']['service']['image_ref']}]
+            pod['containers'][0].update(name='publish', image=candidate['images']['service']['image_ref'])
+
+
+def test_pressure_rejects_coherent_old_service_and_job_images_behind_current_profile(regional_inputs, monkeypatch):
+    config, candidate, _, kube, targets = _active_shared_cache_builders(regional_inputs, monkeypatch)
+    old = 'cr.eu-north1.nebius.cloud/test/service@sha256:' + 'e' * 64
+    kube.objects['deployment', config['namespace'], 'loom-service']['spec']['template']['spec']['containers'][0]['image'] = old
+    for key, controller in kube.objects.items():
+        if key[0] != 'deployment':
+            continue
+        env = controller['spec']['template']['spec']['containers'][0].get('env', [])
+        for item in env:
+            if item['name'] == 'LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER':
+                settings = json.loads(item['value'])
+                settings['service_image'] = old
+                item['value'] = json.dumps(settings)
+    _compatible_native_reader_jobs(kube, {'images':{'service':{'image_ref':old}}})
+    before = deepcopy(kube.objects)
+    with pytest.raises(DeploymentError, match='published candidate'):
+        tuning.apply_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+            resources={target:{'cache_gc_policy':'budget-pressure'} for target in targets})
+    assert kube.objects == before and kube.tuning_owner is None
+
+
+def test_pressure_budget_change_rechecks_frozen_reader_compatibility(regional_inputs, monkeypatch):
+    config, candidate, _, kube, targets = _active_shared_cache_builders(regional_inputs, monkeypatch)
+    _compatible_native_reader_jobs(kube, candidate)
+    tuning.apply_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+        resources={target: {'cache_gc_policy': 'budget-pressure'} for target in targets})
+    kube.incompatible_cache_readers = 1
+    before = deepcopy(kube.objects)
+    with pytest.raises(DeploymentError, match='naturally'):
+        tuning.apply_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+            resources={target: {'cache_total_mib': 65536} for target in targets})
+    assert kube.objects == before and kube.tuning_owner is None
 
 
 def test_cache_total_budget_live_roundtrip_preserves_jobs_quota_and_resource_ceilings(regional_inputs, monkeypatch):

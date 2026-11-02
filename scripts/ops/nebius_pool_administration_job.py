@@ -36,6 +36,7 @@ from loom_service.pool_management.administration import (
     PoolAdministrationAuthorizationV2,
     _Request,
 )
+from loom_service.pool_management.cache_policy import PoolCachePolicyV1
 from loom_service.pool_management.capacity import digest
 from loom_service.pool_management.inspection import PoolInspectionV2, qualify_inspection
 from loom_service.pool_management.legacy_adoption import PoolLegacyAdoptionV2
@@ -45,6 +46,7 @@ from loom_service.pool_management.lifecycle_contracts import (
     PoolPlatformInstallationV2,
     PoolPlatformOperationV2,
 )
+from loom_service.pool_management.routing_policy import PoolRoutingPreferenceV1
 
 _LABEL = r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?'
 _HASH = r'[0-9a-f]{64}'
@@ -100,7 +102,7 @@ def _qualified(value: PoolAdministrationJobV2) -> PoolAdministrationJobV2:
                 grant.environment_id, grant.incarnation, grant.authority) != (request.installation_id,
                 request.pool_id, request.participant_id, request.environment_id, request.incarnation, request.environment_class or 'platform')):
             raise ValueError('pool_administration_target_unqualified')
-    elif isinstance(request, (PoolPlatformInstallationV2, PoolPlatformOperationV2, PoolLegacyAdoptionV2)):
+    elif isinstance(request, (PoolPlatformInstallationV2, PoolPlatformOperationV2, PoolLegacyAdoptionV2, PoolRoutingPreferenceV1, PoolCachePolicyV1)):
         target = request.before if isinstance(request, PoolLegacyAdoptionV2) else request
         if grant.authority != 'platform' or (grant.installation_id, grant.pool_id) != (target.installation_id, target.pool_id):
             raise ValueError('pool_administration_target_unqualified')
@@ -137,6 +139,8 @@ def administration_documents(request: PoolAdministrationJobV2) -> dict[str, dict
         'LOOM_POOL_ADMINISTRATION_AUTHORIZATION_FILE': root + 'authorization.json',
         'LOOM_POOL_ADMINISTRATION_AUTHORIZATION_SHA256': hashlib.sha256(grant_json.encode()).hexdigest(),
         'LOOM_POOL_ADMINISTRATION_ACTION': request.action}
+    if isinstance(request.request, PoolCachePolicyV1):
+        environment['LOOM_POOL_ADMINISTRATION_SERVICE_IMAGE'] = runtime.service_image
     container = {'name': 'register', 'image': runtime.service_image,
         'command': ['python', '-m', 'loom_service.pool_management.administration'],
         'env': [{'name': key, 'value': value} for key, value in environment.items()] + [
@@ -182,6 +186,48 @@ def _head(value: Any, *, receipt: bool = False) -> None:
             _uuid(value[key])
 
 
+def _cache_policy_projection(value: Any, *, receipt: bool = False) -> None:
+    fields = {'pool_id', 'installation_id', 'profile_id', 'cache_total_mib', 'cache_gc_policy',
+        'reuse_task_cache_for_verifier', 'policy_source', 'admission_epoch', 'policy_revision',
+        'registered_scope_profiles', 'registered_scope_pools', 'registered_scope_owner_consistent',
+        'effective_scope_consistent', 'active_build_requests', 'unsettled_application_attempts',
+        'frozen_claims_truncated', 'frozen_claims', 'future_reader_profiles_compatible'}
+    if receipt:
+        fields |= {'schema_version', 'operation_id'}
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError('pool_administration_report_unqualified')
+    for key in ('pool_id', 'installation_id', 'profile_id'):
+        _uuid(value[key])
+    if receipt:
+        _uuid(value['operation_id'])
+        if value['schema_version'] != 'loom.pool-cache-policy-receipt.v1':
+            raise ValueError('pool_administration_report_unqualified')
+    if (type(value['cache_total_mib']) is not int or not 1024 <= value['cache_total_mib'] <= 1048576
+            or value['cache_gc_policy'] not in {'legacy-seven-day', 'budget-pressure'}
+            or value['policy_source'] not in {'management-db', 'profile-default'}
+            or any(type(value[key]) is not bool for key in ('reuse_task_cache_for_verifier',
+                'registered_scope_owner_consistent', 'effective_scope_consistent', 'frozen_claims_truncated'))
+            or any(type(value[key]) is not int or value[key] < 1 for key in ('admission_epoch', 'policy_revision',
+                'registered_scope_profiles', 'registered_scope_pools'))
+            or any(type(value[key]) is not int or value[key] < 0 for key in ('active_build_requests', 'unsettled_application_attempts'))
+            or (value['future_reader_profiles_compatible'] is not None and type(value['future_reader_profiles_compatible']) is not bool)
+            or not isinstance(value['frozen_claims'], list) or len(value['frozen_claims']) > 1024):
+        raise ValueError('pool_administration_report_unqualified')
+    for claim in value['frozen_claims']:
+        if (not isinstance(claim, dict) or set(claim) != {'request_id', 'workload_kind', 'phase', 'projection_status',
+                'cache_total_mib', 'cache_gc_policy', 'reuse_task_cache_for_verifier'}
+                or claim['workload_kind'] not in {'task_image_build', 'application_image_build'}
+                or claim['phase'] not in {'waiting', 'reserved', 'create_intent', 'observed', 'cleanup_intent', 'released',
+                    'cancelled_unstarted', 'queued', 'running', 'settling', 'ready', 'failed', 'cancelled'}
+                or claim['projection_status'] not in {'frozen', 'unfrozen', 'unknown'}
+                or (claim['cache_total_mib'] is not None and (type(claim['cache_total_mib']) is not int
+                    or not 1024 <= claim['cache_total_mib'] <= 1048576))
+                or claim['cache_gc_policy'] not in {None, 'legacy-seven-day', 'budget-pressure'}
+                or (claim['reuse_task_cache_for_verifier'] is not None and type(claim['reuse_task_cache_for_verifier']) is not bool)):
+            raise ValueError('pool_administration_report_unqualified')
+        _uuid(claim['request_id'])
+
+
 def validate_administration_report(request: PoolAdministrationJobV2, report: Any) -> None:
     request = _qualified(request)
     grant, operation = request.authorization, request.request
@@ -193,6 +239,39 @@ def validate_administration_report(request: PoolAdministrationJobV2, report: Any
             or report['authorization_id'] != str(grant.authorization_id) or report['request_sha256'] != grant.request_sha256):
         raise ValueError('pool_administration_report_unqualified')
     receipt, current = report['receipt'], report['current']
+    if isinstance(operation, PoolCachePolicyV1):
+        _cache_policy_projection(current)
+        _cache_policy_projection(receipt, receipt=True)
+        if (receipt['operation_id'] != str(operation.operation_id)
+                or any(current[key] != str(getattr(operation, key)) or receipt[key] != current[key]
+                       for key in ('pool_id', 'installation_id', 'profile_id'))
+                or any(getattr(operation, key) is not None and receipt[key] != getattr(operation, key)
+                       for key in ('cache_total_mib', 'cache_gc_policy', 'reuse_task_cache_for_verifier'))):
+            raise ValueError('pool_administration_report_unqualified')
+        if request.action == 'apply' and (current['future_reader_profiles_compatible'] is not True
+                or not current['registered_scope_owner_consistent']
+                or not current['effective_scope_consistent']
+                or any(getattr(operation, key) is not None and current[key] != getattr(operation, key)
+                       for key in ('cache_total_mib', 'cache_gc_policy', 'reuse_task_cache_for_verifier'))):
+            raise ValueError('pool_administration_report_unqualified')
+        return
+    if isinstance(operation, PoolRoutingPreferenceV1):
+        fields = {'pool_id', 'installation_id', 'prefer_incoming_warm_fit', 'policy_source', 'admission_epoch', 'policy_revision'}
+        if (not isinstance(current, dict) or set(current) != fields
+                or current['pool_id'] != str(operation.pool_id) or current['installation_id'] != str(operation.installation_id)
+                or type(current['prefer_incoming_warm_fit']) is not bool or current['policy_source'] != 'management-db'
+                or any(type(current[key]) is not int or current[key] < 1 for key in ('admission_epoch', 'policy_revision'))
+                or not isinstance(receipt, dict) or set(receipt) != fields | {'schema_version', 'operation_id'}
+                or receipt['schema_version'] != 'loom.pool-routing-preference-receipt.v1'
+                or receipt['operation_id'] != str(operation.operation_id)
+                or any(receipt[key] != current[key] for key in ('pool_id', 'installation_id', 'policy_source'))
+                or type(receipt['prefer_incoming_warm_fit']) is not bool
+                or (operation.prefer_incoming_warm_fit is not None
+                    and receipt['prefer_incoming_warm_fit'] != operation.prefer_incoming_warm_fit)):
+            raise ValueError('pool_administration_report_unqualified')
+        if request.action == 'apply' and current['prefer_incoming_warm_fit'] != operation.prefer_incoming_warm_fit:
+            raise ValueError('pool_administration_report_unqualified')
+        return
     if current is not None:
         if grant.authority == 'platform':
             raise ValueError('pool_administration_report_unqualified')

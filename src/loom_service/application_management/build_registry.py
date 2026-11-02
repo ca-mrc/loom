@@ -6,9 +6,10 @@ attempts yield releases. No network call, capacity reservation or Kubernetes wri
 from __future__ import annotations
 
 import re
+from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -33,17 +34,36 @@ from loom.pipeline.keys import canonical_digest
 from loom_service.application_management.build_publication import qualify_publication
 from loom_service.application_management.source_registry import ApplicationSourceRegistry
 from loom_service.environment_management.registry import ManagementError, owner_identity
+from loom_service.pool_management.application_builder_authority import builder_dispatch_allowed
+from loom_service.pool_management.cache_policy import effective_cache_configuration
+from loom_service.pool_management.locks import acquire_pool_mutation_lock
 
 
 def _claim(build_id: UUID, attempt: int, source: NebiusApplicationSourceUpload,
-           binding: ApplicationImageBuildBindingV1) -> ApplicationImageBuildClaimV1:
+           binding: ApplicationImageBuildBindingV1, *, cache_policy: dict[str, Any] | None = None) -> ApplicationImageBuildClaimV1:
+    if cache_policy is not None and (not isinstance(cache_policy, dict)
+            or set(cache_policy) - {'cache_total_mib', 'cache_gc_policy'}):
+        raise ValueError('application_build_history_conflict')
     return ApplicationImageBuildClaimV1(
         build_id=build_id, attempt=attempt, upload_id=source.upload_id,
         installation_id=source.installation_id, owner_user_id=source.owner_user_id,
         owner_team_id=source.owner_team_id, data_environment_id=source.data_environment_id,
         cluster_id=source.cluster_id, source=ApplicationSourceUploadRequestV1.model_validate(source, from_attributes=True),
         recipe=binding.recipe, storage_endpoint=binding.storage_endpoint, storage_region=binding.storage_region,
-        source_bucket=source.source_bucket, cache_bucket=binding.cache_bucket, registry_repository=binding.registry_repository)
+        source_bucket=source.source_bucket, cache_bucket=binding.cache_bucket, registry_repository=binding.registry_repository,
+        **{**binding.cache_configuration(), **(cache_policy or {})})
+
+
+async def load_attempt_cache_policy(session: AsyncSession, attempt: NebiusApplicationBuildAttempt | None) -> None:
+    """Old schema/history reads never implicitly SELECT the deferred new column."""
+    if attempt is None or 'cache_policy_json' in attempt.__dict__:
+        return
+    if not any(key in attempt.claim_json for key in ('cache_total_mib', 'cache_gc_policy')):
+        return
+    present = await session.scalar(text("SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE "
+        "attrelid = 'nebius_application_build_attempts'::regclass AND attname = 'cache_policy_json' AND NOT attisdropped)"))
+    if present:
+        await session.refresh(attempt, attribute_names=['cache_policy_json'])
 
 
 def retained_build_claim(row: NebiusApplicationBuild, attempt: NebiusApplicationBuildAttempt | None,
@@ -57,7 +77,8 @@ def retained_build_claim(row: NebiusApplicationBuild, attempt: NebiusApplication
     claim = ApplicationImageBuildClaimV1.model_validate(attempt.claim_json)
     if (canonical_digest(attempt.claim_json).removeprefix("sha256:") != attempt.claim_sha256
             or (attempt.build_id, attempt.attempt) != (row.build_id, row.current_attempt)
-            or claim != _claim(row.build_id, row.current_attempt, source, binding)
+            or claim != _claim(row.build_id, row.current_attempt, source, binding,
+                              cache_policy=attempt.__dict__.get('cache_policy_json'))
             or (row.upload_id, row.owner_user_id, row.owner_team_id, row.installation_id, row.data_environment_id, row.cluster_id) != (
                 source.upload_id, source.owner_user_id, source.owner_team_id, source.installation_id,
                 source.data_environment_id, source.cluster_id)
@@ -103,6 +124,7 @@ class ApplicationBuildRegistry:
         attempt = await session.get(NebiusApplicationBuildAttempt, (row.build_id, row.current_attempt))
         source = await session.get(NebiusApplicationSourceUpload, row.upload_id)
         try:
+            await load_attempt_cache_policy(session, attempt)
             _, claim = retained_build_claim(row, attempt, source)
             assert attempt is not None
             return ApplicationImageBuildStatusV1.model_validate({
@@ -142,6 +164,7 @@ class ApplicationBuildRegistry:
             "installation": self.binding.source.installation_id, "data": self.binding.source.data_environment_id,
             "cluster": self.binding.source.cluster_id}).removeprefix("sha256:")
         async with self.session_factory.begin() as session:
+            await acquire_pool_mutation_lock(session)
             query = select(NebiusApplicationBuild).where(NebiusApplicationBuild.owner_user_id == owner,
                 NebiusApplicationBuild.idempotency_key == idempotency_key)
             existing = await session.scalar(query)
@@ -149,9 +172,14 @@ class ApplicationBuildRegistry:
                 if existing.request_sha256 != fingerprint:
                     raise ManagementError("idempotency_conflict")
                 return await self._view(session, await self._owned(session, existing.build_id, principal))
+            if not await builder_dispatch_allowed(session, self.binding):
+                raise ManagementError('application_builder_not_active', 503)
             source = await self.sources._owned(session, upload_id, principal, mutation=True, lock=True)
             if source.phase != "source_verified":
                 raise ManagementError("application_source_not_verified")
+            effective = await effective_cache_configuration(session,
+                installation_id=self.binding.source.installation_id, settings=self.binding)
+            policy = {key: effective[key] for key in ('cache_total_mib', 'cache_gc_policy') if key in effective} or None
             identity = uuid4()
             created = await session.scalar(insert(NebiusApplicationBuild).values(
                 build_id=identity, upload_id=upload_id, owner_user_id=owner, owner_team_id=team,
@@ -160,9 +188,12 @@ class ApplicationBuildRegistry:
                 binding_json=self.binding.model_dump(mode="json"), current_attempt=1, desired_state="running",
             ).on_conflict_do_nothing(index_elements=["owner_user_id", "idempotency_key"]).returning(NebiusApplicationBuild.build_id))
             if created is not None:
-                claim = _claim(identity, 1, source, self.binding).model_dump(mode="json")
-                session.add(NebiusApplicationBuildAttempt(build_id=identity, attempt=1,
-                    claim_json=claim, claim_sha256=canonical_digest(claim).removeprefix("sha256:"), phase="queued"))
+                claim = _claim(identity, 1, source, self.binding, cache_policy=policy).model_dump(mode="json")
+                fields = dict(build_id=identity, attempt=1,
+                    claim_json=claim, claim_sha256=canonical_digest(claim).removeprefix("sha256:"), phase="queued")
+                if policy is not None:
+                    fields['cache_policy_json'] = policy
+                await session.execute(insert(NebiusApplicationBuildAttempt).values(**fields))
                 await session.flush()
             row = await session.scalar(query)
             if row is None or row.request_sha256 != fingerprint:
@@ -206,6 +237,7 @@ class ApplicationBuildRegistry:
         """
         self._attempt(attempt)
         async with self.session_factory.begin() as session:
+            await acquire_pool_mutation_lock(session)
             row = await self._owned(session, build_id, principal, mutation=True, lock=True)
             if row.current_attempt == attempt + 1:
                 return await self._view(session, row)
@@ -218,13 +250,22 @@ class ApplicationBuildRegistry:
                 raise ManagementError("application_build_cleanup_required")
             source = await session.get(NebiusApplicationSourceUpload, row.upload_id, with_for_update={"read": True})
             try:
-                _, claim = retained_build_claim(row, saved, source)
+                await load_attempt_cache_policy(session, saved)
+                binding, _ = retained_build_claim(row, saved, source)
             except (ValueError, TypeError):
                 raise ManagementError("application_build_history_conflict") from None
+            if not await builder_dispatch_allowed(session, binding):
+                raise ManagementError('application_builder_not_active', 503)
             row.current_attempt, row.desired_state = attempt + 1, "running"
             await session.flush()  # SQL qualifies the previous terminal attempt.
-            payload = claim.model_copy(update={"attempt": row.current_attempt}).model_dump(mode="json")
-            session.add(NebiusApplicationBuildAttempt(build_id=build_id, attempt=row.current_attempt,
-                claim_json=payload, claim_sha256=canonical_digest(payload).removeprefix("sha256:"), phase="queued"))
+            effective = await effective_cache_configuration(session, installation_id=binding.source.installation_id, settings=binding)
+            policy = {key: effective[key] for key in ('cache_total_mib', 'cache_gc_policy') if key in effective} or None
+            assert source is not None
+            payload = _claim(build_id, row.current_attempt, source, binding, cache_policy=policy).model_dump(mode='json')
+            fields = dict(build_id=build_id, attempt=row.current_attempt,
+                claim_json=payload, claim_sha256=canonical_digest(payload).removeprefix("sha256:"), phase="queued")
+            if policy is not None:
+                fields['cache_policy_json'] = policy
+            await session.execute(insert(NebiusApplicationBuildAttempt).values(**fields))
             await session.flush()
             return await self._view(session, row)

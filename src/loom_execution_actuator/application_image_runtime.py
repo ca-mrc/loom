@@ -27,6 +27,7 @@ from loom_execution_actuator.task_image_oci import (
 )
 from loom_execution_actuator.task_image_runtime import (
     BuildPreparationError,
+    _CacheImportBudget,
     _client,
     _download,
     _output_path,
@@ -187,8 +188,9 @@ def prepare(claim: ApplicationImageBuildClaimV1, work: Path, secrets: Path) -> N
         cache = _client(binding, secrets / "cache")
         try:
             verified: dict[str, tuple[Path, int]] = {}
+            budget = _CacheImportBudget()
             for index in range(2):
-                _try_import_cache(cache, binding, index=index, work=work, verified=verified)
+                _try_import_cache(cache, binding, index=index, work=work, verified=verified, budget=budget)
         finally:
             cache.close()
 
@@ -197,7 +199,8 @@ def _cache_binding(claim: ApplicationImageBuildClaimV1) -> dict[str, Any]:
     # These cache primitives need only a content key and storage identity, not
     # a TaskConfig/task claim. Preserve the existing shared prefix, GC and bounds.
     return {"storage_endpoint": claim.storage_endpoint, "storage_region": claim.storage_region,
-        "cache_bucket": claim.cache_bucket, "materialization_key": claim.cache_key, "cache_transfer": "blobs"}
+        "cache_bucket": claim.cache_bucket, "materialization_key": claim.cache_key, "cache_transfer": "blobs",
+        **claim.cache_configuration()}
 
 
 def _publication_binding(claim: ApplicationImageBuildClaimV1) -> dict[str, Any]:

@@ -478,6 +478,14 @@ def _pending_state(pod: Any) -> tuple[bool, bool, bool, str | None]:
     return True, unschedulable, image_pull, reason
 
 
+def scheduling_node_labels(node: Any) -> dict[str, str]:
+    """Small operational whitelist from the same already-read exact Node."""
+    return {key: value for key, value in (getattr(node.metadata, "labels", None) or {}).items()
+            if isinstance(key, str) and isinstance(value, str)
+            and (key.startswith("loom.nebius/") or key in {
+                "nebius.com/node-group-id", "kubernetes.io/arch", "kubernetes.io/os"})}
+
+
 class InClusterKubernetesCapacityReader:
     def __init__(
         self,
@@ -697,6 +705,7 @@ class InClusterKubernetesCapacityReader:
                 unschedulable=bool(getattr(node.spec, "unschedulable", False)),
                 deleting=getattr(node.metadata, "deletion_timestamp", None) is not None,
                 draining=_node_draining(node),
+                labels=scheduling_node_labels(node),
                 allocatable=_required_node_resources(node.status.allocatable, name="allocatable"),
                 requested=_add(*[_pod_request(pod) for pod in assigned]),
                 pod_slots=_positive_int(node.status.allocatable.get("pods"), name="node Pod slots"),

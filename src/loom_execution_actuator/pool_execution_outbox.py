@@ -11,10 +11,10 @@ from datetime import datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, text, tuple_, update
+from sqlalchemy import delete, func, select, text, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from loom.db.nebius_pool_outbox_schema import NebiusPoolExecutionOutbox
+from loom.db.nebius_pool_outbox_schema import NebiusPoolExecutionOutbox, NebiusPoolPlacementAdvice
 from loom.db.schema import Batch, ServiceExecutionLease, ServiceExecutionTarget, Task, Trial
 from loom.execution_contract import ExecutionRoutingReason, WorkloadRequirementsV1
 from loom.execution_image_admission import ImageAdmissionKeyring
@@ -28,6 +28,7 @@ from loom.nebius_pool_contract import (
     PoolRequestKeyV1,
 )
 from loom.nebius_pool_lifecycle import PoolDrainV1, PoolStopV1
+from loom.nebius_pool_placement_preview import PoolExecutionPreviewRequestV1, PoolExecutionPreviewV1
 from loom.nebius_pool_priority import PoolWorkOriginV1, pool_request_priority
 from loom.nebius_pool_workload import PoolExecutionPrepareV1, PoolExecutionWorkloadV1
 from loom.nebius_rollout_guard import admission_open
@@ -283,8 +284,36 @@ class PoolExecutionOutbox:
             raise PoolHandoffError
         return receipt
 
+    async def compile_prospective(self, *, trial_id: UUID, target_id: str,
+                                  lease_id: UUID | None = None) -> PoolExecutionPreviewRequestV1 | None:
+        result = await self._propose(trial_id=trial_id, target_id=target_id, preview=True, prospective_lease_id=lease_id)
+        return result if isinstance(result, PoolExecutionPreviewRequestV1) else None
+
     async def propose(self, *, trial_id: UUID, target_id: str,
-                      node_allocation: PoolNodeAllocationV1 | None = None) -> PoolExecutionHandoff | None:
+                      node_allocation: PoolNodeAllocationV1 | None = None,
+                      prospective_lease_id: UUID | None = None, expected_request_sha256: str | None = None,
+                      prospective_deadline: datetime | None = None,
+                      expected_routing_generation: int | None = None,
+                      preview_valid_until: datetime | None = None,
+                      preview_evidence: PoolExecutionPreviewV1 | None = None,
+                      alternative_owner_count: int = 0) -> PoolExecutionHandoff | None:
+        result = await self._propose(trial_id=trial_id, target_id=target_id, node_allocation=node_allocation,
+            prospective_lease_id=prospective_lease_id, expected_request_sha256=expected_request_sha256,
+            prospective_deadline=prospective_deadline, expected_routing_generation=expected_routing_generation,
+            preview_valid_until=preview_valid_until, preview_evidence=preview_evidence,
+            alternative_owner_count=alternative_owner_count)
+        if result is not None and not isinstance(result, PoolExecutionHandoff):
+            raise PoolHandoffError
+        return result
+
+    async def _propose(self, *, trial_id: UUID, target_id: str,
+                       node_allocation: PoolNodeAllocationV1 | None = None, preview: bool = False,
+                       prospective_lease_id: UUID | None = None, expected_request_sha256: str | None = None,
+                       prospective_deadline: datetime | None = None,
+                       expected_routing_generation: int | None = None,
+                       preview_valid_until: datetime | None = None,
+                       preview_evidence: PoolExecutionPreviewV1 | None = None,
+                       alternative_owner_count: int = 0) -> PoolExecutionHandoff | PoolExecutionPreviewRequestV1 | None:
         """Freeze actual compiled input without claiming an execution or budget."""
         self.participant.target(target_id, "trial")
         async with self.sessions.begin() as session:
@@ -300,12 +329,15 @@ class PoolExecutionOutbox:
                     raise PoolHandoffError
                 return view
             now = await _clock(session)
+            if preview_valid_until is not None and preview_valid_until <= now:
+                raise PoolHandoffError
             candidate = (await session.execute(_SERVICE_TRIAL_BY_ID,
                 {"trial_id": trial_id, "pool_id": self.logical_pool_id, "now": now})).mappings().one_or_none()
             if candidate is None or not await admission_open(session):
                 raise PoolHandoffError
             trial = await session.get(Trial, trial_id, populate_existing=True)
-            if trial is None:
+            if trial is None or (expected_routing_generation is not None
+                                 and trial.execution_route_generation != expected_routing_generation):
                 raise PoolHandoffError
             origin = PoolWorkOriginV1.model_validate(trial.pool_origin)
             pool_request_priority(self.participant, origin, workload_kind="trial")
@@ -332,13 +364,15 @@ class PoolExecutionOutbox:
                 # Compilation may have finished an image-failed queued Trial.
                 # Commit that existing terminal behavior without claiming work.
                 return None
-            if target_id not in {target.id for target in compiled.targets}:
+            if (target_id not in {target.id for target in compiled.targets}
+                    or (compiled.requirements.data_residency
+                        and target.data_residency != compiled.requirements.data_residency)):
                 raise PoolHandoffError
             runtime = compiled.runtime_plan
             if runtime.verifier_execution == "separate_execution":
                 self.participant.target(target_id, "verifier")
             evidence = None
-            if compiled.allocate_resources:
+            if compiled.allocate_resources and not preview:
                 if node_allocation is None:
                     raise PoolHandoffError
                 evidence = PoolNodeAllocationV1.model_validate_json(node_allocation.model_dump_json())
@@ -353,23 +387,38 @@ class PoolExecutionOutbox:
             # actual persisted input after that legitimate change, not old SQL.
             await session.flush()
             await session.refresh(trial)
-            lease_id = uuid4()
+            lease_id = prospective_lease_id or uuid4()
             _, _, _, unit = _execution_identity(trial_id=trial.id, attempt=trial.attempt_count + 1,
                 generation=1, execution_role="attempt", namespace_name=self.participant.execution_namespace.name,
                 target_id=target_id)
+            deadline = prospective_deadline or compiled.deadline_at
+            if not now < deadline <= compiled.deadline_at:
+                raise PoolHandoffError
             request = PoolExecutionPrepareV1(pool_id=self.participant.pool_id,
                 admission_epoch=self.participant.admission_epoch, participant_revision=self.participant.binding_revision,
                 key=PoolRequestKeyV1(participant_id=self.participant.participant_id, workload_kind="trial",
-                    local_work_id=lease_id, generation=1), target_id=target_id, deadline_at=compiled.deadline_at,
+                    local_work_id=lease_id, generation=1), target_id=target_id, deadline_at=deadline,
                 origin=origin, execution=PoolExecutionWorkloadV1(lease_generation=1, execution_unit_key=unit,
                     parent_lease_id=None, requirements=compiled.requirements, runtime=runtime, node_allocation=evidence))
+            if preview:
+                return PoolExecutionPreviewRequestV1(request=request, allocate_resources=compiled.allocate_resources,
+                    routing_generation=trial.execution_route_generation)
             payload = request.model_dump(mode="json")
+            payload_sha = canonical_digest(payload).removeprefix("sha256:")
+            if expected_request_sha256 is not None and payload_sha != expected_request_sha256:
+                raise PoolHandoffError
             row = NebiusPoolExecutionOutbox(lease_id=lease_id, trial_id=trial_id, pool_id=request.pool_id,
                 participant_id=request.key.participant_id, request_json=payload,
-                request_sha256=canonical_digest(payload).removeprefix("sha256:"),
+                request_sha256=payload_sha,
                 selection_json=execution_selection_snapshot(trial, candidate, target, runtime), phase="selected")
             session.add(row)
+            if preview_evidence is not None:
+                trial.scheduling_observation = {**(trial.scheduling_observation or {}), "placement_preview": {
+                    **preview_evidence.model_dump(mode="json"), "selected_at": now.isoformat(),
+                    "alternative_owner_count": alternative_owner_count}}
             await session.flush()
+            if preview_evidence is not None:
+                await session.execute(delete(NebiusPoolPlacementAdvice).where(NebiusPoolPlacementAdvice.trial_id == trial_id))
             return self._view(row)
 
     async def _current_claim(self, session: AsyncSession, row: NebiusPoolExecutionOutbox) -> bool:

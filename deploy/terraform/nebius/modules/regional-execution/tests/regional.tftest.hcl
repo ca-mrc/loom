@@ -12,6 +12,36 @@ variables {
     node_registry_pull_service_account_id = "serviceaccount-e00test"
   }
 }
+run "nrd_execution_keeps_system_and_resource_ceiling" {
+  command = plan
+  variables { target = merge(var.target, {
+    execution_preset    = "32vcpu-128gb", execution_max_nodes = 6,
+    execution_disk_type = "NETWORK_SSD_NON_REPLICATED", execution_disk_gib = 279
+  }) }
+  assert {
+    condition = (
+      nebius_mk8s_v1_node_group.regional["execution"].template.boot_disk.type == "NETWORK_SSD_NON_REPLICATED" &&
+      nebius_mk8s_v1_node_group.regional["execution"].template.boot_disk.size_gibibytes == 279 &&
+      nebius_mk8s_v1_node_group.regional["execution"].template.resources.preset == "32vcpu-128gb" &&
+      nebius_mk8s_v1_node_group.regional["execution"].template.resources.platform == "cpu-d3" &&
+      nebius_mk8s_v1_node_group.regional["execution"].autoscaling.max_node_count == 6 &&
+      nebius_mk8s_v1_node_group.regional["system"].template.boot_disk.type == "NETWORK_SSD" &&
+      nebius_mk8s_v1_node_group.regional["system"].template.boot_disk.size_gibibytes == 80 &&
+      alltrue([for node in nebius_mk8s_v1_node_group.regional : node.strategy.max_surge.count == 0 && node.strategy.max_unavailable.count == 1])
+    )
+    error_message = "NRD279 selects only the execution boot disk and preserves the existing system/resources/non-surge strategy."
+  }
+}
+run "reject_nrd_wrong_granularity" {
+  command = plan
+  variables { target = merge(var.target, { execution_disk_type = "NETWORK_SSD_NON_REPLICATED", execution_disk_gib = 300 }) }
+  expect_failures = [var.target]
+}
+run "reject_unapproved_execution_disk_type" {
+  command = plan
+  variables { target = merge(var.target, { execution_disk_type = "NETWORK_HDD" }) }
+  expect_failures = [var.target]
+}
 run "execution_only" {
   command = plan
   assert {

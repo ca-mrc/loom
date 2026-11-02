@@ -159,6 +159,8 @@ async def _eligible(session: AsyncSession, row: Any, payload: Any, now: datetime
 async def read_execution_capacity_waits(
     session: AsyncSession, *, now: datetime, claiming_lease_id: UUID | None = None,
     claiming_inputs: dict[str, Any] | None = None,
+    preview_trial_id: UUID | None = None, preview_target_id: str | None = None,
+    preview_resources: ResourceTotals | None = None, preview_runtime_sha256: str | None = None,
 ) -> tuple[list[ExecutionCapacityWait], tuple[datetime, str] | None]:
     claiming = await session.get(ServiceExecutionLease, claiming_lease_id) if claiming_lease_id else None
     own_order = None
@@ -180,6 +182,16 @@ async def read_execution_capacity_waits(
                     and payload.get("runtime_contract_sha256") == claiming.runtime_contract_sha256):
                 own_order = wait.order
 
+    if claiming is None and preview_trial_id is not None:
+        row = (await session.execute(_candidate_rows().where(Trial.id == preview_trial_id))).mappings().one_or_none()
+        if row is not None:
+            payload = (row["scheduling_observation"] or {}).get("capacity_wait")
+            wait = await _eligible(session, row, payload, now)
+            if (wait is not None and wait.target_id == preview_target_id and wait.resources == preview_resources
+                    and preview_runtime_sha256 is not None and isinstance(payload, dict)
+                    and payload.get("runtime_contract_sha256") == preview_runtime_sha256):
+                own_order = wait.order
+
     hint = Trial.scheduling_observation["capacity_wait"]
     target = hint["target_id"].astext
 
@@ -196,6 +208,8 @@ async def read_execution_capacity_waits(
                target.is_not(None), or_(expiry.is_(None), expiry > now)]
     if claiming is not None:
         filters.append(Trial.id != claiming.trial_id)
+    elif preview_trial_id is not None:
+        filters.append(Trial.id != preview_trial_id)
     targets = (await session.scalars(select(target).where(*filters).distinct().order_by(target))).all()
     for target_id in targets:
         query = select(Trial.id, cast(first, Text).label("order_at"), Trial.next_attempt_at,

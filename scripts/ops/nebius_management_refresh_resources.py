@@ -58,6 +58,8 @@ def refresh_documents(request: ManagementRefreshResourcesRequest, phase: str) ->
         refreshed = render_refresh(render)
         if phase == 'config':
             documents = [refreshed.config]
+            if refreshed.catalog is not None:
+                documents.append(refreshed.catalog)
         else:
             rendered = render_management(render.after, candidate=render.candidate, profile=render.profile,
                 repo_root=render.repo_root)
@@ -127,11 +129,47 @@ class HTTPSManagementRefreshResourcesAPI(HTTPSApplicationSetupAPI):
         super().__init__(request=setup, phase='config', api_server=api_server, ssl_context=ssl_context, token=token)
         self.documents = documents
         self.before_write = before_write
+        self.application_catalog = copy.deepcopy(request.switch.render.application_catalog)
+        before = render.before.installation.applications
+        after = render.after.installation.applications
+        self.application_reader_binding = (after.runtime.build.binding if before is not None and after is not None
+            and before.runtime.build is not None and after.runtime.build is not None
+            and before.runtime.build.binding.recipe.trusted_image_ref != after.runtime.build.binding.recipe.trusted_image_ref else None)
+        self.application_catalog_name = ('loom-pool-profiles-' + render.after.pool_catalog_operation_id.hex
+            if self.application_reader_binding is not None else None)
 
     def create_resource(self, document: dict[str, Any]) -> None:
         # The stage has persisted its create intent by this point. Dry-run and
         # identity reads happen earlier and must not require a child journal.
         self._approved(document, writing=True)
+        original = self.application_catalog
+        if original is not None:
+            self.verify_identity(self.binding)
+            current = self._request('GET', '/api/v1/namespaces/' + self.binding.namespace
+                + '/configmaps/' + original['metadata']['name'])
+            if (current is None or _uid(current) != _uid(original) or current.get('data') != original.get('data')
+                    or current.get('immutable') is not True):
+                raise ValueError('application catalog predecessor changed')
+        elif self.application_reader_binding is not None:
+            from loom_service.pool_management.profiles import PoolProfileCatalog
+
+            # A separately staged normal owner catalog is also supported, but
+            # a dangling/new unqualified reference must fail before any write.
+            self.verify_identity(self.binding)
+            current = self._request('GET', '/api/v1/namespaces/' + self.binding.namespace
+                + '/configmaps/' + self.application_catalog_name)
+            try:
+                profiles = PoolProfileCatalog.model_validate_json(current['data']['profiles.json'])
+                profile, = (row for row in profiles.application_images if row.profile_id == self.application_reader_binding.profile_id)
+                expected = self.application_reader_binding
+                if (current.get('immutable') is not True or profile.recipe != expected.recipe
+                        or profile.settings.service_image != expected.recipe.trusted_image_ref
+                        or any(getattr(profile.settings,key) != getattr(expected,key) for key in (
+                            'storage_endpoint','storage_region','cache_bucket','registry_repository','cache_total_mib','cache_gc_policy'))
+                        or profile.settings.source_bucket != expected.source.source_bucket):
+                    raise ValueError
+            except (ValueError,TypeError,KeyError):
+                raise ValueError('application catalog successor unavailable') from None
         if self.before_write is not None:
             self.before_write()
         super().create_resource(document)

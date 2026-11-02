@@ -48,6 +48,49 @@ def builder() -> dict:
             "archive_secret_name": "loom-task-image-archive-writer"}
 
 
+@pytest.mark.parametrize("warm_fit,gc_policy,sibling", [
+    (False, "legacy-seven-day", False), (True, "budget-pressure", True),
+])
+def test_independent_p1_controls_render_from_saved_source(regional_inputs, warm_fit, gc_policy, sibling):
+    config, candidate, profile = regional_inputs
+    config["prefer_incoming_warm_fit"] = warm_fit
+    config["task_image_builder"] = {**builder(), "cache_total_mib": 65536,
+        "cache_gc_policy": gc_policy, "reuse_task_cache_for_verifier": sibling}
+    west = config["regional_execution_targets"][0]
+    west["task_image_builder"] = {**builder(), "cache_total_mib": 65536,
+        "cache_gc_policy": gc_policy, "reuse_task_cache_for_verifier": not sibling}
+    original = deepcopy(config)
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    deployments = [doc for group in files.values() for doc in group if doc["kind"] == "Deployment"]
+    cp = next(doc for doc in deployments if doc["metadata"]["name"] == "loom-control-plane")
+    cp_env = {row["name"]: row.get("value") for row in cp["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert cp_env["LOOM_CP_PREFER_INCOMING_WARM_FIT"] == str(warm_fit).lower()
+    for name, expected_sibling in (("loom-execution-actuator", sibling), (west["target_id"] + "-actuator", not sibling)):
+        actuator = next(doc for doc in deployments if doc["metadata"]["name"] == name)
+        env = {row["name"]: row.get("value") for row in actuator["spec"]["template"]["spec"]["containers"][0]["env"]}
+        settings = NativeTaskImageSettings.model_validate_json(env["LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER"])
+        assert settings.runtime_configuration()["cache_gc_policy"] == gc_policy
+        assert settings.runtime_configuration()["reuse_task_cache_for_verifier"] is expected_sibling
+        assert settings.job_config().reuse_task_cache_for_verifier is expected_sibling
+    assert config == original
+
+
+@pytest.mark.parametrize("regional_type,expected_quota", [
+    (None, "compute.disk.size.network-ssd"),
+    ("NETWORK_SSD_NON_REPLICATED", "compute.disk.size.network-ssd-non-replicated"),
+])
+def test_regional_disk_type_is_independent_and_sets_actual_collector_quota(regional_inputs, regional_type, expected_quota):
+    config, candidate, profile = regional_inputs
+    config["execution_disk_type"] = "NETWORK_SSD_NON_REPLICATED"
+    west = config["regional_execution_targets"][0]
+    if regional_type is not None:
+        west["execution_disk_type"] = regional_type
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    maps = [doc for doc in files["60-execution.yaml"] if doc["kind"] == "ConfigMap"]
+    collector = next(doc for doc in maps if doc["metadata"]["name"] == west["target_id"] + "-collector")
+    assert collector["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME"] == expected_quota
+
+
 def test_explicit_shared_cache_budget_renders_both_actuators_without_changing_pod_envelopes(regional_inputs: tuple) -> None:
     config, candidate, profile = regional_inputs
     config["task_image_builder"] = {**builder(), "cache_total_mib": 65536, "ephemeral_storage_mib": 51200}

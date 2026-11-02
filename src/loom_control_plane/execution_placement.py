@@ -23,6 +23,39 @@ class PlacementUnavailableError(ValueError):
     pass
 
 
+def incoming_warm_nodes(
+    placement: CapacityPlacement, demands: Iterable[tuple[str, ResourceTotals]], *,
+    incoming_id: str, sample: NodeTemplateSample | None,
+    constraints: dict[str, PlacementConstraint] | None = None,
+) -> frozenset[str]:
+    """Prove this incoming envelope fits a Ready UID without displacing promises.
+
+    This is advisory: callers first qualify health, observations, waits, I/O and
+    budgets using their actual admission path, then recheck under its normal
+    lock. A different demand's cold nodes do not make this incoming cold.
+    """
+    rows = list(demands)
+    if sum(key == incoming_id for key, _ in rows) != 1:
+        raise ValueError("incoming_demand_must_be_unique")
+    bound = constraints or {}
+    prior = plan_placement(placement, [row for row in rows if row[0] != incoming_id],
+                           sample=sample, constraints=bound)
+    result = set()
+    allowed = bound.get(incoming_id)
+    for node in placement.nodes:
+        if (not node.ready or node.unschedulable or node.deleting or node.draining is not False
+                or (allowed is not None and node.uid not in allowed.node_uids)):
+            continue
+        try:
+            projected = plan_placement(placement, rows, sample=sample,
+                constraints={**bound, incoming_id: PlacementConstraint(frozenset({node.uid}))})
+        except PlacementUnavailableError:
+            continue
+        if projected.additional_nodes <= prior.additional_nodes:
+            result.add(node.uid)
+    return frozenset(result)
+
+
 def quota_identity(quota: QuotaResource) -> tuple[str, ...]:
     return (quota.parent_id, quota.region, quota.service, quota.name, quota.unit)
 

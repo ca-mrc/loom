@@ -146,6 +146,12 @@ python_type = "str"
 default     = "development"
 description = "Logical environment whose healthy execution target may receive normal service-execution reservations."
 
+[service_config.prefer_incoming_warm_fit]
+used_by     = ["control-plane"]
+python_type = "bool"
+default     = false
+description = "Prefer a qualified Ready node for the actual incoming target envelope before cold expansion. Advisory only; final admission, fairness and committed routes remain unchanged."
+
 [service_config.service_execution_placement_policy]
 used_by     = ["control-plane"]
 python_type = "str"

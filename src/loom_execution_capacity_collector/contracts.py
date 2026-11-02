@@ -139,11 +139,21 @@ class NodePlacement(BaseModel):
     deleting: bool
     # None means the observation predates explicit drain detection.
     draining: bool | None = None
+    # Actual scheduling labels, not node-group template assumptions. Historical
+    # observations omit the new projection and retain identical canonical bytes.
+    labels: dict[str, str] | None = None
     allocatable: ResourceTotals
     requested: ResourceTotals
     pod_slots: int = Field(gt=0)
     used_pod_slots: int = Field(ge=0)
     managed_pods: list[ManagedPodPlacement]
+
+    @model_serializer(mode="wrap")
+    def _omit_historical_labels(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        value: dict[str, Any] = handler(self)
+        if self.labels is None:
+            value.pop("labels", None)
+        return value
 
     @field_validator("created_at", mode="before")
     @classmethod
