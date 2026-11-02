@@ -304,8 +304,6 @@ def _stage_builders_locked(
         sources = [_runtime(kube, row).get("builder_configuration_source", "unknown") for row in matches]
         if "management-profile" in sources:
             raise DeploymentError("global native build settings are owned by management profiles; use normal management configuration")
-        if "cache_total_mib" in resources.get(target, {}) and sources != ["actuator"]:
-            raise DeploymentError("cache budget staging requires a known running standalone builder controller")
     if updated != config:
         kube.run("patch", "configmap", "loom-platform-config", "-n", namespace, "--type=json", "-p",
                  json.dumps([

@@ -1398,8 +1398,10 @@ These stage/apply commands own standalone actuator configuration. Runtime
 readback reports `builder_configuration_source`. In global pool mode the
 management build profile owns the actual frozen claim; changing the actuator's
 environment would not update it. The standalone commands reject known global
-builders before saving or applying settings, and staging a cache budget requires
-a known running standalone controller. Use the normal management profile
+builders before saving or applying settings. Staging intent for a new or stopped
+standalone target remains available for its next normal protected installation;
+it does not claim that a live builder or management profile has changed.
+Use the normal management profile
 configuration path for global builders, preserving global mode. The shared
 profile renderer supports the same explicit `cache_total_mib` field.
 

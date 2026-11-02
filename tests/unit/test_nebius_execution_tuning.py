@@ -982,3 +982,35 @@ def test_management_profile_builders_reject_standalone_tuning_before_any_write(
     assert kube.cm['metadata']['resourceVersion'] == '1'
     assert kube.tuning_owner is None
     assert not any(args[0] in {'patch', 'set', 'rollout', 'apply', 'delete', 'create'} for args in kube.calls)
+
+
+@pytest.mark.parametrize('regional_controller', ['absent', 'dormant'])
+def test_cache_total_budget_stage_optin_keeps_future_regional_install_semantics(
+    regional_inputs, regional_controller,
+):
+    from tests.unit.test_nebius_platform_render_regional_builder import builder
+
+    config, candidate, _ = regional_inputs
+    config['task_image_builder'] = builder()
+    west = config['regional_execution_targets'][0]['target_id']
+    kube = FakeKube(regional_inputs)
+    key = next(key for key, doc in kube.objects.items() if key[0] == 'deployment'
+               and tuning._env(doc).get('LOOM_EXECUTION_ACTUATOR_TARGET_ID') == west)
+    if regional_controller == 'absent':
+        del kube.objects[key]
+    else:
+        kube.objects[key]['spec']['replicas'] = 0
+        kube.objects[key]['status'] = {'readyReplicas': 0}
+    deployments = {key: deepcopy(row) for key, row in kube.objects.items() if key[0] == 'deployment'}
+    result = tuning.stage_builders(kube, config['namespace'], expected_candidate=candidate['candidate_sha'],
+        resources={target: {'cache_total_mib': 65536} for target in (config['target_id'], west)},
+        enable_regional=(west,))
+    saved = json.loads(kube.cm['data']['environment.json'])
+    for target in (config['target_id'], west):
+        assert tuning._owners(saved)[target]['task_image_builder']['cache_total_mib'] == 65536
+        assert result['builders'][target]['cache_total_mib'] == 65536
+    assert result['effective_on_next_deployment'] is True
+    assert result['regional_preflight_required'] == [west]
+    assert result['controllers_restarted'] is False and result['task_jobs_replaced'] is False
+    assert deployments == {key: row for key, row in kube.objects.items() if key[0] == 'deployment'}
+    assert not any(args[0] in {'set', 'rollout', 'apply', 'delete', 'create'} for args in kube.calls)
