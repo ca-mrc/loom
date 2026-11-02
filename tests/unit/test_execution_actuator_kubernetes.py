@@ -13,7 +13,11 @@ import yaml
 from fastapi.testclient import TestClient
 
 from loom_execution_actuator.__main__ import ActuatorRuntimeHealth, _health_app
-from loom_execution_actuator.contracts import ExecutionTerminationSummaryV1, NormalizedJobState
+from loom_execution_actuator.contracts import (
+    ExecutionTerminationSummaryV1,
+    KubernetesApiError,
+    NormalizedJobState,
+)
 from loom_execution_actuator.kubernetes_api import InClusterKubernetesJobApi, _normalize, _scrub_log
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -1150,3 +1154,40 @@ async def test_resource_summary_never_uses_proxy_even_if_direct_summary_is_denie
             await api.resource_summary(node_name="node-1")
     finally:
         api_client.close()
+
+
+@pytest.mark.parametrize("status", [410, 500])
+async def test_expired_watch_restarts_quietly_but_other_watch_errors_raise(
+    monkeypatch: pytest.MonkeyPatch, status: int,
+) -> None:
+    from prometheus_client import REGISTRY
+
+    from loom_execution_actuator.controller import ExecutionActuator
+    from loom_execution_actuator.renderer import ExecutionTargetRuntime
+
+    def stream(*_args: Any, **_kwargs: Any) -> Any:
+        error = RuntimeError("watch failed")
+        error.status = status  # type: ignore[attr-defined]
+        raise error
+        yield  # pragma: no cover - makes this a generator like the client stream
+
+    monkeypatch.setattr("kubernetes.watch.Watch", lambda: _ns(stream=stream, stop=lambda: None))
+    api = object.__new__(InClusterKubernetesJobApi)
+    api._batch = _ns(list_namespaced_job=None)
+    actuator = ExecutionActuator(sessions=None, kubernetes=api,
+        target=ExecutionTargetRuntime(target_id="target", namespace="executions"), controller_id="watch-expiry")
+    actuator._watch_resource_version = "40"
+
+    def restarts(outcome: str) -> float:
+        return REGISTRY.get_sample_value("loom_execution_actuator_watch_restarts_total", {"outcome": outcome}) or 0.0
+
+    expired, errors = restarts("expired"), restarts("error")
+    if status == 410:
+        assert await actuator.watch_once() == 0
+        assert (restarts("expired"), restarts("error")) == (expired + 1, errors)
+    else:
+        with pytest.raises(KubernetesApiError):
+            await actuator.watch_once()
+        assert (restarts("expired"), restarts("error")) == (expired, errors + 1)
+    # Either way the next watch starts from a fresh list.
+    assert actuator._watch_resource_version is None
