@@ -22,6 +22,8 @@ export default function Monitor(): JSX.Element {
   const capacity = ["capacity", "resources"].includes(searchParams.get("view") ?? "");
   const view: View = searchParams.get("view") === "trials" ? "trials" : "batches";
   const batchIdFilter = searchParams.get("batch_id") ?? undefined;
+  const batchSearch = searchParams.get("batch_q") ?? undefined;
+  const imageId = searchParams.get("image_id") ?? undefined;
   const search = searchParams.get("q") ?? "";
   const [searchDraft, setSearchDraft] = useState(search);
   const pendingQueries = useRef<string[]>([]);
@@ -87,6 +89,11 @@ export default function Monitor(): JSX.Element {
     clearCursorParams(next);
     next.set("view", v);
     next.delete("state");
+    if (v === "batches") {
+      next.delete("batch_q");
+      next.delete("image_id");
+      next.delete("batch_id");
+    }
     navigateParams(next);
   };
 
@@ -227,6 +234,12 @@ export default function Monitor(): JSX.Element {
             </button>
           </span>
         ) : null}
+        {[["batch_q", batchSearch, "Batch search"], ["image_id", imageId, "Shared image"]].map(([key, value, label]) => value ? (
+          <span key={key} className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700">
+            {label}: {key === "image_id" ? value.slice(0, 8) : value}
+            <button type="button" className="ml-2 underline" onClick={() => updateParam(key!, "")} aria-label={`Clear ${label?.toLowerCase()} filter`}>clear</button>
+          </span>
+        ) : null)}
       </div>
 
       <MonitorHealthSummary
@@ -242,6 +255,8 @@ export default function Monitor(): JSX.Element {
         providerConnectionFilter={providerConnectionFilter}
         providerModelFilter={providerModelFilter}
         batchId={batchIdFilter}
+        batchSearch={batchSearch}
+        imageId={imageId}
       />
 
       <Suspense fallback={<LoadingState label="Loading monitor view…" />}>
@@ -262,6 +277,8 @@ export default function Monitor(): JSX.Element {
           search={search}
           stateFilter={stateFilter}
           batchId={batchIdFilter}
+          batchSearch={batchSearch}
+          imageId={imageId}
           teamFilter={teamFilter}
           benchmarkFilter={benchmarkFilter}
           agentFilter={agentFilter}

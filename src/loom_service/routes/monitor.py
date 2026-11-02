@@ -11,7 +11,7 @@ from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Response
-from sqlalchemy import case, func, select
+from sqlalchemy import and_, case, func, or_, select
 
 from loom.db.schema import ArtifactUploadSession, Batch, ServiceExecutionLease, Trial
 from loom.resource_pools import get_resource_pool_summary
@@ -28,11 +28,17 @@ from loom_service.monitor_filters import (
     resolve_monitor_team_filter,
 )
 from loom_service.monitor_placement import load_placement
+from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.service_execution_status import (
     SERVICE_EXECUTION_LIFECYCLE_STAGES,
     service_execution_lifecycle_case,
 )
-from loom_service.trial_progress import latest_execution_id, progress_summary
+from loom_service.trial_progress import (
+    image_response,
+    image_rows,
+    latest_execution_id,
+    progress_summary,
+)
 from loom_service.worker_backends import (
     _HEARTBEAT_FRESHNESS_SEC,
     get_active_backends,
@@ -406,6 +412,7 @@ async def get_monitor_summary(
     view: Annotated[View, Query()] = "batches",
     team_id: Annotated[UUID | None, Query()] = None,
     q: Annotated[str | None, Query()] = None,
+    batch_q: Annotated[str | None, Query()] = None,
     benchmark_id: Annotated[str | None, Query()] = None,
     agent_name: Annotated[str | None, Query()] = None,
     agent: Annotated[str | None, Query()] = None,
@@ -415,6 +422,7 @@ async def get_monitor_summary(
     provider_connection_id: Annotated[UUID | None, Query()] = None,
     provider_model_id: Annotated[str | None, Query()] = None,
     batch_id: Annotated[UUID | None, Query()] = None,
+    image_id: Annotated[UUID | None, Query()] = None,
     state: Annotated[
         str | None,
         Query(description="selected table state; summary still counts all states"),
@@ -434,7 +442,7 @@ async def get_monitor_summary(
     batch_counts_stmt = apply_batch_monitor_filters(
         batch_counts_stmt,
         target_team=target_team,
-        q=q_value if view == "batches" else None,
+        q=batch_q or (q_value if view == "batches" else None),
         benchmark_id=benchmark_id,
         agent_name=agent_value,
         model_provider=model_provider,
@@ -449,9 +457,10 @@ async def get_monitor_summary(
     trial_counts_stmt = apply_trial_monitor_filters(
         trial_counts_stmt,
         target_team=target_team,
-        q=q_value if view == "batches" else None,
+        q=batch_q or (q_value if view == "batches" else None),
         trial_q=q_value if view == "trials" else None,
         batch_id=batch_id,
+        image_id=image_id,
         benchmark_id=benchmark_id,
         agent_name=agent_value,
         model_provider=model_provider,
@@ -464,9 +473,10 @@ async def get_monitor_summary(
     resource_trials_stmt = apply_trial_monitor_filters(
         resource_trials_stmt,
         target_team=target_team,
-        q=q_value if view == "batches" else None,
+        q=batch_q or (q_value if view == "batches" else None),
         trial_q=q_value if view == "trials" else None,
         batch_id=batch_id,
+        image_id=image_id,
         benchmark_id=benchmark_id,
         agent_name=agent_value,
         model_provider=model_provider,
@@ -476,9 +486,10 @@ async def get_monitor_summary(
         state=None,
     )
     service_filters: dict[str, Any] = {
-        "q": q_value if view == "batches" else None,
+        "q": batch_q or (q_value if view == "batches" else None),
         "trial_q": q_value if view == "trials" else None,
         "batch_id": batch_id,
+        "image_id": image_id,
         "benchmark_id": benchmark_id,
         "agent_name": agent_value,
         "model_provider": model_provider,
@@ -533,6 +544,7 @@ async def get_monitor_summary(
             "view": view,
             "team_id": str(target_team) if target_team else None,
             "q": q_value,
+            "batch_q": batch_q,
             "benchmark_id": benchmark_id,
             "agent_name": agent_value,
             "model_provider": model_provider,
@@ -542,6 +554,7 @@ async def get_monitor_summary(
             ),
             "provider_model_id": provider_model_id,
             "batch_id": str(batch_id) if batch_id else None,
+            "image_id": str(image_id) if image_id else None,
             "state": state,
         },
         "progress": progress,
@@ -604,4 +617,60 @@ async def get_monitor_placement(
         **await load_placement(session, observation_id=observation["id"], scoped_ids=ids,
                                admin=is_admin(ctx)),
         "observed_at": observation["observed_at"], "is_fresh": observation["is_fresh"],
+    }
+
+
+@router.get("/monitor/images", response_model=wire.MonitorImages, response_model_exclude_unset=True)
+async def get_monitor_images(
+    response: Response,
+    sc: SessionAndCtx,
+    view: Annotated[View, Query()] = "trials",
+    team_id: Annotated[UUID | None, Query()] = None,
+    q: Annotated[str | None, Query()] = None,
+    batch_q: Annotated[str | None, Query()] = None,
+    batch_id: Annotated[UUID | None, Query()] = None,
+    image_id: Annotated[UUID | None, Query()] = None,
+    benchmark_id: Annotated[str | None, Query()] = None,
+    agent_name: Annotated[str | None, Query()] = None,
+    model_provider: Annotated[str | None, Query()] = None,
+    model_name: Annotated[str | None, Query()] = None,
+    provider_connection_id: Annotated[UUID | None, Query()] = None,
+    provider_model_id: Annotated[str | None, Query()] = None,
+    stage: Annotated[str | None, Query()] = None,
+    cursor: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(gt=0, le=100)] = 50,
+) -> dict[str, Any]:
+    """On-demand, scope-authorized unique image jobs; no shared diagnostic payloads."""
+    response.headers["Cache-Control"] = "no-store"
+    session, ctx = sc
+    require_scope(ctx, "read:own")
+    target_team = resolve_monitor_team_filter(ctx, team_id)
+    scope = apply_trial_monitor_filters(
+        select(Trial.id), target_team=target_team,
+        q=batch_q or (q if view == "batches" else None),
+        trial_q=q if view == "trials" else None,
+        batch_id=batch_id,
+        image_id=image_id, benchmark_id=benchmark_id, agent_name=agent_name,
+        model_provider=model_provider, model_name=model_name,
+        provider_connection_id=provider_connection_id, provider_model_id=provider_model_id,
+    )
+    images = image_rows(scope)
+    stmt = select(images).order_by(images.c.created_at.desc(), images.c.id.desc())
+    if stage:
+        stmt = stmt.where(images.c.stage.in_([value.strip() for value in stage.split(",")]))
+    if cursor:
+        try:
+            decoded = decode_cursor(cursor)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid image cursor") from exc
+        stmt = stmt.where(or_(images.c.created_at < decoded.submitted_at,
+                              and_(images.c.created_at == decoded.submitted_at, images.c.id < decoded.id)))
+    rows = (await session.execute(stmt.limit(limit + 1))).mappings().all()
+    more = len(rows) > limit
+    rows = rows[:limit]
+    now = datetime.now(UTC)
+    return {
+        "items": [image_response(row, now=now) for row in rows],
+        "next_cursor": encode_cursor(Cursor(submitted_at=rows[-1]["created_at"], id=rows[-1]["id"]))
+        if more else None,
     }

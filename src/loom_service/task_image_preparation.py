@@ -73,6 +73,16 @@ _REASONS = {
 }
 
 
+def preparation_failure_message(reason: str | None) -> str | None:
+    """Allowlisted image failure text for compact pipeline rows and retry waits."""
+    failure = image_preparation_failure(reason)
+    if failure is not None:
+        return str(failure["message"])
+    if reason is None:
+        return None
+    return _REASONS.get(reason, "Task image preparation did not complete. Contact the platform operator for build diagnostics.")
+
+
 def _timestamp(value: Any) -> str | None:
     if not isinstance(value, str):
         return None

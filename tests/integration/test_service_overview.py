@@ -424,6 +424,8 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
         "view": "trials",
         "team_id": str(team_id),
         "q": None,
+        "batch_q": None,
+        "image_id": None,
         "benchmark_id": "humaneval",
         "agent_name": "oracle",
         "model_provider": None,

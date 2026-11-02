@@ -203,6 +203,10 @@
     "src/pages/newBatch/ExecutionSelectionEditor.tsx": {
       "bytes": 10104,
       "gzipBytes": 3837
+    },
+    "src/components/ImageProgressList.tsx": {
+      "bytes": 34141,
+      "gzipBytes": 12853
     }
   }
 }

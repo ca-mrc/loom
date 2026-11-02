@@ -1265,6 +1265,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/monitor/images": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Monitor Images
+         * @description On-demand, scope-authorized unique image jobs; no shared diagnostic payloads.
+         */
+        get: operations["get_monitor_images_api_v1_monitor_images_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/monitor/placement": {
         parameters: {
             query?: never;
@@ -4409,6 +4429,41 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /** ImageProgress */
+        ImageProgress: {
+            /** Affected Trials */
+            affected_trials: number;
+            /** Id */
+            id: string;
+            /** Label */
+            label: string;
+            /** Observation Missing */
+            observation_missing: boolean;
+            /** Observation Stale */
+            observation_stale: boolean;
+            /** Observed At */
+            observed_at: string | null;
+            /** Region */
+            region: string | null;
+            /** Resources Released */
+            resources_released: boolean | null;
+            /** Stage */
+            stage: string;
+            /** Stage Seconds */
+            stage_seconds: number | null;
+            /** Stage Started At */
+            stage_started_at: string | null;
+            /** State */
+            state: string;
+            /** Task Id */
+            task_id: string;
+            /** Wait Message */
+            wait_message: string | null;
+            /** Waiting Trials */
+            waiting_trials: number;
+        } & {
+            [key: string]: unknown;
+        };
         /** InputImportFileV1 */
         InputImportFileV1: {
             /** Media Type */
@@ -4677,6 +4732,15 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** MonitorImages */
+        MonitorImages: {
+            /** Items */
+            items: components["schemas"]["ImageProgress"][];
+            /** Next Cursor */
+            next_cursor: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** MonitorPlacement */
         MonitorPlacement: {
             /** Available */
@@ -4773,8 +4837,12 @@ export interface components {
             agent_name: string | null;
             /** Batch Id */
             batch_id: string | null;
+            /** Batch Q */
+            batch_q?: string | null;
             /** Benchmark Id */
             benchmark_id: string | null;
+            /** Image Id */
+            image_id?: string | null;
             /** Model Name */
             model_name: string | null;
             /** Model Provider */
@@ -6237,9 +6305,17 @@ export interface components {
         };
         /** ProgressSummary */
         ProgressSummary: {
+            /** Cleanup States */
+            cleanup_states?: {
+                [key: string]: number;
+            };
             images: components["schemas"]["ProgressSummaryImages"];
             /** Oldest Wait Since Submission Seconds */
             oldest_wait_since_submission_seconds?: {
+                [key: string]: number;
+            };
+            /** Output States */
+            output_states?: {
                 [key: string]: number;
             };
             /** Stages */
@@ -6255,6 +6331,10 @@ export interface components {
         ProgressSummaryImages: {
             /** Image Count */
             image_count: number;
+            /** Stages */
+            stages?: {
+                [key: string]: number;
+            };
             /** States */
             states: {
                 [key: string]: number;
@@ -8258,18 +8338,34 @@ export interface components {
         };
         /** TrialProgress */
         TrialProgress: {
+            /** Cleanup Observation Stale */
+            cleanup_observation_stale?: boolean;
+            /** Cleanup Observed At */
+            cleanup_observed_at?: string | null;
+            /** Cleanup State */
+            cleanup_state?: string;
             /** Detail */
             detail: string | null;
             /** Label */
             label: string;
             /** Node Name */
             node_name: string | null;
+            /** Observation Missing */
+            observation_missing?: boolean;
             /** Observation Stale */
             observation_stale: boolean;
             /** Observed At */
             observed_at: string | null;
+            /** Output State */
+            output_state?: string;
+            /** Region */
+            region?: string | null;
             /** Stage */
             stage: string;
+            /** Stage Seconds */
+            stage_seconds?: number | null;
+            /** Stage Started At */
+            stage_started_at?: string | null;
             /** Timeline */
             timeline: components["schemas"]["TrialProgressTimelineItem"][];
             /** Wait Message */
@@ -11751,6 +11847,53 @@ export interface operations {
             };
         };
     };
+    get_monitor_images_api_v1_monitor_images_get: {
+        parameters: {
+            query?: {
+                view?: "batches" | "trials";
+                team_id?: string | null;
+                q?: string | null;
+                batch_q?: string | null;
+                batch_id?: string | null;
+                image_id?: string | null;
+                benchmark_id?: string | null;
+                agent_name?: string | null;
+                model_provider?: string | null;
+                model_name?: string | null;
+                provider_connection_id?: string | null;
+                provider_model_id?: string | null;
+                stage?: string | null;
+                cursor?: string | null;
+                limit?: number;
+            };
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MonitorImages"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_monitor_placement_api_v1_monitor_placement_get: {
         parameters: {
             query: {
@@ -11800,6 +11943,7 @@ export interface operations {
                 view?: "batches" | "trials";
                 team_id?: string | null;
                 q?: string | null;
+                batch_q?: string | null;
                 benchmark_id?: string | null;
                 agent_name?: string | null;
                 agent?: string | null;
@@ -11809,6 +11953,7 @@ export interface operations {
                 provider_connection_id?: string | null;
                 provider_model_id?: string | null;
                 batch_id?: string | null;
+                image_id?: string | null;
                 /** @description selected table state; summary still counts all states */
                 state?: string | null;
             };
@@ -14934,7 +15079,10 @@ export interface operations {
                 team_id?: string | null;
                 /** @description Search trial ID, task ID, or owner */
                 q?: string | null;
+                /** @description Search the containing batch */
+                batch_q?: string | null;
                 task_id?: string | null;
+                image_id?: string | null;
                 batch_id?: string | null;
                 benchmark_id?: string | null;
                 agent_name?: string | null;

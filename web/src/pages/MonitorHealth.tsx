@@ -4,11 +4,11 @@ import { api } from "../api";
 import { Card } from "../components/Card";
 import ErrorState from "../components/ErrorState";
 import { StatusPill } from "../components/StatusPill";
-import { ProgressSummary } from "../components/TrialProgress";
+import { ProgressSummary } from "../components/ProgressSummary";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { queueStatusText, queueStatusVariant, stateCount, type View } from "./monitorPresentation";
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { lazyRoute } from "../lib/lazyRoute";
 import LoadingState from "../components/LoadingState";
 
@@ -27,6 +27,8 @@ export function MonitorHealthSummary({
   providerConnectionFilter,
   providerModelFilter,
   batchId,
+  batchSearch,
+  imageId,
 }: {
   view: View;
   compact?: boolean;
@@ -40,6 +42,8 @@ export function MonitorHealthSummary({
   providerConnectionFilter: string;
   providerModelFilter: string;
   batchId?: string;
+  batchSearch?: string;
+  imageId?: string;
 }): JSX.Element | null {
   const [detailsOpen, setDetailsOpen] = useState(!compact);
   useEffect(() => { setDetailsOpen(!compact); }, [compact]);
@@ -64,8 +68,10 @@ export function MonitorHealthSummary({
       providerConnectionFilter,
       providerModelFilter,
       batchId,
+      batchSearch,
+      imageId,
     ),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.getMonitorSummary({
         view,
         q: debouncedSearch || undefined,
@@ -78,9 +84,19 @@ export function MonitorHealthSummary({
         provider_connection_id: providerConnectionFilter || undefined,
         provider_model_id: providerModelFilter || undefined,
         batch_id: batchId || undefined,
-      }),
+        batch_q: batchSearch || undefined,
+        image_id: imageId || undefined,
+      }, signal),
     refetchInterval: polling.refetchInterval,
   });
+  const imageScope = useMemo(() => ({
+    view, q: debouncedSearch || undefined, team_id: teamFilter || undefined,
+    benchmark_id: benchmarkFilter || undefined, agent_name: agentFilter || undefined,
+    model_provider: modelProviderFilter || undefined, model_name: modelNameFilter || undefined,
+    provider_connection_id: providerConnectionFilter || undefined, provider_model_id: providerModelFilter || undefined,
+    batch_id: batchId, batch_q: batchSearch, image_id: imageId,
+  }), [view, debouncedSearch, teamFilter, benchmarkFilter, agentFilter, modelProviderFilter,
+    modelNameFilter, providerConnectionFilter, providerModelFilter, batchId, batchSearch, imageId]);
 
   if (query.isError) {
     return (
@@ -124,7 +140,7 @@ export function MonitorHealthSummary({
         actions={<StatusPill variant={queueStatusVariant(data.queue.status)}>{data.queue.status}</StatusPill>}
       />
       <Card.Body className="stack-y-4">
-        <ProgressSummary progress={data.progress} batchId={batchId} />
+        <ProgressSummary progress={data.progress} batchId={batchId} scope={imageScope} />
         <p className="text-sm text-slate-600">{queueStatusText(data)}</p>
         <details open={detailsOpen} onToggle={event => setDetailsOpen(event.currentTarget.open)}>
           <summary className="cursor-pointer text-sm font-medium">Nodes, scheduling and capacity diagnostics</summary>
