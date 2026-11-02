@@ -1576,17 +1576,23 @@ instant. This reuses the same CronJob,
 worker identity and RBAC; it adds no worker or permission.
 
 Each build loop pass has three steps:
-1. Reconcile outstanding builds, at most four at a time.
+1. Start reconciling outstanding builds, at most four at a time, unless a
+   previous pass's reconciliation is still running.
 2. Run one admission pass, which claims up to 32 queued builds (`ADMISSIONS_PER_PASS`).
 3. Sleep for `poll_seconds`.
 
-The admission pass waits up to two seconds for that pass's reconciliation, so
-cleanup can free capacity first. It never waits longer, so one slow unrelated
-build observation cannot hold back new starts. Every claim still reserves
-capacity in its own transaction before its Job is created. Capacity, quota, I/O
-pressure and `max_concurrent` stop the pass at the first refusal. The global-pool
-controller reconciles its outbox with the same bound and selects up to 32
-requests per pass for management to prepare.
+The admission pass waits up to two seconds for a newly started reconciliation,
+so cleanup can free capacity first. It never waits longer, and it does not wait
+at all while an earlier reconciliation is still running. One slow unrelated
+build observation therefore cannot hold back new starts in this pass or later
+ones. At most one reconciliation runs at a time. Its result and duration are
+reported by the pass that finds it finished, and an error fails that pass. A
+reconciliation still running after five minutes fails each pass after it has
+admitted, so the build loop's readiness still reports a stuck reconcile. Every
+claim still reserves capacity in its own transaction before its Job is created.
+Capacity, quota, I/O pressure and `max_concurrent` stop the pass at the first
+refusal. The global-pool controller reconciles its outbox the same way and
+selects up to 32 requests per pass for management to prepare.
 
 The pass size and concurrency are source constants. They are deliberately not
 platform settings, so builder configuration and the frozen pool contracts stay
@@ -1617,7 +1623,9 @@ The `Native build cycle` log line and the
 
 `idle` means no build was claimable. A queued head that cannot start reports its
 blocked reason instead, such as `execution_capacity_native_io_feedback_pending`.
-The log line appears only for passes with outstanding or claimed builds.
+The log line appears only for passes with outstanding or claimed builds. It
+shows `reconcile_s=running` while the reconciliation is still in flight; the
+reconcile duration is recorded once, when it finishes.
 
 `snapshotter` selects the BuildKit OCI worker snapshotter (`overlayfs` or
 `native`). It defaults to `native` so unchanged Dockerfiles can hardlink files

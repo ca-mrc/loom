@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 from kubernetes.client import ApiException
 
+from loom_execution_actuator.build_reconcile import ReconcileRunner
 from loom_execution_actuator.task_image_controller import (
     _BUILDER_LOG_LIMIT,
     NativeBuildKubernetesApi,
@@ -738,16 +739,86 @@ async def test_native_admission_waits_for_a_slow_unrelated_reconcile_only_until_
             await release.wait()
 
     monkeypatch.setattr(controller, "_reconcile", reconcile, raising=False)
-    cycle = asyncio.create_task(controller.run_once())
-    await started.wait()
-    # Only the grace separates the slow observation from both new starts.
+    # Only the grace separates the slow observation from both new starts, and
+    # the pass finishes without waiting for it (#2754).
     async with asyncio.timeout(1):
-        while ("reconcile", "c2") not in controller.calls:
-            await asyncio.sleep(0.01)
+        await controller.run_once()
+    assert started.is_set() and controller.reconciler.running
     assert [call[1] for call in controller.calls if call[0] == "reconcile" and call[1] != "slow"] == ["c1", "c2"]
-    assert not cycle.done()
     release.set()
-    await cycle
+    await controller.close()
+
+
+async def test_a_slow_reconcile_does_not_delay_later_admission_passes(monkeypatch, caplog):
+    sample = _cycle_samples("native")
+    reconciles = sample("loom_execution_actuator_task_image_build_cycle_seconds_count", phase="reconcile")
+    controller = _native_controller(monkeypatch, outstanding=["slow"], claims=["c1", None, "c2", None])
+    release = asyncio.Event()
+
+    async def reconcile(attempt_id):
+        controller.calls.append(("reconcile", attempt_id))
+        if attempt_id == "slow":
+            await release.wait()
+
+    monkeypatch.setattr(controller, "_reconcile", reconcile, raising=False)
+    with caplog.at_level("INFO", logger="loom_execution_actuator.metrics"):
+        async with asyncio.timeout(1):
+            await controller.run_once()
+            await controller.run_once()  # No grace wait: the reconcile is already in flight.
+    # One reconcile in flight across both passes; each pass admitted.
+    assert [call[1] for call in controller.calls if call[0] == "reconcile"] == ["slow", "c1", "c2"]
+    assert "reconcile_s=running" in caplog.text
+    assert sample("loom_execution_actuator_task_image_build_cycle_seconds_count", phase="reconcile") == reconciles
+
+    release.set()
+    async with asyncio.timeout(1):
+        while controller.reconciler.running:
+            await asyncio.sleep(0.01)
+    await controller.run_once()  # Collects the finished reconcile.
+    assert sample("loom_execution_actuator_task_image_build_cycle_seconds_count", phase="reconcile") == reconciles + 1
+    await controller.run_once()  # And starts the next one.
+    assert [call[1] for call in controller.calls if call[0] == "reconcile"].count("slow") == 2
+
+
+async def test_a_background_reconcile_failure_fails_the_pass_that_collects_it(monkeypatch):
+    controller = _native_controller(monkeypatch, outstanding=["a"], claims=[], reconcile_error=ValueError("boom"))
+    release = asyncio.Event()
+    original = controller._reconcile
+
+    async def reconcile(attempt_id):
+        await release.wait()
+        await original(attempt_id)
+
+    monkeypatch.setattr(controller, "_reconcile", reconcile, raising=False)
+    await controller.run_once()  # Still running: this pass succeeds.
+    release.set()
+    async with asyncio.timeout(1):
+        while controller.reconciler.running:
+            await asyncio.sleep(0.01)
+    with pytest.raises(RuntimeError, match="Native build reconciliation failed"):
+        await controller.run_once()
+
+
+async def test_a_stalled_reconcile_fails_passes_after_admitting(monkeypatch):
+    sample = _cycle_samples("native")
+    controller = _native_controller(monkeypatch, outstanding=["stuck"], claims=["c1", None])
+    controller.admission_grace_seconds = 0
+    controller.reconciler.stall_seconds = 0
+    release = asyncio.Event()
+
+    async def reconcile(attempt_id):
+        controller.calls.append(("reconcile", attempt_id))
+        if attempt_id == "stuck":
+            await release.wait()
+
+    monkeypatch.setattr(controller, "_reconcile", reconcile, raising=False)
+    claims = sample("loom_execution_actuator_task_image_build_claims_total")
+    # Readiness still sees a stuck reconcile, but admission ran first.
+    with pytest.raises(RuntimeError, match="has not finished"):
+        await controller.run_once()
+    assert sample("loom_execution_actuator_task_image_build_claims_total") == claims + 1
+    await controller.close()
+    assert not controller.reconciler.running and not release.is_set()
 
 
 async def test_native_reconcile_pass_is_bounded_concurrently(monkeypatch):
@@ -821,6 +892,31 @@ async def test_pool_build_cycle_selects_several_and_preserves_errors():
     with pytest.raises(LookupError):
         await failing.run_once()
     assert sample("loom_execution_actuator_task_image_build_admissions_total", outcome="error") == errors + 1
+
+
+async def test_pool_selection_does_not_wait_for_a_slow_pending_key():
+    controller = _pool_controller(pending=["slow"], selected=["n1", "n2"])
+    release = asyncio.Event()
+    fast = controller._reconcile
+
+    async def reconcile(key):
+        if getattr(key, "local_work_id", None) == "slow":
+            await release.wait()
+        await fast(key)
+
+    controller._reconcile = reconcile
+    controller._reconciler = ReconcileRunner(grace_seconds=0)
+    async with asyncio.timeout(1):
+        await controller.run_once()
+        await controller.run_once()
+    # Both passes selected while the pending key's reconcile stayed in flight.
+    assert controller.reconciled == ["n1", "n2"] and controller.reconciler.running
+    release.set()
+    async with asyncio.timeout(1):
+        while controller.reconciler.running:
+            await asyncio.sleep(0.01)
+    await controller.run_once()
+    assert controller.reconciled[-1] == "slow"
 
 
 async def test_pool_reconcile_pass_is_bounded_concurrently():
