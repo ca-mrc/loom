@@ -82,6 +82,25 @@ def test_builder_delivery_is_derived_without_replacing_retained_manager_identity
         derive_application_build_deployment(result, spec)
 
 
+@pytest.mark.parametrize('explicit', [False, True])
+def test_application_delivery_freezes_only_explicit_cache_policy(delivery_inputs, explicit):
+    from scripts.ops.nebius_pool_application_delivery import derive_application_build_deployment
+
+    from loom_service.pool_management.installation import PoolInstallation
+
+    before, spec, _ = delivery_inputs
+    raw = spec.model_dump(mode='json')
+    profile, = raw['profiles']['application_images']
+    if explicit:
+        profile['settings'].update(cache_total_mib=65536, cache_gc_policy='budget-pressure')
+    result = derive_application_build_deployment(before, PoolInstallation.model_validate(raw))
+    binding = result.installation.applications.runtime.build.binding.model_dump(mode='json')
+    if explicit:
+        assert binding['cache_total_mib'] == 65536 and binding['cache_gc_policy'] == 'budget-pressure'
+    else:
+        assert 'cache_total_mib' not in binding and 'cache_gc_policy' not in binding
+
+
 @pytest.mark.parametrize('damage', ['installation', 'cluster', 'data', 'namespace', 'schema', 'source', 'node-group', 'missing-builder'])
 def test_builder_delivery_rejects_pool_scope_drift_before_runtime_changes(delivery_inputs, damage):
     from scripts.ops.nebius_pool_application_delivery import derive_application_build_deployment

@@ -278,6 +278,30 @@ def test_successive_normal_releases_keep_original_handoff_lineage_and_current_re
     assert second.preserved == first.preserved
 
 
+@pytest.mark.parametrize('roster', ['omitted', 'empty', 'peer'])
+def test_normal_participant_release_preserves_explicit_placement_roster(release_inputs, roster):
+    options = copy.deepcopy(release_inputs)
+    rows = {_key(row): row for row in options['current']}
+    controller = rows[f'Deployment:{options["config"]["namespace"]}:loom-control-plane']
+    setting = env(controller)['LOOM_CP_SERVICE_EXECUTION_GLOBAL_POOL_JSON']
+    original = json.loads(setting['value'])
+    if roster == 'empty':
+        original['placement_peers'] = []
+    elif roster == 'peer':
+        own = PoolRuntimeSettings.model_validate(original).participant
+        peer = own.model_copy(update={'participant_id': uuid4(), 'pool_id': uuid4(), 'incarnation': uuid4()})
+        original['placement_peers'] = [peer.model_dump(mode='json')]
+    setting['value'] = json.dumps(original)
+    options['current'] = tuple(rows.values())
+    plan = module().prepare_staging_pool_release(**options)
+    successor = next(row for group in plan.files.values() for row in group
+        if _key(row) == _key(controller))
+    actual = json.loads(env(successor)['LOOM_CP_SERVICE_EXECUTION_GLOBAL_POOL_JSON']['value'])
+    assert actual.get('placement_peers') == original.get('placement_peers')
+    assert ('placement_peers' in actual) == ('placement_peers' in original)
+    assert actual['participant']['binding_revision'] > original['participant']['binding_revision']
+
+
 def test_shared_release_preserves_selected_candidates_isolated_render(release_inputs, monkeypatch):
     """Re-rendering with operator code would discard the candidate's new template."""
     options = copy.deepcopy(release_inputs)

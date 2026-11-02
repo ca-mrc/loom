@@ -167,3 +167,20 @@ class NebiusPoolBuildOutbox(Base):
     attempt_number: Mapped[int | None] = mapped_column(Integer)
     lease_epoch: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+
+class NebiusPoolPlacementAdvice(Base):
+    """Disposable owner observations, never a route, wait or physical resource."""
+    __tablename__ = "nebius_pool_placement_advice"
+    __table_args__ = (
+        CheckConstraint("jsonb_typeof(advice_json) = 'object' AND requested_at <= observed_at AND observed_at < valid_until",
+                        name="nebius_pool_placement_advice_payload_check"),
+        Index("nebius_pool_placement_advice_expiry_idx", "valid_until"),
+    )
+    trial_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("trials.id", ondelete="CASCADE"), primary_key=True)
+    participant_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    target_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    requested_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    valid_until: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    advice_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)

@@ -12,6 +12,7 @@ import json
 import math
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import tarfile
@@ -22,7 +23,8 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Lock
+from threading import Lock, current_thread, main_thread
+from types import FrameType
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -74,6 +76,10 @@ _BUNDLE_BYTES = 512 * 1024 * 1024
 _CACHE_BYTES = 1024 * 1024 * 1024
 _CACHE_TOTAL_BYTES = 4 * 1024 * 1024 * 1024
 _CACHE_REUSE_BYTES = 256 * 1024 * 1024
+# A bounded starting point, not a measured optimum for every family. The DNA
+# acceptance observed 12/15 GETs and about 1/2 seconds per warm import.
+_CACHE_IMPORT_SECONDS = 60.0
+_CACHE_IMPORT_REQUESTS = 128
 _CACHE_TAR_ENTRIES = 10000
 # Linux paths plus ordinary PAX time/identity records fit an 8 KiB extension.
 # The writer checks the same bound that the reader checks before allocation.
@@ -92,6 +98,92 @@ _IO_FULL = re.compile(
 class BuildPreparationError(TaskImagePreparationError):
     def __init__(self, message: str, *, code: str = "image_preparation_input_invalid") -> None:
         super().__init__(code, message)
+
+
+class _CacheAbsentError(Exception):
+    """Only a remote optional-cache miss, never a local filesystem failure."""
+
+
+class _CacheReadUnavailableError(Exception):
+    """An optional remote stream failed, independently of local filesystem I/O."""
+
+
+class _CacheBudgetExceededError(Exception):
+    """Optional cache exhausted its shared prepare budget."""
+
+
+class _CacheImportBudget:
+    def __init__(self) -> None:
+        self.deadline = time.monotonic() + _CACHE_IMPORT_SECONDS
+        self.requests = 0
+        self.external_alarm_exception = False
+
+    def check(self) -> None:
+        if time.monotonic() >= self.deadline:
+            raise _CacheBudgetExceededError
+
+    @contextmanager
+    def network(self, *, request: bool = False) -> Iterator[None]:
+        self.check()
+        if request:
+            if self.requests >= _CACHE_IMPORT_REQUESTS:
+                raise _CacheBudgetExceededError
+            self.requests += 1
+        # Trusted prepare entrypoints run in the main thread. Library callers
+        # in other threads retain cooperative checks and the SDK timeout bound.
+        if current_thread() is not main_thread() or not hasattr(signal, 'setitimer'):
+            yield
+            self.check()
+            return
+        previous_handler = signal.getsignal(signal.SIGALRM)
+        previous_timer = signal.getitimer(signal.ITIMER_REAL)
+        if previous_handler is None:
+            yield
+            self.check()
+            return
+        remaining = self.deadline - time.monotonic()
+        earlier = 0 < previous_timer[0] <= remaining
+        started = time.monotonic()
+
+        def preserve(signum: int, frame: FrameType | None) -> None:
+            assert callable(previous_handler)
+            try:
+                previous_handler(signum, frame)
+            except BaseException:
+                self.external_alarm_exception = True
+                raise
+
+        def expired(_signum: int, _frame: FrameType | None) -> None:
+            raise _CacheBudgetExceededError
+
+        if earlier:
+            # Do not move an earlier caller deadline. Mark its exception so a
+            # caller's BotoCoreError/ValueError cannot become an optional miss.
+            # If that handler returns or ignores the signal, this library-only
+            # branch remains cooperative + SDK-bounded until the call returns.
+            # Normal main-thread prepare entrypoints have no outer alarm.
+            if callable(previous_handler):
+                signal.signal(signal.SIGALRM, preserve)
+            try:
+                yield
+            finally:
+                signal.signal(signal.SIGALRM, previous_handler)
+            self.check()
+            return
+        signal.signal(signal.SIGALRM, expired)
+        signal.setitimer(signal.ITIMER_REAL, max(remaining, 0.000001))
+        try:
+            yield
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_handler)
+            if previous_timer[0] > 0:
+                left = previous_timer[0] - (time.monotonic() - started)
+                signal.setitimer(signal.ITIMER_REAL, max(left, 0.000001), previous_timer[1])
+                if left <= 0 and callable(previous_handler):
+                    signal.setitimer(signal.ITIMER_REAL, 0)
+                    preserve(signal.SIGALRM, None)
+        self.check()
 
 
 class PublishCommandError(Exception):
@@ -263,6 +355,9 @@ def load_claim(path: Path) -> dict[str, Any]:
     if export_format not in {"archive", "directory"}:
         raise BuildPreparationError("invalid OCI export format")
     _cache_total_bytes(claim)
+    _cache_gc_policy(claim)
+    if "reuse_task_cache_for_verifier" in claim and type(claim["reuse_task_cache_for_verifier"]) is not bool:
+        raise BuildPreparationError("invalid sibling cache policy")
     _io_full_avg10_limit(claim)
     return claim
 
@@ -275,6 +370,13 @@ def _cache_total_bytes(claim: dict[str, Any]) -> int:
     if type(value) is not int or not 1024 <= value <= 1048576:
         raise BuildPreparationError("invalid cache total budget")
     return value * 1024 * 1024
+
+
+def _cache_gc_policy(claim: dict[str, Any]) -> str:
+    value = claim.get("cache_gc_policy", "legacy-seven-day")
+    if not isinstance(value, str) or value not in ("legacy-seven-day", "budget-pressure"):
+        raise BuildPreparationError("invalid cache GC policy")
+    return value
 
 
 def _io_full_avg10_limit(claim: dict[str, Any]) -> float | None:
@@ -331,8 +433,19 @@ def _client(claim: dict[str, Any], secret: Path) -> Any:
     )
 
 
-def _download(client: Any, *, bucket: str, key: str, destination: Path, limit: int) -> int:
-    response = client.get_object(Bucket=bucket, Key=key)
+def _download(client: Any, *, bucket: str, key: str, destination: Path, limit: int,
+              optional_cache: bool = False, cache_budget: _CacheImportBudget | None = None) -> int:
+    response: Any = None
+    try:
+        if cache_budget is None:
+            response = client.get_object(Bucket=bucket, Key=key)
+        else:
+            with cache_budget.network(request=True):
+                response = client.get_object(Bucket=bucket, Key=key)
+    except BaseException:
+        if response is not None:
+            response['Body'].close()
+        raise
     body = response["Body"]
     size = 0
     try:
@@ -340,11 +453,25 @@ def _download(client: Any, *, bucket: str, key: str, destination: Path, limit: i
             raise BuildPreparationError("input exceeds its byte limit")
         destination.parent.mkdir(parents=True, exist_ok=True)
         with destination.open("xb") as output:
-            while chunk := body.read(min(1024 * 1024, limit - size + 1)):
+            while True:
+                try:
+                    if cache_budget is None:
+                        chunk = body.read(min(1024 * 1024, limit - size + 1))
+                    else:
+                        with cache_budget.network():
+                            chunk = body.read(min(1024 * 1024, limit - size + 1))
+                except OSError as error:
+                    if optional_cache:
+                        raise _CacheReadUnavailableError from error
+                    raise
+                if not chunk:
+                    break
                 size += len(chunk)
                 if size > limit:
                     raise BuildPreparationError("input exceeds its byte limit")
                 output.write(chunk)
+                if cache_budget is not None:
+                    cache_budget.check()
     finally:
         body.close()
     return size
@@ -501,11 +628,20 @@ def unpack_cache(archive: Path, directory: Path) -> None:
     if not stat.S_ISREG(info.st_mode) or info.st_size > _cache_tar_byte_limit():
         raise BuildPreparationError("build cache tar exceeds transfer byte limit")
     total = 0
+    paths: dict[str, bool] = {}
     with tarfile.open(archive, "r|", tarinfo=_CacheTarInfo) as source:
         for index, member in enumerate(source):
             if index >= _CACHE_TAR_ENTRIES or member.size < 0:
                 raise BuildPreparationError("build cache exceeds file limit")
             _validate_bundle_relative_path(member.name)
+            if len(member.name) > 4096 or member.name.count("/") > 128:
+                raise BuildPreparationError("cache archive path exceeds limit")
+            if (member.name in paths
+                    or any(not paths.get("/".join(member.name.split("/")[:n]), True)
+                           for n in range(1, len(member.name.split("/"))))
+                    or (not member.isdir() and any(path.startswith(member.name + "/") for path in paths))):
+                raise BuildPreparationError("cache archive paths conflict")
+            paths[member.name] = member.isdir()
             total += member.size
             if total > _CACHE_BYTES or member.sparse is not None or not (member.isdir() or member.isfile()):
                 raise BuildPreparationError("build cache contains unsupported content")
@@ -595,17 +731,27 @@ def _parse_cache_manifest(body: bytes) -> list[dict[str, Any]]:
         path, digest, size = item.get("path"), item.get("sha256"), item.get("size")
         if (
             not isinstance(path, str)
+            or len(path) > 4096 or path.count("/") > 128
             or not isinstance(digest, str)
             or not _KEY.fullmatch(digest)
             or type(size) is not int
             or size < 0
         ):
             raise BuildPreparationError("cache manifest entry is invalid")
-        _validate_bundle_relative_path(path)
+        try:
+            _validate_bundle_relative_path(path)
+        except ValueError as error:
+            raise BuildPreparationError("cache manifest path is invalid") from error
         total += size
         if total > _CACHE_BYTES:
             raise BuildPreparationError("build cache exceeds byte limit")
         entries.append({"path": path, "sha256": digest, "size": size})
+    paths = {entry["path"] for entry in entries}
+    if len(paths) != len(entries) or any(
+        "/".join(path.split("/")[:index]) in paths
+        for path in paths for index in range(1, len(path.split("/")))
+    ):
+        raise BuildPreparationError("cache manifest paths conflict")
     return entries
 
 
@@ -667,6 +813,7 @@ def _materialize_cache_blobs(
     index: int,
     destination: Path,
     verified: dict[str, tuple[Path, int]] | None = None,
+    budget: _CacheImportBudget | None = None,
 ) -> None:
     """Import a v2 manifest + content-addressed blobs into cache-in/{index}."""
     with tempfile.TemporaryDirectory(prefix="loom-cache-manifest-") as temporary:
@@ -678,13 +825,19 @@ def _materialize_cache_blobs(
                 key=_v2_manifest_key(materialization_key, index),
                 destination=manifest_path,
                 limit=4 * 1024 * 1024,
+                optional_cache=True,
+                cache_budget=budget,
             )
         except ClientError as error:
             if _object_absent(error):
-                raise FileNotFoundError from error
+                raise _CacheAbsentError from error
             raise
         entries = _parse_cache_manifest(manifest_path.read_bytes())
-    destination.mkdir(parents=True, exist_ok=False)
+        if budget is not None:
+            budget.check()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = destination.parent / (".partial-" + uuid4().hex)
+    staging.mkdir()
     downloaded_bytes = 0
     downloaded: set[str] = set()
     # Only trusted prepare reads/writes these independent cache-in copies. The
@@ -694,10 +847,13 @@ def _materialize_cache_blobs(
             if not path.is_file() or path.is_symlink() or path.stat().st_size != size:
                 del verified[digest]
     reuse_bytes = sum(size for _, size in verified.values()) if verified is not None else 0
+    committed: dict[str, tuple[Path, int]] = {}
     try:
         with tempfile.TemporaryDirectory(prefix="loom-cache-blob-") as blob_tmp:
             for entry in entries:
-                target = destination / entry["path"]
+                if budget is not None:
+                    budget.check()
+                target = staging / entry["path"]
                 target.parent.mkdir(parents=True, exist_ok=True)
                 temporary_path = Path(blob_tmp) / entry["sha256"]
                 prior = verified.get(entry["sha256"]) if verified is not None else None
@@ -710,6 +866,8 @@ def _materialize_cache_blobs(
                         key=_v2_blob_key(entry["sha256"]),
                         destination=temporary_path,
                         limit=max(entry["size"], 1),
+                        optional_cache=True,
+                        cache_budget=budget,
                     )
                     if _sha256_file(temporary_path) != entry["sha256"]:
                         raise BuildPreparationError("cache blob digest mismatch")
@@ -717,17 +875,23 @@ def _materialize_cache_blobs(
                 if temporary_path.stat().st_size != entry["size"]:
                     raise BuildPreparationError("cache blob size mismatch")
                 shutil.copyfile(temporary_path, target)
-                if verified is not None and prior is None and reuse_bytes + entry["size"] <= _CACHE_REUSE_BYTES:
-                    verified[entry["sha256"]] = (target, entry["size"])
+                if budget is not None:
+                    budget.check()
+                if (verified is not None and prior is None and entry["sha256"] not in committed
+                        and reuse_bytes + entry["size"] <= _CACHE_REUSE_BYTES):
+                    committed[entry["sha256"]] = (destination / entry["path"], entry["size"])
                     reuse_bytes += entry["size"]
+        staging.rename(destination)
+        if verified is not None:
+            verified.update(committed)
         emit_stage("cache_import", "transfer", component_index=index,
                    logical_bytes=sum(entry["size"] for entry in entries),
                    locally_reused_bytes=sum(entry["size"] for entry in entries) - downloaded_bytes,
                    downloaded_blob_bytes=downloaded_bytes, unique_digests=len(downloaded),
                    manifest_bytes=manifest_bytes)
-    except Exception:
-        shutil.rmtree(destination, ignore_errors=False)
-        raise
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
 
 
 def _blob_exists(client: Any, bucket: str, key: str) -> bool:
@@ -745,6 +909,11 @@ _CACHE_GC_CHECKPOINT = "task-build-cache/.gc-checkpoint.json"
 _CACHE_GC_PUBLICATIONS = 64
 _CACHE_GC_BYTES = 256 * 1024 * 1024
 _CACHE_GC_SECONDS = 300
+_CACHE_GC_BACKOFF_SECONDS = 1800
+_CACHE_GC_MAX_OBJECTS = 20000
+_CACHE_GC_MAX_MANIFESTS = 1024
+_CACHE_GC_MAX_MANIFEST_BYTES = 32 * 1024 * 1024
+_CACHE_GC_MAX_SECONDS = 30
 
 
 def _read_cache_checkpoint(client: Any, bucket: str) -> dict[str, Any] | None:
@@ -762,12 +931,17 @@ def _read_cache_checkpoint(client: Any, bucket: str) -> dict[str, Any] | None:
     try:
         state = json.loads(raw)
         if (
-            len(raw) > 4096 or not isinstance(state, dict) or state.get("version") != 1
+            len(raw) > 4096 or not isinstance(state, dict)
+            or (state.get("version") != 1 and not (
+                state.get("version") == 2 and state.get("inventory_complete") is False))
             or any(type(state.get(field)) is not int or state[field] < 0
                    for field in ("retained_bytes", "debt_bytes", "publications"))
             or type(state.get("scanned_at")) not in {int, float}
             or not math.isfinite(state["scanned_at"])
             or not 0 < state["scanned_at"] <= time.time() + 60
+            or type(state.get("inventory_complete", True)) is not bool
+            or ("retry_after" in state and (type(state["retry_after"]) not in {int, float}
+                or not math.isfinite(state["retry_after"]) or state["retry_after"] < 0))
         ):
             raise ValueError
     except (ValueError, TypeError, UnicodeError) as error:
@@ -787,7 +961,7 @@ def _cache_checkpoint(retained_bytes: int) -> dict[str, Any]:
 
 def _reserve_cache_publication(
     client: Any, bucket: str, incoming_bytes: int, *, refresh_incoming: Callable[[], int] | None = None,
-    total_bytes: int | None = None,
+    total_bytes: int | None = None, gc_policy: str = "legacy-seven-day",
 ) -> bool:
     """Under the mutation lock, pre-account an upper bound before writing data.
 
@@ -795,27 +969,46 @@ def _reserve_cache_publication(
     A crash or ambiguous PUT can overcount; only a complete sweep resets debt.
     """
     budget = _CACHE_TOTAL_BYTES if total_bytes is None else total_bytes
+    _cache_gc_policy({"cache_gc_policy": gc_policy})
     try:
         state = _read_cache_checkpoint(client, bucket)
+        policy_changed = state is not None and (
+            state.get("gc_policy", "legacy-seven-day") != gc_policy
+            or state.get("budget_bytes", budget) != budget)
+        backoff = state is not None and not policy_changed and state.get("retry_after", 0) > time.time()
+        if (state is not None and backoff and (not state.get("inventory_complete", True)
+                or state["retained_bytes"] + state["debt_bytes"] + incoming_bytes > budget)):
+            emit_stage("cache_export", "deferred", reason="cache_gc_backoff", budget_bytes=budget)
+            return False
         expired = state is not None and time.time() - state["scanned_at"] >= _CACHE_GC_SECONDS
         over_budget = state is not None and (
             state["retained_bytes"] + state["debt_bytes"] + incoming_bytes > budget
         )
-        due = state is None or expired or (
+        incomplete = state is not None and not state.get("inventory_complete", True)
+        due = not backoff and (state is None or expired or incomplete or (policy_changed and over_budget) or (
             state["publications"] >= _CACHE_GC_PUBLICATIONS
             or state["debt_bytes"] + incoming_bytes > _CACHE_GC_BYTES
             or over_budget
-        )
+        ))
         # A just-completed sweep cannot reclaim grace-protected data. Avoid a
         # full scan for every refused publication while waiting for its next tick.
-        if due and state is not None and not expired and state["publications"] == 0:
+        if due and state is not None and not expired and not incomplete and not policy_changed and state["publications"] == 0:
             due = False
         if due:
-            remaining = _trim_cache_locked(client, bucket, incoming_bytes, total_bytes=budget)
+            remaining = _trim_cache_locked(client, bucket, incoming_bytes, total_bytes=budget, gc_policy=gc_policy)
             if remaining is None:
+                # Incomplete inventories never discharge pre-existing debt.
+                deferred = dict(state or _cache_checkpoint(0))
+                # Old readers reject v2 rather than treating an incomplete
+                # first inventory as zero retained bytes. A full sweep writes
+                # the historical v1 shape again; this affects optional cache only.
+                deferred.update(version=2, inventory_complete=False, gc_policy=gc_policy, budget_bytes=budget,
+                                retry_after=time.time() + _CACHE_GC_BACKOFF_SECONDS)
+                _write_cache_checkpoint(client, bucket, deferred)
                 emit_stage("cache_export", "deferred", reason="cache_gc_incomplete")
                 return False
             state = _cache_checkpoint(remaining)
+            state.update(gc_policy=gc_policy, budget_bytes=budget)
             # The sweep may have removed an old unreferenced blob that the
             # publisher's first HEAD saw. Refresh under this same lock before
             # reserving or reusing its missing set; never discount deleted data.
@@ -823,12 +1016,17 @@ def _reserve_cache_publication(
                 incoming_bytes = refresh_incoming()
         assert state is not None
         if state["retained_bytes"] + state["debt_bytes"] + incoming_bytes > budget:
+            state.update(gc_policy=gc_policy, budget_bytes=budget,
+                         retry_after=time.time() + _CACHE_GC_BACKOFF_SECONDS)
+            _write_cache_checkpoint(client, bucket, state)
             emit_stage("cache_export", "deferred", reason="cache_budget_protected",
                        accounted_bytes=state["retained_bytes"] + state["debt_bytes"],
                        incoming_bytes=incoming_bytes, budget_bytes=budget)
             return False
         state = {**state, "debt_bytes": state["debt_bytes"] + incoming_bytes,
-                 "publications": state["publications"] + 1}
+                 "publications": state["publications"] + 1, "gc_policy": gc_policy, "budget_bytes": budget}
+        if policy_changed:
+            state.pop("retry_after", None)
         _write_cache_checkpoint(client, bucket, state)
     except (BotoCoreError, ClientError, BuildPreparationError, OSError):
         emit_stage("cache_export", "deferred", reason="cache_checkpoint_unavailable")
@@ -931,6 +1129,7 @@ def _publish_cache_blobs_locked(
     if not _reserve_cache_publication(
         client, claim["cache_bucket"], incoming, refresh_incoming=missing_bytes,
         total_bytes=_cache_total_bytes(claim),
+        gc_policy=_cache_gc_policy(claim),
     ):
         return
     uploaded_bytes = 0
@@ -963,6 +1162,7 @@ def _try_import_legacy_tar(
     index: int,
     work: Path,
     archive_parent: Path,
+    budget: _CacheImportBudget | None = None,
 ) -> bool:
     archive = archive_parent / f"{source}.tar"
     try:
@@ -972,24 +1172,23 @@ def _try_import_legacy_tar(
             key=f"task-build-cache/{key}/{index}.tar",
             destination=archive,
             limit=_cache_tar_byte_limit(),
+            optional_cache=True,
+            cache_budget=budget,
         )
-    except ClientError as error:
-        if _object_absent(error):
-            emit_stage(
-                "cache_import",
-                "miss",
-                component_index=index,
-                reason="absent",
-                source=source,
-                format="tar",
-            )
-            return False
-        raise
+    except (BotoCoreError, ClientError, BuildPreparationError, _CacheReadUnavailableError) as error:
+        if budget is not None and budget.external_alarm_exception:
+            raise
+        emit_stage("cache_import", "miss", component_index=index,
+                   reason="absent" if isinstance(error, ClientError) and _object_absent(error) else "unavailable",
+                   source=source, format="tar")
+        return False
     cache_directory = work / "cache-in" / str(index)
+    cache_directory.parent.mkdir(parents=True, exist_ok=True)
+    staging = cache_directory.parent / (".partial-" + uuid4().hex)
     try:
-        unpack_cache(archive, cache_directory)
-    except (BuildPreparationError, tarfile.TarError):
-        shutil.rmtree(cache_directory, ignore_errors=False)
+        unpack_cache(archive, staging)
+        staging.rename(cache_directory)
+    except (BuildPreparationError, tarfile.TarError, ValueError):
         emit_stage(
             "cache_import",
             "miss",
@@ -1010,6 +1209,9 @@ def _try_import_legacy_tar(
             flush=True,
         )
         return False
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
     emit_stage(
         "cache_import",
         "hit",
@@ -1027,11 +1229,14 @@ def _try_import_cache(
     index: int,
     work: Path,
     verified: dict[str, tuple[Path, int]] | None = None,
+    budget: _CacheImportBudget | None = None,
 ) -> None:
+    budget = budget or _CacheImportBudget()
     transfer = _cache_transfer_mode(claim)
     archive_parent = Path(tempfile.mkdtemp(prefix="loom-cache-"))
     try:
         for source, key in _cache_import_candidates(claim):
+            budget.check()
             if transfer == "blobs":
                 cache_directory = work / "cache-in" / str(index)
                 try:
@@ -1042,8 +1247,9 @@ def _try_import_cache(
                         index=index,
                         destination=cache_directory,
                         verified=verified,
+                        budget=budget,
                     )
-                except FileNotFoundError:
+                except _CacheAbsentError:
                     emit_stage(
                         "cache_import",
                         "miss",
@@ -1052,8 +1258,9 @@ def _try_import_cache(
                         source=source,
                         format="blobs",
                     )
-                except (BuildPreparationError, ClientError) as error:
-                    shutil.rmtree(cache_directory, ignore_errors=True)
+                except (BuildPreparationError, ClientError, BotoCoreError, _CacheReadUnavailableError) as error:
+                    if budget.external_alarm_exception:
+                        raise
                     reason = (
                         "invalid_blobs"
                         if isinstance(error, BuildPreparationError)
@@ -1085,6 +1292,7 @@ def _try_import_cache(
                     index=index,
                     work=work,
                     archive_parent=archive_parent,
+                    budget=budget,
                 ):
                     return
                 continue
@@ -1096,10 +1304,16 @@ def _try_import_cache(
                 index=index,
                 work=work,
                 archive_parent=archive_parent,
+                budget=budget,
             ):
                 return
+    except _CacheBudgetExceededError:
+        if budget.external_alarm_exception:
+            raise
+        emit_stage('cache_import', 'miss', component_index=index, reason='cache_budget_exhausted',
+                   request_count=budget.requests, budget_seconds=_CACHE_IMPORT_SECONDS)
     finally:
-        shutil.rmtree(archive_parent, ignore_errors=True)
+        shutil.rmtree(archive_parent)
 
 
 def _install_terminus_runtime_tools(claim: dict[str, Any], context: Path) -> None:
@@ -1139,11 +1353,12 @@ def prepare(claim: dict[str, Any], work: Path, secrets: Path) -> None:
             cache = _client(claim, secrets / "cache")
             try:
                 verified: dict[str, tuple[Path, int]] = {}
+                budget = _CacheImportBudget()
                 for index, _ in enumerate(derive_task_image_build_components(claim["task_config"])):
                     with stage_span("cache_import", component_index=index), cache_request_counts(
                         cache, "cache_import", component_index=index,
                     ):
-                        _try_import_cache(cache, claim, index=index, work=work, verified=verified)
+                        _try_import_cache(cache, claim, index=index, work=work, verified=verified, budget=budget)
             finally:
                 cache.close()
         _wait_for_io_health(claim)
@@ -1165,17 +1380,17 @@ def pack_cache(directory: Path, archive: Path) -> None:
             output.add(path, arcname=path.relative_to(directory).as_posix(), recursive=False)
 
 
-def _read_cache_manifest(client: Any, bucket: str, key: str) -> list[str]:
+def _read_cache_manifest(client: Any, bucket: str, key: str, *, limit: int = 4 * 1024 * 1024) -> tuple[list[str], int]:
     """Return blob digests. Close the response body even when the read or parse fails."""
     response = client.get_object(Bucket=bucket, Key=key)
     body = response["Body"]
     try:
-        payload = body.read(4 * 1024 * 1024 + 1)
+        payload = body.read(limit + 1)
     finally:
         body.close()
-    if len(payload) > 4 * 1024 * 1024:
+    if len(payload) > limit:
         raise BuildPreparationError("cache manifest exceeds byte limit")
-    return [entry["sha256"] for entry in _parse_cache_manifest(payload)]
+    return [entry["sha256"] for entry in _parse_cache_manifest(payload)], len(payload)
 
 
 def _delete_cache_object(client: Any, bucket: str, item: dict[str, Any], deleted: set[str]) -> None:
@@ -1183,44 +1398,70 @@ def _delete_cache_object(client: Any, bucket: str, item: dict[str, Any], deleted
     deleted.add(item["Key"])
 
 
-def trim_cache(client: Any, bucket: str, incoming_bytes: int, *, total_bytes: int | None = None) -> None:
+def trim_cache(client: Any, bucket: str, incoming_bytes: int, *, total_bytes: int | None = None,
+               gc_policy: str = "legacy-seven-day") -> None:
     """Bound disposable cache size/age while excluding concurrent publishers."""
     with _cache_mutation(client, bucket) as acquired:
         if acquired:
-            _trim_cache_locked(client, bucket, incoming_bytes, total_bytes=total_bytes)
+            _trim_cache_locked(client, bucket, incoming_bytes, total_bytes=total_bytes, gc_policy=gc_policy)
 
 
 def _trim_cache_locked(
     client: Any, bucket: str, incoming_bytes: int, *, total_bytes: int | None = None,
+    gc_policy: str = "legacy-seven-day",
 ) -> int | None:
     with stage_span("cache_gc"), cache_request_counts(client, "cache_gc"):
-        remaining = _trim_cache_inventory(client, bucket, incoming_bytes, total_bytes=total_bytes)
+        try:
+            remaining = _trim_cache_inventory(client, bucket, incoming_bytes, total_bytes=total_bytes, gc_policy=gc_policy)
+        except (BotoCoreError, ClientError, BuildPreparationError, OSError):
+            emit_stage("cache_gc", "deferred", reason="inventory_unavailable")
+            return None
         if remaining is not None:
-            _write_cache_checkpoint(client, bucket, _cache_checkpoint(remaining))
+            state = _cache_checkpoint(remaining)
+            state.update(gc_policy=gc_policy, budget_bytes=_CACHE_TOTAL_BYTES if total_bytes is None else total_bytes)
+            _write_cache_checkpoint(client, bucket, state)
         return remaining
 
 
 def _trim_cache_inventory(
     client: Any, bucket: str, incoming_bytes: int, *, total_bytes: int | None = None,
+    gc_policy: str = "legacy-seven-day",
 ) -> int | None:
     budget = _CACHE_TOTAL_BYTES if total_bytes is None else total_bytes
+    pressure = _cache_gc_policy({"cache_gc_policy": gc_policy}) == "budget-pressure"
+    started = time.monotonic()
+    object_count = 0
     roots: list[dict[str, Any]] = []
     blobs: list[dict[str, Any]] = []
     for page in client.get_paginator("list_objects_v2").paginate(
         Bucket=bucket, Prefix="task-build-cache/"
     ):
         for item in page.get("Contents", []):
+            object_count += 1
+            if object_count > _CACHE_GC_MAX_OBJECTS or time.monotonic() - started > _CACHE_GC_MAX_SECONDS:
+                emit_stage("cache_gc", "deferred", reason="inventory_limit")
+                return None
             key = item["Key"]
             if _LEGACY_TAR.fullmatch(key) or _V2_MANIFEST.fullmatch(key):
                 roots.append(item)
             elif _V2_BLOB.fullmatch(key):
                 blobs.append(item)
     referenced: dict[str, set[str]] = {}
+    manifest_count = 0
+    manifest_bytes = 0
     try:
         for root in roots:
             if not _V2_MANIFEST.fullmatch(root["Key"]):
                 continue
-            for digest in _read_cache_manifest(client, bucket, root["Key"]):
+            manifest_count += 1
+            if (manifest_count > _CACHE_GC_MAX_MANIFESTS or manifest_bytes >= _CACHE_GC_MAX_MANIFEST_BYTES
+                    or time.monotonic() - started > _CACHE_GC_MAX_SECONDS):
+                emit_stage("cache_gc", "deferred", reason="inventory_limit")
+                return None
+            digests, read_bytes = _read_cache_manifest(client, bucket, root["Key"],
+                limit=min(_CACHE_GC_MAX_MANIFEST_BYTES - manifest_bytes, 4 * 1024 * 1024))
+            manifest_bytes += read_bytes
+            for digest in digests:
                 referenced.setdefault(digest, set()).add(root["Key"])
     except (BotoCoreError, ClientError, BuildPreparationError, OSError):
         emit_stage("cache_gc", "deferred", reason="manifest_unreadable")
@@ -1235,15 +1476,21 @@ def _trim_cache_inventory(
     cutoff = datetime.now(UTC) - timedelta(days=7)
     deleted: set[str] = set()
     for blob in sorted(blobs, key=lambda row: row["LastModified"]):
+        if time.monotonic() - started > _CACHE_GC_MAX_SECONDS:
+            emit_stage("cache_gc", "deferred", reason="inventory_limit")
+            return None
         digest = blob["Key"].rsplit("/", 1)[-1]
-        if digest in referenced or blob["LastModified"] >= cutoff:
+        if digest in referenced or (blob["LastModified"] >= cutoff and (not pressure or total <= budget)):
             continue
         _delete_cache_object(client, bucket, blob, deleted)
         total -= blob["Size"]
     for root in sorted(roots, key=lambda row: row["LastModified"]):
+        if time.monotonic() - started > _CACHE_GC_MAX_SECONDS:
+            emit_stage("cache_gc", "deferred", reason="inventory_limit")
+            return None
         if total <= budget:
             break
-        if root["LastModified"] >= cutoff:
+        if root["LastModified"] >= cutoff and not pressure:
             continue
         exclusive: list[dict[str, Any]] = []
         if _V2_MANIFEST.fullmatch(root["Key"]):
@@ -1253,12 +1500,15 @@ def _trim_cache_inventory(
                     owners == {root["Key"]}
                     and referenced_blob is not None
                     and referenced_blob["Key"] not in deleted
-                    and referenced_blob["LastModified"] < cutoff
+                    and (pressure or referenced_blob["LastModified"] < cutoff)
                 ):
                     exclusive.append(referenced_blob)
         _delete_cache_object(client, bucket, root, deleted)
         total -= root["Size"]
         for blob in exclusive:
+            if time.monotonic() - started > _CACHE_GC_MAX_SECONDS:
+                emit_stage("cache_gc", "deferred", reason="inventory_limit")
+                return None
             _delete_cache_object(client, bucket, blob, deleted)
             total -= blob["Size"]
         for owners in referenced.values():
@@ -1451,6 +1701,7 @@ def publish(
                                 if acquired is True and _reserve_cache_publication(
                                     cache, claim["cache_bucket"], cache_archive.stat().st_size,
                                     total_bytes=_cache_total_bytes(claim),
+                                    gc_policy=_cache_gc_policy(claim),
                                 ):
                                     cache.upload_file(
                                         str(cache_archive), claim["cache_bucket"],

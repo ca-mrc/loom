@@ -67,6 +67,7 @@ class TaskImageJobConfig:
     snapshotter: Literal["overlayfs", "native"] = "native"
     export_cache_mode: Literal["max", "min"] = "max"
     oci_export_format: Literal["archive", "directory"] = "archive"
+    reuse_task_cache_for_verifier: bool = False
 
     def __post_init__(self) -> None:
         for image in (self.service_image, self.buildkit_image):
@@ -97,6 +98,8 @@ class TaskImageJobConfig:
             raise ValueError("task-image export_cache_mode must be max or min")
         if self.oci_export_format not in {"archive", "directory"}:
             raise ValueError("task-image oci_export_format must be archive or directory")
+        if type(self.reuse_task_cache_for_verifier) is not bool:
+            raise ValueError("reuse_task_cache_for_verifier must be a boolean")
 
 
 def task_image_job_name(materialization_id: UUID, lease_epoch: int) -> str:
@@ -126,6 +129,7 @@ def _build_script(
     component_build_args: dict[str, dict[str, str]] | None = None,
     component_build_targets: dict[str, str] | None = None,
     component_no_cache: frozenset[str] = frozenset(),
+    reuse_task_cache_for_verifier: bool = False,
 ) -> str:
     lines = [
         "set -eu",
@@ -192,6 +196,16 @@ def _build_script(
             lines.append(
                 f"if [ -f {shlex.quote(cache_in + '/index.json')} ]; then set -- --import-cache {shlex.quote('type=local,src=' + cache_in)}; fi"
             )
+            if reuse_task_cache_for_verifier and component.name == "verifier":
+                # Same-Job public task prefix only. Independent imports retain
+                # the verifier's own records; no files or indexes are merged.
+                task_index = next((i for i, c in enumerate(components[:index]) if c.name == "task"), None)
+                if task_index is not None:
+                    sibling = f"{_BUILD}/cache-out/{task_index}"
+                    lines.append(
+                        f"if [ -f {shlex.quote(sibling + '/index.json')} ]; then "
+                        f'set -- "$@" --import-cache {shlex.quote("type=local,src=" + sibling)}; fi'
+                    )
         # Stage timing (Phase 2/5): solve covers buildctl LLB solve + OCI write.
         # oci_export records resulting bytes (archive size or directory sum).
         lines.extend(
@@ -462,6 +476,7 @@ def render_native_image_job(
                 component_build_args=component_build_args,
                 component_build_targets=component_build_targets,
                 component_no_cache=component_no_cache,
+                reuse_task_cache_for_verifier=config.reuse_task_cache_for_verifier and workload == "task",
             ),
         ],
         "env": [

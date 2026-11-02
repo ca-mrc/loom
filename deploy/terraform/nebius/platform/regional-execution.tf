@@ -22,12 +22,21 @@ variable "regional_execution_targets" {
     node_platform       = string
     system_preset       = optional(string, "4vcpu-16gb")
     execution_preset    = optional(string, "16vcpu-64gb")
+    execution_disk_type = optional(string, "NETWORK_SSD")
     execution_disk_gib  = optional(number, 80)
   }))
   default = {}
   validation {
     condition     = alltrue([for target in values(var.regional_execution_targets) : target.system_node_count >= 1 && floor(target.system_node_count) == target.system_node_count])
     error_message = "Regional system_node_count must be a positive integer."
+  }
+  validation {
+    condition = alltrue([for target in values(var.regional_execution_targets) :
+      contains(["NETWORK_SSD", "NETWORK_SSD_NON_REPLICATED"], target.execution_disk_type) &&
+      target.execution_disk_gib >= 80 && floor(target.execution_disk_gib) == target.execution_disk_gib &&
+      (target.execution_disk_type != "NETWORK_SSD_NON_REPLICATED" || target.execution_disk_gib % 93 == 0)
+    ])
+    error_message = "Regional execution disk must be an integer of at least 80 GiB, using NETWORK_SSD or NETWORK_SSD_NON_REPLICATED in multiples of 93 GiB."
   }
 }
 module "regional_execution" {

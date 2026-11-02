@@ -18,6 +18,7 @@ from loom_execution_actuator.task_image_renderer import (
     BUILDKIT_IMAGE,
     MIN_TASK_IMAGE_EPHEMERAL_STORAGE_MIB,
     TaskImageJobConfig,
+    render_native_image_job,
     render_task_image_job,
     task_image_job_name,
 )
@@ -26,6 +27,57 @@ from loom_execution_actuator.task_image_renderer import (
 def _component_script(script: str) -> str:
     creator = shlex.split(script.split("exec ", 1)[1])[-1]
     return shlex.split(creator.split("exec ", 1)[1])[-1]
+
+
+@pytest.mark.parametrize("value", [0, 1, "true", "false", None])
+def test_sibling_cache_flag_is_strict_bool(inputs, value) -> None:
+    with pytest.raises(ValueError, match="reuse_task_cache_for_verifier"):
+        replace(inputs["config"], reuse_task_cache_for_verifier=value)
+
+
+def test_sibling_cache_is_opt_in_and_follows_task_verifier_roles(inputs) -> None:
+    inputs["components"] = tuple(TaskImageBuildComponentV1(
+        name=name, dockerfile_path=f"c{i}/Dockerfile", context_path=f"c{i}", oci_output_path=f"oci/{i:04d}.tar",
+    ) for i, name in enumerate(("sidecar:first", "task", "verifier", "verifier-sidecar:last")))
+    _, default = render_task_image_job(**inputs)
+    default_script = _component_script(default["spec"]["template"]["spec"]["initContainers"][1]["command"][-1])
+    assert "type=local,src=/loom/build/cache-out/1" not in default_script
+    config = replace(inputs["config"], reuse_task_cache_for_verifier=True)
+    _, job = render_task_image_job(**{**inputs, "config": config})
+    script = _component_script(job["spec"]["template"]["spec"]["initContainers"][1]["command"][-1])
+    sibling = 'set -- "$@" --import-cache type=local,src=/loom/build/cache-out/1'
+    assert script.count(sibling) == 1
+    assert script.index("/loom/build/cache-in/2/index.json") < script.index(sibling)
+    assert script.index("dest=/loom/build/cache-out/1") < script.index(sibling) < script.index("dest=/loom/build/cache-out/2")
+    assert script.count("buildctl-daemonless.sh build") == 4
+    assert "type=local,src=/loom/build/cache-out/0" not in script
+    assert "type=local,src=/loom/build/cache-out/2" not in script
+
+
+def test_sibling_cache_requires_an_earlier_task_and_enabled_cache(inputs) -> None:
+    inputs["components"] = tuple(TaskImageBuildComponentV1(
+        name=name, dockerfile_path=f"c{i}/Dockerfile", context_path=f"c{i}", oci_output_path=f"oci/{i:04d}.tar",
+    ) for i, name in enumerate(("verifier", "task")))
+    config = replace(inputs["config"], reuse_task_cache_for_verifier=True)
+    _, job = render_task_image_job(**{**inputs, "config": config})
+    script = _component_script(job["spec"]["template"]["spec"]["initContainers"][1]["command"][-1])
+    assert "type=local,src=/loom/build/cache-out/1" not in script
+    config = replace(config, cache_secret_name=None)
+    _, job = render_task_image_job(**{**inputs, "config": config})
+    script = _component_script(job["spec"]["template"]["spec"]["initContainers"][1]["command"][-1])
+    assert "--import-cache" not in script and "--export-cache" not in script
+
+
+def test_task_sibling_opt_in_never_grants_application_role_reuse(inputs) -> None:
+    inputs["components"] = tuple(TaskImageBuildComponentV1(
+        name=name, dockerfile_path=f"c{i}/Dockerfile", context_path=f"c{i}", oci_output_path=f"oci/{i:04d}.tar",
+    ) for i, name in enumerate(("task", "verifier")))
+    _, job = render_native_image_job(workload="application", work_id=uuid4(), attempt=1,
+        claim={"cpu_arch": "x86_64"}, components=inputs["components"], target=inputs["target"],
+        config=replace(inputs["config"], reuse_task_cache_for_verifier=True))
+    script = _component_script(job["spec"]["template"]["spec"]["initContainers"][1]["command"][-1])
+    assert "type=local,src=/loom/build/cache-out/0" not in script
+    assert "/loom/build/cache-in/1/index.json" in script
 
 
 def test_explicit_cpu_request_keeps_all_phase_limits_and_storage_reserved(inputs) -> None:

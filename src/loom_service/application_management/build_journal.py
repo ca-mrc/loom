@@ -105,8 +105,18 @@ class ApplicationBuildJournal:
         return timedelta(seconds=seconds)
 
     async def claim(self, build_id: UUID, *, attempt: int, lease_seconds: int = 60) -> ApplicationBuildLease | None:
+        from loom_service.pool_management.application_builder_authority import (
+            builder_dispatch_allowed,
+            builder_recovery_allowed,
+        )
+        from loom_service.pool_management.locks import acquire_pool_mutation_lock
+
         duration = self._duration(lease_seconds)
         async with self.session_factory.begin() as session:
+            await acquire_pool_mutation_lock(session)
+            if not await builder_dispatch_allowed(session, self.registry.binding):
+                if not await builder_recovery_allowed(session, self.registry.binding, build_id, attempt):
+                    return None
             _, saved, now = await self._locked(session, build_id, attempt)
             if saved.phase in _TERMINAL or (saved.lease_expires_at is not None and saved.lease_expires_at > now):
                 return None

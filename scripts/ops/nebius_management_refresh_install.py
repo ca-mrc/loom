@@ -100,6 +100,11 @@ def refresh_contract(request: ManagementRefreshInstallRequest) -> dict[str, Any]
         'target_manager_revision': resources.target_manager_revision, 'installation_anchor': str(request.installation_anchor)}
     if resources.switch.initial_stopped is not None:
         contract['initial_stopped'] = resources.switch.initial_stopped
+    if render.application_catalog is not None or render.application_release is not None:
+        if render.application_catalog is None or render.application_release is None:
+            raise ValueError('application catalog release incomplete')
+        contract['application_catalog'] = render.application_catalog
+        contract['application_release'] = render.application_release.model_dump(mode='json')
     if request.pool_baseline is not None:
         from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1
 

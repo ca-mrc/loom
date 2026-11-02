@@ -48,6 +48,10 @@ EXECUTION_DISK_STORAGE_QUOTAS = {
     "NETWORK_SSD_NON_REPLICATED": "compute.disk.size.network-ssd-non-replicated",
 }
 
+# The configuration-only maintenance command probes the installed renderer
+# before saving a field that an older deployment would reject or discard.
+REGIONAL_DISK_CONFIGURATION_SUPPORTED = True
+
 
 class NebiusPlatformError(ValueError):
     """An input cannot describe an independent, reproducible environment."""
@@ -144,6 +148,7 @@ def validate_environment(config: dict[str, Any]) -> None:
             "emulated_auth_execution_target",
             "execution_disk_type",
             "execution_placement_policy",
+            "prefer_incoming_warm_fit",
             "execution_command_concurrency",
             "postgres_settings",
             "resource_observer_api_cidrs",
@@ -163,6 +168,8 @@ def validate_environment(config: dict[str, Any]) -> None:
         "environment-local-health-first", "environment-local-capacity-balanced",
     }:
         raise NebiusPlatformError("unsupported execution_placement_policy")
+    if type(config.get("prefer_incoming_warm_fit", False)) is not bool:
+        raise NebiusPlatformError("prefer_incoming_warm_fit must be a boolean")
     postgres_settings(config)
     concurrency = config.get("execution_command_concurrency", 1)
     if type(concurrency) is not int or not 1 <= concurrency <= 8:
@@ -456,8 +463,8 @@ def _regional_config(config: dict[str, Any], target: dict[str, Any]) -> dict[str
     result.pop("regional_execution_targets", None)
     result.pop("execution_resource_quota", None)
     result.pop("resource_observer_api_cidrs", None)
-    # Regional node groups retain their independently owned SSD templates.
-    # The primary build disk selection must not change their quota class.
+    # Regional disk types are independently owned; omitted regional settings
+    # keep their existing SSD class rather than inherit the primary template.
     result.pop("execution_disk_type", None)
     # Regional builders opt in independently; never inherit the primary loop.
     result.pop("task_image_builder", None)
@@ -491,7 +498,7 @@ def _validate_regions(config: dict[str, Any]) -> None:
     for target in regions:
         if (
             not isinstance(target, dict)
-            or set(target) - {"execution_resource_quota", "task_identity_policy", "task_image_builder", "resource_observer_api_cidrs"} != _REGIONAL_FIELDS
+            or set(target) - {"execution_resource_quota", "task_identity_policy", "task_image_builder", "resource_observer_api_cidrs", "execution_disk_type"} != _REGIONAL_FIELDS
         ):
             raise NebiusPlatformError("regional execution target has missing or unknown fields")
         validate_environment(_regional_config(config, target))
@@ -999,6 +1006,8 @@ def _task_image_builder_settings(
         "registry_repository",
         "cache_bucket",
         "cache_total_mib",
+        "cache_gc_policy",
+        "reuse_task_cache_for_verifier",
         "cpu_millis",
         "memory_mib",
         "ephemeral_storage_mib",
@@ -1914,6 +1923,7 @@ def _build_platform(
                     "LOOM_CP_SERVICE_EXECUTION_PLACEMENT_POLICY": config.get(
                         "execution_placement_policy", "environment-local-health-first"
                     ),
+                    "LOOM_CP_PREFER_INCOMING_WARM_FIT": str(config.get("prefer_incoming_warm_fit", False)).lower(),
                     "LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENVIRONMENT": config["environment"],
                     "LOOM_CP_SERVICE_EXECUTION_SCHEDULER_POOL_ID": "nebius-cpu",
                     "LOOM_CP_SERVICE_EXECUTION_SCHEDULER_MAX_DEADLINE_SEC": config.get(

@@ -193,6 +193,62 @@ def test_conditional_storage_reuses_published_blobs_and_batches_collection(condi
         client.close()
 
 
+def test_pressure_gc_can_race_reader_without_installing_partial_cache(conditional_minio, tmp_path):
+    config = conditional_minio.get_config()
+    def connect():
+        return boto3.client('s3', endpoint_url='http://' + config['endpoint'],
+            aws_access_key_id=config['access_key'], aws_secret_access_key=config['secret_key'], region_name='us-east-1')
+    admin, reader = connect(), connect()
+    bucket = 'cache-reader-race-' + uuid4().hex
+    admin.create_bucket(Bucket=bucket)
+    ready, resume = Event(), Event()
+    claim = {'cache_bucket': bucket, 'materialization_key': 'a' * 64, 'cache_gc_policy': 'budget-pressure'}
+    directory = tmp_path / 'export'
+    directory.mkdir()
+    (directory / 'first').write_bytes(b'first verified bytes')
+    (directory / 'second').write_bytes(b'second verified bytes')
+    original = reader.get_object
+    calls = 0
+    def pause_second_blob(**kwargs):
+        nonlocal calls
+        if '/blobs/' in kwargs['Key']:
+            calls += 1
+            if calls == 2:
+                ready.set()
+                assert resume.wait(15)
+        return original(**kwargs)
+    reader.get_object = pause_second_blob
+    verified = {}
+    try:
+        runtime._publish_cache_blobs(admin, claim, index=0, cache_dir=directory)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            pending = executor.submit(runtime._try_import_cache, reader, claim, index=0,
+                work=tmp_path / 'work', verified=verified)
+            try:
+                assert ready.wait(15), 'reader did not reach the second blob'
+                # GC completes while the unlocked reader is paused, including
+                # recent roots. The reader must cold-fallback transactionally.
+                runtime.trim_cache(admin, bucket, 0, total_bytes=0, gc_policy='budget-pressure')
+                assert not admin.list_objects_v2(Bucket=bucket, Prefix='task-build-cache/v2/').get('Contents')
+            finally:
+                resume.set()
+            pending.result(timeout=15)
+        assert verified == {} and not (tmp_path / 'work/cache-in/0').exists()
+        assert list((tmp_path / 'work/cache-in').iterdir()) == []
+        # A later valid publication remains usable; no stale partial aliases.
+        runtime._publish_cache_blobs(admin, claim, index=0, cache_dir=directory)
+        runtime._try_import_cache(reader, claim, index=0, work=tmp_path / 'work', verified=verified)
+        assert (tmp_path / 'work/cache-in/0/second').read_bytes() == b'second verified bytes'
+        assert len(verified) == 2
+    finally:
+        resume.set()
+        for item in admin.list_objects_v2(Bucket=bucket).get('Contents', []):
+            admin.delete_object(Bucket=bucket, Key=item['Key'])
+        admin.delete_bucket(Bucket=bucket)
+        reader.close()
+        admin.close()
+
+
 def test_real_storage_excludes_gc_and_other_publishers_during_preaccount(
     conditional_minio, tmp_path, monkeypatch, capsys,
 ):

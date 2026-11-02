@@ -1261,6 +1261,32 @@ loops; full reconciliation includes listing Jobs in the remote namespace.
 That proves API connectivity/reconciliation, not a successful regional task,
 capacity warmup, TokenReview authorization or regional workload acceptance.
 
+After a reviewed Terraform disk maintenance operation, persist the matching
+regional disk type and collector quota class without rebuilding images or
+restarting Postgres:
+
+```sh
+python scripts/ops/nebius_execution_tuning.py apply-regional-disks \
+  --kubeconfig /protected/primary.kubeconfig --namespace PRIMARY_NAMESPACE \
+  --expected-candidate MERGED_CANDIDATE_SHA \
+  --regional-disk-type "$REGIONAL_TARGET_ID=NETWORK_SSD_NON_REPLICATED"
+```
+
+This command requires drained execution/build work, uses the normal tuning and
+deployment mutex, saves the environment source, and patches only the existing
+primary-side regional collector ConfigMap. It rejects an actual global-pool
+runtime even when an old standalone configuration remains mounted; global quota
+accounting must use the normal management owner. It does **not** change cloud disks or
+qualify a new node shape. An operator performing the physical maintenance keeps
+one normal idle rollout guard across the exact saved Terraform plan, calls
+`_apply_regional_disks_locked` under that owned guard, and releases it only after
+the ordinary fresh placement qualification below. Do not acquire a nested tuning
+guard or release another operation's owner. An interrupted configuration update
+is failed; the same intent can be retried to converge source and accounting.
+Future normal deployments render the saved disk type. Preserve the complete
+Terraform owner inputs as well; changing runtime accounting cannot substitute
+for persisting the actual NodeGroup template.
+
 The ordinary regional collector runs every minute. To collect an initial sample
 without waiting for the schedule, use its existing CronJob after the relevant
 node warmup and mutation are authorized:
@@ -1401,18 +1427,113 @@ environment would not update it. The standalone commands reject known global
 builders before saving or applying settings. Staging intent for a new or stopped
 standalone target remains available for its next normal protected installation;
 it does not claim that a live builder or management profile has changed.
-Use the normal management profile
-configuration path for global builders, preserving global mode. The shared
-profile renderer supports the same explicit `cache_total_mib` field.
+Global builders use the protected `loom.pool-cache-policy.v1` owner operation
+described below. Profile settings remain the legacy/default source when no
+independent policy exists; existing immutable profile and request bytes are
+not rewritten by tuning.
 
 The total applies to recognized cache objects in the configured bucket, rather
 than independently per Task or region. Controllers sharing a bucket must use
-the same budget. The existing seven-day retention protection remains: lowering
-the budget does not immediately reclaim protected objects, and over-budget
-publication can be deferred while final image publication still succeeds.
+the same budget and GC policy. The default `legacy-seven-day` policy preserves
+seven-day retention protection: lowering the budget does not immediately reclaim
+protected objects, and over-budget publication can be deferred while final image
+publication still succeeds. Explicit `budget-pressure` permits safe eviction of
+recent cache soft state within the configured budget, after compatible readers
+are installed and old frozen readers have naturally drained.
 Choose the budget from observed resident bytes, actual operation cache hits,
 transfer/GC costs and end-to-end completion throughput; 64 GiB is an operator
 choice rather than a universal performance optimum.
+
+The P1 controls are independent of resource limits, create rate and command
+concurrency. After the first supporting normal deployment, these standalone
+commands persist changes without another PR or image build:
+
+```bash
+python scripts/ops/nebius_execution_tuning.py apply-builders \
+  --kubeconfig "$KUBECONFIG_PATH" --namespace "$PLATFORM_NAMESPACE" \
+  --expected-candidate "$INSTALLED_CANDIDATE_SHA" \
+  --build-cache-gc-policy "$PRIMARY_TARGET_ID=budget-pressure" \
+  --build-cache-gc-policy "$REGIONAL_TARGET_ID=budget-pressure"
+python scripts/ops/nebius_execution_tuning.py apply-builders \
+  --kubeconfig "$KUBECONFIG_PATH" --namespace "$PLATFORM_NAMESPACE" \
+  --expected-candidate "$INSTALLED_CANDIDATE_SHA" \
+  --build-reuse-task-cache-for-verifier "$PRIMARY_TARGET_ID=true" \
+  --build-reuse-task-cache-for-verifier "$REGIONAL_TARGET_ID=true"
+python scripts/ops/nebius_execution_tuning.py apply \
+  --kubeconfig "$KUBECONFIG_PATH" --namespace "$PLATFORM_NAMESPACE" \
+  --expected-candidate "$INSTALLED_CANDIDATE_SHA" \
+  --prefer-incoming-warm-fit true
+```
+
+`cache_gc_policy` defaults to `legacy-seven-day` and
+`reuse_task_cache_for_verifier` defaults to `false`; omitted old settings keep
+their historical serialized shape. Builders sharing a physical cache scope must
+change GC policy together, while sibling import may be selected per builder.
+Its verifier keeps its own cache import and independent output, and adds only
+the preceding Task's successful cache-out in the same Job. Cache import and
+BuildKit operation hits are different measurements. Native layer materialization
+can remain expensive despite `CACHED`; do not switch snapshotter or lower scratch
+on that evidence alone. See [sibling cache](../architecture/native-task-verifier-cache.md).
+
+Optional remote cache imports share one 60-second / 128-logical-GET budget per
+prepare, across components, exact/donor candidates and legacy tar fallback. SDK
+internal retries do not add logical GETs. Exhaustion discards the incomplete
+component and continues with an ordinary build; earlier complete imports remain
+usable. Source reads, local writes/copies and staging cleanup failures remain
+real failures. The ordinary main-thread prepare interrupts cache network calls
+at its deadline; local filesystem operations and cleanup can add time. Library
+calls in other threads, or with an earlier caller alarm whose handler returns or
+ignores it, retain cooperative deadline checks and SDK timeouts. This is not a
+universal hard 60-second wall-clock guarantee. The initial bounds exceed the
+sampled DNA imports (2–15 logical GETs, roughly 0.08–1.98 seconds); measure other
+families before treating them as optimal.
+
+First deploy the new reader with legacy GC/off settings. Before pressure GC,
+account for every known producer sharing the cache scope: local/pool Task builds,
+App builds, retained waiting requests and already rendered Jobs. The standalone
+operator checks installed capability, service/Job images and frozen native/App
+attempts before the first pressure transition and pressure-mode budget changes.
+It rejects a scope with a current registered management Task/App profile or a
+persisted management cache policy, including one with no active builds; use the
+normal management cache-policy owner for that scope. It does not inspect
+unrelated management installations. An unknown external App scope is not evidence that
+its reader is disabled or drained. Let incompatible builds finish naturally;
+do not cancel/re-submit a healthy batch to tune it. Compatible existing Jobs
+retain their frozen policy/resources, and execution leases continue. The normal
+deployment/tuning mutex excludes version rollout while values converge. Partial
+application remains failed and the same saved intent may be retried normally.
+
+Only selected actuator controllers roll for builder changes; the independent
+warm-fit flag rolls the control plane. Saved/runtime readback and future
+rendering retain the values. Turning off an optimization affects future or
+uncommitted work; it does not migrate an existing lease, outbox or verifier to
+another region. Warm-fit uses the actual incoming Pod and qualified capacity;
+unknown or stale evidence retains ordinary cold-capable selection. See
+[incoming warm fit](../architecture/incoming-warm-fit.md).
+
+For a management-owned pool, use the existing protected pool-administration
+launcher with `loom.pool-cache-policy.v1`: `operation_id`, the existing
+`installation_id`, `pool_id`, and current `profile_id`, plus any independently
+requested `cache_total_mib`, `cache_gc_policy`, or
+`reuse_task_cache_for_verifier`. An inspect request omits all three values and
+does not write. The owner derives the existing endpoint/region/bucket scope from
+the authorized profile; requests cannot invent a bucket or reader image. One
+durable policy covers known same-installation profiles sharing that scope,
+including Task and App; a foreign installation conflict fails. It preserves
+profile IDs, physical bindings/epochs and old request/claim bytes. New Task
+claims use the effective policy when rendering; each new App attempt freezes
+its own values, and retained history uses those frozen values rather than the
+latest policy. App ignores the Task→verifier sibling flag. Actual profile/reader
+compatibility and old build drain are checked by the owning operation before
+pressure activation. Do not substitute standalone actor environment changes.
+
+Global routing also requires the normal `loom.pool-routing-preference.v1` pool
+owner operation and actual manager policy readback, in addition to the actual
+control-plane flag. A single global participant is one physical owner, not two
+regions. Existing registered `placement_peers` remain nonsecret scope metadata;
+each owner uses its own credential and manager. Old/mixed/unknown policy falls
+back to ordinary selection. None of these controls adds enrollment, RBAC,
+resource quota or cross-region authority.
 
 The existing minutely capacity-collector Job normally publishes complete
 feedback at wall-start offsets 0, 15, 30 and 45 seconds within a 50-second

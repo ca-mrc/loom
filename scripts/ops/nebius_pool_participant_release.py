@@ -224,6 +224,18 @@ def _prepare(*, previous: PoolMigrationRequest, current: tuple[dict[str, Any], .
     wired = wire_participant(request=migration, participant_id=selected.participant_id, management_origin=management_origin,
         actuator=retained_identity(ordinary), guest_actuators=tuple(retained_identity(row) for row in guests),
         service=retained_identity(desired[service_key]), runtime_profile=runtime_profile)
+    # Retain independently configured, non-secret placement peers through a
+    # normal candidate release; they confer no registration or token scope.
+    old_cp_container, = indexed[controller_key]['spec']['template']['spec']['containers']
+    retained_cp = PoolRuntimeSettings.model_validate_json(
+        _environment(old_cp_container)['LOOM_CP_SERVICE_EXECUTION_GLOBAL_POOL_JSON']['value'])
+    cp_container, = wired['control_plane']['spec']['template']['spec']['containers']
+    setting = _environment(cp_container)['LOOM_CP_SERVICE_EXECUTION_GLOBAL_POOL_JSON']
+    successor = PoolRuntimeSettings.model_validate_json(setting['value'])
+    if 'placement_peers' in retained_cp.model_fields_set:
+        successor = PoolRuntimeSettings.model_validate(successor.model_copy(
+            update={'placement_peers': retained_cp.placement_peers}).model_dump())
+    setting['value'] = successor.model_dump_json()
     replacements_by_key = {}
     for row in wired.values():
         row['spec']['replicas'] = 1

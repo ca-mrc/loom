@@ -8,11 +8,11 @@ from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 from scripts.ops.nebius_application_upgrade_prerequisites import (
     ApplicationUpgradePrerequisites,
     UpgradePrerequisiteSettings,
@@ -59,6 +59,7 @@ from scripts.ops.nebius_pool_predecessor import (
 from loom.execution_image_admission import ImageAdmissionKeyring
 from loom_service.environment_management.candidates import GitHubCandidateCatalog
 from loom_service.environment_management.deployment import ManagementDeployment
+from loom_service.pool_management.lifecycle_contracts import PoolParticipantReleaseV2
 
 
 class RefreshPrivateInputs(BaseModel):
@@ -76,6 +77,16 @@ class RefreshPrivateInputs(BaseModel):
     foundation_candidate: str = Field(pattern=r'^[0-9a-f]{40}$')
     supersedes: SupersededRefreshV1 | None = None
     platform_rollout: OrdinaryPlatformRollout | None = None
+    application_catalog: dict[str, Any] | None = None
+    application_release: PoolParticipantReleaseV2 | None = None
+
+    @model_serializer(mode='wrap')
+    def _historical_catalog_shape(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        value = cast(dict[str, Any], handler(self))
+        for key in ('application_catalog','application_release'):
+            if getattr(self,key) is None:
+                value.pop(key,None)
+        return value
 
 
 @dataclass(frozen=True, repr=False)
@@ -134,7 +145,8 @@ def _load_refresh_inputs(operation: dict[str, Any], ancestors: tuple[str, ...], 
                 and inputs.platform_rollout is None):
             raise ValueError
         render = ManagementRefreshRenderRequest(predecessor.deployment, inputs.deployment, predecessor.active,
-            inputs.candidate, inputs.profile, Path(__file__).resolve().parents[2])
+            inputs.candidate, inputs.profile, Path(__file__).resolve().parents[2],
+            inputs.application_catalog, inputs.application_release)
         config_name = render_refresh(render).config['metadata']['name']
         # Refresh resources are create-only. Never admit a successor that would
         # require adopting or replacing an ancestor's immutable configuration.

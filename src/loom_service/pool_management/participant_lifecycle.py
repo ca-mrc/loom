@@ -154,6 +154,19 @@ async def transition_participant(session: AsyncSession, spec: PoolParticipantOpe
                 NebiusPoolRequest.request_id.in_([row.request_id for row in waiting]), NebiusPoolRequest.phase == 'waiting'
             ).values(phase='cancelled_unstarted'))
     if spec.action == 'begin_release':
+        from loom.db.nebius_application_build_schema import (
+            NebiusApplicationBuild,
+            NebiusApplicationBuildAttempt,
+        )
+
+        outstanding_application = await session.scalar(select(NebiusApplicationBuildAttempt.build_id).join(
+            NebiusApplicationBuild, (NebiusApplicationBuild.build_id == NebiusApplicationBuildAttempt.build_id)
+            & (NebiusApplicationBuild.current_attempt == NebiusApplicationBuildAttempt.attempt)).where(
+            NebiusApplicationBuild.binding_json['participant_id'].astext == str(spec.participant_id),
+            NebiusApplicationBuild.binding_json['pool_id'].astext == str(spec.pool_id),
+            NebiusApplicationBuildAttempt.phase.in_(('queued', 'running', 'settling'))).limit(1))
+        if outstanding_application is not None:
+            raise ValueError('pool_participant_application_build_drain_required')
         assert spec.replacement is not None
         await qualify_release(session, pool, PoolParticipantV1.model_validate(selected.binding_json), spec.replacement)
     if spec.action == 'commit_release':

@@ -7,6 +7,7 @@ from uuid import UUID
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     ForeignKey,
     ForeignKeyConstraint,
@@ -45,6 +46,7 @@ class NebiusPoolBinding(Base):
     mode: Mapped[str] = mapped_column(Text, nullable=False)
     binding_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     binding_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    prefer_incoming_warm_fit: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false", deferred=True, deferred_raiseload=True)
 
 
 class NebiusPoolParticipant(Base):
