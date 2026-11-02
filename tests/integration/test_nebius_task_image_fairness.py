@@ -817,3 +817,122 @@ async def test_admission_pass_starts_one_build_per_node_until_its_io_feedback(na
         wait = await session.get(TaskImageCapacityWait, target.target_id)
         assert wait is not None and states[wait.materialization_id] == "queued"
         assert wait.reason == "execution_capacity_native_io_feedback_pending"
+
+
+def _start_build_pods(kube, started_at):
+    """Schedule each Job's Pod on its bound node with the build phase running."""
+    for job in kube.jobs.values():
+        node = job["metadata"]["annotations"]["loom.openai.com/build-node-name"]
+        job["pods"] = [{"metadata": {"uid": f"pod-{job['metadata']['uid']}", "name": "pod",
+                                     "ownerReferences": [{"kind": "Job", "uid": job["metadata"]["uid"]}]},
+                        "spec": {"nodeName": node},
+                        "status": {"phase": "Running", "initContainerStatuses": [
+                            {"name": "prepare", "state": {"terminated": {"exitCode": 0}}},
+                            {"name": "build", "state": {"running": {"startedAt": started_at.isoformat()}}},
+                        ]}}]
+
+
+async def test_one_admission_pass_starts_a_build_on_each_healthy_node(native_build_setup, monkeypatch):
+    # #2750: several admissions in one pass through the real capacity path. Each
+    # healthy node takes one unobserved start; further builds wait for feedback.
+    controller, sessions, kube, image_id, builder_trial_id, _, target, now = native_build_setup
+    controller.settings = controller.settings.model_copy(update={"cpu_millis": 1000})
+    async with sessions() as session:
+        team_id = (await session.get(Trial, builder_trial_id)).team_id
+    images = [image_id, *[(await seed_image(sessions, team_id))[0] for _ in range(2)]]
+    # Pressure samples are dated in the recent past so a complete ten-second
+    # window after the build start is already fresh without the test waiting.
+    sampled = now - timedelta(seconds=30)
+    async with sessions() as session, session.begin():
+        two = _healthy_placement(target_id=target.target_id, nodes=2, used_nodes=2, quota_nodes=2, sampled_at=sampled)
+        await _record(session, target.target_id, now + timedelta(milliseconds=2), two)
+    cycles = []
+    monkeypatch.setattr("loom_execution_actuator.task_image_controller.record_build_cycle",
+                        lambda controller, **cycle: cycles.append(cycle))
+
+    await controller.run_once()
+
+    assert (cycles[-1]["claimed"], cycles[-1]["outcome"]) == (2, "execution_capacity_native_io_feedback_pending")
+    assert kube.ensure_calls == 2
+    nodes = {job["metadata"]["annotations"]["loom.openai.com/build-node-name"] for job in kube.jobs.values()}
+    assert nodes == {node["name"] for node in two["nodes"]}
+    states = {image: (await rows(sessions, image))[0].state for image in images}
+    assert sorted(states.values()) == ["queued", "running", "running"]
+
+    # Both builds reach their heavy phase. Until a sample covers ten seconds of
+    # it on each node, the queued build keeps waiting.
+    started = sampled + timedelta(seconds=5)
+    _start_build_pods(kube, started)
+    await controller.run_once()
+    assert (cycles[-1]["claimed"], cycles[-1]["outcome"], kube.ensure_calls) == (
+        0, "execution_capacity_native_io_feedback_pending", 2)
+    async with sessions() as session, session.begin():
+        observed = _healthy_placement(target_id=target.target_id, nodes=2, used_nodes=2, quota_nodes=2,
+                                      sampled_at=started + timedelta(seconds=11))
+        await _record(session, target.target_id, datetime.now(UTC), observed)
+    await controller.run_once()
+    assert (cycles[-1]["claimed"], kube.ensure_calls) == (1, 3)
+    assert [(await rows(sessions, image))[0].state for image in images] == ["running"] * 3
+
+
+async def _two_node_setup(native_build_setup, monkeypatch, *, builds, damage=None):
+    controller, sessions, kube, image_id, builder_trial_id, _, target, now = native_build_setup
+    controller.settings = controller.settings.model_copy(update={"cpu_millis": 1000})
+    async with sessions() as session:
+        team_id = (await session.get(Trial, builder_trial_id)).team_id
+    images = [image_id, *[(await seed_image(sessions, team_id))[0] for _ in range(builds - 1)]]
+    placement = _healthy_placement(target_id=target.target_id, nodes=2, used_nodes=2, quota_nodes=2,
+                                   sampled_at=now - timedelta(seconds=30))
+    if damage is not None:
+        damage(placement["nodes"][1], now)
+    async with sessions() as session, session.begin():
+        await _record(session, target.target_id, now + timedelta(milliseconds=2), placement)
+    cycles = []
+    monkeypatch.setattr("loom_execution_actuator.task_image_controller.record_build_cycle",
+                        lambda controller, **cycle: cycles.append(cycle))
+    return controller, sessions, kube, team_id, images, placement, cycles
+
+
+def _bound_nodes(kube):
+    return sorted(job["metadata"]["annotations"]["loom.openai.com/build-node-name"] for job in kube.jobs.values())
+
+
+async def test_a_start_awaiting_feedback_does_not_hold_a_fitting_start_on_the_other_node(native_build_setup, monkeypatch):
+    controller, sessions, kube, team_id, _, placement, cycles = await _two_node_setup(
+        native_build_setup, monkeypatch, builds=1)
+    first, second = (node["name"] for node in placement["nodes"])
+    await controller.run_once()
+    assert (cycles[-1]["claimed"], _bound_nodes(kube)) == (1, [first])
+
+    # A later build arrives while the first still awaits feedback on its node.
+    later, _ = await seed_image(sessions, team_id)
+    await controller.run_once()
+    assert (cycles[-1]["claimed"], _bound_nodes(kube)) == (1, [first, second])
+    assert (await rows(sessions, later))[0].state == "running"
+
+
+def _hot(node, now):
+    node["io_pressure"]["full_avg10"] = 80.0
+
+
+def _stale(node, now):
+    node["io_pressure"]["sampled_at"] = (now - timedelta(seconds=120)).isoformat()
+
+
+def _unmeasured(node, now):
+    del node["io_pressure"]
+
+
+@pytest.mark.parametrize("damage", [_hot, _stale, _unmeasured], ids=["hot", "stale", "unmeasured"])
+async def test_one_pass_never_starts_on_a_hot_stale_or_unmeasured_second_node(native_build_setup, monkeypatch, damage):
+    controller, sessions, kube, _, images, placement, cycles = await _two_node_setup(
+        native_build_setup, monkeypatch, builds=2, damage=damage)
+    await controller.run_once()
+    # Only the healthy node takes a start; the second build waits instead of
+    # landing on the damaged node.
+    assert (cycles[-1]["claimed"], _bound_nodes(kube)) == (1, [placement["nodes"][0]["name"]])
+    states = sorted([(await rows(sessions, image))[0].state for image in images])
+    assert states == ["queued", "running"]
+    # Known limitation: the healthy node's unobserved start is reported first,
+    # so the pass shows feedback_pending even though the other node is unusable.
+    assert cycles[-1]["outcome"] == "execution_capacity_native_io_feedback_pending"
