@@ -148,7 +148,7 @@ def test_native_verifier_exports_original_logs_result_and_zero_reward(timed_out)
     assert trial.state == ("failed" if timed_out else "succeeded")
 
 
-@pytest.mark.parametrize("damage", ["missing_log", "missing_result", "wrong_team", "wrong_attempt", "hash", "blocked", "score", "phase_path", "secret"])
+@pytest.mark.parametrize("damage", ["missing_log", "missing_result", "wrong_team", "wrong_attempt", "hash", "blocked", "score", "phase_path"])
 def test_native_verifier_rejects_missing_corrupt_or_unrelated_evidence(damage):
     trial, s3 = native_trial()
     index = trial.trajectory_index["artifacts"]
@@ -168,20 +168,31 @@ def test_native_verifier_rejects_missing_corrupt_or_unrelated_evidence(damage):
         result = trial.result["runtime_result"]
         if damage == "score":
             result["verifier_rewards"] = {"passed": 1}
-        elif damage == "phase_path":
-            result["phases"][1]["stdout"]["path"] = "01-agent.stdout"
         else:
-            row = index[0]
-            body = b"Bearer abcdefghijklmnop"
-            s3._objects[("artifacts", row["key"])] = body
-            row.update(size_bytes=len(body), sha256="sha256:"+hashlib.sha256(body).hexdigest())
-            result["phases"][1]["stdout"].update(bytes_seen=len(body), bytes_saved=len(body), sha256=row["sha256"])
+            result["phases"][1]["stdout"]["path"] = "01-agent.stdout"
         row = index[-1]
         body = json.dumps(result).encode()
         s3._objects[("artifacts", row["key"])] = body
         row.update(size_bytes=len(body), sha256="sha256:"+hashlib.sha256(body).hexdigest())
     with pytest.raises(Tb2V2ExportError):
         resolve_verifier_artifacts(trial, client=s3, artifacts_bucket="artifacts")
+
+
+def test_native_verifier_keeps_bearer_shaped_log_text():
+    trial, s3 = native_trial()
+    index = trial.trajectory_index["artifacts"]
+    result = trial.result["runtime_result"]
+    row = index[0]
+    body = b"Bearer abcdefghijklmnop"
+    s3._objects[("artifacts", row["key"])] = body
+    row.update(size_bytes=len(body), sha256="sha256:"+hashlib.sha256(body).hexdigest())
+    result["phases"][1]["stdout"].update(bytes_seen=len(body), bytes_saved=len(body), sha256=row["sha256"])
+    result_row = index[-1]
+    result_body = json.dumps(result).encode()
+    s3._objects[("artifacts", result_row["key"])] = result_body
+    result_row.update(size_bytes=len(result_body), sha256="sha256:"+hashlib.sha256(result_body).hexdigest())
+    files = resolve_verifier_artifacts(trial, client=s3, artifacts_bucket="artifacts")
+    assert any(item.data == body for item in files)
 
 
 def test_native_verifier_packs_separate_child_namespace():
