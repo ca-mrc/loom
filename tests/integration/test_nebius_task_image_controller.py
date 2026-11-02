@@ -908,14 +908,18 @@ async def test_slow_unrelated_observation_does_not_hold_new_starts_past_the_grac
         return await original(namespace, name, capture_logs=capture_logs)
 
     monkeypatch.setattr(kube, "observe", observe)
-    cycle = asyncio.create_task(controller.run_once())
-    await started.wait()
-    async with asyncio.timeout(10):
-        while kube.ensure_calls < 4:
-            await asyncio.sleep(0.01)
-    assert not cycle.done()
-    release.set()
-    await cycle
-    for image_id in images:
-        assert (await rows(sessions, image_id))[0].state == "running"
-    assert (await rows(sessions, slow_id))[0].state == "running"
+    controller.admissions_per_pass = 1
+    try:
+        # Real claims and advisory locks: every pass returns and starts another
+        # queued build while the same unrelated Kubernetes read stays blocked.
+        for count in range(2, 5):
+            async with asyncio.timeout(10):
+                await controller.run_once()
+            assert started.is_set() and controller.reconciler.running
+            assert kube.ensure_calls == count
+        for image_id in images:
+            assert (await rows(sessions, image_id))[0].state == "running"
+        assert (await rows(sessions, slow_id))[0].state == "running"
+    finally:
+        release.set()
+        await controller.close()

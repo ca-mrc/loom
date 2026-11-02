@@ -52,6 +52,7 @@ from loom_control_plane.task_image_materializations import (
     start_task_image_materialization,
     task_image_materialization_payload,
 )
+from loom_execution_actuator.build_reconcile import ReconcileRunner
 from loom_execution_actuator.image_publication_receipt import decode_publication_receipt
 from loom_execution_actuator.kubernetes_api import exact_pods_absent
 from loom_execution_actuator.metrics import blocked_outcome, record_build_cycle
@@ -644,48 +645,45 @@ class NativeTaskImageController:
             TaskImageMaterializationAttempt.native_capacity_released_at.is_(None),
         ))).all())
 
+    _reconciler: ReconcileRunner | None = None
+
+    @property
+    def reconciler(self) -> ReconcileRunner:
+        if self._reconciler is None:
+            self._reconciler = ReconcileRunner(grace_seconds=self.admission_grace_seconds)
+        return self._reconciler
+
+    async def close(self) -> None:
+        await self.reconciler.close()
+
     async def run_once(self) -> None:
         # Database scans recover missing Jobs, stale epochs and ambiguous creates.
         async with self.sessions() as session:
             attempt_ids = [attempt.id for attempt in await self._outstanding(session)]
-        timings = {"reconcile": 0.0, "admission": 0.0}
-
-        async def reconcile() -> bool:
-            started = time.monotonic()
-            try:
-                return await self._reconcile_all(attempt_ids)
-            finally:
-                timings["reconcile"] = time.monotonic() - started
-
-        async def admit() -> tuple[str, int]:
-            started = time.monotonic()
-            try:
-                return await self._admit()
-            finally:
-                timings["admission"] = time.monotonic() - started
 
         # Admission does not wait behind a slow or failing unrelated build past
-        # the grace. Per-attempt advisory locks already serialize any overlap,
-        # as they do across replicas.
-        reconciling = asyncio.create_task(reconcile())
+        # the grace, in this pass or later ones: at most one reconcile is in
+        # flight. Per-attempt advisory locks already serialize any overlap, as
+        # they do across replicas.
+        await self.reconciler.advance(lambda: self._reconcile_all(attempt_ids))
+        started = time.monotonic()
+        admitted: tuple[str, int] | BaseException
         try:
-            await asyncio.wait({reconciling}, timeout=self.admission_grace_seconds)
-            admitted: tuple[str, int] | BaseException
-            try:
-                admitted = await admit()
-            except Exception as error:
-                admitted = error
-            unexpected = (await asyncio.gather(reconciling, return_exceptions=True))[0]
-        finally:
-            reconciling.cancel()
+            admitted = await self._admit()
+        except Exception as error:
+            admitted = error
+        admission_seconds = time.monotonic() - started
+        reconcile_seconds, reconciled = self.reconciler.collect()
         outcome, claimed = admitted if isinstance(admitted, tuple) else ("error", 0)
-        record_build_cycle("native", outstanding=len(attempt_ids), reconcile_seconds=timings["reconcile"],
-                           outcome=outcome, admission_seconds=timings["admission"], claimed=claimed)
-        for result in (unexpected, admitted):
+        record_build_cycle("native", outstanding=len(attempt_ids), reconcile_seconds=reconcile_seconds,
+                           outcome=outcome, admission_seconds=admission_seconds, claimed=claimed)
+        for result in (reconciled, admitted):
             if isinstance(result, BaseException):
                 raise result
-        if unexpected:
+        if reconciled:
             raise RuntimeError("Native build reconciliation failed; inspect bounded actuator diagnostics")
+        if self.reconciler.stalled():
+            raise RuntimeError("Native build reconciliation has not finished; inspect bounded actuator diagnostics")
 
     async def _reconcile_all(self, attempt_ids: list[UUID]) -> bool:
         slots = asyncio.Semaphore(self.reconcile_concurrency)
