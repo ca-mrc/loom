@@ -15,14 +15,19 @@ from uuid import UUID
 
 import httpx
 from fastapi import HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import AuthContext
 from loom.db.schema import (
+    GatewayDispatchReceipt,
     ProviderConnection,
+    ProviderConnectionTimeoutHealth,
+    ProviderConnectionTimeoutObservation,
     ProviderModelCache,
     ProviderRequestPool,
+    ProviderRequestPoolBinding,
     ProviderRequestPoolMember,
     Trial,
 )
@@ -33,13 +38,21 @@ from loom_llm_gateway.execution_attempt_dispatch import (
     admitted_service_execution_models,
     authorize_trial_execution_dispatch,
 )
-from loom_llm_gateway.retry import retry_after_seconds
 from loom_llm_gateway.routes._facade_common import (
     decrypt_facade_api_key,
     resolve_facade_connection,
 )
 
 logger = logging.getLogger(__name__)
+
+
+class PoolMemberSwitchedError(Exception):
+    """The trial binding moved after an upstream timeout; do not send again."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
 
 _OPENAI_TYPES = frozenset({"openai-compatible", "custom"})
 _STATEFUL_FIELDS = frozenset(
@@ -142,9 +155,6 @@ class PoolDispatchAudit(DispatchAudit):
         self.failover_reason: str | None = None
         self.possible_duplicate_inference = False
         self._keys: list[str] = []
-        self._failed_members: set[UUID] = set()
-        self._failed_groups: set[str] = set()
-        self._deadline: GatewayAttemptDeadline | None = None
 
     async def _prepare_dispatch(self, session: AsyncSession, values: dict[str, Any]) -> None:
         pool = await session.scalar(
@@ -181,150 +191,300 @@ class PoolDispatchAudit(DispatchAudit):
             ).all()
         )
         now = datetime.now(UTC)
-        for offset in range(len(members)):
-            index = (pool.next_member + offset) % len(members)
-            member = members[index]
-            if (
-                not member.enabled
-                or member.connection_id in self._failed_members
-                or member.quota_group in self._failed_groups
-                or (member.cooldown_until and member.cooldown_until > now)
-            ):
-                continue
-            try:
-                row = await resolve_facade_connection(
-                    session,
-                    member.connection_id,
-                    self.ctx.team_id,
-                    supported_types=_OPENAI_TYPES,
-                    dialect_label="request pool",
-                    allow_request_pool=member.connection_id == self.pool_id,
-                )
-            except HTTPException:
-                continue  # Revoked/deleted/dialect-incompatible members never receive traffic.
-            if row.status != "valid" or (
-                row.allowed_models and not required.issubset(row.allowed_models)
-            ):
-                continue
-            cached = list(
-                (
-                    await session.scalars(
-                        select(ProviderModelCache).where(
-                            ProviderModelCache.provider_connection_id == row.id,
-                            ProviderModelCache.visible.is_(True),
-                            ProviderModelCache.upstream_present.is_(True),
-                            ProviderModelCache.model_id.in_(required),
-                        )
-                    )
-                ).all()
+        suppressed = await self._suppressed_members(session, members, now)
+        assert self.ctx.trial_id is not None
+        binding = await session.get(
+            ProviderRequestPoolBinding, (self.pool_id, self.ctx.trial_id)
+        )
+        selected = await self._select_member(
+            session, pool, members, binding, now, suppressed, required,
+        )
+        if selected is None:
+            raise HTTPException(
+                429,
+                "provider_request_pool_unavailable",
+                headers={"Retry-After": "1"},
             )
-            if {model.model_id for model in cached} != required or any(
-                preflight_failure_kind(
-                    model.last_preflight_status,
-                    model.last_preflight_error_code,
-                    model.last_preflight_http_status,
-                )
-                == "rejected"
-                for model in cached
-            ):
-                continue
-            key = await decrypt_facade_api_key(session, row)
-            pool.next_member = (index + 1) % len(members)
-            self.row, self.api_key = row, key
-            self.quota_group = member.quota_group
-            self.last_attempt = values["attempt"]
-            self._keys.append(key)
-            self.attempt_timeout_sec = pool.attempt_timeout_sec
-            self.cooldown_sec = pool.cooldown_sec
-            values.update(
-                provider_connection_id=row.id,
-                pool_connection_id=self.pool_id,
-                failover_reason=self.failover_reason,
-            )
-            return
-        raise HTTPException(
-            429,
-            "provider_request_pool_unavailable",
-            headers={"Retry-After": "1"},
+        member, row, key = selected
+        self.row, self.api_key = row, key
+        self.quota_group = member.quota_group
+        self.last_attempt = values["attempt"]
+        self._keys.append(key)
+        self.attempt_timeout_sec = pool.attempt_timeout_sec
+        self.cooldown_sec = pool.cooldown_sec
+        values.update(
+            provider_connection_id=row.id,
+            pool_connection_id=self.pool_id,
+            failover_reason=self.failover_reason,
         )
 
-    @staticmethod
-    def invalid_credential(response: httpx.Response) -> bool:
-        if response.status_code not in {401, 403}:
-            return False
+    async def _suppressed_members(
+        self,
+        session: AsyncSession,
+        members: list[ProviderRequestPoolMember],
+        now: datetime,
+    ) -> set[UUID]:
+        ids = [member.connection_id for member in members]
+        if not ids:
+            return set()
+        rows = list(
+            (
+                await session.scalars(
+                    select(ProviderConnectionTimeoutHealth).where(
+                        ProviderConnectionTimeoutHealth.connection_id.in_(ids),
+                    )
+                )
+            ).all()
+        )
+        return {
+            row.connection_id
+            for row in rows
+            if row.suppressed_until is not None and row.suppressed_until > now
+        }
+
+    async def _eligible(
+        self,
+        session: AsyncSession,
+        member: ProviderRequestPoolMember,
+        now: datetime,
+        suppressed: set[UUID],
+        required: set[str],
+    ) -> tuple[ProviderConnection, str] | None:
+        if (
+            not member.enabled
+            or member.connection_id in suppressed
+            or (member.cooldown_until is not None and member.cooldown_until > now)
+        ):
+            return None
+        assert self.ctx.team_id is not None
         try:
-            body = response.json()
-            error = body.get("error", {}) if isinstance(body, dict) else {}
-            code = error.get("code") if isinstance(error, dict) else None
-            return code in {
-                "invalid_api_key",
-                "invalid_token",
-                "token_invalid",
-                "invalid_credential",
-            }
-        except ValueError:
-            return False
+            row = await resolve_facade_connection(
+                session,
+                member.connection_id,
+                self.ctx.team_id,
+                supported_types=_OPENAI_TYPES,
+                dialect_label="request pool",
+                allow_request_pool=member.connection_id == self.pool_id,
+            )
+        except HTTPException:
+            return None
+        if row.status != "valid" or (
+            row.allowed_models and not required.issubset(row.allowed_models)
+        ):
+            return None
+        cached = list(
+            (
+                await session.scalars(
+                    select(ProviderModelCache).where(
+                        ProviderModelCache.provider_connection_id == row.id,
+                        ProviderModelCache.visible.is_(True),
+                        ProviderModelCache.upstream_present.is_(True),
+                        ProviderModelCache.model_id.in_(required),
+                    )
+                )
+            ).all()
+        )
+        if {model.model_id for model in cached} != required or any(
+            preflight_failure_kind(
+                model.last_preflight_status,
+                model.last_preflight_error_code,
+                model.last_preflight_http_status,
+            )
+            == "rejected"
+            for model in cached
+        ):
+            return None
+        return row, await decrypt_facade_api_key(session, row)
+
+    async def _select_member(
+        self,
+        session: AsyncSession,
+        pool: ProviderRequestPool,
+        members: list[ProviderRequestPoolMember],
+        binding: ProviderRequestPoolBinding | None,
+        now: datetime,
+        suppressed: set[UUID],
+        required: set[str],
+    ) -> tuple[ProviderRequestPoolMember, ProviderConnection, str] | None:
+        if not members:
+            return None
+        if binding is not None:
+            current = next(
+                (member for member in members if member.connection_id == binding.member_connection_id),
+                None,
+            )
+            if current is not None:
+                found = await self._eligible(session, current, now, suppressed, required)
+                if found is not None:
+                    return current, found[0], found[1]
+        start = pool.next_member
+        if binding is not None:
+            for index, member in enumerate(members):
+                if member.connection_id == binding.member_connection_id:
+                    start = index + 1
+                    break
+        for offset in range(len(members)):
+            index = (start + offset) % len(members)
+            member = members[index]
+            found = await self._eligible(session, member, now, suppressed, required)
+            if found is None:
+                continue
+            assert self.ctx.trial_id is not None
+            if binding is None:
+                session.add(
+                    ProviderRequestPoolBinding(
+                        pool_connection_id=self.pool_id,
+                        trial_id=self.ctx.trial_id,
+                        member_connection_id=member.connection_id,
+                        updated_at=now,
+                    )
+                )
+                pool.next_member = (index + 1) % len(members)
+            else:
+                binding.member_connection_id = member.connection_id
+                binding.updated_at = now
+            return member, found[0], found[1]
+        return None
 
     def response_retryable(self, response: httpx.Response) -> bool:
-        return response.status_code in {408, 429, 500, 502, 503, 504} or self.invalid_credential(
-            response
-        )
+        # Same-member retries only. A real upstream timeout switches the binding
+        # and returns 504 instead of starting another generation here.
+        return response.status_code in {408, 429, 500, 502, 503}
 
-    async def _cool_down(self, *, reason: str, response: httpx.Response | None = None) -> None:
+    async def _switch_after_timeout(self, reason: str) -> None:
         assert self.row is not None and self.state.session_factory is not None
+        assert self.ctx.trial_id is not None
         self.failover_reason = reason
-        if reason in {"upstream_timeout", "upstream_504"}:
-            self.possible_duplicate_inference = True
-        self._failed_members.add(self.row.id)
-        if reason == "quota":
-            self._failed_groups.add(self.quota_group)
-        # A failed shared-state write must never make this request reuse a key.
-        timeout = min(1.0, max(0.0, self._deadline.remaining())) if self._deadline else 1.0
+        self.possible_duplicate_inference = True
+        if not self.state.receipt_ids:
+            return
+        receipt_id = self.state.receipt_ids[-1]
         try:
-            async with asyncio.timeout(timeout), self.state.session_factory() as session:
-                # Same lock order as admission/config edits; shared by replicas.
-                await session.scalar(
+            async with asyncio.timeout(1.0), self.state.session_factory() as session:
+                pool = await session.scalar(
                     select(ProviderRequestPool)
-                    .where(
-                        ProviderRequestPool.connection_id == self.pool_id,
-                    )
+                    .where(ProviderRequestPool.connection_id == self.pool_id)
                     .with_for_update()
                 )
-                members = list(
-                    (
-                        await session.scalars(
-                            select(ProviderRequestPoolMember).where(
-                                ProviderRequestPoolMember.pool_connection_id == self.pool_id,
-                            )
-                        )
-                    ).all()
-                )
-                failed = next((m for m in members if m.connection_id == self.row.id), None)
-                if failed is None:
+                if pool is None or not pool.enabled:
                     return
-                if reason == "quota":
-                    self._failed_groups.add(failed.quota_group)
-                delay = max(
-                    self.cooldown_sec, retry_after_seconds(response) if response is not None else 0
-                )
+                await authorize_trial_execution_dispatch(session, self.ctx)
                 now = datetime.now(UTC)
-                delay = min(delay, (datetime.max.replace(tzinfo=UTC) - now).total_seconds() - 1)
-                until = now + timedelta(seconds=delay)
-                for member in members:
-                    if member.connection_id == failed.connection_id or (
-                        reason == "quota" and member.quota_group == failed.quota_group
-                    ):
-                        member.cooldown_until = max(member.cooldown_until or until, until)
-                        if (
-                            reason == "invalid_credential"
-                            and member.connection_id == failed.connection_id
-                        ):
-                            member.enabled = False
+                await session.execute(
+                    pg_insert(ProviderConnectionTimeoutObservation)
+                    .values(
+                        receipt_id=receipt_id,
+                        connection_id=self.row.id,
+                        observed_at=now,
+                    )
+                    .on_conflict_do_nothing(index_elements=["receipt_id"])
+                )
+                health = await session.get(ProviderConnectionTimeoutHealth, self.row.id)
+                if health is None:
+                    health = ProviderConnectionTimeoutHealth(connection_id=self.row.id)
+                    session.add(health)
+                    await session.flush()
+                window_start = now - timedelta(seconds=pool.timeout_window_sec)
+                count_stmt = (
+                    select(func.count())
+                    .select_from(ProviderConnectionTimeoutObservation)
+                    .where(
+                        ProviderConnectionTimeoutObservation.connection_id == self.row.id,
+                        ProviderConnectionTimeoutObservation.observed_at >= window_start,
+                    )
+                )
+                if health.suppression_started_at is not None:
+                    count_stmt = count_stmt.where(
+                        ProviderConnectionTimeoutObservation.observed_at
+                        > health.suppression_started_at
+                    )
+                observed = int(await session.scalar(count_stmt) or 0)
+                suppressed_now = (
+                    health.suppressed_until is not None and health.suppressed_until > now
+                )
+                if observed >= pool.timeout_burst_count and not suppressed_now:
+                    health.suppressed_until = now + timedelta(seconds=pool.cooldown_sec)
+                    health.suppression_started_at = now
+                await session.execute(
+                    update(GatewayDispatchReceipt)
+                    .where(GatewayDispatchReceipt.id == receipt_id)
+                    .values(failover_reason=reason)
+                )
+                await self._rebind_after_timeout(session, pool, now)
                 await session.commit()
+        except HTTPException:
+            raise
         except Exception:
-            # Do not log driver text/binds, credentials, or response content.
-            # Current-request exclusion remains effective if persistence fails.
-            logger.warning("request_pool_cooldown_unavailable pool_connection_id=%s", self.pool_id)
+            logger.warning(
+                "request_pool_timeout_switch_unavailable pool_connection_id=%s", self.pool_id,
+            )
+
+    async def _rebind_after_timeout(
+        self, session: AsyncSession, pool: ProviderRequestPool, now: datetime,
+    ) -> None:
+        assert self.row is not None and self.ctx.trial_id is not None
+        members = list(
+            (
+                await session.scalars(
+                    select(ProviderRequestPoolMember)
+                    .where(ProviderRequestPoolMember.pool_connection_id == self.pool_id)
+                    .order_by(ProviderRequestPoolMember.ordinal)
+                )
+            ).all()
+        )
+        suppressed = await self._suppressed_members(session, members, now)
+        suppressed.add(self.row.id)
+        required = set(pool.required_models)
+        start = 0
+        for index, member in enumerate(members):
+            if member.connection_id == self.row.id:
+                start = index + 1
+                break
+        spare: ProviderRequestPoolMember | None = None
+        for offset in range(len(members)):
+            member = members[(start + offset) % len(members)]
+            if member.connection_id == self.row.id:
+                continue
+            if await self._eligible(session, member, now, suppressed, required) is None:
+                continue
+            spare = member
+            break
+        if spare is None:
+            return
+        binding = await session.get(
+            ProviderRequestPoolBinding, (self.pool_id, self.ctx.trial_id)
+        )
+        if binding is None:
+            session.add(
+                ProviderRequestPoolBinding(
+                    pool_connection_id=self.pool_id,
+                    trial_id=self.ctx.trial_id,
+                    member_connection_id=spare.connection_id,
+                    updated_at=now,
+                )
+            )
+            return
+        binding.member_connection_id = spare.connection_id
+        binding.updated_at = now
+
+    async def _note_member_success(self) -> None:
+        if self.row is None or self.state.session_factory is None:
+            return
+        try:
+            async with asyncio.timeout(1.0), self.state.session_factory() as session:
+                health = await session.get(ProviderConnectionTimeoutHealth, self.row.id)
+                now = datetime.now(UTC)
+                if (
+                    health is not None
+                    and health.suppressed_until is not None
+                    and health.suppressed_until > now
+                ):
+                    health.suppressed_until = None
+                    await session.commit()
+        except Exception:
+            logger.warning(
+                "request_pool_timeout_probe_unavailable pool_connection_id=%s", self.pool_id,
+            )
 
     async def send(
         self,
@@ -333,24 +493,16 @@ class PoolDispatchAudit(DispatchAudit):
         deadline: GatewayAttemptDeadline | None,
         attempt: int = 1,
     ) -> Any:
-        self._deadline = deadline
         try:
             response = await super().send(operation, deadline=deadline, attempt=attempt)
         except httpx.TimeoutException:
-            await self._cool_down(reason="upstream_timeout")
-            raise httpx.ReadTimeout("request pool upstream timed out") from None
-        except httpx.HTTPError:
-            await self._cool_down(reason="transport_error")
-            raise httpx.ConnectError("request pool upstream transport failure") from None
-        if self.response_retryable(response):
-            reason = (
-                "invalid_credential"
-                if self.invalid_credential(response)
-                else "quota"
-                if response.status_code == 429
-                else f"upstream_{response.status_code}"
-            )
-            await self._cool_down(reason=reason, response=response)
+            await self._switch_after_timeout("upstream_timeout")
+            raise PoolMemberSwitchedError("upstream_timeout") from None
+        if response.status_code == 504:
+            await self._switch_after_timeout("upstream_504")
+            raise PoolMemberSwitchedError("upstream_504") from None
+        if response.status_code < 400:
+            await self._note_member_success()
         return response
 
     def redact(self, text: str) -> str:

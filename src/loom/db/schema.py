@@ -8145,6 +8145,12 @@ class GatewayDispatchReceipt(Base):
         ),
         Index("gateway_receipt_trial_idx", "trial_id", "admitted_at"),
         Index("gateway_receipt_pending_idx", "provider_outcome", "admitted_at"),
+        Index(
+            "gateway_receipt_admitted_connection_idx",
+            "provider_connection_id",
+            "admitted_at",
+            postgresql_where=text("provider_outcome = 'admitted'"),
+        ),
     )
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     request_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
@@ -8578,6 +8584,12 @@ class ProviderConnection(Base):
     """
 
     __tablename__ = "provider_connections"
+    __table_args__ = (
+        CheckConstraint(
+            "max_in_flight IS NULL OR (max_in_flight BETWEEN 1 AND 1000)",
+            name="provider_connection_max_in_flight_check",
+        ),
+    )
     id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True),
         primary_key=True,
@@ -8648,6 +8660,8 @@ class ProviderConnection(Base):
         nullable=True,
     )
     rate_card_provider: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # NULL means this connection does not queue on open generations.
+    max_in_flight: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_by: Mapped[str] = mapped_column(Text, nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True),
@@ -8678,6 +8692,10 @@ class ProviderRequestPool(Base):
             "attempt_timeout_sec > 0 AND cooldown_sec > 0",
             name="provider_request_pool_timeout_check",
         ),
+        CheckConstraint(
+            "timeout_burst_count > 0 AND timeout_window_sec > 0",
+            name="provider_request_pool_timeout_burst_check",
+        ),
     )
     connection_id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("provider_connections.id", ondelete="CASCADE"),
@@ -8688,6 +8706,8 @@ class ProviderRequestPool(Base):
     next_member: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     attempt_timeout_sec: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("20"))
     cooldown_sec: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("30"))
+    timeout_burst_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("3"))
+    timeout_window_sec: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("60"))
 
 
 class ProviderRequestPoolMember(Base):
@@ -8710,6 +8730,66 @@ class ProviderRequestPoolMember(Base):
     quota_group: Mapped[str] = mapped_column(Text, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     cooldown_until: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class ProviderRequestPoolBinding(Base):
+    """The physical member one trial keeps using until an upstream timeout."""
+
+    __tablename__ = "provider_request_pool_bindings"
+    pool_connection_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("provider_request_pools.connection_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    trial_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("trials.id", ondelete="CASCADE"), primary_key=True,
+    )
+    member_connection_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("provider_connections.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+
+class ProviderConnectionTimeoutHealth(Base):
+    """Shared timeout suppression for one physical connection across pools."""
+
+    __tablename__ = "provider_connection_timeout_health"
+    connection_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("provider_connections.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    suppressed_until: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    suppression_started_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+
+
+class ProviderConnectionTimeoutObservation(Base):
+    """One upstream timeout, deduplicated by the dispatch receipt that saw it."""
+
+    __tablename__ = "provider_connection_timeout_observations"
+    __table_args__ = (
+        Index(
+            "provider_connection_timeout_observations_window_idx",
+            "connection_id",
+            "observed_at",
+        ),
+    )
+    receipt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("gateway_dispatch_receipts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    connection_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("provider_connections.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    observed_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+    )
 
 
 class ProviderConnectionShare(Base):

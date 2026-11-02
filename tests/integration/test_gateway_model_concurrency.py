@@ -152,12 +152,10 @@ async def test_replica_pool_admission_releases_database_before_upstream(
                     rows = await receipts(p)
                     assert len(rows) == expected
                     assert len({r.request_id for r in rows}) == expected
-                    assert Counter(r.provider_connection_id for r in rows) == {
-                        member: expected // 3 for member in p["ids"]
-                    }
+                    assert Counter(r.provider_connection_id for r in rows) == {p["ids"][0]: expected}
                     assert len({receipt for _, receipt in requests}) == expected
                     assert Counter(key for key, _ in requests) == {
-                        f"Bearer test-credential-{i}": expected // 3 for i in range(3)
+                        "Bearer test-credential-0": expected
                     }
                 finally:
                     release.set()
@@ -785,10 +783,11 @@ async def test_real_upstream_timeout_rotates_key_and_closes_previous_socket(
         await session.execute(
             update(ProviderRequestPool)
             .where(ProviderRequestPool.connection_id == p["root"])
-            .values(attempt_timeout_sec=0.2)
+            .values(attempt_timeout_sec=20)
         )
         await session.commit()
     app = p["apps"][0]
+    app.state.settings.upstream_timeout_sec = 0.2
     await app.state.upstream_client.aclose()
     app.state.upstream_client = create_upstream_client(timeout_sec=30)
     app.state.egress_client_pool = EgressClientPool(
@@ -812,8 +811,14 @@ async def test_real_upstream_timeout_rotates_key_and_closes_previous_socket(
                     headers={"Authorization": "Bearer " + p["jwt"]},
                     json=payload,
                 )
-                assert response.status_code == 200, response.text
+                assert response.status_code == 504, response.text
                 await asyncio.wait_for(disconnected.wait(), 1)
+                spare = await client.post(
+                    base + "/openai/v1/chat/completions",
+                    headers={"Authorization": "Bearer " + p["jwt"]},
+                    json=payload,
+                )
+                assert spare.status_code == 200, spare.text
                 async with asyncio.timeout(3):
                     while True:
                         rows = await receipts(p)
@@ -825,26 +830,27 @@ async def test_real_upstream_timeout_rotates_key_and_closes_previous_socket(
                     "Bearer test-credential-1",
                 ]
                 assert [body for _, body in observed] == [payload, payload]
-                assert rows[0].request_id == rows[1].request_id
+                assert rows[0].request_id != rows[1].request_id
                 assert [r.provider_connection_id for r in rows] == p["ids"][:2]
                 assert [r.provider_outcome for r in rows] == [
                     "transport_error",
                     "response_received",
                 ]
-                assert rows[1].failover_reason == "upstream_timeout"
+                assert rows[0].failover_reason == "upstream_timeout"
                 assert rows[1].provider_http_status == 200
                 async with p["sessions"]() as session:
                     calls = list(
                         (
                             await session.scalars(
-                                select(LlmCall).where(LlmCall.trial_id == p["trial_id"])
+                                select(LlmCall)
+                                .where(LlmCall.trial_id == p["trial_id"])
+                                .order_by(LlmCall.captured_at)
                             )
                         ).all()
                     )
-                assert len(calls) == 1 and calls[0].attempt == 2
-                assert calls[0].provider_extras["_loom_request_pool"][
-                    "possible_duplicate_inference"
-                ]
+                assert len(calls) == 2
+                assert calls[0].provider_extras["_loom_request_pool"]["possible_duplicate_inference"]
+                assert calls[1].attempt == 1
                 assert app.state.drain.in_flight == 0
                 assert p["sessions"].kw["bind"].pool.checkedout() == 0
     finally:

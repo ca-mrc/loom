@@ -25,6 +25,7 @@ class GatewaySettings(BaseSettings):
     artifacts_bucket: str = "artifacts"
     bind_host: str = "0.0.0.0"
     bind_port: int = 9100
+    connection_queue_max_wait_sec: float = 120.0
     db_url: PostgresDsn
     db_url_pool: PostgresDsn | None = None
     dev_reload: bool = False

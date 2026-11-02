@@ -1,9 +1,13 @@
 # Model forwarding concurrency
 
-Loom does not assign a model request concurrency allowance to a provider key,
-provider connection, request pool, or quota group. Requests already admitted to
-run may reach the provider concurrently. Rotation chooses a physical credential;
-it does not reserve an inference slot or wait for another inference to finish.
+A provider connection may set `max_in_flight` (1–1000). Null leaves open
+generations unlimited. The cap counts admitted dispatch receipts for that
+physical connection and is shared by both gateway replicas and every pool.
+At the cap, admission waits outside the pool row lock, up to
+`connection_queue_max_wait_sec` (default 120 seconds), and then returns HTTP
+429 `provider_connection_concurrency_limited`. A request pool and a quota
+group do not add a separate cap. A pooled trial stays on one physical member
+until that member times out.
 
 This applies to the forwarding transports, including nonpooled legacy routes.
 Request-pool protocol support remains narrower: stateless, nonstreaming
@@ -27,10 +31,10 @@ See [provider onboarding](../integrations/provider-onboarding.md#request-level-r
 | Native `workloadBroker.startProxy` | Go transport has no active per-host cap and retains the default non-strict H2 stream policy; copying SSE through an unflushed writer delayed initial output. | 129 H1 and 301 TLS H2 held Chat/Responses sends reach the upstream using one scoped token refresh; H2 opens additional connections beyond the peer's 250-stream limit; cancellation releases all 129 and the next request succeeds. SSE/unknown-length output is flushed as it arrives. Existing phase revocation and absolute deadline tests remain required. |
 | Gateway ASGI model routes | Nonstreaming ASGI handlers continued inference after the client disconnected. `BaseHTTPMiddleware` also complicated cancellation cleanup. | A body-aware receive owner cancels abandoned forwarding and awaits durable cleanup. Pure-ASGI drain tracking spans the complete body and cleanup. Real TCP tests verify upstream EOF, terminal cancelled receipts, zero checked-out DB connections, drain zero, and recovery. |
 | Gateway streaming/accounting | Streaming headers previously ended drain accounting; cancellation could skip observed partial usage or pipeline settlement. | Drain stays active through the stream. Only observed usage is recorded, exactly once. Reserved but unsent dispatches release budget; dispatched requests settle conservatively as uncertain using durable DB state. |
-| `PoolDispatchAudit._prepare_dispatch`, dispatch admission | A row lock serializes updates of one pool cursor. | This is a short atomic selection/receipt transaction, released before upstream HTTP. It does not cover inference lifetime. Two Gateway replicas with their default DB pools deliver 36 held sends through three members and two quota groups; each member receives 12, and both DB pools have zero checked-out connections during inference. |
+| `PoolDispatchAudit._prepare_dispatch`, dispatch admission | A row lock serializes updates of one pool cursor. | This is a short atomic selection/receipt transaction, released before upstream HTTP and before any in-flight wait. It does not cover inference lifetime. Two Gateway replicas with their default DB pools deliver 36 held sends for one trial; with no cap they stay on the bound member, and both DB pools have zero checked-out connections during inference. |
 | Gateway SQLAlchemy / optional PgBouncer | DB resource pools can wait for DB connections; SQLAlchemy defaults are 5 pooled + 10 overflow per process, 30-second checkout. | Retained DB resource boundary. Authentication, selection, admission, and accounting use short transactions. No inspected model route holds a DB connection or row lock across provider HTTP/streaming. Production PgBouncer use and replica counts require deployed configuration readback. |
 | Rate-card cache / drain counter | Cache refresh and integer updates use short locks. | Neither lock spans provider HTTP. Cache refresh remains coalesced; the drain counter observes work and does not grant request slots. |
-| Provider cooldown and retry | Real upstream 429/Retry-After, credential rejection, transient failures, and signed deadlines constrain dispatch. | Retained. Quota groups share cooldown evidence, not concurrency slots. Timeout failover stays within the existing total deadline, retry count, backoff, authorization, and accounting contract. |
+| Provider cooldown and retry | Real upstream 429/Retry-After, credential rejection, transient failures, and signed deadlines constrain dispatch. | A 429 retries the same member inside the 60-second budget and honors Retry-After. An upstream timeout or HTTP 504 writes the trial's next binding, then returns 504 without a second send in that request. Explicit invalid credentials do not disable the member. |
 
 ## Resource and authorization boundaries
 

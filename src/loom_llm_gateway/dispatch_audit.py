@@ -9,24 +9,27 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, TypeVar
 from uuid import UUID, uuid4
 
 from anyio import CancelScope
 from fastapi import HTTPException, Request
-from sqlalchemy import insert, update
+from sqlalchemy import and_, func, insert, or_, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from loom.auth import AuthContext
-from loom.db.schema import GatewayDispatchReceipt
+from loom.db.schema import GatewayDispatchReceipt, ProviderConnection
 from loom_llm_gateway.attempt_deadline import AttemptDeadlineReachedError, GatewayAttemptDeadline
+from loom_llm_gateway.metrics import CONNECTION_QUEUE_LIMITED_TOTAL, CONNECTION_QUEUE_WAIT_SECONDS
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -87,6 +90,16 @@ class _RequestAudit:
     next_ordinal: int = 0
     receipt_ids: list[UUID] = field(default_factory=list)
     session_factory: async_sessionmaker[AsyncSession] | None = None
+    upstream_timeout_sec: float = 200.0
+    connection_queue_max_wait_sec: float = 120.0
+
+
+class ConnectionAtCapacityError(Exception):
+    """The physical connection is already at its open-generation cap."""
+
+    def __init__(self, connection_id: UUID) -> None:
+        self.connection_id = connection_id
+        super().__init__(connection_id)
 
 
 class DispatchAudit:
@@ -148,8 +161,11 @@ class DispatchAudit:
             async with asyncio.timeout(_AUDIT_TIMEOUT_SECONDS):
                 async with self.state.session_factory() as session:
                     await self._prepare_dispatch(session, values)
+                    await self._limit_in_flight(session, values)
                     await session.execute(insert(GatewayDispatchReceipt).values(**values))
                     await session.commit()
+        except ConnectionAtCapacityError:
+            raise
         except HTTPException:
             # A routing policy may decline admission before any provider I/O.
             raise
@@ -175,6 +191,85 @@ class DispatchAudit:
             raise DispatchAuditUnavailableError("gateway dispatch audit unavailable") from None
         self.state.receipt_ids.append(receipt_id)
         return receipt_id
+
+    async def _limit_in_flight(self, session: AsyncSession, values: dict[str, Any]) -> None:
+        connection_id = values.get("provider_connection_id")
+        if connection_id is None:
+            return
+        cap = await session.scalar(
+            select(ProviderConnection.max_in_flight).where(ProviderConnection.id == connection_id)
+        )
+        if cap is None:
+            return
+        await session.execute(
+            text(
+                "SELECT pg_advisory_xact_lock("
+                "hashtext('loom-connection-inflight'), hashtext(:connection_id))"
+            ),
+            {"connection_id": str(connection_id)},
+        )
+        now = datetime.now(UTC)
+        stale_after = now - timedelta(seconds=self.state.upstream_timeout_sec + 5.0)
+        open_count = await session.scalar(
+            select(func.count())
+            .select_from(GatewayDispatchReceipt)
+            .where(
+                GatewayDispatchReceipt.provider_connection_id == connection_id,
+                GatewayDispatchReceipt.provider_outcome == "admitted",
+                or_(
+                    GatewayDispatchReceipt.attempt_deadline_wall_clock > now,
+                    and_(
+                        GatewayDispatchReceipt.attempt_deadline_wall_clock.is_(None),
+                        GatewayDispatchReceipt.admitted_at > stale_after,
+                    ),
+                ),
+            )
+        )
+        if int(open_count or 0) >= int(cap):
+            raise ConnectionAtCapacityError(connection_id)
+
+    async def _admit_with_capacity(
+        self, deadline: GatewayAttemptDeadline | None, attempt: int,
+    ) -> UUID:
+        started = time.monotonic()
+        waited = False
+        limited_connection: UUID | None = None
+        while True:
+            try:
+                receipt_id = await self._admit(attempt)
+                break
+            except ConnectionAtCapacityError as saturated:
+                waited = True
+                limited_connection = saturated.connection_id
+                remaining = self.state.connection_queue_max_wait_sec - (time.monotonic() - started)
+                delay = min(random.uniform(0.25, 2.0), remaining)
+                if delay <= 0:
+                    self._observe_queue(saturated.connection_id, started, "queue_timeout")
+                    raise HTTPException(
+                        status_code=429,
+                        detail="provider_connection_concurrency_limited",
+                        headers={"Retry-After": "1"},
+                    ) from None
+                if deadline is not None and delay >= deadline.remaining():
+                    self._observe_queue(saturated.connection_id, started, "deadline")
+                    await deadline.sleep(delay)
+                await asyncio.sleep(delay)
+        if waited and limited_connection is not None:
+            self._observe_queue(limited_connection, started, "admitted_after_wait")
+        return receipt_id
+
+    def _observe_queue(self, connection_id: UUID, started: float, outcome: str) -> None:
+        waited = max(0.0, time.monotonic() - started)
+        CONNECTION_QUEUE_WAIT_SECONDS.observe(waited)
+        CONNECTION_QUEUE_LIMITED_TOTAL.labels(outcome=outcome).inc()
+        logger.info(
+            "gateway_connection_queue_wait request_id=%s connection_id=%s "
+            "wait_seconds=%.3f outcome=%s",
+            self.state.request_id,
+            connection_id,
+            waited,
+            outcome,
+        )
 
     async def _finish(
         self, receipt_id: UUID, outcome: ProviderOutcome, response: Any = None
@@ -203,7 +298,7 @@ class DispatchAudit:
     ) -> T:
         if deadline is not None:
             deadline.require_remaining()
-        receipt_id = await self._admit(attempt)
+        receipt_id = await self._admit_with_capacity(deadline, attempt)
         dispatched = False
         returned = False
         observed_response = None
@@ -252,7 +347,7 @@ class DispatchAudit:
     ) -> AsyncIterator[T]:
         if deadline is not None:
             deadline.require_remaining()
-        receipt_id = await self._admit(attempt)
+        receipt_id = await self._admit_with_capacity(deadline, attempt)
         dispatched = False
         response = None
         entered = False
@@ -367,6 +462,10 @@ def audit_for_request(
     if not isinstance(state, _RequestAudit):
         raise RuntimeError("invalid dispatch audit request state")
     state.session_factory = request.app.state.session_factory
+    settings = getattr(request.app.state, "settings", None)
+    if settings is not None:
+        state.upstream_timeout_sec = float(settings.upstream_timeout_sec)
+        state.connection_queue_max_wait_sec = float(settings.connection_queue_max_wait_sec)
     return DispatchAudit(state, ctx, dialect, provider_connection_id, purpose)
 
 

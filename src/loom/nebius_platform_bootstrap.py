@@ -120,6 +120,9 @@ GATEWAY_TABLES = (
     "provider_connections",
     "provider_request_pools",
     "provider_request_pool_members",
+    "provider_request_pool_bindings",
+    "provider_connection_timeout_health",
+    "provider_connection_timeout_observations",
     "provider_connection_shares",
     "execution_attempts",
     "execution_attempt_provider_budgets",
@@ -296,6 +299,9 @@ def _bootstrap_database(
                         "provider_connections",
                         "provider_request_pools",
                         "provider_request_pool_members",
+                        "provider_request_pool_bindings",
+                        "provider_connection_timeout_health",
+                        "provider_connection_timeout_observations",
                         "price_catalogs",
                         "provider_connection_shares",
                         "execution_classes",
@@ -330,6 +336,16 @@ def _bootstrap_database(
                         cursor.execute(
                             "GRANT UPDATE ON provider_request_pools, "
                             "provider_request_pool_members TO loom_gateway"
+                        )
+                        # A trial binding and a physical connection's timeout health
+                        # move during dispatch. Membership rows stay management-owned.
+                        cursor.execute(
+                            "GRANT INSERT, UPDATE ON provider_request_pool_bindings, "
+                            "provider_connection_timeout_health TO loom_gateway"
+                        )
+                        cursor.execute(
+                            "GRANT INSERT ON provider_connection_timeout_observations "
+                            "TO loom_gateway"
                         )
                         # Call audit lazily creates trial/event authorities and
                         # verifies existing ones; retention and deletion remain

@@ -108,6 +108,7 @@ class ProviderConnectionCreate(BaseModel):
     custom_pricing: dict[str, ModelPrice] | None = None
     supplier_id: str | None = Field(default=None, max_length=128)
     catalog_id: str | None = Field(default=None, max_length=256)
+    max_in_flight: int | None = Field(default=None, ge=1, le=1000)
 
 
 class ProviderConnectionUpdate(BaseModel):
@@ -126,6 +127,7 @@ class ProviderConnectionUpdate(BaseModel):
     custom_pricing: dict[str, ModelPrice] | None = None
     supplier_id: str | None = Field(default=None, max_length=128)
     catalog_id: str | None = Field(default=None, max_length=256)
+    max_in_flight: int | None = Field(default=None, ge=1, le=1000)
 
 
 class ProviderConnectionResponse(BaseModel):
@@ -147,6 +149,7 @@ class ProviderConnectionResponse(BaseModel):
     supplier_id: str | None
     catalog_id: str | None
     legacy_pricing: dict[str, Any] | None
+    max_in_flight: int | None
     created_by: str
     created_at: datetime
     updated_at: datetime
@@ -332,6 +335,7 @@ def _row_to_response(row: ProviderConnection) -> ProviderConnectionResponse:
         last_validated_at=row.last_validated_at,
         last_validation_error=row.last_validation_error,
         **pricing_response(row),
+        max_in_flight=row.max_in_flight,
         created_by=row.created_by,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -598,6 +602,7 @@ async def create_connection(
         status="pending",  # /test route flips to 'valid' / 'invalid'
         pricing_source="tokens-only",
         pricing_config=pricing.model_dump(mode="json"),
+        max_in_flight=payload.max_in_flight,
         # Per spec audit format: "<token-type>:<token-id-suffix>".
         # token_hash is bytes (sha256 digest); hex-encode the prefix
         # for a stable printable suffix without leaking the full hash.
@@ -876,6 +881,10 @@ async def update_connection(
     if payload.allowed_models is not None:
         changed_fields.append("allowed_models")
         row.allowed_models = payload.allowed_models
+
+    if "max_in_flight" in payload.model_fields_set:
+        changed_fields.append("max_in_flight")
+        row.max_in_flight = payload.max_in_flight
 
     # API key rotation encrypts the new value and swaps the active ref.
     # Retirement is committed atomically with the swap; GC observes a full grace.

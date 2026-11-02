@@ -103,3 +103,16 @@ LEGACY_ATTEMPT_DEADLINE_TOKEN_TOTAL = Counter(
     # accepted | rejected
     labelnames=("outcome",),
 )
+
+CONNECTION_QUEUE_WAIT_SECONDS = Histogram(
+    "loom_gateway_connection_queue_wait_seconds",
+    "Time a gateway request waited for a free in-flight slot on a provider connection.",
+    buckets=(0.25, 1.0, 2.0, 5.0, 15.0, 30.0, 60.0, 120.0),
+)
+
+CONNECTION_QUEUE_LIMITED_TOTAL = Counter(
+    "loom_gateway_connection_queue_limited_total",
+    "Provider-connection in-flight queue outcomes.",
+    # admitted_after_wait | queue_timeout | deadline
+    labelnames=("outcome",),
+)
