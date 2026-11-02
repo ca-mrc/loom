@@ -88,8 +88,11 @@ async def test_image_stage_counts_drilldown_pagination_and_tenant_scope(trials_s
             assert (await client.get("/api/v1/monitor/images", params={"team_id": str(foreign_team)})).status_code == 403
             rows = await client.get("/api/v1/trials", params={"batch_q": "pipeline named batch", "image_id": str(images[0])})
             assert {item["id"] for item in rows.json()["items"]} == {str(i) for i in own_ids[:2]}
-            drill_summary = (await client.get("/api/v1/monitor/summary", params={"view": "trials",
-                "batch_q": "pipeline named batch", "image_id": str(images[0])})).json()["progress"]
+            drill = (await client.get("/api/v1/monitor/summary", params={"view": "trials",
+                "batch_q": "pipeline named batch", "image_id": str(images[0])})).json()
+            assert drill["scope"]["batch_q"] == "pipeline named batch"
+            assert drill["scope"]["image_id"] == str(images[0])
+            drill_summary = drill["progress"]
             assert drill_summary["trial_count"] == 2 and drill_summary["images"]["image_count"] == 1
             # Admin retry advances the epoch before old native resources are
             # released. The old reservation still blocks admission and must be

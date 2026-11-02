@@ -120,6 +120,8 @@ class MonitorSummaryScope(TypedDict):
     view: Literal["batches"] | Literal["trials"]
     team_id: str | None
     q: str | None
+    batch_q: NotRequired[str | None]
+    image_id: NotRequired[str | None]
     benchmark_id: str | None
     agent_name: str | None
     model_provider: str | None

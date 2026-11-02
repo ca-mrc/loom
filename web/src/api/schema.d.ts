@@ -4837,8 +4837,12 @@ export interface components {
             agent_name: string | null;
             /** Batch Id */
             batch_id: string | null;
+            /** Batch Q */
+            batch_q?: string | null;
             /** Benchmark Id */
             benchmark_id: string | null;
+            /** Image Id */
+            image_id?: string | null;
             /** Model Name */
             model_name: string | null;
             /** Model Provider */
