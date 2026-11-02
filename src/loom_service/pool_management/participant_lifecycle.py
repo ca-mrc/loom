@@ -159,12 +159,27 @@ async def transition_participant(session: AsyncSession, spec: PoolParticipantOpe
             NebiusApplicationBuildAttempt,
         )
 
+        # Only an accepted waiting request has retained manager authority to
+        # replay the old profile after release. A local freeze alone has not
+        # acquired that authority; charged work must still drain before a
+        # manager can roll to a new binding.
+        accepted_waiting = select(NebiusPoolRequest.request_id).where(
+            NebiusPoolRequest.pool_id == spec.pool_id,
+            NebiusPoolRequest.participant_id == spec.participant_id,
+            NebiusPoolRequest.workload_kind == 'application_image_build',
+            NebiusPoolRequest.local_work_id == NebiusApplicationBuild.build_id,
+            NebiusPoolRequest.generation == NebiusApplicationBuildAttempt.attempt,
+            NebiusPoolRequest.phase == 'waiting',
+            NebiusPoolRequest.request_json == NebiusApplicationBuildAttempt.pool_request_json,
+            NebiusPoolRequest.request_sha256 == NebiusApplicationBuildAttempt.pool_request_sha256,
+        ).correlate(NebiusApplicationBuild, NebiusApplicationBuildAttempt).exists()
         outstanding_application = await session.scalar(select(NebiusApplicationBuildAttempt.build_id).join(
             NebiusApplicationBuild, (NebiusApplicationBuild.build_id == NebiusApplicationBuildAttempt.build_id)
             & (NebiusApplicationBuild.current_attempt == NebiusApplicationBuildAttempt.attempt)).where(
             NebiusApplicationBuild.binding_json['participant_id'].astext == str(spec.participant_id),
             NebiusApplicationBuild.binding_json['pool_id'].astext == str(spec.pool_id),
-            NebiusApplicationBuildAttempt.phase.in_(('queued', 'running', 'settling'))).limit(1))
+            NebiusApplicationBuildAttempt.phase.in_(('queued', 'running', 'settling')),
+            ~((NebiusApplicationBuildAttempt.phase == 'queued') & accepted_waiting)).limit(1))
         if outstanding_application is not None:
             raise ValueError('pool_participant_application_build_drain_required')
         assert spec.replacement is not None

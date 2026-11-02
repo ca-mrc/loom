@@ -1539,6 +1539,14 @@ latest policy. App ignores the Task→verifier sibling flag. Actual profile/read
 compatibility and old build drain are checked by the owning operation before
 pressure activation. Do not substitute standalone actor environment changes.
 
+A normal participant image release retains an App attempt only when it is still
+queued and its exact frozen request/hash has already been accepted as waiting
+by the same manager for that build/attempt. Its old profile, source and recipe
+stay authoritative after activation. A freeze without matching manager history,
+or running/settling work, still requires natural drain. Workers cannot obtain a
+new grant while the replacement is suspended or ready; ordinary activation
+resumes accepted waiting work through its retained request.
+
 Global routing also requires the normal `loom.pool-routing-preference.v1` pool
 owner operation and actual manager policy readback, in addition to the actual
 control-plane flag. A single global participant is one physical owner, not two
