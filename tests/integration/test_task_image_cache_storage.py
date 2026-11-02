@@ -14,7 +14,11 @@ from testcontainers.minio import MinioContainer
 
 from loom_execution_actuator import task_image_runtime as runtime
 from tests.support.minio_images import MINIO_TLS_IMAGE, prepare_test_image
-from tests.unit.test_nebius_task_image_runtime import _write_native_oci, source_bundle  # noqa: F401
+from tests.unit.test_nebius_task_image_runtime import (  # noqa: F401
+    _v2_cache_objects,
+    _write_native_oci,
+    source_bundle,
+)
 
 pytestmark = [pytest.mark.docker, pytest.mark.timeout(120)]
 
@@ -321,3 +325,61 @@ def test_real_storage_excludes_gc_and_other_publishers_during_preaccount(
         admin.delete_bucket(Bucket=bucket)
         admin.close()
         publisher.close()
+
+
+@pytest.mark.parametrize('budget', [800, 10000])
+def test_real_storage_resumes_mid_list_page_and_graph_with_no_retained_lock(
+    conditional_minio, monkeypatch, budget,
+):
+    config = conditional_minio.get_config()
+    admin = boto3.client('s3', endpoint_url='http://' + config['endpoint'],
+        aws_access_key_id=config['access_key'], aws_secret_access_key=config['secret_key'], region_name='us-east-1')
+    bucket = 'cache-resume-' + uuid4().hex
+    admin.create_bucket(Bucket=bucket)
+    objects = {}
+    for index in range(7):
+        objects.update(_v2_cache_objects(f'{index:064x}', 0, {'layer': b'shared' * 16}))
+    class Paged:
+        def __getattr__(self, name):
+            return getattr(admin, name)
+        def get_paginator(self, name):
+            paginator = admin.get_paginator(name)
+            class Pages:
+                def paginate(self, **kwargs):
+                    return paginator.paginate(**kwargs, PaginationConfig={'PageSize': 2})
+            return Pages()
+    try:
+        for key, body in objects.items():
+            admin.put_object(Bucket=bucket, Key=key, Body=body)
+        monkeypatch.setattr(runtime, '_CACHE_GC_MAX_OBJECTS', 5)
+        monkeypatch.setattr(runtime, '_CACHE_GC_MAX_MANIFESTS', 2)
+        monkeypatch.setattr(runtime, '_CACHE_GC_ROOT_BATCH', 2)
+        phases = set()
+        for _ in range(200):
+            runtime.trim_cache(Paged(), bucket, 0, total_bytes=budget, gc_policy='budget-pressure')
+            state = runtime._read_cache_checkpoint(admin, bucket)
+            current = {row['Key']: row['Size'] for page in admin.get_paginator('list_objects_v2').paginate(Bucket=bucket)
+                       for row in page.get('Contents', [])}
+            assert runtime._CACHE_MUTATION_LOCK not in current
+            if state['version'] == 1:
+                break
+            phases.add(state['scan']['phase'])
+            assert state['inventory_complete'] is False and 'retry_after' not in state
+        else:
+            pytest.fail('real S3 continuation did not converge')
+        expected = {key: size for key, size in current.items()
+                    if runtime._V2_MANIFEST.fullmatch(key) or runtime._V2_BLOB.fullmatch(key)}
+        assert state['retained_bytes'] == sum(expected.values()) <= budget
+        assert not any(key.startswith(runtime._CACHE_GC_CONTROL) for key in current)
+        roots = [key for key in expected if runtime._V2_MANIFEST.fullmatch(key)]
+        assert len(roots) == (5 if budget == 800 else 7)
+        assert any(runtime._V2_BLOB.fullmatch(key) for key in expected)
+        assert 'list' in phases
+        if budget == 800:
+            assert phases & {'load', 'refs'}
+    finally:
+        for page in admin.get_paginator('list_objects_v2').paginate(Bucket=bucket):
+            for row in page.get('Contents', []):
+                admin.delete_object(Bucket=bucket, Key=row['Key'])
+        admin.delete_bucket(Bucket=bucket)
+        admin.close()

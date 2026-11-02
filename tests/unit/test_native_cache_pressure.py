@@ -126,6 +126,12 @@ def test_real_publisher_path_applies_frozen_pressure_and_refreshes_reclaimed_inc
     source_bundle, publisher, tmp_path, monkeypatch, transfer,
 ):
     cache, copies = publisher
+    delete = cache.delete_object
+    def remove_from_inventory(**kwargs):
+        delete(**kwargs)
+        if cache.listing is not None:
+            cache.listing = [row for row in cache.listing if row['Key'] != kwargs['Key']]
+    monkeypatch.setattr(cache, 'delete_object', remove_from_inventory)
     frozen = {**source_bundle[0], 'cache_transfer': transfer, 'cache_gc_policy': 'budget-pressure'}
     work = tmp_path / 'work'
     (work / 'oci').mkdir(parents=True)
@@ -151,7 +157,7 @@ def test_real_publisher_path_applies_frozen_pressure_and_refreshes_reclaimed_inc
     assert saved['debt_bytes'] <= runtime._CACHE_TOTAL_BYTES
 
 
-def test_bounded_incomplete_scan_never_resets_debt_and_backs_off(monkeypatch):
+def test_bounded_incomplete_scan_preserves_debt_then_resumes_without_backoff(monkeypatch):
     class Counted(FakeS3):
         scans = 0
         def paginate(self, **kwargs):
@@ -162,16 +168,22 @@ def test_bounded_incomplete_scan_never_resets_debt_and_backs_off(monkeypatch):
         "debt_bytes": 77, "publications": 2}).encode()}, listing=[
         _listed(f"task-build-cache/{i:064x}/0.tar", 1, _cache_moment(days=1)) for i in range(3)])
     monkeypatch.setattr(runtime, "_CACHE_GC_MAX_OBJECTS", 2)
-    for _ in range(2):
-        assert not runtime._reserve_cache_publication(cache, "cache", 1, total_bytes=1000, gc_policy="budget-pressure")
+    assert not runtime._reserve_cache_publication(cache, "cache", 1, total_bytes=1000, gc_policy="budget-pressure")
     saved = json.loads(cache.objects[runtime._CACHE_GC_CHECKPOINT])
     assert saved["debt_bytes"] == 77 and saved["retained_bytes"] == 100
     assert not saved["inventory_complete"] and cache.scans == 1
     assert saved['version'] == 2, 'old writers must not treat incomplete accounting as an empty v1 inventory'
     assert not _cache_data_deletes(cache)
+    assert 'retry_after' not in saved
+    for _ in range(20):
+        if runtime._reserve_cache_publication(cache, "cache", 1, total_bytes=1000, gc_policy="budget-pressure"):
+            break
+    else:
+        pytest.fail('bounded inventory never resumed to complete accounting')
+    assert json.loads(cache.objects[runtime._CACHE_GC_CHECKPOINT])['version'] == 1
 
 
-@pytest.mark.parametrize('limit', ['manifests', 'bytes', 'seconds', 'sdk'])
+@pytest.mark.parametrize('limit', ['bytes', 'seconds', 'sdk'])
 def test_scan_failure_bounds_preserve_prior_accounting_and_backoff(monkeypatch, limit):
     class Counted(FakeS3):
         scans = 0
@@ -186,18 +198,21 @@ def test_scan_failure_bounds_preserve_prior_accounting_and_backoff(monkeypatch, 
     old.update(scanned_at=runtime.time.time()-1000, debt_bytes=77, publications=2)
     objects[runtime._CACHE_GC_CHECKPOINT] = json.dumps(old).encode()
     cache = Counted(objects)
-    if limit == 'manifests':
-        monkeypatch.setattr(runtime, '_CACHE_GC_MAX_MANIFESTS', 1)
-    elif limit == 'bytes':
+    # Force a graph: ordinary underbudget/recent inventories need no GETs.
+    cache._now -= __import__('datetime').timedelta(days=8)
+    if limit == 'bytes':
         monkeypatch.setattr(runtime, '_CACHE_GC_MAX_MANIFEST_BYTES', 10)
     elif limit == 'seconds':
-        clock = iter([0, 31])
-        monkeypatch.setattr(runtime.time, 'monotonic', lambda: next(clock))
+        clock = [0]
+        def tick():
+            clock[0] += 31
+            return clock[0]
+        monkeypatch.setattr(runtime.time, 'monotonic', tick)
     for _ in range(2):
         assert not runtime._reserve_cache_publication(cache, 'cache', 1, total_bytes=1000, gc_policy='budget-pressure')
     saved = json.loads(cache.objects[runtime._CACHE_GC_CHECKPOINT])
     assert (saved['retained_bytes'], saved['debt_bytes'], saved['version']) == (900, 77, 2)
-    assert cache.scans == 1 and not _cache_data_deletes(cache)
+    assert cache.scans == (0 if limit == 'seconds' else 1) and not _cache_data_deletes(cache)
     assert all(body.closed for body in cache.bodies)
 
 

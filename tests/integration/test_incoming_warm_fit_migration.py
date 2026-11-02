@@ -3,9 +3,51 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
 from tests.integration.test_nebius_pool_schema import registered
+
+
+@pytest.mark.parametrize(('direction', 'table', 'lock_mode'), [
+    ('downgrade', 'trials', 'ACCESS SHARE'),
+    ('downgrade', 'nebius_application_build_attempts', 'ACCESS SHARE'),
+    ('downgrade', 'execution_targets', 'ACCESS SHARE'),
+    ('downgrade', 'nebius_pool_bindings', 'ACCESS SHARE'),
+    ('downgrade', 'nebius_cache_runtime_policies', 'ACCESS SHARE'),
+    ('downgrade', 'nebius_pool_placement_advice', 'ACCESS SHARE'),
+    ('upgrade', 'trials', 'ROW EXCLUSIVE'),
+    ('upgrade', 'nebius_application_build_attempts', 'ACCESS SHARE'),
+    ('upgrade', 'execution_targets', 'ACCESS SHARE'),
+    ('upgrade', 'nebius_pool_bindings', 'ACCESS SHARE'),
+])
+def test_0187_refuses_busy_relations_before_any_schema_change(
+    isolated_migration_postgres_url, direction, table, lock_mode,
+):
+    config = Config('database/migrations/alembic.ini')
+    url = make_url(isolated_migration_postgres_url).update_query_dict(
+        {'options': '-c statement_timeout=2000'})
+    config.set_main_option('sqlalchemy.url', url.render_as_string(hide_password=False).replace('%', '%%'))
+    engine = create_engine(isolated_migration_postgres_url)
+    try:
+        if direction == 'upgrade':
+            command.downgrade(config, '0186')
+        with engine.begin() as connection:
+            connection.exec_driver_sql(f'LOCK TABLE "{table}" IN {lock_mode} MODE')
+            with pytest.raises(DBAPIError, match='could not obtain lock'):
+                if direction == 'upgrade':
+                    command.upgrade(config, '0187')
+                else:
+                    command.downgrade(config, '0186')
+        with engine.connect() as connection:
+            expected = '0186' if direction == 'upgrade' else '0187'
+            assert connection.scalar(text('SELECT version_num FROM alembic_version')) == expected
+            assert inspect(connection).has_table('nebius_cache_runtime_policies') == (expected == '0187')
+            assert inspect(connection).has_table('nebius_pool_placement_advice') == (expected == '0187')
+            assert ('cache_policy_json' in {column['name'] for column in
+                inspect(connection).get_columns('nebius_application_build_attempts')}) == (expected == '0187')
+    finally:
+        engine.dispose()
 
 
 def test_0187_independent_preference_and_cache_scope_preserve_physical_identity(isolated_migration_postgres_url):

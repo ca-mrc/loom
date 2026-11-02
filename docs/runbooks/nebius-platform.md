@@ -1440,6 +1440,18 @@ protected objects, and over-budget publication can be deferred while final image
 publication still succeeds. Explicit `budget-pressure` permits safe eviction of
 recent cache soft state within the configured budget, after compatible readers
 are installed and old frozen readers have naturally drained.
+Large inventories continue through a version2 checkpoint and bounded control
+segments rather than restarting at the same object or manifest limit. Each pass
+checks its 20,000-object, 1,024-manifest, 32MiB and cooperative 30-second budgets;
+one SDK call/retry can extend elapsed time. Positive progress resumes on a later
+publication, while failures or completed zero-reclaim scans back off for
+1,800seconds. Only optional cache append pauses during an incomplete scan;
+normal image publication continues. A complete recent inventory already within
+budget needs no manifest GETs. Reclamation uses bounded batches of eight FIFO
+roots and candidate-blob references, never an unbounded in-memory full graph.
+Blob deletion requires complete retained-root coverage. Final size accounting
+and control-segment cleanup finish before restoring a complete version1
+checkpoint; interruption must not clear retained bytes or publication debt.
 Choose the budget from observed resident bytes, actual operation cache hits,
 transfer/GC costs and end-to-end completion throughput; 64 GiB is an operator
 choice rather than a universal performance optimum.

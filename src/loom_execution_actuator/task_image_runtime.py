@@ -21,7 +21,6 @@ import time
 from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock, current_thread, main_thread
 from types import FrameType
@@ -76,6 +75,7 @@ _BUNDLE_BYTES = 512 * 1024 * 1024
 _CACHE_BYTES = 1024 * 1024 * 1024
 _CACHE_TOTAL_BYTES = 4 * 1024 * 1024 * 1024
 _CACHE_REUSE_BYTES = 256 * 1024 * 1024
+_CACHE_MANIFEST_FILES = 10000
 # A bounded starting point, not a measured optimum for every family. The DNA
 # acceptance observed 12/15 GETs and about 1/2 seconds per warm import.
 _CACHE_IMPORT_SECONDS = 60.0
@@ -720,7 +720,7 @@ def _parse_cache_manifest(body: bytes) -> list[dict[str, Any]]:
         not isinstance(payload, dict)
         or payload.get("version") != 1
         or not isinstance(payload.get("files"), list)
-        or len(payload["files"]) > 10000
+        or len(payload["files"]) > _CACHE_MANIFEST_FILES
     ):
         raise BuildPreparationError("cache manifest is unsupported")
     entries: list[dict[str, Any]] = []
@@ -914,6 +914,9 @@ _CACHE_GC_MAX_OBJECTS = 20000
 _CACHE_GC_MAX_MANIFESTS = 1024
 _CACHE_GC_MAX_MANIFEST_BYTES = 32 * 1024 * 1024
 _CACHE_GC_MAX_SECONDS = 30
+_CACHE_GC_ROOT_BATCH = 8
+_CACHE_GC_ORPHAN_BATCH = 256
+_CACHE_GC_CONTROL = "task-build-cache/.gc-scan/"
 
 
 def _read_cache_checkpoint(client: Any, bucket: str) -> dict[str, Any] | None:
@@ -997,14 +1000,8 @@ def _reserve_cache_publication(
         if due:
             remaining = _trim_cache_locked(client, bucket, incoming_bytes, total_bytes=budget, gc_policy=gc_policy)
             if remaining is None:
-                # Incomplete inventories never discharge pre-existing debt.
-                deferred = dict(state or _cache_checkpoint(0))
-                # Old readers reject v2 rather than treating an incomplete
-                # first inventory as zero retained bytes. A full sweep writes
-                # the historical v1 shape again; this affects optional cache only.
-                deferred.update(version=2, inventory_complete=False, gc_policy=gc_policy, budget_bytes=budget,
-                                retry_after=time.time() + _CACHE_GC_BACKOFF_SECONDS)
-                _write_cache_checkpoint(client, bucket, deferred)
+                # The collector owns the durable continuation. Do not replace
+                # its newer cursor with this caller's pre-scan checkpoint.
                 emit_stage("cache_export", "deferred", reason="cache_gc_incomplete")
                 return False
             state = _cache_checkpoint(remaining)
@@ -1411,117 +1408,394 @@ def _trim_cache_locked(
     gc_policy: str = "legacy-seven-day",
 ) -> int | None:
     with stage_span("cache_gc"), cache_request_counts(client, "cache_gc"):
+        sweep: _CacheSweep | None = None
         try:
-            remaining = _trim_cache_inventory(client, bucket, incoming_bytes, total_bytes=total_bytes, gc_policy=gc_policy)
+            try:
+                state = _read_cache_checkpoint(client, bucket)
+            except BuildPreparationError:
+                state = None  # Explicit trim can repair an unknown checkpoint.
+            sweep = _CacheSweep(client, bucket, state, incoming_bytes,
+                _CACHE_TOTAL_BYTES if total_bytes is None else total_bytes, gc_policy)
+            remaining = sweep.run()
         except (BotoCoreError, ClientError, BuildPreparationError, OSError):
+            # Never commit in-memory cursors after an ambiguous segment PUT.
+            # Resume only the last durable checkpoint and its committed slot.
+            try:
+                retained = _read_cache_checkpoint(client, bucket)
+                if retained is not None and not retained.get("inventory_complete", True):
+                    retained["retry_after"] = time.time() + _CACHE_GC_BACKOFF_SECONDS
+                    _write_cache_checkpoint(client, bucket, retained)
+            except (BotoCoreError, ClientError, BuildPreparationError, OSError):
+                pass  # The last durable v2 freeze remains conservative.
             emit_stage("cache_gc", "deferred", reason="inventory_unavailable")
+            emit_stage("cache_export", "deferred", reason="cache_checkpoint_unavailable")
             return None
-        if remaining is not None:
-            state = _cache_checkpoint(remaining)
-            state.update(gc_policy=gc_policy, budget_bytes=_CACHE_TOTAL_BYTES if total_bytes is None else total_bytes)
-            _write_cache_checkpoint(client, bucket, state)
         return remaining
 
 
-def _trim_cache_inventory(
-    client: Any, bucket: str, incoming_bytes: int, *, total_bytes: int | None = None,
-    gc_policy: str = "legacy-seven-day",
-) -> int | None:
-    budget = _CACHE_TOTAL_BYTES if total_bytes is None else total_bytes
-    pressure = _cache_gc_policy({"cache_gc_policy": gc_policy}) == "budget-pressure"
-    started = time.monotonic()
-    object_count = 0
-    roots: list[dict[str, Any]] = []
-    blobs: list[dict[str, Any]] = []
-    for page in client.get_paginator("list_objects_v2").paginate(
-        Bucket=bucket, Prefix="task-build-cache/"
-    ):
-        for item in page.get("Contents", []):
-            object_count += 1
-            if object_count > _CACHE_GC_MAX_OBJECTS or time.monotonic() - started > _CACHE_GC_MAX_SECONDS:
-                emit_stage("cache_gc", "deferred", reason="inventory_limit")
-                return None
-            key = item["Key"]
-            if _LEGACY_TAR.fullmatch(key) or _V2_MANIFEST.fullmatch(key):
-                roots.append(item)
-            elif _V2_BLOB.fullmatch(key):
-                blobs.append(item)
-    referenced: dict[str, set[str]] = {}
-    manifest_count = 0
-    manifest_bytes = 0
-    try:
-        for root in roots:
-            if not _V2_MANIFEST.fullmatch(root["Key"]):
+class _CacheSweepPausedError(Exception):
+    pass
+
+
+class _CacheSweep:
+    """Bounded passes over a stable cache-only snapshot, under the existing lock.
+
+    v2 blocks optional publishers (including old writers) until completion. Each
+    pass releases the lock; optimistic readers remain independent. LIST metadata
+    is segmented remotely; only one segment and a bounded victim set enter RAM.
+    No blob is removed until every retained root has been checked for that set.
+    """
+
+    def __init__(self, client: Any, bucket: str, previous: dict[str, Any] | None,
+                 incoming: int, budget: int, policy: str):
+        self.client, self.bucket, self.budget = client, bucket, budget
+        self.policy = _cache_gc_policy({"cache_gc_policy": policy})
+        self.state = dict(previous or _cache_checkpoint(0))
+        scan = self.state.get("scan")
+        if scan is None:
+            scan = dict(generation=uuid4().hex, phase="list", cursor="", parts=0, total=0,
+                aged=False, part=0, row=0, work_slot=0, incoming=incoming, budget=budget, policy=policy)
+        if (not isinstance(scan, dict) or not re.fullmatch(r"[0-9a-f]{32}", str(scan.get("generation", "")))
+                or scan.get("phase") not in {"list", "select", "load", "refs", "delete", "account", "cleanup"}
+                or any(type(scan.get(key)) is not int or scan[key] < 0 for key in
+                       ("parts", "total", "part", "row", "work_slot", "incoming", "budget"))
+                or scan["work_slot"] not in (0, 1) or not isinstance(scan.get("cursor"), str)):
+            raise BuildPreparationError("invalid cache inventory continuation")
+        self.scan = dict(scan)
+        self.work: dict[str, Any] | None = None
+        if self.scan["phase"] in {"select", "load", "refs", "delete"}:
+            self.work = self.read("work-" + str(self.scan["work_slot"]))
+            if (not isinstance(self.work.get("roots"), list) or len(self.work["roots"]) > _CACHE_GC_ROOT_BATCH
+                    or not isinstance(self.work.get("orphans"), list) or len(self.work["orphans"]) > _CACHE_GC_ORPHAN_BATCH
+                    or any(not self.valid_row(row) for row in (*self.work["roots"], *self.work["orphans"]))
+                    or any(_V2_BLOB.fullmatch(row[0]) for row in self.work["roots"])
+                    or any(not _V2_BLOB.fullmatch(row[0]) for row in self.work["orphans"])
+                    or not isinstance(self.work.get("candidates"), dict)
+                    or len(self.work["candidates"]) > _CACHE_GC_ROOT_BATCH * _CACHE_MANIFEST_FILES + _CACHE_GC_ORPHAN_BATCH
+                    or any(not _KEY.fullmatch(digest) or not isinstance(value, dict)
+                        or type(value.get("referenced")) is not bool
+                        or (value.get("row") is not None and (not self.valid_row(value["row"])
+                            or value["row"][0] != _v2_blob_key(digest)))
+                        for digest, value in self.work["candidates"].items())):
+                raise BuildPreparationError("invalid cache inventory candidates")
+            roots = {row[0] for row in self.work['roots']}
+            if any(not isinstance(value.get('owners', []), list) or not set(value.get('owners', [])) <= roots
+                   for value in self.work['candidates'].values()):
+                raise BuildPreparationError('invalid cache inventory owners')
+            if self.scan['phase'] == 'delete':
+                self.qualify_deletes()
+            if (self.scan["budget"], self.scan["policy"]) != (budget, policy):
+                # A prior DELETE may have committed without its cursor. Old
+                # segments can therefore name absent roots. Re-account first,
+                # then rebuild the snapshot if this new policy needs more GC.
+                self.account()
+                self.scan['restart'] = True
+        elif (self.scan["budget"], self.scan["policy"]) != (budget, policy) and self.scan['phase'] != 'list':
+            self.scan['restart'] = True
+        self.scan.update(incoming=max(incoming, self.scan["incoming"]), budget=budget, policy=policy)
+        self.state.update(version=2, inventory_complete=False, scan=self.scan,
+                          gc_policy=policy, budget_bytes=budget)
+        self.started = time.monotonic()
+        self.objects = self.manifests = self.manifest_bytes = 0
+        _write_cache_checkpoint(client, bucket, self.state)  # Freeze BEFORE LIST.
+
+    def key(self, name: str) -> str:
+        return _CACHE_GC_CONTROL + str(self.scan["generation"]) + "/" + name + ".json"
+
+    def room(self, *, objects: bool = False, manifest: int | None = None) -> None:
+        if (time.monotonic() - self.started >= _CACHE_GC_MAX_SECONDS
+                or (objects and self.objects >= _CACHE_GC_MAX_OBJECTS)
+                or (manifest is not None and (self.manifests >= _CACHE_GC_MAX_MANIFESTS
+                    or self.manifest_bytes + manifest > _CACHE_GC_MAX_MANIFEST_BYTES))):
+            raise _CacheSweepPausedError
+        if objects:
+            self.objects += 1
+        if manifest is not None:
+            self.manifests += 1
+            self.manifest_bytes += manifest
+
+    def read(self, name: str) -> Any:
+        response = self.client.get_object(Bucket=self.bucket, Key=self.key(name))
+        body = response["Body"]
+        try:
+            raw = body.read(40 * 1024 * 1024 + 1)
+        finally:
+            body.close()
+        try:
+            value = json.loads(raw)
+        except (ValueError, UnicodeError) as error:
+            raise BuildPreparationError("invalid cache inventory segment") from error
+        if (len(raw) > 40 * 1024 * 1024 or not isinstance(value, dict)
+                or value.get("generation") != self.scan["generation"]):
+            raise BuildPreparationError("invalid cache inventory segment")
+        return value
+
+    def write(self, name: str, value: dict[str, Any]) -> None:
+        self.client.put_object(Bucket=self.bucket, Key=self.key(name),
+            Body=json.dumps(dict(value, generation=self.scan["generation"]), separators=(",", ":")).encode())
+
+    def save(self, *, backoff: bool = False) -> None:
+        if self.work is not None:
+            slot = 1 - self.scan["work_slot"]
+            self.write("work-" + str(slot), self.work)
+            self.scan["work_slot"] = slot
+        self.state["scan"] = self.scan
+        if backoff:
+            self.state["retry_after"] = time.time() + _CACHE_GC_BACKOFF_SECONDS
+        else:
+            self.state.pop("retry_after", None)
+        _write_cache_checkpoint(self.client, self.bucket, self.state)
+
+    @staticmethod
+    def order(row: list[Any]) -> tuple[float, str]:
+        return row[2], row[0]
+
+    @staticmethod
+    def valid_row(row: Any) -> bool:
+        return (isinstance(row, list) and len(row) == 3 and isinstance(row[0], str)
+            and bool(_LEGACY_TAR.fullmatch(row[0]) or _V2_MANIFEST.fullmatch(row[0]) or _V2_BLOB.fullmatch(row[0]))
+            and type(row[1]) is int and row[1] >= 0 and type(row[2]) in (int, float) and math.isfinite(row[2]))
+
+    def rows(self) -> Iterator[list[Any]]:
+        while self.scan["part"] < self.scan["parts"]:
+            self.room()
+            rows = self.read("list-" + str(self.scan["part"])).get("rows")
+            if not isinstance(rows, list) or any(not self.valid_row(row) for row in rows):
+                raise BuildPreparationError("invalid cache inventory metadata")
+            while self.scan["row"] < len(rows):
+                self.room(objects=True)
+                yield rows[self.scan["row"]]
+                self.scan["row"] += 1
+            self.scan["part"] += 1
+            self.scan["row"] = 0
+
+    def listing(self, *, account: bool = False) -> None:
+        records: list[list[Any]] = []
+        kwargs = dict(Bucket=self.bucket, Prefix="task-build-cache/")
+        if self.scan["cursor"]:
+            kwargs["StartAfter"] = self.scan["cursor"]
+        try:
+            for page in self.client.get_paginator("list_objects_v2").paginate(**kwargs):
+                # S3 general-purpose buckets are lexicographic; sorting also
+                # preserves the exact mid-page cursor in one-page test doubles.
+                for item in sorted(page.get("Contents", []), key=lambda row: row["Key"]):
+                    key = item["Key"]
+                    if key <= self.scan["cursor"] or key.startswith(_CACHE_GC_CONTROL):
+                        continue
+                    self.room(objects=True)
+                    if _LEGACY_TAR.fullmatch(key) or _V2_MANIFEST.fullmatch(key) or _V2_BLOB.fullmatch(key):
+                        row = [key, item["Size"], item["LastModified"].timestamp()]
+                        if not self.valid_row(row):
+                            raise BuildPreparationError("invalid cache inventory metadata")
+                        self.scan["total"] += row[1]
+                        if not account:
+                            records.append(row)
+                            self.scan["aged"] |= row[2] < time.time() - 7 * 86400
+                    self.scan["cursor"] = key
+        finally:
+            if records:
+                self.write("list-" + str(self.scan["parts"]), {"rows": records})
+                self.scan["parts"] += 1
+        if not account:
+            self.scan["initial_total"] = self.scan["total"]
+        if account or (self.scan["total"] + self.scan["incoming"] <= self.budget and not self.scan["aged"]):
+            self.scan.update(phase="cleanup", cleanup=0)
+            self.save()  # Cleanup replay must not need already-deleted segments.
+        else:
+            self.select()
+
+    def select(self) -> None:
+        self.scan.update(phase="select", part=0, row=0)
+        self.work = {"roots": [], "orphans": [], "candidates": {}, "load": 0}
+
+    def selection(self) -> None:
+        assert self.work is not None
+        over = self.scan["total"] + self.scan["incoming"] > self.budget
+        pressure = self.policy == "budget-pressure" and over
+        for row in self.rows():
+            blob = bool(_V2_BLOB.fullmatch(row[0]))
+            after = self.scan.get("blob_after" if blob else "root_after")
+            if after is not None and self.order(row) <= tuple(after):
                 continue
-            manifest_count += 1
-            if (manifest_count > _CACHE_GC_MAX_MANIFESTS or manifest_bytes >= _CACHE_GC_MAX_MANIFEST_BYTES
-                    or time.monotonic() - started > _CACHE_GC_MAX_SECONDS):
-                emit_stage("cache_gc", "deferred", reason="inventory_limit")
-                return None
-            digests, read_bytes = _read_cache_manifest(client, bucket, root["Key"],
-                limit=min(_CACHE_GC_MAX_MANIFEST_BYTES - manifest_bytes, 4 * 1024 * 1024))
-            manifest_bytes += read_bytes
-            for digest in digests:
-                referenced.setdefault(digest, set()).add(root["Key"])
-    except (BotoCoreError, ClientError, BuildPreparationError, OSError):
-        emit_stage("cache_gc", "deferred", reason="manifest_unreadable")
-        return None
-    blobs_by_digest = {item["Key"].rsplit("/", 1)[-1]: item for item in blobs}
-    total: int = (
-        sum(item["Size"] for item in roots)
-        + sum(item["Size"] for item in blobs)
-        + incoming_bytes
-    )
-    initial_total = total
-    cutoff = datetime.now(UTC) - timedelta(days=7)
-    deleted: set[str] = set()
-    for blob in sorted(blobs, key=lambda row: row["LastModified"]):
-        if time.monotonic() - started > _CACHE_GC_MAX_SECONDS:
-            emit_stage("cache_gc", "deferred", reason="inventory_limit")
+            if row[2] >= time.time() - 7 * 86400 and not pressure:
+                continue
+            if not blob and not over:
+                continue
+            chosen = self.work["orphans" if blob else "roots"]
+            chosen.append(row)
+            chosen.sort(key=self.order)
+            del chosen[_CACHE_GC_ORPHAN_BATCH if blob else _CACHE_GC_ROOT_BATCH:]
+        if not self.work["roots"] and not self.work["orphans"]:
+            if self.scan["aged"]:
+                self.scan.update(phase="refs", part=0, row=0)
+            else:
+                self.account()
+            return
+        for row in self.work["orphans"]:
+            self.work["candidates"][row[0].rsplit("/", 1)[-1]] = {"row": row, "referenced": False}
+        self.scan.update(phase="load", part=0, row=0)
+
+    def digests(self, row: list[Any]) -> list[str]:
+        if not _V2_MANIFEST.fullmatch(row[0]):
+            return []
+        if row[1] > min(4 * 1024 * 1024, _CACHE_GC_MAX_MANIFEST_BYTES):
+            raise BuildPreparationError("cache manifest exceeds collection limit")
+        self.room(manifest=row[1])
+        try:
+            digests, size = _read_cache_manifest(self.client, self.bucket, row[0],
+                limit=min(4 * 1024 * 1024, _CACHE_GC_MAX_MANIFEST_BYTES - self.manifest_bytes + row[1]))
+            self.manifest_bytes += size - row[1]
+        except (BotoCoreError, ClientError, BuildPreparationError, OSError):
+            emit_stage("cache_gc", "deferred", reason="manifest_unreadable")
+            raise
+        return digests
+
+    def load(self) -> None:
+        assert self.work is not None
+        while self.work["load"] < len(self.work["roots"]):
+            for digest in self.digests(self.work["roots"][self.work["load"]]):
+                candidate = self.work["candidates"].setdefault(digest, {"row": None, "referenced": False})
+                candidate.setdefault("owners", []).append(self.work["roots"][self.work["load"]][0])
+            self.work["load"] += 1
+        self.scan.update(phase="refs", part=0, row=0)
+
+    def references(self) -> None:
+        assert self.work is not None
+        victims = {row[0] for row in self.work["roots"]}
+        for row in self.rows():
+            if _V2_BLOB.fullmatch(row[0]):
+                candidate = self.work["candidates"].get(row[0].rsplit("/", 1)[-1])
+                if candidate is not None:
+                    candidate["row"] = row
+            elif row[0] not in victims and (self.scan.get("root_after") is None
+                    or self.order(row) > tuple(self.scan["root_after"])):
+                for digest in self.digests(row):
+                    if digest in self.work["candidates"]:
+                        self.work["candidates"][digest]["referenced"] = True
+        # The complete retained-root stream has now qualified this bounded set.
+        available = {digest: value for digest, value in self.work["candidates"].items()
+            if value["row"] is not None and not value["referenced"] and
+                (self.policy == "budget-pressure" or value["row"][2] < time.time() - 7 * 86400)}
+        deletes = [value["row"] for value in available.values() if not value.get("owners")]
+        remaining = self.scan["total"] - sum(row[1] for row in deletes)
+        deleted = {row[0] for row in deletes}
+        victims_deleted: set[str] = set()
+        for root in self.work["roots"]:
+            if remaining + self.scan["incoming"] <= self.budget:
+                break
+            deletes.append(root)
+            victims_deleted.add(root[0])
+            remaining -= root[1]
+            for value in available.values():
+                row = value["row"]
+                if row[0] not in deleted and set(value.get("owners", ())) <= victims_deleted:
+                    deletes.append(row)
+                    deleted.add(row[0])
+                    remaining -= row[1]
+        self.work["deletes"] = deletes
+        self.work["delete"] = 0
+        self.scan["phase"] = "delete"
+        self.save()  # Commit the complete reference check BEFORE any DELETE.
+
+    def deletion(self) -> None:
+        assert self.work is not None
+        for row in self.work["deletes"][self.work["delete"]:]:
+            self.room(objects=True)
+            if not self.valid_row(row):
+                raise BuildPreparationError("invalid cache deletion candidate")
+            try:
+                self.client.head_object(Bucket=self.bucket, Key=row[0])
+            except ClientError as error:
+                if not _object_absent(error):
+                    raise
+            else:
+                self.client.delete_object(Bucket=self.bucket, Key=row[0])
+                self.scan["total"] -= row[1]
+            self.work["delete"] += 1
+        deleted_roots = [row for row in self.work["deletes"] if not _V2_BLOB.fullmatch(row[0])]
+        if deleted_roots:
+            self.scan["root_after"] = list(max(map(self.order, deleted_roots)))
+        if self.work["orphans"]:
+            self.scan["blob_after"] = list(max(map(self.order, self.work["orphans"])))
+        if self.scan["total"] + self.scan["incoming"] > self.budget and deleted_roots:
+            self.select()
+        else:
+            self.account()
+
+    def qualify_deletes(self) -> None:
+        assert self.work is not None
+        rows = self.work.get('deletes')
+        position = self.work.get('delete')
+        if not isinstance(rows, list) or type(position) is not int or not 0 <= position <= len(rows):
+            raise BuildPreparationError('invalid cache inventory deletion')
+        roots = {row[0]: row for row in self.work['roots']}
+        preceding: set[str] = set()
+        for row in rows:
+            if not self.valid_row(row):
+                raise BuildPreparationError('invalid cache inventory deletion')
+            if row[0] in roots and row == roots[row[0]]:
+                preceding.add(row[0])
+                continue
+            value = self.work['candidates'].get(row[0].rsplit('/', 1)[-1])
+            if (not _V2_BLOB.fullmatch(row[0]) or value is None or value['row'] != row
+                    or value['referenced'] or not set(value.get('owners', [])) <= preceding):
+                raise BuildPreparationError('unqualified cache inventory deletion')
+
+    def account(self) -> None:
+        # A final complete LIST discharges ambiguous DELETE debt. Never infer
+        # free space from an uncertain reply or replayed deletion counters.
+        self.scan.update(phase="account", cursor="", total=0)
+        self.work = None
+
+    def cleanup(self) -> int | None:
+        while self.scan["cleanup"] < self.scan["parts"] + 2:
+            self.room(objects=True)
+            index = self.scan["cleanup"]
+            name = "list-" + str(index) if index < self.scan["parts"] else "work-" + str(index - self.scan["parts"])
+            self.client.delete_object(Bucket=self.bucket, Key=self.key(name))
+            self.scan["cleanup"] += 1
+        remaining = int(self.scan["total"])
+        if self.scan.get('restart') and remaining + self.scan['incoming'] > self.budget:
+            incoming = self.scan['incoming']
+            self.scan = dict(generation=uuid4().hex, phase="list", cursor="", parts=0, total=0,
+                aged=False, part=0, row=0, work_slot=0, incoming=incoming, budget=self.budget, policy=self.policy)
+            self.work = None
+            self.save()
             return None
-        digest = blob["Key"].rsplit("/", 1)[-1]
-        if digest in referenced or (blob["LastModified"] >= cutoff and (not pressure or total <= budget)):
-            continue
-        _delete_cache_object(client, bucket, blob, deleted)
-        total -= blob["Size"]
-    for root in sorted(roots, key=lambda row: row["LastModified"]):
-        if time.monotonic() - started > _CACHE_GC_MAX_SECONDS:
-            emit_stage("cache_gc", "deferred", reason="inventory_limit")
+        state = _cache_checkpoint(remaining)
+        state.update(gc_policy=self.policy, budget_bytes=self.budget)
+        if remaining + self.scan["incoming"] > self.budget:
+            state["retry_after"] = time.time() + _CACHE_GC_BACKOFF_SECONDS
+            emit_stage("cache_gc", "deferred", reason="grace_protected")
+        _write_cache_checkpoint(self.client, self.bucket, state)
+        emit_stage("cache_gc", "inventory", remaining_bytes=remaining,
+            incoming_bytes=self.scan["incoming"], budget_bytes=self.budget,
+            reclaimed_bytes=max(0, self.scan["initial_total"] - remaining))
+        return remaining
+
+    def run(self) -> int | None:
+        try:
+            while True:
+                self.room()
+                phase = self.scan["phase"]
+                if phase in {"list", "account"}:
+                    self.listing(account=phase == "account")
+                elif phase == "select":
+                    self.selection()
+                elif phase == "load":
+                    self.load()
+                elif phase == "refs":
+                    self.references()
+                elif phase == "delete":
+                    self.deletion()
+                else:
+                    remaining = self.cleanup()
+                    if remaining is not None:
+                        return remaining
+        except _CacheSweepPausedError:
+            self.save(backoff=self.objects == 0 and self.manifests == 0)
+            emit_stage("cache_gc", "deferred", reason="inventory_progress")
             return None
-        if total <= budget:
-            break
-        if root["LastModified"] >= cutoff and not pressure:
-            continue
-        exclusive: list[dict[str, Any]] = []
-        if _V2_MANIFEST.fullmatch(root["Key"]):
-            for digest, owners in referenced.items():
-                referenced_blob = blobs_by_digest.get(digest)
-                if (
-                    owners == {root["Key"]}
-                    and referenced_blob is not None
-                    and referenced_blob["Key"] not in deleted
-                    and (pressure or referenced_blob["LastModified"] < cutoff)
-                ):
-                    exclusive.append(referenced_blob)
-        _delete_cache_object(client, bucket, root, deleted)
-        total -= root["Size"]
-        for blob in exclusive:
-            if time.monotonic() - started > _CACHE_GC_MAX_SECONDS:
-                emit_stage("cache_gc", "deferred", reason="inventory_limit")
-                return None
-            _delete_cache_object(client, bucket, blob, deleted)
-            total -= blob["Size"]
-        for owners in referenced.values():
-            owners.discard(root["Key"])
-    emit_stage("cache_gc", "inventory", reclaimed_bytes=initial_total - total,
-               remaining_bytes=total - incoming_bytes, incoming_bytes=incoming_bytes,
-               budget_bytes=budget)
-    if total > budget and any(
-        item["LastModified"] >= cutoff and item["Key"] not in deleted
-        for item in (*roots, *blobs)
-    ):
-        emit_stage("cache_gc", "deferred", reason="grace_protected")
-    return total - incoming_bytes
 
 
 def _output_path(work: Path, relative: str, *, directory: bool = False) -> Path:

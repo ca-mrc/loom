@@ -56,6 +56,11 @@ def _registration_guard(*, preference: bool) -> None:
 
 def upgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
+    # Preflight every existing relation before any DDL. Adding the advice FK
+    # also locks trials, but does not need to exclude its ordinary readers.
+    op.execute("LOCK TABLE nebius_application_build_attempts, execution_targets, "
+        "nebius_pool_bindings IN ACCESS EXCLUSIVE MODE NOWAIT")
+    op.execute("LOCK TABLE trials IN SHARE ROW EXCLUSIVE MODE NOWAIT")
     op.create_table("nebius_cache_runtime_policies",
         sa.Column("storage_endpoint", sa.Text(), primary_key=True),
         sa.Column("storage_region", sa.Text(), primary_key=True),
@@ -87,6 +92,11 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
+    # Dropping the advice FK also locks its parent. Refuse busy readers/writers
+    # immediately, before dropping any table or changing the trigger contract.
+    op.execute("LOCK TABLE trials, nebius_application_build_attempts, execution_targets, "
+        "nebius_pool_bindings, nebius_cache_runtime_policies, nebius_pool_placement_advice "
+        "IN ACCESS EXCLUSIVE MODE NOWAIT")
     op.drop_table("nebius_cache_runtime_policies")
     op.drop_table("nebius_pool_placement_advice")
     op.drop_column("execution_targets", "preview_runtime_json")
