@@ -463,15 +463,15 @@ def audit_for_request(
         raise RuntimeError("invalid dispatch audit request state")
     state.session_factory = request.app.state.session_factory
     settings = getattr(request.app.state, "settings", None)
-        if settings is not None:
-            state.upstream_timeout_sec = float(settings.upstream_timeout_sec)
-            state.connection_queue_max_wait_sec = float(
-                getattr(
-                    settings,
-                    "connection_queue_max_wait_sec",
-                    state.connection_queue_max_wait_sec,
-                )
+    if settings is not None:
+        state.upstream_timeout_sec = float(settings.upstream_timeout_sec)
+        state.connection_queue_max_wait_sec = float(
+            getattr(
+                settings,
+                "connection_queue_max_wait_sec",
+                state.connection_queue_max_wait_sec,
             )
+        )
     return DispatchAudit(state, ctx, dialect, provider_connection_id, purpose)
 
 
