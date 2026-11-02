@@ -38,6 +38,7 @@ class FakeKube:
         self.tuning_owner = None
         self.builder_request_support = True
         self.builder_cache_budget_support = True
+        self.builder_configuration_source = 'actuator'
 
     def get(self, kind, name, namespace):
         return deepcopy(self.objects.get((kind, namespace, name), {}))
@@ -84,6 +85,7 @@ class FakeKube:
             return json.dumps({'command_concurrency': int(env['LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY']),
                 'builder_enabled': builder is not None, 'builder_request_support': self.builder_request_support,
                 'builder_cache_budget_support': self.builder_cache_budget_support,
+                'builder_configuration_source': self.builder_configuration_source,
                 'builder_resources': None if builder is None else {
                     'effective_cpu_request_millis': builder.get('cpu_request_millis') or builder['cpu_millis'],
                     'cache_total_mib': builder.get('cache_total_mib', 4096) if self.builder_cache_budget_support else None,
@@ -867,7 +869,8 @@ def test_cache_total_budget_cli_accepts_two_targets_in_one_saved_change(regional
 
 
 @pytest.mark.parametrize('support', [False, True])
-def test_cache_total_budget_runtime_probe_detects_actual_installed_settings_shape(monkeypatch, support):
+@pytest.mark.parametrize('global_mode', [False, True])
+def test_cache_total_budget_runtime_probe_detects_actual_installed_settings_shape(monkeypatch, support, global_mode):
     from contextlib import redirect_stdout
     from io import StringIO
     from types import SimpleNamespace
@@ -878,7 +881,8 @@ def test_cache_total_budget_runtime_probe_detects_actual_installed_settings_shap
               'ephemeral_storage_mib': 51200, 'namespace': 'native-build'}
     if support:
         values['cache_total_mib'] = 65536
-    settings = SimpleNamespace(command_concurrency=1, task_image_builder=SimpleNamespace(**values))
+    settings = SimpleNamespace(command_concurrency=1, task_image_builder=SimpleNamespace(**values),
+                               global_pool=SimpleNamespace() if global_mode else None)
     monkeypatch.setattr(actuator_config, 'ExecutionActuatorSettings', lambda: settings)
 
     def run(*args, **kwargs):
@@ -894,6 +898,7 @@ def test_cache_total_budget_runtime_probe_detects_actual_installed_settings_shap
                   'spec': {'replicas': 1}}
     observed = tuning._runtime(SimpleNamespace(run=run), controller)
     assert observed['builder_cache_budget_support'] is support
+    assert observed['builder_configuration_source'] == ('management-profile' if global_mode else 'actuator')
     assert observed['builder_resources']['cache_total_mib'] == (65536 if support else None)
     assert observed['builder_resources']['effective_cpu_request_millis'] == 4000
 
@@ -958,3 +963,22 @@ def test_cache_total_budget_only_cannot_apply_unrequested_staged_resources(
     assert result['task_jobs_replaced'] is False
     assert {key: value for key, value in kube.objects.items() if key[0] == 'job'} == {
         key: value for key, value in before.items() if key[0] == 'job'}
+
+
+@pytest.mark.parametrize('operation', ['stage', 'apply'])
+@pytest.mark.parametrize('knob', ['cache', 'resource'])
+def test_management_profile_builders_reject_standalone_tuning_before_any_write(
+    regional_inputs, monkeypatch, operation, knob,
+):
+    config, candidate, _, kube, targets = _active_shared_cache_builders(regional_inputs, monkeypatch)
+    kube.builder_configuration_source = 'management-profile'
+    resources = ({target: {'cache_total_mib': 65536} for target in targets} if knob == 'cache'
+                 else {targets[0]: {'cpu_request_millis': 2000}})
+    before = deepcopy(kube.objects)
+    function = tuning.stage_builders if operation == 'stage' else tuning.apply_builders
+    with pytest.raises(DeploymentError, match='management'):
+        function(kube, config['namespace'], expected_candidate=candidate['candidate_sha'], resources=resources)
+    assert kube.objects == before
+    assert kube.cm['metadata']['resourceVersion'] == '1'
+    assert kube.tuning_owner is None
+    assert not any(args[0] in {'patch', 'set', 'rollout', 'apply', 'delete', 'create'} for args in kube.calls)

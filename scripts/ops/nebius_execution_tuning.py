@@ -154,7 +154,7 @@ def _runtime(kube: Kubectl, controller: dict[str, Any]) -> dict[str, Any]:
             raise DeploymentError("control-plane has no running replicas")
         return {"command_concurrency": None, "configured_command_concurrency": int(
             _env(controller).get("LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY", "1"),
-        )}
+        ), "builder_configuration_source": "unknown"}
     if name == "loom-control-plane":
         script = ("import json; from loom_control_plane.config import ControlPlaneSettings; "
                   "s=ControlPlaneSettings(); "
@@ -166,6 +166,7 @@ def _runtime(kube: Kubectl, controller: dict[str, Any]) -> dict[str, Any]:
                   "'builder_enabled':b is not None, "
                   "'builder_request_support':b is not None and hasattr(b,'cpu_request_millis'), "
                   "'builder_cache_budget_support':b is not None and hasattr(b,'cache_total_mib'), "
+                  "'builder_configuration_source':'management-profile' if getattr(s,'global_pool',None) is not None else 'actuator', "
                   "'builder_resources':None if b is None else {"
                   "'effective_cpu_request_millis':getattr(b,'cpu_request_millis',None) or b.cpu_millis, "
                   "'cpu_millis':b.cpu_millis,'memory_mib':b.memory_mib,"
@@ -294,10 +295,17 @@ def _stage_builders_locked(
     Existing Jobs retain their frozen settings. Enabling a regional builder must
     go through the normal reviewed regional namespace/Secret/RBAC rollout.
     """
-    cm, config, profile, _ = _read(kube, namespace)
+    cm, config, profile, controllers = _read(kube, namespace)
     if not re.fullmatch(r"[0-9a-f]{40}", expected_candidate) or profile["candidate_sha"] != expected_candidate:
         raise DeploymentError("build settings candidate differs from installed platform")
     updated = _updated_builders(config, resources, enable_regional)
+    for target in set(resources) | set(enable_regional):
+        matches = [row for row in controllers if _env(row).get("LOOM_EXECUTION_ACTUATOR_TARGET_ID") == target]
+        sources = [_runtime(kube, row).get("builder_configuration_source", "unknown") for row in matches]
+        if "management-profile" in sources:
+            raise DeploymentError("global native build settings are owned by management profiles; use normal management configuration")
+        if "cache_total_mib" in resources.get(target, {}) and sources != ["actuator"]:
+            raise DeploymentError("cache budget staging requires a known running standalone builder controller")
     if updated != config:
         kube.run("patch", "configmap", "loom-platform-config", "-n", namespace, "--type=json", "-p",
                  json.dumps([
@@ -504,6 +512,10 @@ def _apply_builders_locked(
             raise DeploymentError("live build tuning requires one running existing actuator")
         controller = matches[0]
         runtime = _runtime(kube, controller)
+        if runtime.get("builder_configuration_source") == "management-profile":
+            raise DeploymentError("global native build settings are owned by management profiles; use normal management configuration")
+        if "cache_total_mib" in resources[target] and runtime.get("builder_configuration_source") != "actuator":
+            raise DeploymentError("cache budget tuning requires a known standalone builder configuration source")
         if not runtime.get("builder_enabled") or not runtime.get("builder_request_support"):
             raise DeploymentError("live build tuning requires an already enabled supporting builder; use staged protected deployment first")
         if "cache_total_mib" in resources[target] and not runtime.get("builder_cache_budget_support"):
@@ -554,6 +566,8 @@ def _apply_builders_locked(
             kube.run("rollout", "status", "deployment/" + name, "-n", ns, "--timeout=300s", timeout=330)
             restarted.append(name)
         observed = _runtime(kube, controller)
+        if observed.get("builder_configuration_source") != "actuator":
+            raise DeploymentError("live builder configuration source changed; inspect management ownership before continuing")
         expected = {"effective_cpu_request_millis": desired.cpu_request_millis or desired.cpu_millis,
                     "cpu_millis": desired.cpu_millis, "memory_mib": desired.memory_mib,
                     "ephemeral_storage_mib": desired.ephemeral_storage_mib, "namespace": desired.namespace}

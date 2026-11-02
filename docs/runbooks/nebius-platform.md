@@ -1394,6 +1394,15 @@ CPU, memory, scratch, resource ceilings and quotas. Normal deployments reuse the
 saved configuration. Reapply the same intent after a partial failure; a saved
 budget alone is not proof that every controller has converged.
 
+These stage/apply commands own standalone actuator configuration. Runtime
+readback reports `builder_configuration_source`. In global pool mode the
+management build profile owns the actual frozen claim; changing the actuator's
+environment would not update it. The standalone commands reject known global
+builders before saving or applying settings, and staging a cache budget requires
+a known running standalone controller. Use the normal management profile
+configuration path for global builders, preserving global mode. The shared
+profile renderer supports the same explicit `cache_total_mib` field.
+
 The total applies to recognized cache objects in the configured bucket, rather
 than independently per Task or region. Controllers sharing a bucket must use
 the same budget. The existing seven-day retention protection remains: lowering
