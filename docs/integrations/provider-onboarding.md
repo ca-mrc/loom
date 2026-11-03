@@ -214,6 +214,13 @@ budget. Other statuses stay on the bound member. A 429 may retry that same
 member inside the existing 60-second gateway budget and honors Retry-After.
 A second key in the same quota group is not a spare.
 
+The retry budget includes the duration of subsequent sends, not just their
+backoff and start time. Expiry cancels the retry and is reported as
+`gateway_retry_budget_exhausted`; it does not suppress the physical provider
+or rotate the sticky binding. The initial send retains the configured upstream
+timeout so a valid slow generation is not cut off by the retry budget. Every
+send is also bounded by the trial's signed deadline.
+
 `attempt_timeout_sec` remains stored and defaults to 20. The gateway does not
 use it as the send cutoff. A pooled send waits for the upstream timeout,
 capped by the trial's signed deadline. A timeout may already have executed
@@ -228,6 +235,13 @@ assignments. The defaults are 3 timeouts inside 60 seconds
 that already moved stay on their new member. When no spare is eligible,
 the binding stays and that turn still returns 504. A later call with no
 usable member returns 429 `provider_request_pool_unavailable`.
+
+Usage and cost totals reflect only recorded evidence. Missing provider usage
+does not establish zero spend: an all-missing zero subtotal has no monetary
+estimate, and partial usage lowers cost-estimate confidence. The Web app labels
+incomplete totals as known subtotals and displays missing-usage and unpriced-call
+coverage. A configured zero rate with complete usage remains a valid zero cost.
+Provider billing reconciliation is still required for missing or unpriced calls.
 
 `max_in_flight` on a provider connection is optional, from 1 to 1000. Null
 means unlimited. When set, both gateway replicas count open admitted

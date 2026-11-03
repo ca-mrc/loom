@@ -41,6 +41,10 @@ from loom_llm_gateway.metrics import (
 logger = logging.getLogger(__name__)
 
 
+class RetryBudgetExceededError(httpx.TimeoutException):
+    """A retry exhausted the gateway budget, not the provider's timeout."""
+
+
 @dataclass(frozen=True)
 class RetryOutcome:
     """The result of one `send_with_retry` call.
@@ -95,15 +99,40 @@ async def send_with_retry(
 
     for attempt in range(1, max_attempts + 1):
         last_exc = None
+
+        async def bounded_send(current_attempt: int = attempt) -> httpx.Response:
+            # The initial request retains the configured upstream timeout:
+            # valid slow generations must not be cut off by the retry budget.
+            # Only subsequent sends consume its remaining wall-clock budget.
+            if current_attempt == 1:
+                return await send()
+            remaining = budget - (now() - started)
+            if remaining <= 0:
+                raise RetryBudgetExceededError("gateway retry budget exhausted")
+            timeout = asyncio.timeout(remaining)
+            try:
+                async with timeout:
+                    response = await send()
+            except TimeoutError:
+                if timeout.expired():
+                    raise RetryBudgetExceededError("gateway retry budget exhausted") from None
+                raise
+            return response
+
         try:
             if dispatch_audit is not None:
                 response = await dispatch_audit.send(
-                    send,
+                    bounded_send,
                     deadline=deadline,
                     attempt=attempt,
                 )
             else:
-                response = await send() if deadline is None else await deadline.run(send)
+                response = (
+                    await bounded_send() if deadline is None else await deadline.run(bounded_send)
+                )
+        except RetryBudgetExceededError:
+            _record_budget_exceeded(dialect, attempt, status=0)
+            raise
         except httpx.HTTPError as exc:
             last_exc = exc
             if not is_retryable(exc) or attempt >= max_attempts:

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import LlmCall, ServiceExecutionLease
@@ -56,14 +56,42 @@ async def read_service_execution_llm_calls(
     The same scope serves the active Pod and terminal canonical materialization.
     """
     binding = LlmCall.provider_extras["_loom_raw_provider_log"]["service_execution"]
-    rows = (await session.scalars(select(LlmCall).where(
+    # Keep raw provider bodies in PostgreSQL. They can exceed the accounting
+    # envelope by orders of magnitude and previously crossed the DB boundary
+    # on every checkpoint poll, only to be discarded during serialization.
+    fields = (
+        "id", "trial_id", "step_id", "dialect", "model", "input_tokens",
+        "output_tokens", "request_params", "cost_usd", "rate_card_hash",
+        "captured_at", "attempt", "client_call_id", "episode", "call_ordinal",
+        "requested_model", "response_model", "role", "correlation_status",
+    )
+    raw_reason = LlmCall.provider_extras["_loom_raw_provider_log"]["response"]["body"]["choices"][0]["finish_reason"].astext
+    finish_reason = case((raw_reason.in_(
+        ("stop", "length", "tool_calls", "function_call", "content_filter"),
+    ), raw_reason), else_=None)
+    rows = (await session.execute(select(
+        *(getattr(LlmCall, field) for field in fields),
+        LlmCall.provider_extras.op("-")("_loom_raw_provider_log").label("provider_extras"),
+        finish_reason.label("finish_reason"),
+    ).where(
         LlmCall.team_id == lease.team_id,
         LlmCall.trial_id == lease.trial_id,
         LlmCall.step_id == "agent",
         binding["lease_id"].astext == str(lease.id),
         binding["generation"].astext == str(generation if generation is not None else lease.generation),
     ).order_by(LlmCall.captured_at, LlmCall.id))).all()
-    return [serialize_execution_accounting_call(row) for row in rows]
+    result = []
+    for row in rows:
+        payload = serialize_execution_accounting_call(cast(LlmCall, row))
+        payload["finish_reason"] = _safe_finish_reason(row.finish_reason)
+        result.append(payload)
+    return result
+
+
+def _safe_finish_reason(reason: Any) -> str | None:
+    return reason if isinstance(reason, str) and reason in {
+        "stop", "length", "tool_calls", "function_call", "content_filter",
+    } else None
 
 
 def serialize_execution_accounting_call(row: LlmCall) -> dict[str, Any]:
@@ -85,7 +113,7 @@ def serialize_execution_accounting_call(row: LlmCall) -> dict[str, Any]:
         "_loom_failure_category": {
             "upstream_timeout", "upstream_transport", "upstream_http_4xx",
             "upstream_http_5xx", "upstream_http_error", "attempt_deadline_reached",
-            "upstream_protocol", "client_cancelled",
+            "upstream_protocol", "client_cancelled", "gateway_retry_budget_exhausted",
         },
         "_loom_gateway_route": {"native_responses", "chat_translation", "native_anthropic", "anthropic_to_chat"},
         "_loom_compatibility_profile": {"claude-code-chat-v1"},
@@ -110,7 +138,5 @@ def serialize_execution_accounting_call(row: LlmCall) -> dict[str, Any]:
         choices[0].get("finish_reason")
         if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
     )
-    payload["finish_reason"] = reason if isinstance(reason, str) and reason in {
-        "stop", "length", "tool_calls", "function_call", "content_filter",
-    } else None
+    payload["finish_reason"] = _safe_finish_reason(reason)
     return payload

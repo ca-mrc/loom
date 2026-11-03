@@ -122,6 +122,41 @@ def test_incomplete_provider_usage_marks_estimate_confidence() -> None:
     assert summary["missing_usage_llm_calls_count"] == 1
     assert summary["usage_reporting_status"] == "partial"
     assert summary["usage_estimate_confidence"] == "partial"
+    assert summary["cost_estimate_confidence"] == "partial"
+
+
+def test_all_missing_usage_does_not_report_a_priced_zero_as_free() -> None:
+    summary = summarize_usage_counts(
+        llm_calls_count=2,
+        total_prompt_tokens=0,
+        total_completion_tokens=0,
+        total_cost_usd=Decimal("0"),
+        priced_llm_calls_count=2,
+        token_only_llm_calls_count=0,
+        price_unknown_llm_calls_count=0,
+        missing_usage_llm_calls_count=2,
+        cost_confidence_counts={"configured": 2},
+    )
+
+    assert summary["total_cost_usd"] == 0.0  # Legacy storage subtotal.
+    assert summary["estimated_cost_usd"] is None
+    assert summary["cost_currency"] is None
+    assert summary["cost_estimate_confidence"] == "missing"
+
+
+def test_explicit_priced_zero_with_complete_usage_is_preserved() -> None:
+    summary = summarize_usage_counts(
+        llm_calls_count=1,
+        total_prompt_tokens=10,
+        total_completion_tokens=20,
+        total_cost_usd=Decimal("0"),
+        priced_llm_calls_count=1,
+        token_only_llm_calls_count=0,
+        price_unknown_llm_calls_count=0,
+    )
+
+    assert summary["estimated_cost_usd"] == 0.0
+    assert summary["cost_estimate_confidence"] == "configured"
 
 
 def test_cost_projection_carries_source_and_confidence_metadata() -> None:

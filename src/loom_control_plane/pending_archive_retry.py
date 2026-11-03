@@ -32,6 +32,7 @@ from loom_control_plane.pending_archive_recovery import (
     project_oracle,
     qualify_inputs,
 )
+from loom_control_plane.service_execution_locks import lock_execution_trial
 from loom_control_plane.service_execution_materializer import (
     MaterializationIntegrityError,
     MaterializationResult,
@@ -144,6 +145,8 @@ async def requeue_parked_archive(
         if (request.schema_head != service_schema_head()
                 or list(await session.scalars(text("SELECT version_num FROM alembic_version"))) != [request.schema_head]):
             raise RecoveryRefusedError("schema_binding_changed")
+        if apply:
+            await lock_execution_trial(session, request.lease_id)
         lease = await session.get(ServiceExecutionLease, request.lease_id, with_for_update=apply)
         if lease is None or lease.team_id != request.team_id:
             raise RecoveryRefusedError("source_identity_missing")

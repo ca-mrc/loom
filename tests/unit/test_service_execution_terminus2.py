@@ -512,7 +512,7 @@ async def test_ledger_facade_reads_only_bound_trial(monkeypatch: Any, foreign: b
     ))
     facade = LeaseGatewayClient(gateway_url="http://127.0.0.1:9000", trial_id=trial_id, team_id=team_id)
     if foreign:
-        with pytest.raises(AgentError, match="identity is invalid"):
+        with pytest.raises(AgentError, match="ledger GET failed phase=identity_invalid"):
             await facade.get_trial_llm_calls(trial_id)
     else:
         assert await facade.get_trial_llm_calls(trial_id) == []
@@ -524,3 +524,109 @@ async def test_ledger_facade_reads_only_bound_trial(monkeypatch: Any, foreign: b
 def test_adapter_rejects_nonbroker_gateway(url: str) -> None:
     with pytest.raises(AgentError, match="loopback"):
         LeaseGatewayClient(gateway_url=url, trial_id=uuid4(), team_id=uuid4())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("final_unavailable", [False, True])
+async def test_background_ledger_transport_failure_does_not_cancel_session(tmp_path, monkeypatch, final_unavailable):
+    from loom.agent.terminus2 import runtime as module
+    from loom.agent.terminus2.gateway_ledger import LedgerReadUnavailableError
+
+    _patch_harbor(monkeypatch)
+    original = module.HarborCheckpointBridge.sync_trajectory_file
+    observed = asyncio.Event()
+    calls = []
+
+    async def sync(self, *args, **kwargs):
+        calls.append(kwargs.get("allow_incomplete", False))
+        if kwargs.get("allow_incomplete"):
+            observed.set()
+            raise LedgerReadUnavailableError("Terminus ledger GET transport unavailable")
+        if final_unavailable:
+            raise LedgerReadUnavailableError("Terminus ledger GET transport unavailable")
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(module.HarborCheckpointBridge, "sync_trajectory_file", sync)
+    harbor, context = module._import_terminus2()
+
+    class Harbor(harbor):
+        async def run(self, *args):
+            await observed.wait()
+            await asyncio.sleep(0)
+            await super().run(*args)
+
+    monkeypatch.setattr(module, "_import_terminus2", lambda: (Harbor, context))
+    monkeypatch.setattr(LeaseGatewayClient, "get_trial_llm_calls", lambda *args: _rows())
+
+    async def _rows():
+        return [{"id": "gw-real-1", "step_id": "agent", "input_tokens": 10,
+                 "output_tokens": 5, "model": "glm-5.2", "dialect": "openai_chat",
+                 "cost_usd": 0.01, "rate_card_hash": "rate"}]
+
+    task, trial = _config()
+    driver = FakeDriver()
+    await driver.start()
+    running = asyncio.wait_for(run_terminus2(
+        driver=driver, workspace=tmp_path, task_config=task, trial_config=trial,
+        trial_id=uuid4(), team_id=uuid4(), gateway_url="http://127.0.0.1:9000",
+        instruction="Inspect /app and write the manifest.",
+    ), timeout=5)
+    if final_unavailable:
+        with pytest.raises(LedgerReadUnavailableError):
+            await running
+    else:
+        await running
+        events = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
+        assert any(row["kind"] == "llm_call" and row["gateway_request_id"] == "gw-real-1" for row in events)
+    assert calls == [True, False]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [403, 409, 502, 503, 504, None])
+async def test_ledger_retry_classification_preserves_fencing(monkeypatch, status):
+    from loom.agent.terminus2.gateway_ledger import LedgerReadUnavailableError
+
+    def handler(request):
+        if status is None:
+            raise httpx.ReadTimeout("synthetic", request=request)
+        return httpx.Response(status, json={"detail": "synthetic"})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(
+        **kwargs, transport=httpx.MockTransport(handler),
+    ))
+    client = LeaseGatewayClient(gateway_url="http://127.0.0.1:9000", trial_id=uuid4(), team_id=uuid4())
+    with pytest.raises(AgentError) as captured:
+        await client.get_trial_llm_calls(client.trial_id)
+    assert isinstance(captured.value, LedgerReadUnavailableError) == (status in {502, 503, 504, None})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error,phase", [
+    (httpx.ReadTimeout, "read_timeout"), (httpx.ConnectTimeout, "connect_timeout"),
+    (httpx.PoolTimeout, "pool_timeout"), (httpx.ReadError, "read_error"),
+])
+async def test_ledger_failure_evidence_retains_safe_operation_and_phase(monkeypatch, caplog, error, phase):
+    from loom.errors import exception_info
+
+    secret = "synthetic-private-provider-detail"
+
+    def handler(request):
+        raise error(secret, request=request)
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(
+        **kwargs, transport=httpx.MockTransport(handler),
+    ))
+    client = LeaseGatewayClient(gateway_url="http://127.0.0.1:9000", trial_id=uuid4(), team_id=uuid4())
+    for _ in range(2):
+        with pytest.raises(AgentError) as captured:
+            await client.get_trial_llm_calls(client.trial_id)
+        info = exception_info(captured.value)
+        assert info.exception_type == "LedgerReadUnavailableError"
+        assert info.exception_message == f"Terminus ledger GET failed phase={phase}"
+        assert secret not in info.model_dump_json()
+    assert caplog.text.count("terminus_ledger_get_failed") == 1
+    assert f"phase={phase}" in caplog.text and "elapsed_ms=" in caplog.text
+    assert str(client.trial_id) in caplog.text
+    assert secret not in caplog.text and "127.0.0.1" not in caplog.text

@@ -5,6 +5,16 @@ from __future__ import annotations
 from typing import Any, Protocol
 from uuid import UUID
 
+from loom.errors import AgentError
+
+
+class LedgerReadUnavailableError(AgentError):
+    """A bounded, retryable observation read failed; identity remains unverified.
+
+    Only the background observer may defer this error. Dispatch and final
+    materialization still require an authoritative successful read.
+    """
+
 
 class CheckpointBridgeError(Exception):
     """Raised when Harbor checkpoint bridging cannot satisfy join invariants."""

@@ -614,7 +614,7 @@ async def test_verifier_primary_failure_survives_cleanup_and_driver_stop_failure
     if exec_raises:
         assert caught.value is exec_error
     else:
-        assert str(caught.value) == "isolated verifier process failed"
+        assert str(caught.value) == "isolated verifier process failed (exit_code=1)"
         assert json.loads((tmp_path / ".loom/verifier/output.json").read_bytes())["rewards"] == {"passed": 0}
     assert driver.stops == 1 and driver.closed
     stderr = capsys.readouterr().err

@@ -215,6 +215,16 @@ def summarize_usage_counts(
         usage_reporting_status = "complete"
         usage_estimate_confidence = "high"
 
+    # A configured rate is not a complete monetary estimate when the provider
+    # omitted its usage. Keep the legacy sum, but do not expose its all-zero
+    # placeholder as an estimate that this inference was free.
+    if missing_usage or partial_usage:
+        if missing_usage >= llm_calls and llm_calls > 0 and cost == 0:
+            estimated_cost_usd = None
+            cost_estimate_confidence = "missing"
+        elif estimated_cost_usd is not None:
+            cost_estimate_confidence = "partial"
+
     return {
         "total_prompt_tokens": prompt,
         "total_completion_tokens": completion,

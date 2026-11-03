@@ -48,13 +48,12 @@ from loom_control_plane.service_execution import (
     reserve_trial_execution,
     verifier_retries,
 )
+from loom_control_plane.service_execution_locks import lock_execution_trial
 from loom_control_plane.service_execution_scheduler import (
     _SERVICE_TRIAL_BY_ID,
-    VERIFIER_HANDOFF_TIMEOUT,
     ServiceExecutionConfigurationError,
     _compile_service_candidate,
     _fail_verifier_handoff,
-    _handoff_pending_since,
     compile_verifier_candidate,
     verifier_candidates,
 )
@@ -183,10 +182,6 @@ class PoolExecutionOutbox:
         parent, trial = verifier_candidate
         await lock_verifier_source(session, trial=trial)
         target = await session.get(ServiceExecutionTarget, request.target_id, with_for_update=True)
-        waiting_since = _handoff_pending_since(trial) or parent.deleted_at
-        if waiting_since is not None and now - waiting_since >= VERIFIER_HANDOFF_TIMEOUT:
-            _fail_verifier_handoff(trial, reason="global_verifier_capacity_unavailable", now=now)
-            return None
         if target is None or parent.target_id != target.id:
             return None
         return await verifier_selection_snapshot(session, trial=trial, parent=parent,
@@ -231,10 +226,9 @@ class PoolExecutionOutbox:
                                 or previous.participant_id != self.participant.participant_id
                                 or previous.pool_id != self.participant.pool_id):
                             raise ValueError("verifier_parent_global_release_unavailable")
-                        waiting_since = _handoff_pending_since(trial) or parent.deleted_at
-                        if waiting_since is not None and now - waiting_since >= VERIFIER_HANDOFF_TIMEOUT:
-                            _fail_verifier_handoff(trial, reason="global_verifier_capacity_unavailable", now=now)
-                            continue
+                        # Global capacity admission may wait longer than an
+                        # agent's execution budget. Recheck authority on every
+                        # refresh; do not discard committed work due to age.
                         # Match ordinary proposal/attachment: source -> target -> images.
                         await lock_verifier_source(session, trial=trial)
                         target = await session.get(ServiceExecutionTarget, target_id, with_for_update=True)
@@ -269,7 +263,7 @@ class PoolExecutionOutbox:
                         return self._view(row)
                 except ServiceExecutionConflict:
                     # Image admission, rollout and target health can recover.
-                    # The handoff deadline above bounds these waits, as locally.
+                    # A pending workspace remains durable while admission waits.
                     continue
                 except ValueError as error:
                     _fail_verifier_handoff(trial, reason=str(error), now=now)
@@ -518,6 +512,7 @@ class PoolExecutionOutbox:
         saved = self._view(row)
         if saved.phase not in {"active", "stop_pending", "released"} or saved.activated is None or row.attached_lease_id is None:
             raise PoolHandoffError
+        await lock_execution_trial(session, row.attached_lease_id)
         lease = await session.get(ServiceExecutionLease, row.attached_lease_id, with_for_update=True, populate_existing=True)
         if (lease is None or lease.trial_id != row.trial_id or lease.target_id != saved.request.target_id
                 or lease.resource_generation != saved.request.key.generation
@@ -535,7 +530,7 @@ class PoolExecutionOutbox:
             lease = await self._cleanup_lease(session, row)
             if lease.desired_state not in {"create", "start", "finalize"}:
                 return
-            trial = await session.get(Trial, row.trial_id, with_for_update=True, populate_existing=True)
+            trial = await session.get(Trial, row.trial_id, with_for_update={"key_share": True}, populate_existing=True)
             if lease.desired_state == "finalize":
                 desired = "delete_pending"  # Existing transition requires durable output.
             elif (trial is not None and trial.attempt_count == lease.attempt

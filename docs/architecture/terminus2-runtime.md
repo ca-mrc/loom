@@ -805,3 +805,47 @@ local Terminus runtime fallback builds.
 The [Harbor90 migration runbook](../runbooks/nebius-harbor90-migration.md)
 prepares an x86 revision of that specific Nebius catalog. It does not retire ARM
 execution globally or authorize publication or live maintenance by itself.
+
+## Ledger reads during execution
+
+The dispatch checkpoint joins each agent turn to the authoritative call ledger
+before sending terminal keystrokes. The background trajectory observer reuses
+that join for its observation and reads the ledger only for an unseen agent step
+that has no dispatch join. An unchanged trajectory, initial user prompt, or
+already joined turn therefore does not repeatedly read the whole call history.
+An unjoined step whose call row is not visible remains pending for the next poll.
+
+Hosted background reads have a 15-second transport bound. Transport failures and
+HTTP 502/503/504 defer only that observation and use a five-second polling delay;
+they do not cancel the agent. Lease rejection, identity mismatch, malformed
+responses, persistence failure and deadline fencing remain terminal. Dispatch
+and final reconciliation still require authoritative evidence and do not use
+this background deferral. This does not authorize terminal commands before their
+call/dispatch evidence is persisted.
+
+The execution ledger projects accounting columns and excludes raw provider logs
+in SQL, before rows cross the database connection. The response keeps the same
+accounting/usage identity and bounded finish reason; the lease/generation scope
+still comes from authenticated execution identity. Raw logs remain available
+only to their existing authorized diagnostic/export paths.
+
+Developer measurements for #2768 used existing local resources. The unchanged
+prompt regression formerly issued 11 ledger reads across its first sync and
+10 repeated polls; it now issues zero. A dispatched agent turn formerly issued
+one additional read when its observation arrived; it now reuses the dispatch
+join with zero additional reads.
+
+The real-PostgreSQL equivalence test seeds a synthetic 40-call ledger, alternates
+full ORM and projected reads, excludes two warmups, and compares the complete
+serialized results after each pair. In one local run the extras JSON transferred
+fell from 664,640 bytes to 920 bytes, with median read-and-serialize time 2.076 ms
+versus 1.166 ms. These are payload and local timing measurements, not proof of
+hosted database CPU reduction or sufficient sustained production capacity.
+Reproduce with
+`pytest tests/integration/test_service_execution_call_ledger.py::test_projected_ledger_matches_full_rows_without_transferring_provider_logs -q -s`.
+
+Failed hosted ledger reads retain `ledger GET` and a fixed transport/response
+phase in their serialized error. Raw HTTP causes are not unwrapped into task
+evidence. Error-only logs include Trial ID, fixed phase and elapsed milliseconds,
+rate-limited to one entry per lease client per 30 seconds; request objects,
+headers, response bodies and driver messages are excluded.

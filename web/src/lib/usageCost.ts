@@ -16,6 +16,9 @@ function hasKey<T extends object>(item: T, key: PropertyKey): boolean {
 }
 
 export function usageCostAmount(item: UsageCostLike): number | null {
+  if (["price_unknown", "failed_upstream", "not_applicable", "no_usage"].includes(item.cost_status ?? "")) {
+    return null;
+  }
   if (hasKey(item, "estimated_cost_usd")) {
     return typeof item.estimated_cost_usd === "number"
       ? item.estimated_cost_usd
@@ -27,13 +30,22 @@ export function usageCostAmount(item: UsageCostLike): number | null {
 export function formatUsageCost(item: UsageCostLike): string {
   const value = usageCostAmount(item);
   if (value == null) {
+    if (item.usage_reporting_status === "missing" || item.missing_usage_llm_calls_count) {
+      return "unknown (usage missing)";
+    }
     if (item.cost_status === "price_unknown") return "unknown/unpriced";
     if (item.cost_status === "failed_upstream") return "unavailable";
     return "n/a";
   }
   const currency = item.cost_currency ?? "USD";
   const amount = currency === "USD" ? `$${value.toFixed(4)}` : `${value.toFixed(4)} ${currency}`;
-  if (item.cost_status === "mixed") return `${amount} known subtotal (${item.price_unknown_llm_calls_count ?? "some"} unpriced calls)`;
+  const coverage: string[] = [];
+  if (item.price_unknown_llm_calls_count) coverage.push(`${item.price_unknown_llm_calls_count} unpriced calls`);
+  if (item.missing_usage_llm_calls_count) coverage.push(`${item.missing_usage_llm_calls_count} missing usage`);
+  if (item.partial_usage_llm_calls_count) coverage.push(`${item.partial_usage_llm_calls_count} partial usage`);
+  if (item.cost_status === "mixed" || coverage.length) {
+    return `${amount} known subtotal (${coverage.length ? coverage.join("; ") : "pricing incomplete"})`;
+  }
   return amount;
 }
 

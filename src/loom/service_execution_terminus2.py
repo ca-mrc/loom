@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -20,6 +22,7 @@ from uuid import UUID
 
 import httpx
 
+from loom.agent.terminus2.gateway_ledger import LedgerReadUnavailableError
 from loom.agent.terminus2.native_artifacts import HARBOR_ARTIFACT_NAMES
 from loom.agent.terminus2.runtime import LoomTerminus2Runtime
 from loom.attempt_deadline import AttemptDeadline
@@ -31,6 +34,8 @@ from loom.models.trial import MultiModelSwitchSpec, TrialConfig
 
 if TYPE_CHECKING:
     from loom.trajectory.writer import TrajectoryWriter
+
+logger = logging.getLogger(__name__)
 
 _PROXY_TOKEN = "loom_workload_proxy"
 _LEDGER_MAX_BYTES = 16 * 1024 * 1024
@@ -75,6 +80,7 @@ class LeaseGatewayClient:
         self.trial_id = trial_id
         self.team_id = team_id
         self._control_token = control_token
+        self._last_ledger_error_log_at: float | None = None
 
     def _check_identity(self, *, team_id: UUID, trial_id: UUID, step_id: str) -> None:
         if (team_id, trial_id, step_id) != (self.team_id, self.trial_id, "agent"):
@@ -187,9 +193,23 @@ class LeaseGatewayClient:
             },
         )
 
+    def _ledger_error(self, phase: str, started: float, *, retryable: bool = False) -> AgentError:
+        now = time.monotonic()
+        # One bounded log per client per 30 seconds, only on failed reads. Never
+        # include exception text, HTTP request/response objects or headers.
+        if self._last_ledger_error_log_at is None or now - self._last_ledger_error_log_at >= 30:
+            self._last_ledger_error_log_at = now
+            logger.warning(
+                "terminus_ledger_get_failed trial_id=%s phase=%s elapsed_ms=%.3f",
+                self.trial_id, phase, max(0.0, now - started) * 1000,
+            )
+        error_type = LedgerReadUnavailableError if retryable else AgentError
+        return error_type(f"Terminus ledger GET failed phase={phase}")
+
     async def get_trial_llm_calls(self, trial_id: UUID) -> list[dict[str, Any]]:
         if trial_id != self.trial_id:
             raise AgentError("Terminus cannot read another trial's ledger")
+        started = time.monotonic()
         try:
             async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
                 async with client.stream(
@@ -203,9 +223,22 @@ class LeaseGatewayClient:
                         if len(body) > _LEDGER_MAX_BYTES:
                             raise AgentError("Terminus Gateway ledger exceeds output limit")
             envelope = json.loads(body)
-        except (httpx.HTTPError, ValueError) as exc:
-            # Never serialize proxy responses or request objects into evidence.
-            raise AgentError("Terminus Gateway ledger is unavailable") from exc
+        except httpx.TransportError as exc:
+            # Defer only observation transport failures, never invalid identity
+            # or fencing responses. Do not persist requests or response bodies.
+            phase = next((name for kind, name in (
+                (httpx.ReadTimeout, "read_timeout"), (httpx.ConnectTimeout, "connect_timeout"),
+                (httpx.PoolTimeout, "pool_timeout"), (httpx.WriteTimeout, "write_timeout"),
+                (httpx.ReadError, "read_error"), (httpx.ConnectError, "connect_error"),
+                (httpx.ProtocolError, "protocol_error"),
+            ) if isinstance(exc, kind)), "transport_error")
+            raise self._ledger_error(phase, started, retryable=True) from None
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in {502, 503, 504}:
+                raise self._ledger_error("service_unavailable", started, retryable=True) from None
+            raise self._ledger_error("http_rejected", started) from None
+        except (httpx.HTTPError, ValueError):
+            raise self._ledger_error("invalid_response", started) from None
         if (
             not isinstance(envelope, dict)
             or envelope.get("trial_id") != str(self.trial_id)
@@ -213,7 +246,7 @@ class LeaseGatewayClient:
             or envelope.get("step_id") != "agent"
             or not isinstance(envelope.get("items"), list)
         ):
-            raise AgentError("Terminus Gateway ledger identity is invalid")
+            raise self._ledger_error("identity_invalid", started) from None
         rows = envelope["items"]
         if any(
             not isinstance(row, dict)
@@ -221,7 +254,7 @@ class LeaseGatewayClient:
             or row.get("step_id") != "agent"
             for row in rows
         ):
-            raise AgentError("Terminus Gateway ledger contains an unrelated call")
+            raise self._ledger_error("unrelated_call", started) from None
         return cast(list[dict[str, Any]], rows)
 
 

@@ -498,7 +498,7 @@ async def test_admission_failure_logs_only_fixed_error_category(
     assert len(records) == 1
     assert records[0].getMessage() == (
         f"gateway_dispatch_admission_failed request_id={audit.state.request_id} "
-        f"error_category={category}"
+        f"phase=session error_category={category} database_reason=other"
     )
     assert records[0].exc_info is None
     assert secret not in caplog.text
@@ -570,7 +570,7 @@ async def test_database_enforces_request_dispatch_uniqueness(audit_setup: tuple)
 
 
 @pytest.mark.parametrize("observation", ["provider", "gateway"])
-@pytest.mark.parametrize("phase", ["session", "execute", "commit", "session_exit"])
+@pytest.mark.parametrize("phase", ["session", "checkout", "execute", "commit", "session_exit"])
 @pytest.mark.parametrize("category", ["timeout", "database", "other"])
 async def test_observation_failure_identifies_boundary_without_private_details(
     monkeypatch: pytest.MonkeyPatch,
@@ -602,13 +602,16 @@ async def test_observation_failure_identifies_boundary_without_private_details(
     async def execute(statement):
         await maybe_fail("execute")
 
+    async def connection():
+        await maybe_fail("checkout")
+
     async def commit():
         await maybe_fail("commit")
 
     @asynccontextmanager
     async def session():
         await maybe_fail("session")
-        yield SimpleNamespace(execute=execute, commit=commit)
+        yield SimpleNamespace(connection=connection, execute=execute, commit=commit)
         await maybe_fail("session_exit")
 
     audit.state.session_factory = session
