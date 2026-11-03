@@ -91,7 +91,7 @@ def test_text_is_forwarded_before_the_upstream_finishes() -> None:
 def test_incomplete_stream_never_fabricates_a_successful_stop(suffix: bytes) -> None:
     converter = ChatToAnthropicStream(model="selected")
     converter.feed(_chunk({"content": "Partial"}))
-    with pytest.raises(AnthropicCompatibilityError, match="finish|incomplete"):
+    with pytest.raises(AnthropicCompatibilityError, match=r"finish|incomplete"):
         converter.feed(suffix)
         converter.finish()
     assert not converter.completed
@@ -112,7 +112,7 @@ def test_malformed_tool_arguments_are_not_closed_as_successful_tools(arguments: 
     output = converter.feed(_chunk({"tool_calls": [
         {"index": 0, "id": "a", "type": "function", "function": {"name": "Write", "arguments": arguments}},
     ]}))
-    with pytest.raises(AnthropicCompatibilityError, match="arguments|JSON"):
+    with pytest.raises(AnthropicCompatibilityError, match=r"arguments|JSON"):
         converter.feed(_chunk({}, "tool_calls"))
     assert b"event: content_block_stop" not in output
 
