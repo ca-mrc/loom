@@ -97,12 +97,20 @@ provider authorization and routing, the Gateway commits a receipt before each
 direct upstream send. It rechecks the signed attempt deadline after that commit
 and before transport. Audit admission failure returns a secret-free
 `503 / dispatch_audit_unavailable` and sends nothing upstream.
+If the admission commit succeeds but its acknowledgement times out, the Gateway
+retains the allocated receipt ID and uses the existing bounded inline provider
+observation to mark any committed row `not_dispatched`. The HTTP middleware
+separately records the actual response status. A failed or rolled-back insert
+has no matching row to update. This cleanup does not retry admission or permit
+provider I/O; an unavailable database or repeated cancellation can still leave
+the outcome unknown.
 Admission failure logs contain the opaque request ID and only a fixed error
 category (`timeout`, `database`, or `other`), never driver messages, SQL binds,
 or exception tracebacks. The category diagnoses failure without relaxing admission.
 Observation failure logs use the same fixed categories and identify the
-`provider` or `gateway` write and its unfinished phase (`session`, `execute`,
-`commit`, or `session_exit`). The execute phase includes connection checkout;
+`provider` or `gateway` write and its unfinished phase (`session`, `checkout`,
+`execute`, `commit`, or `session_exit`). Checkout is measured separately from
+statement execution;
 these fields locate the failed boundary without establishing a physical cause.
 The existing one-second audit budget and durable unknown outcomes still apply.
 
@@ -140,7 +148,7 @@ Two observations must be read independently:
 | Observation | Meaning |
 | --- | --- |
 | `provider_outcome=admitted` | Durable permission to try sending; completion is unknown, not proof the provider received bytes. |
-| `not_dispatched` | The deadline/cancellation prevented send after admission. |
+| `not_dispatched` | Admission confirmation, the deadline or cancellation prevented send. |
 | `response_received` / `stream_completed` | A response or the complete stream was observed, not proof of task success. Later caller/accounting failure must not overwrite this fact. |
 | `deadline` / `cancelled` / `transport_error` | Transport ended without complete observation; provider completion and cost may remain unknown. |
 | `gateway_outcome`, `gateway_http_status` | Separate caller-side completion, error, cancellation or observed deadline. SSE headers can already be HTTP200 when the stream subsequently expires. |

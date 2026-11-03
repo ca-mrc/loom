@@ -206,7 +206,16 @@ An owner can opt an existing OpenAI-compatible connection into a request pool.
 The selected connection remains the logical Batch/Trial/JWT binding. Each trial
 stays on one physical member so prompt cache remains with that provider. The
 first assignment uses the pool cursor; later calls for that trial reuse the
-binding. The binding moves only when that member produces no body within the
+binding. Existing bindings serialize only that trial's admission while holding
+a shared pool lock; unrelated bound trials can admit concurrently. First
+assignments, pool configuration changes and timeout switching retain the
+exclusive pool lock. Every admission still rechecks live execution authority,
+member eligibility, model availability and credentials before committing its
+receipt. If the unlocked binding hint disappears, the untouched transaction is
+rolled back and selection restarts with the exclusive lock, without a lock
+upgrade or cursor change on ordinary sticky reuse.
+
+The binding moves only when that member produces no body within the
 upstream timeout, or returns HTTP 504. The gateway writes the new binding
 before it returns 504, and that request does not start another upstream send.
 The harness retry of the same turn uses the spare and gets a fresh 60-second
@@ -227,6 +236,11 @@ capped by the trial's signed deadline. A timeout may already have executed
 upstream and can cause uncertain duplicate inference cost. The timed-out
 receipt records that possibility. The failed call leaves the turn's client
 call id free so the spare success can be stored.
+Transport timeout logs retain only the fixed `connect`, `read`, `write`, `pool`
+or `unknown` phase and opaque request, receipt and connection IDs. The outbound
+`X-Request-ID` is the receipt ID. These joins support proxy/supplier correlation;
+a locally generated transport504 is not evidence that the supplier returned
+HTTP504. No exception text, credentials or endpoint is logged.
 
 A burst of timeouts on one physical connection suppresses it for later
 assignments. The defaults are 3 timeouts inside 60 seconds
