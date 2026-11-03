@@ -149,7 +149,8 @@ async def test_real_claude_local_read_write_edit_and_verify(claude_task_image, t
         object_store=LocalDiskObjectStore(root=tmp_path / "store"), upstream_gateway_tokens={},
         anthropic_client=None, openai_client=None, google_client=None,
         local_providers={"fixture": LocalProvider(base_url="https://fixture.test/v1", api_key="host-only-key", api_dialect=dialect)},
-        trial_config=TrialConfig(agent_name="claude-code", agent_model=model, verifier_env_mode="shared"))
+        trial_config=TrialConfig(agent_name="claude-code", agent_model=model,
+            verifier_env_mode="shared" if libc == "glibc" else "separate"))
     result = await runner.run()
     assert result.state == TrialState.SUCCEEDED, result.model_dump_json(indent=2)
     assert result.reward == {"passed": 1.0} and len(calls) == 4
