@@ -34,6 +34,26 @@ class ProviderRouteError(ValueError):
     """The selection's provider fields conflict or are missing."""
 
 
+def freeze_connection_modes(
+    trial_config: dict[str, Any], combinations: list[dict[str, Any]], *,
+    connection_id: UUID, provider_type: str, indices: set[int] | None = None,
+) -> None:
+    """Freeze the derived mode on exactly the selections using this connection.
+
+    The shared controls are checked with each selection, but derived fields
+    belong to the combination so mixed-agent batches cannot inherit a mode.
+    """
+    from loom_service.provider_connection_lookup import connection_runtime_config
+
+    selections = [combo for index, combo in enumerate(combinations)
+                  if (indices is None or index in indices)
+                  and str(combo.get("provider_connection_id")) == str(connection_id)] if combinations else [trial_config]
+    for selection in selections:
+        config = connection_runtime_config({**trial_config, **selection}, provider_type)
+        if config.get("claude_code_mode") is not None:
+            selection["claude_code_mode"] = config["claude_code_mode"]
+
+
 @dataclass(frozen=True)
 class ProviderRoute:
     connection_id: UUID | None
@@ -67,7 +87,7 @@ def resolve_provider_route(
     if effective_connection is None:
         raise ProviderRouteError(
             f"{context}: model {agent_model.name!r} requires a Provider "
-            "Connection; set provider_connection_id to an OpenAI-compatible "
+            "Connection; set provider_connection_id to a compatible "
             "connection owned by or shared with your team",
         )
     supplied_model_id = model_id or default_model_id
@@ -85,6 +105,7 @@ class DerivedRoutes:
     """Resolved routes for new trials derived from a stored batch."""
 
     combinations: list[dict[str, Any]]
+    trial_config: dict[str, Any]
     batch_connection_id: UUID | None
     batch_model_id: str | None
     # Connections the new trials run on; only these need authorization.
@@ -133,6 +154,13 @@ def derive_stored_routes(
     must name each model-backed selection's model. `indices` limits a
     rerun to the combinations it re-dispatches. Raises ProviderRouteError.
     """
+    trial_config = dict(trial_config)
+    combinations = [dict(combo) for combo in combinations]
+    if replace_connections:
+        # These are new selections: a replacement connection chooses its mode.
+        trial_config.pop("claude_code_mode", None)
+        for combo in combinations:
+            combo.pop("claude_code_mode", None)
     selections = [(f"combinations[{i}]", c) for i, c in enumerate(combinations)] or [
         ("trial_config", dict(trial_config)),
     ]
@@ -194,6 +222,7 @@ def derive_stored_routes(
         route = routes["trial_config"]
         return DerivedRoutes(
             combinations=[],
+            trial_config=trial_config,
             batch_connection_id=route.connection_id,
             batch_model_id=route.model_id,
             connection_ids=connections,
@@ -218,6 +247,7 @@ def derive_stored_routes(
     # dispatched combination carries its own resolved pair.
     return DerivedRoutes(
         combinations=derived,
+        trial_config=trial_config,
         batch_connection_id=next(iter(connections)) if len(connections) == 1 else None,
         batch_model_id=next(iter(models)) if len(models) == 1 else None,
         connection_ids=connections,
@@ -229,5 +259,6 @@ __all__ = [
     "ProviderRoute",
     "ProviderRouteError",
     "derive_stored_routes",
+    "freeze_connection_modes",
     "resolve_provider_route",
 ]

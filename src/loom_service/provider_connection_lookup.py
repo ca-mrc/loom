@@ -10,9 +10,8 @@ The user supplies a UUID; the route must check that:
    that team (unshared cross-team → 404, matching provider route +
    gateway existence-hiding behavior).
 4. The row is not soft-deleted (deleted_at IS NULL).
-5. For agent submissions, the row speaks the OpenAI wire protocol.
-   Native Anthropic/Google connections are not admitted for new hosted
-   agent submissions in this phase (#2054).
+5. For agent submissions, the row speaks a protocol accepted by every
+   selection using it. Claude Code also accepts native Anthropic Messages.
 
 Centralized here so the Trial and Batch routes use the same shape +
 error messages.
@@ -28,10 +27,34 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import ProviderConnection, ProviderConnectionShare
+from loom_service.agent_catalog import get_agent
 
 # Provider types the gateway routes with the OpenAI wire protocol (see
 # loom_llm_gateway.routes.responses._OPENAI_SHAPED_TYPES).
 OPENAI_SHAPED_PROVIDER_TYPES = frozenset({"openai-compatible", "custom"})
+
+
+def connection_runtime_config(config: dict[str, Any], provider_type: str) -> dict[str, Any]:
+    """Derive the runtime protocol from a connection already authorized to the team."""
+    agent = get_agent(config.get("agent_name", ""))
+    supported = agent.supported_connection_types if agent else OPENAI_SHAPED_PROVIDER_TYPES
+    if provider_type not in supported:
+        raise HTTPException(status_code=400, detail=(
+            f"agent {config.get('agent_name')!r} cannot use {provider_type!r}; "
+            f"select a compatible Provider Connection ({', '.join(sorted(supported))}). "
+            "OpenAI-compatible connections remain supported."
+        ))
+    out = dict(config)
+    if config.get("agent_name") == "claude-code":
+        if config.get("request_params"):
+            raise HTTPException(status_code=400, detail="Claude Code does not support request_params overrides")
+        mode = "native" if provider_type == "anthropic" else "chat"
+        if config.get("claude_code_mode") not in {None, mode}:
+            raise HTTPException(status_code=400, detail="claude_code_mode conflicts with the selected connection")
+        out["claude_code_mode"] = mode
+    elif config.get("claude_code_mode") is not None:
+        raise HTTPException(status_code=400, detail="claude_code_mode requires claude-code")
+    return out
 
 
 async def validate_provider_connection(
@@ -41,11 +64,11 @@ async def validate_provider_connection(
     team_id: UUID,
     agent_submission: bool = False,
     submission_configs: list[dict[str, Any]] | None = None,
-) -> None:
+) -> str:
     """Raise HTTPException if the connection is missing, soft-deleted,
     or owned by a different team. With `agent_submission`, also reject
-    connections that don't speak the OpenAI wire protocol. Returns None
-    on success."""
+    connections incompatible with the selected agents. Returns the authorized
+    provider type for freezing per-selection runtime modes."""
     row = (await session.execute(
         select(
             ProviderConnection.team_id,
@@ -82,15 +105,9 @@ async def validate_provider_connection(
             raise HTTPException(
                 status_code=404, detail="provider_connection not found",
             )
-    if agent_submission and provider_type not in OPENAI_SHAPED_PROVIDER_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"provider_connection {provider_connection_id} is a native "
-                f"{provider_type!r} connection; hosted agent submissions "
-                "accept only OpenAI-compatible Provider Connections"
-            ),
-        )
+    if agent_submission:
+        for config in submission_configs or [{}]:
+            connection_runtime_config(config, provider_type)
 
     # Pool selection keeps the existing logical connection id, while every
     # physical member must satisfy the new submission's agent/model contract.
@@ -100,3 +117,4 @@ async def validate_provider_connection(
         session, provider_connection_id, team_id=team_id,
         submission_configs=submission_configs,
     )
+    return str(provider_type)

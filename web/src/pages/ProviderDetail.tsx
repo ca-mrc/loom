@@ -219,7 +219,7 @@ function OverviewTab({
           <dd>
             <p>{conn.base_url}</p>
             <p className="mt-1 text-xs text-slate-500">
-              OpenAI-compatible root ending in /v1; this is the URL Loom calls
+              Provider API root (OpenAI-compatible roots end in /v1); this is the URL Loom calls
               from the server side.
             </p>
           </dd>

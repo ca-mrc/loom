@@ -37,7 +37,7 @@ export type ProviderFormProps = {
 const PROVIDER_TYPES = [
   { value: "openai-compatible", label: "openai-compatible" },
   { value: "custom", label: "custom (OpenAI protocol)" },
-  { value: "anthropic", label: "anthropic (not for agent runs)" },
+  { value: "anthropic", label: "anthropic (Claude Code)" },
   { value: "google", label: "google (not for agent runs)" },
 ];
 

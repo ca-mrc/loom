@@ -100,10 +100,10 @@ def test_local_server_field_only_with_local_source() -> None:
     assert "local_server" in err
 
 
-SUPPORTED_PRODUCT_ENTRIES = {"oracle", "direct-completion", "terminus-2", "openhands-sdk", "codex"}
+SUPPORTED_PRODUCT_ENTRIES = {"oracle", "direct-completion", "terminus-2", "openhands-sdk", "codex", "claude-code"}
 
 
-def test_only_the_five_product_entries_are_supported() -> None:
+def test_only_the_supported_product_entries_are_selectable() -> None:
     supported = {a.name for a in list_agents() if a.product_support == "supported"}
     assert supported == SUPPORTED_PRODUCT_ENTRIES
     for agent in list_agents():
@@ -118,7 +118,7 @@ def test_supported_model_backed_entries_accept_api_models() -> None:
 
 
 def test_deferred_agent_rejects_with_reason() -> None:
-    for name in ("claude-code", "opencode", "swe-agent"):
+    for name in ("opencode", "swe-agent"):
         err = validate_agent_model_compat(
             name,
             ModelSpec(provider="openai", name="gpt-4o"),

@@ -108,6 +108,7 @@ from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
 from loom_service.effective_combination import (
     ProviderRouteError,
     derive_stored_routes,
+    freeze_connection_modes,
     resolve_provider_route,
 )
 from loom_service.execution_admission import (
@@ -1049,6 +1050,11 @@ async def _create_batch_record(
     await _reject_if_team_paused(s, submission_team_id)
 
     catalog = known_names()
+    if payload.trial_config.get("request_params") and any(
+        name == "claude-code" for _, name in selection_agents(payload.trial_config, payload.combinations)
+    ):
+        reject_submission(reason="invalid_input", status_code=400,
+                          detail="Claude Code does not support request_params overrides")
     trial_config = _sanitize_trial_config(payload.trial_config)
     _reject_invalid_workspace_staging_policy_name(trial_config)
     purpose_trial_err = validate_purpose_trial_config(payload.purpose, trial_config)
@@ -1077,7 +1083,7 @@ async def _create_batch_record(
         # Multi-combination batch. trial_config MUST NOT carry
         # agent_name / agent_model / n_per_task in this shape —
         # those live on each Combination.
-        for forbidden in ("agent_name", "agent_model", "agent_version"):
+        for forbidden in ("agent_name", "agent_model", "agent_version", "claude_code_mode"):
             if forbidden in trial_config:
                 reject_submission(
                     reason="invalid_input",
@@ -1185,25 +1191,29 @@ async def _create_batch_record(
         if is_codex(trial_config.get("agent_name")):
             codex_models.add((conn_id, model_id))
 
+    resolved_combinations = [combo.model_dump(mode="json") for combo in payload.combinations]
     for conn_id in sorted(provider_connection_ids, key=str):
         try:
-            await validate_provider_connection(
+            provider_type = await validate_provider_connection(
                 s,
                 conn_id,
                 team_id=submission_team_id,
                 agent_submission=True,
                 submission_configs=provider_submission_configs(
                     trial_config=trial_config,
-                    combinations=[combo.model_dump(mode="json") for combo in payload.combinations],
+                    combinations=resolved_combinations,
                     connection_id=conn_id,
                 ),
             )
+            freeze_connection_modes(trial_config, resolved_combinations,
+                                    connection_id=conn_id, provider_type=provider_type)
         except HTTPException:
             SUBMISSION_REJECTS_TOTAL.labels(
                 reason="provider_connection",
             ).inc()
             raise
 
+    payload = payload.model_copy(update={"combinations": [Combination.model_validate(c) for c in resolved_combinations]})
     if payload.provider_connection_id is not None:
         provider_connection = (
             await s.execute(
@@ -3088,9 +3098,10 @@ async def rerun_failed_batch(
             detail=f"cannot rerun: {exc}",
         )
     combinations = rerun_routes.combinations
+    rerun_trial_config = rerun_routes.trial_config
     for conn_id in sorted(rerun_routes.connection_ids, key=str):
         try:
-            await validate_provider_connection(
+            provider_type = await validate_provider_connection(
                 s,
                 conn_id,
                 team_id=b.team_id,
@@ -3102,6 +3113,8 @@ async def rerun_failed_batch(
                     indices={int(target["combination_idx"]) for target in targets},
                 ),
             )
+            freeze_connection_modes(rerun_trial_config, combinations, connection_id=conn_id, provider_type=provider_type,
+                                    indices={int(target["combination_idx"]) for target in targets})
         except HTTPException:
             SUBMISSION_REJECTS_TOTAL.labels(reason="provider_connection").inc()
             raise

@@ -313,6 +313,11 @@ class TrialConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _merge_harbor_config(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            if value.get("agent_name") == "claude-code" and value.get("request_params"):
+                raise ValueError("Claude Code does not support request_params overrides")
+            if value.get("agent_name") != "claude-code" and value.get("claude_code_mode") is not None:
+                raise ValueError("claude_code_mode requires claude-code")
         if isinstance(value, dict) and value.get("harbor_config") is not None:
             return apply_harbor_config_dict(dict(value))
         return value

@@ -47,6 +47,7 @@ from loom_service.effective_combination import (
     DerivedRoutes,
     ProviderRouteError,
     derive_stored_routes,
+    freeze_connection_modes,
 )
 from loom_service.execution_admission import (
     admit_execution_backend,
@@ -2318,17 +2319,19 @@ async def _derive_new_batch_routes(
     except ProviderRouteError as exc:
         raise HTTPException(status_code=400, detail=f"cannot {action}: {exc}") from exc
     for connection_id in sorted(routes.connection_ids, key=str):
-        await validate_provider_connection(
+        provider_type = await validate_provider_connection(
             session,
             connection_id,
             team_id=team_id,
             agent_submission=True,
             submission_configs=provider_submission_configs(
-                trial_config=trial_config,
+                trial_config=routes.trial_config,
                 combinations=routes.combinations,
                 connection_id=connection_id,
             ),
         )
+        freeze_connection_modes(routes.trial_config, routes.combinations,
+                                connection_id=connection_id, provider_type=provider_type)
     return routes
 
 
@@ -2379,7 +2382,7 @@ async def clone_run_library_batch_config(
         team_id=ctx.team_id,
     )
     combinations = routes.combinations
-    trial_config = apply_plan_mode(dict(source.trial_config), mode=payload.model_switch_plan_mode)
+    trial_config = apply_plan_mode(routes.trial_config, mode=payload.model_switch_plan_mode)
     runtime_profile = await _freeze_derived_runtime_profile(
         request, session, team_id=ctx.team_id, backend=source.backend,
         task_ids=resolved_task_ids, combinations=combinations, trial_config=trial_config,
@@ -2599,7 +2602,7 @@ async def reuse_run_library_artifact(
         if batch is not None
         else {"subset_kind": "explicit", "task_ids": [trial.task_id]}
     )
-    trial_config = dict(batch.trial_config) if batch is not None else dict(trial.config)
+    trial_config = dict(routes.trial_config)
     resolved_task_ids, benchmark_provenance = await _resolve_new_batch_snapshot(
         session,
         task_filter=task_filter,

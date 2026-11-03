@@ -1329,6 +1329,7 @@ class Combination(TypedDict):
     agent_name: str
     agent_version: NotRequired[str | None]
     agent_model: CombinationAgentModelVariant0 | None
+    claude_code_mode: NotRequired[Literal["native", "chat"] | None]
     n_per_task: int | float
     provider_connection_id: NotRequired[str | None]
     provider_model_id: NotRequired[str | None]

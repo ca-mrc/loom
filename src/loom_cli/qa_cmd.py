@@ -75,9 +75,13 @@ _PROVIDER_ENDPOINT_TYPES: list[dict[str, str]] = [
         "protocol_surface": "chat",
         "description": "User-hosted OpenAI-compatible endpoint such as vLLM.",
     },
+    {
+        "id": "anthropic-compatible",
+        "provider_family": "anthropic",
+        "protocol_surface": "anthropic-messages",
+        "description": "Anthropic Messages endpoint for Claude Code.",
+    },
 ]
-# #2054: this phase supports OpenAI-compatible Provider Connections only.
-# Native Anthropic Messages and Gemini endpoints stay deferred (#4, #5, #114).
 _SECRET_QUERY_PARAM_RE = re.compile(
     r"(?i)(?:[?&;]|^)"
     r"(?:api[-_]?key|access[-_]?token|auth[-_]?token|token|"
@@ -173,6 +177,7 @@ class CompatibilityAgentMetadata:
     supported_providers: tuple[str, ...]
     supported_model_sources: tuple[str, ...]
     endpoint_dialect: str | None
+    supported_connection_types: tuple[str, ...] = ("openai-compatible", "custom")
 
 
 def _compat_cell(
@@ -215,6 +220,7 @@ def _compat_cell(
 
 
 _FALLBACK_ADAPTER_ENDPOINT_DIALECTS: dict[str, str] = {
+    "claude-code": "anthropic",
     "codex": "openai_responses",
     "openhands-sdk": "openai_chat",
     "terminus-2": "openai_chat",
@@ -239,6 +245,7 @@ def _repo_known_service_mode_ready_agents() -> list[CompatibilityAgentMetadata]:
             supported_providers=tuple(agent.supported_providers),
             supported_model_sources=tuple(agent.supported_model_sources),
             endpoint_dialect=agent.runtime_contract.endpoint_dialect,
+            supported_connection_types=agent.supported_connection_types,
         )
 
     adapter_ready = getattr(agent_catalog, "_ADAPTER_RUNTIME_READY", {})
@@ -267,6 +274,8 @@ def _repo_known_service_mode_ready_agents() -> list[CompatibilityAgentMetadata]:
             supported_providers=tuple(providers),
             supported_model_sources=tuple(sources),
             endpoint_dialect=_FALLBACK_ADAPTER_ENDPOINT_DIALECTS.get(str(name)),
+            supported_connection_types=(("anthropic", "openai-compatible", "custom")
+                                        if name == "claude-code" else ("openai-compatible", "custom")),
         )
 
     return sorted(entries.values(), key=lambda agent: agent.name)
@@ -285,6 +294,8 @@ def _cell_protocol_surface(
     endpoint: Mapping[str, str],
 ) -> str:
     provider_family = endpoint["provider_family"]
+    if agent.name == "claude-code":
+        return "messages-to-chat" if provider_family == "openai" else "anthropic-messages"
     if provider_family == "openai":
         dialect = agent.endpoint_dialect or ""
         if agent.name == "codex" or "responses" in dialect:
@@ -297,6 +308,9 @@ def _supported_dimension_statuses(
     agent: CompatibilityAgentMetadata,
     endpoint: Mapping[str, str],
 ) -> dict[str, str]:
+    if agent.name == "claude-code":
+        return {"streaming": "supported", "tool_use": "supported",
+                "request_params": "unsupported", "max_tokens": "unsupported"}
     if agent.name == "codex" and endpoint["provider_family"] == "openai":
         return {
             "streaming": "supported",
@@ -345,7 +359,9 @@ def _provider_compatibility_cell_for_agent_endpoint(
         )
 
     providers = agent.supported_providers
-    provider_matches = "*" in providers or endpoint_provider in providers
+    connection_type = "openai-compatible" if endpoint_provider == "openai" else endpoint_provider
+    provider_matches = (("*" in providers or endpoint_provider in providers)
+                        and connection_type in agent.supported_connection_types)
     if not provider_matches:
         return _compat_cell(
             agent=agent.name,
@@ -361,8 +377,9 @@ def _provider_compatibility_cell_for_agent_endpoint(
             diagnostics="supported",
             redaction="supported",
             blocked_reason=(
-                f"agent metadata {_supported_providers_text(providers)} does "
-                f"not include endpoint provider family {endpoint_provider!r}"
+                f"agent metadata {_supported_providers_text(providers)} and "
+                f"supported_connection_types={list(agent.supported_connection_types)!r} "
+                f"do not accept endpoint provider family {endpoint_provider!r}"
             ),
             follow_up_url=_COMPATIBILITY_ISSUE_URL,
         )

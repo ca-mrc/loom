@@ -184,6 +184,7 @@ export const providersApi = {
         supported_providers: string[];
         /** PR-A: subset of ["api","local-server","hf"]. Empty when needs_model=false. */
         supported_model_sources: string[];
+        supported_connection_types?: string[];
         requires_capabilities?: string[];
         provides_capabilities?: string[];
         service_mode_ready?: boolean;

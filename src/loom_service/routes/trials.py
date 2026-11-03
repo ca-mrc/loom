@@ -87,7 +87,10 @@ from loom_service.monitor_filters import (
 from loom_service.multi_model import usage_by_role
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.pool_submission import prepare_trial_submission
-from loom_service.provider_connection_lookup import validate_provider_connection
+from loom_service.provider_connection_lookup import (
+    connection_runtime_config,
+    validate_provider_connection,
+)
 from loom_service.provider_model_gate import (
     is_codex,
     refresh_codex_model_preflight,
@@ -1504,13 +1507,14 @@ async def submit_trial(
     # round-trip + keeps the user-facing error close to the user-
     # supplied input.
     if payload.provider_connection_id is not None and ctx.team_id is not None:
-        await validate_provider_connection(
+        provider_type = await validate_provider_connection(
             s,
             payload.provider_connection_id,
             team_id=ctx.team_id,
             agent_submission=True,
             submission_configs=[payload.config],
         )
+        payload = payload.model_copy(update={"config": connection_runtime_config(payload.config, provider_type)})
     if is_codex(payload.config.get("agent_name")):
         # CP idempotency replays return their original accepted Trial before
         # catalog/target checks. Keep that frozen path available after retirement.

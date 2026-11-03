@@ -10,7 +10,10 @@ from loom_service.agent_catalog import get_agent, validate_agent_model_compat
 from loom_service.batch_runner import _materialize_trial_config
 from loom_service.effective_combination import freeze_connection_modes
 from loom_service.execution_admission import submission_trials
-from loom_service.provider_connection_lookup import connection_runtime_config, validate_provider_connection
+from loom_service.provider_connection_lookup import (
+    connection_runtime_config,
+    validate_provider_connection,
+)
 
 
 def _claude(**extra):
@@ -71,11 +74,12 @@ async def test_authorized_shared_native_connection_accepts_claude_but_hides_fore
     class Session:
         shared = True
         async def execute(self, statement):
+            shared = self.shared
             class Result:
-                def one_or_none(inner):
+                def one_or_none(self):
                     return (owner, None, "anthropic")
-                def scalar_one_or_none(inner):
-                    return connection if self.shared else None
+                def scalar_one_or_none(self):
+                    return connection if shared else None
             return Result()
         async def get(self, model, key):
             return None  # no request pool
@@ -87,3 +91,17 @@ async def test_authorized_shared_native_connection_accepts_claude_but_hides_fore
         await validate_provider_connection(session, connection, team_id=team, agent_submission=True,
                                            submission_configs=[_claude()])
     assert error.value.status_code == 404
+
+
+@pytest.mark.parametrize("combined", [False, True])
+def test_clone_rederives_mode_without_mutating_original_selection(combined):
+    from loom_service.effective_combination import derive_stored_routes
+
+    source, replacement = uuid4(), uuid4()
+    original = _claude(claude_code_mode="native", provider_connection_id=str(source))
+    shared, combos = ({}, [original]) if combined else (original, [])
+    derived = derive_stored_routes(trial_config=shared, combinations=combos,
+        source_connection_id=source, source_model_id="code", replacement_connection_id=replacement, replace_connections=True)
+    freeze_connection_modes(derived.trial_config, derived.combinations, connection_id=replacement, provider_type="custom")
+    selected = derived.combinations[0] if combined else derived.trial_config
+    assert selected["claude_code_mode"] == "chat" and original["claude_code_mode"] == "native"

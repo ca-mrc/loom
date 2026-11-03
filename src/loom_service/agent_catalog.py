@@ -11,13 +11,13 @@ Each entry also declares what models it accepts:
 
 - `supported_providers`: tuple of provider names (`"anthropic"`,
   `"openai"`, …) or `("*",)` for "any provider the LLM Gateway can
-  route". CLI adapters lock to one provider; generic agents
+  route". Some CLI adapters lock to one provider; generic agents
   (direct-completion, aider, openhands) accept anything.
 - `supported_model_sources`: subset of the `ModelSpec.source`
   discriminator. Hosted submissions admit only `"api"`; `local-server`
   and `hf` are retired (#2054). Empty tuple means the agent doesn't take
   a model at all (oracle).
-- `product_support`: `"supported"` for the five product entries new
+- `product_support`: `"supported"` for the product entries new
   submissions may select; `"deferred"` (with `deferred_reason`) for the
   rest, which remain listed so historical records stay readable.
 
@@ -111,6 +111,7 @@ class AgentEntry:
     aliases: tuple[str, ...] = ()
     supported_providers: tuple[str, ...] = ()
     supported_model_sources: tuple[str, ...] = ()
+    supported_connection_types: tuple[str, ...] = ("openai-compatible", "custom")
     runtime_contract: RuntimeContract = RuntimeContract(
         execution="unknown",
         capture="unknown",
@@ -146,6 +147,7 @@ class AgentEntry:
             "description": self.description,
             "supported_providers": list(self.supported_providers),
             "supported_model_sources": list(self.supported_model_sources),
+            "supported_connection_types": list(self.supported_connection_types) if self.needs_model else [],
             "runtime_contract": self.runtime_contract.to_dict(),
             "service_mode_ready": self.service_mode_ready,
             "readiness_status": self.readiness_status,
@@ -170,7 +172,7 @@ class AgentEntry:
 # #2054: the only entries new hosted submissions may select. Every other
 # catalog entry is deferred pending a product decision.
 _SUPPORTED_PRODUCT_ENTRIES = frozenset(
-    {"oracle", "direct-completion", "terminus-2", "openhands-sdk", "codex"},
+    {"oracle", "direct-completion", "terminus-2", "openhands-sdk", "codex", "claude-code"},
 )
 # Adapters folded into another entry as an alias. `openhands` and
 # `openhands-sdk` run the same SDK runner; typed artifact capture and the
@@ -268,7 +270,7 @@ _BUILTIN: tuple[AgentEntry, ...] = (
 # remains for hosted submissions (#2054); wire-protocol compatibility is
 # checked against the Provider Connection type, not the provider name.
 _ADAPTER_OVERRIDES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    "claude-code": (("anthropic",), _HOSTED_MODEL_SOURCES),
+    "claude-code": (("*",), _HOSTED_MODEL_SOURCES),
     "codex": (("*",), _HOSTED_MODEL_SOURCES),
     "gemini-cli": (("google",), _HOSTED_MODEL_SOURCES),
     "kimi-cli": (("moonshot",), _HOSTED_MODEL_SOURCES),
@@ -492,6 +494,8 @@ def list_agents(*, include_internal: bool = False) -> list[AgentEntry]:
                 description=description,
                 supported_providers=providers,
                 supported_model_sources=sources,
+                supported_connection_types=(("anthropic", "openai-compatible", "custom")
+                                            if adapter.name == "claude-code" else ("openai-compatible", "custom")),
                 runtime_contract=_adapter_runtime_contract(adapter),
                 service_mode_ready=ready,
                 readiness_status=readiness_status,

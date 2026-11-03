@@ -46,12 +46,12 @@ describe("ProviderForm", () => {
     );
   });
 
-  it("labels native types as unusable for agent runs (#2054)", async () => {
+  it("offers Anthropic for Claude while labelling unsupported agent protocols", async () => {
     const user = userEvent.setup();
     render(<ProviderForm mode="create" onSubmit={vi.fn()} />);
     expect(screen.queryByRole("note")).not.toBeInTheDocument();
     expect(
-      screen.getByRole("option", { name: "anthropic (not for agent runs)" }),
+      screen.getByRole("option", { name: "anthropic (Claude Code)" }),
     ).toBeInTheDocument();
     await user.selectOptions(screen.getByLabelText(/type/i), "google");
     expect(screen.getByRole("note")).toHaveTextContent(

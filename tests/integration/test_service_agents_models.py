@@ -245,16 +245,17 @@ async def test_agents_includes_builtins_and_adapters(
     assert by_name["oracle"]["supported_model_sources"] == []
     assert by_name["direct-completion"]["supported_providers"] == ["*"]
     assert by_name["direct-completion"]["supported_model_sources"] == ["api"]
-    # CLI adapters lock down to their provider.
-    assert by_name["claude-code"]["supported_providers"] == ["anthropic"]
+    # Claude routes by connection type independently of the model namespace.
+    assert by_name["claude-code"]["supported_providers"] == ["*"]
     assert by_name["claude-code"]["supported_model_sources"] == ["api"]
 
-    # #2054: five supported product entries; the rest stay listed as deferred.
+    # Supported product entries; the rest stay listed as deferred.
     assert {
         name for name, a in by_name.items() if a["product_support"] == "supported"
-    } == {"oracle", "direct-completion", "terminus-2", "openhands-sdk", "codex"}
-    assert by_name["claude-code"]["product_support"] == "deferred"
-    assert by_name["claude-code"]["deferred_reason"]
+    } == {"oracle", "direct-completion", "terminus-2", "openhands-sdk", "codex", "claude-code"}
+    assert by_name["claude-code"]["product_support"] == "supported"
+    assert by_name["claude-code"]["deferred_reason"] is None
+    assert by_name["claude-code"]["supported_connection_types"] == ["anthropic", "openai-compatible", "custom"]
     assert by_name["openhands-sdk"]["aliases"] == ["openhands"]
     assert by_name["openhands-sdk"]["display_name"] == "openhands"
     assert "openhands" not in by_name
@@ -368,7 +369,7 @@ async def test_agents_report_hosted_native_availability(
     assert r.status_code == 200
     by_name = {a["name"]: a for a in r.json()["items"]}
 
-    for name in ("direct-completion", "terminus-2", "oracle", "codex"):
+    for name in ("direct-completion", "terminus-2", "oracle", "codex", "claude-code"):
         assert by_name[name]["service_mode_ready"] is True, name
         assert by_name[name]["readiness_status"] == "ready", name
     for name in ("openhands-sdk",):
