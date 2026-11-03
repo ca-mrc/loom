@@ -223,20 +223,21 @@ async def authorize_trial_model(
 
 
 async def authorize_anthropic_trial_model(
-    request: Request, ctx: AuthContext, *, model: str, connection_type: str,
+    session: AsyncSession, ctx: AuthContext, *, model: str, connection_type: str,
 ) -> ModelSpec:
     """Keep the selected model namespace independent of the Messages wire API.
 
     Claude's mode is frozen at admission from its authorized connection. Neither
     a request field nor the upstream response can supply the canonical identity.
     Other runtimes retain the existing provider/name authorization rule.
+    Reuse the caller's transaction so authorization never waits for a second
+    pool checkout while connection resolution holds the first.
     """
     native = connection_type == "anthropic"
     fallback = ModelSpec(provider="anthropic" if native else "openai", name=model)
     if ctx.service_execution_lease_id is None or ctx.trial_id is None:
         return fallback
-    async with request.app.state.session_factory() as session:
-        config = (await session.execute(select(Trial.config).where(Trial.id == ctx.trial_id))).scalar_one_or_none()
+    config = (await session.execute(select(Trial.config).where(Trial.id == ctx.trial_id))).scalar_one_or_none()
     if isinstance(config, dict) and config.get("agent_name") == "claude-code":
         selected = config.get("agent_model")
         if (isinstance(selected, dict) and selected.get("name") == model

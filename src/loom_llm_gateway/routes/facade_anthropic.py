@@ -51,7 +51,7 @@ async def anthropic_messages_facade(
             dialect_label="/anthropic/v1/messages",
         )
         identity = await authorize_anthropic_trial_model(
-            request, ctx, model=payload["model"], connection_type=row.provider_type,
+            session, ctx, model=payload["model"], connection_type=row.provider_type,
         )
         native = row.provider_type == "anthropic"
         try:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -11,7 +10,6 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
-from starlette.requests import Request
 
 from loom.db.schema import LlmCall
 from loom.llm_call_ledger import serialize_execution_accounting_call
@@ -38,28 +36,23 @@ def _authority(provider="vendor", name="code-model", mode="chat"):
               "claude_code_mode": mode}
     session = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: config)))
 
-    @asynccontextmanager
-    async def factory():
-        yield session
-
-    request = Request({"type": "http", "app": SimpleNamespace(state=SimpleNamespace(session_factory=factory))})
     ctx = SimpleNamespace(service_execution_lease_id=uuid4(), trial_id=uuid4())
-    return request, ctx
+    return session, ctx
 
 
 @pytest.mark.parametrize("provider", ["anthropic", "openai", "local", "vendor"])
 @pytest.mark.parametrize("mode,connection_type", [("native", "anthropic"), ("chat", "openai-compatible"), ("chat", "custom")])
 async def test_authorization_preserves_the_frozen_namespace(provider, mode, connection_type):
-    request, ctx = _authority(provider=provider, mode=mode)
-    identity = await authorize_anthropic_trial_model(request, ctx, model="code-model", connection_type=connection_type)
+    session, ctx = _authority(provider=provider, mode=mode)
+    identity = await authorize_anthropic_trial_model(session, ctx, model="code-model", connection_type=connection_type)
     assert identity.provider == provider and identity.name == "code-model"
 
 
 @pytest.mark.parametrize("model,connection_type", [("other", "openai-compatible"), ("code-model", "anthropic")])
 async def test_wrong_model_or_connection_mode_is_forbidden(model, connection_type):
-    request, ctx = _authority()
+    session, ctx = _authority()
     with pytest.raises(HTTPException) as exc:
-        await authorize_anthropic_trial_model(request, ctx, model=model, connection_type=connection_type)
+        await authorize_anthropic_trial_model(session, ctx, model=model, connection_type=connection_type)
     assert exc.value.status_code == 403
 
 
