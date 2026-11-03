@@ -106,7 +106,7 @@ describe("ProviderDetail", () => {
       screen.getByText(/last provider test passed/i),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/OpenAI-compatible root ending in \/v1/i),
+      screen.getByText(/Provider API root \(OpenAI-compatible roots end in \/v1\)/i),
     ).toBeInTheDocument();
     expect(screen.getByText("Provider setup guide")).toBeInTheDocument();
     expect(screen.queryByText("loom providers test prod-anthropic")).not.toBeInTheDocument();
