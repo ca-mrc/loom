@@ -5,7 +5,7 @@ import asyncio
 import os
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from ipaddress import IPv4Address
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -86,7 +86,7 @@ class _Invocation:
     output: Path
     instruction: str
     step_id: str
-    event_count: int = 0
+    offered_events: list[TrajectoryEvent] = field(default_factory=list)
     succeeded: bool = False
 
 
@@ -155,8 +155,11 @@ class LocalClaudeRuntime:
                     if row["id"] not in prior and row["step_id"] == step_id]
 
         async def observe(event: TrajectoryEvent) -> None:
-            await trajectory.append(event.model_copy(update={"step_id": step_id, "seq": 0}))
-            invocation.event_count += 1
+            canonical = event.model_copy(update={"step_id": step_id, "seq": 0})
+            # append can persist bytes and then be cancelled during a flush.
+            # Finalization matches read-back events, not await-return counts.
+            invocation.offered_events.append(canonical)
+            await trajectory.append(canonical)
 
         async with relay_endpoint_access(env, self.relay.base_url, policy):
             self.relay.activate(step_id=step_id, deadline=self._deadline)
@@ -183,13 +186,17 @@ class LocalClaudeRuntime:
                 if invocation.succeeded:
                     raise AgentError("Claude native evidence missing")
                 continue
-            selected = semantic[offset:offset + invocation.event_count]
-            offset += invocation.event_count
-            if any(event.step_id != invocation.step_id for event in selected):
-                raise AgentError("Claude native/canonical step identity drift")
+            selected: list[TrajectoryEvent] = []
+            for offered in invocation.offered_events:
+                if (offset >= len(semantic) or semantic[offset].model_dump(exclude={"seq"}) !=
+                        offered.model_dump(exclude={"seq"})):
+                    break
+                selected.append(semantic[offset])
+                offset += 1
             native_steps = claude_atif_steps(native_path.read_bytes(), invocation.instruction,
                 trial_id=self.trial_id, events=[event.model_copy(update={"step_id": "agent"}) for event in selected],
-                model_name=self.model.name if self.model else None, succeeded=invocation.succeeded)
+                model_name=self.model.name if self.model else None, succeeded=invocation.succeeded,
+                allow_partial_canonical=not invocation.succeeded)
             for item in native_steps:
                 steps.append({**item, "step_id": len(steps) + 1})
         if offset != len(semantic):

@@ -14,6 +14,7 @@ from loom.models.trajectory import AgentThoughtEvent, ToolUseEvent, TrajectoryEv
 def claude_atif_steps(
     native: bytes, instruction: str, *, trial_id: UUID, events: Sequence[TrajectoryEvent],
     model_name: str | None, succeeded: bool,
+    allow_partial_canonical: bool = False,
 ) -> list[dict[str, Any]]:
     capture = ClaudeCapture(trial_id=trial_id, instruction=instruction)
     capture.feed(native)
@@ -21,12 +22,16 @@ def claude_atif_steps(
     semantic_types = (AgentThoughtEvent, ToolUseEvent)
     canonical = [event.model_dump(exclude={"emitted_at", "seq"}) for event in events if isinstance(event, semantic_types)]
     native_events = [event.model_dump(exclude={"emitted_at", "seq"}) for event in capture.events]
-    if canonical != native_events:
+    partial = (not succeeded and allow_partial_canonical and len(canonical) < len(native_events)
+               and canonical == native_events[:len(canonical)])
+    if canonical != native_events and not partial:
         raise AgentError("Claude native/canonical tool or message identity drift")
     steps: list[dict[str, Any]] = [{"step_id": 1, "source": "user", "message": instruction}]
     for turn in capture.turns:
         step: dict[str, Any] = {"step_id": len(steps) + 1, "source": "agent", "message": "".join(turn["text"]),
                                 "llm_call_count": 1, "extra": {"message_id": turn["id"]}}
+        if partial:
+            step["extra"]["canonical_event_join"] = "partial_prefix"
         if model_name is not None:
             step["model_name"] = model_name
         if turn["thinking"]:
