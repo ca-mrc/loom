@@ -190,6 +190,13 @@ checks, but common families include:
 - `terminus-2`, a built-in Harbor-embedded runtime that does not use
   `loom-launcher`.
 
+Claude Code 2.1.183 has a pinned installed harness for hosted execution and
+local Linux Docker runs. It uses native Anthropic Messages connections or a
+bounded streaming translation to OpenAI-compatible Chat Completions, including
+workspace tool results and ledger-backed trajectories. See the
+[Claude Code connection guide](docs/user-guide.md#claude-code-connections) for
+configuration, compatibility limits and runtime requirements.
+
 Provider/model/agent compatibility is enforced at submission time. Invalid
 combinations fail as API validation errors instead of becoming worker
 surprises.

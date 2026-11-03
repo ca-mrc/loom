@@ -276,14 +276,14 @@ with a hint to add one.
 
 | Local runtime | Provider connection |
 | --- | --- |
-| Claude Code | Anthropic Messages, using `ANTHROPIC_API_KEY` |
+| Claude Code (local Linux Docker) | Native Anthropic or OpenAI Chat through a trial-owned Messages relay; upstream key stays on the CLI host |
 | Gemini CLI | Google Gemini, using `GEMINI_API_KEY` |
 | Codex | OpenAI or a registered local endpoint that supports Responses |
 | Other installed chat adapters | OpenAI or registered local Chat Completions |
 | Terminus-2 | OpenAI, Anthropic, Google or registered local Chat Completions |
 
-Installed agents run inside the task sandbox, which therefore receives the
-selected upstream key. Use this local mode only with trusted task images and
+Other installed agents run inside the task sandbox, which therefore receives
+the selected upstream key. Use this local mode only with trusted task images and
 agents. Captured output redacts that exact key; it does not make arbitrary task
 files safe to share. Qwen receives its key through the environment; OpenCode's
 configuration references the environment rather than embedding the key in argv.
@@ -292,7 +292,7 @@ Hosted execution continues to use scoped Gateway tokens.
 Terminus uses pinned Harbor in the CLI process (Python >=3.12). Its native
 provider calls feed a trial-local ledger, retaining usage/cost and checkpoint
 joins without a hosted Control Plane. Local multi-model switching is rejected;
-hosted switching retains its existing contract. Installed subprocess agents
+hosted switching retains its existing contract. Other installed subprocess agents
 retain native output, but do not provide authoritative local rate-card billing;
 their reported zero cost must not be interpreted as free inference.
 Terminus forwards configured request parameters to its native provider client.
@@ -300,10 +300,39 @@ Installed local agents reject nonempty `request_params`; those controls require
 an agent-native configuration rather than Gateway query parameters.
 
 The endpoint must be reachable from the process making the call: `127.0.0.1`
-means the sandbox for installed agents and the CLI host for Terminus and direct
-completion. An OpenAI-compatible chat server does not necessarily support
+means the CLI host for Claude's local relay, Terminus and direct completion;
+other installed agents contact endpoints from the sandbox. An OpenAI-compatible chat server does not necessarily support
 Responses. Credential-free interface tests do not establish live provider or
 agent-version acceptance.
+
+## Local Claude runtime
+
+`LocalRunner` selects `LocalClaudeRuntime` for Claude on local Linux Docker.
+It resolves the explicit connection dialect, binds a relay to the local Docker
+bridge and pins the upstream URL, model and credential. The relay verifies a
+random trial bearer and accepts Messages calls only during the agent phase.
+For restricted tool networks, the runtime adds only the relay IP/TCP port to
+OUTPUT, removes that rule afterward and revokes streams before verification.
+The `mainland_proxy` boundary is unchanged; Claude is rejected with that option.
+Remote daemons and Docker Desktop have no supported same-host bridge here.
+Legacy native direct execution on other backends retains its earlier contract;
+Chat translation requires the local Docker runtime.
+
+Installation shares the hosted pinned glibc/musl archive selection, exact
+version check and SHA512 verification. Local archives are cached atomically and
+reverified on reuse. Hosted installation still requires its setup egress proxy.
+The controller shares supervised invocation and native capture with hosted
+Claude; a local streaming adapter leaves process deadlines with the enclosing
+supervisor. Semantic events append while the attempt is active, retaining
+already observed turns when cancellation closes its trajectory fence.
+
+The relay records usage once under the original ModelSpec and real task step.
+The controller receives a scoped invocation view for validation; Trial appends
+the authoritative call ledger once. Native outputs remain under
+`<output_dir>/<trial_id>/native/<invocation>/claude-code/`. The ATIF builder
+joins native message/tool identities to canonical semantic events and retains
+trial/verifier metadata and ledger accounting before upload and hashing.
+Missing rate cards produce unknown cost; configured zero remains priced.
 
 ## Concurrency
 

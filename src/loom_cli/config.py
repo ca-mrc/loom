@@ -10,7 +10,7 @@ Lives at `$XDG_CONFIG_HOME/loom/config.toml` (default
   LLM servers (vLLM, ollama, llama.cpp, lm-studio). Each server has
   a name + base_url + optional api_key. The name disambiguates
   between multiple local servers; the base_url is the
-  OpenAI-compatible endpoint (typically ends in `/v1`).
+  endpoint with an explicit OpenAI Chat or Anthropic Messages dialect.
 
 All fields are optional — a fresh install has no file and
 `load_config()` returns an empty `LoomConfig`.

@@ -171,7 +171,28 @@ the formally isolated, installed Case A/B collection and live acceptance.
 | `POST /v1/responses`     | OpenAI Responses / BYO OpenAI-compatible Responses | Native OpenAI path or direct httpx through `EgressClientPool` when the step JWT or `x-loom-provider-connection-id` resolves to `openai-compatible` / `custom`; if a BYO endpoint exposes only Chat Completions and returns the chat-style "messages required" 400 from `/responses`, the provider facade retries once through `/chat/completions` and synthesizes a Responses body/SSE for Codex |
 | `POST /v1beta/models/{model}:generateContent` | Gemini  | Direct httpx passthrough using the Gateway's configured Google credential; streaming actions are rejected |
 | `POST /v1/chat/completions` *(via litellm)* | Tail-provider shim | non-BYO and non-OpenAI-compatible fallback providers |
-| `POST /openai/v1/chat/completions`, `/openai/v1/responses`, `/anthropic/v1/messages`, `/google/v1beta/...` | Sandbox provider facade | Direct httpx through `EgressClientPool` |
+| `POST /openai/v1/chat/completions`, `/openai/v1/responses`, `/google/v1beta/...` | Sandbox provider facade | Direct httpx through `EgressClientPool` |
+| `POST /anthropic/v1/messages` | Connection-bound Messages facade | Native Anthropic passthrough or streamed Chat translation selected from the authorized connection |
+
+### Claude Messages compatibility
+
+The authorized connection type chooses native Anthropic or OpenAI Chat; callers
+cannot use a model namespace or request header to change the route. Native
+endpoint normalization preserves a proxy prefix and exactly one terminal `/v1`
+across discovery, preflight and runtime. The historical platform-credentialed
+`/v1/messages` route remains separate.
+
+The `claude-code-chat-v1` profile supports text, function tools, tool choice,
+matching results and bounded incremental SSE. It disables native thinking/cache/
+experimental features in the pinned harness. Anthropic effort has no Chat
+mapping. Unsupported images, server tools and native semantic fields fail
+before upstream I/O. Stream failure after output is never retried into a second
+response; observed usage survives timeout/cancellation, with one ledger row.
+
+Trusted ledger extras retain the admitted ModelSpec, native/translated route,
+compatibility profile, provider response alias, call/usage status and cost
+confidence. The CLI's local relay shares these converters and usage conventions.
+Native CLI summaries do not determine billed usage or price.
 
 ### Provider-connection authority
 
@@ -202,18 +223,18 @@ fail closed before persistence, and Gateway failures must not log or echo
 credentials, authorization values, secret references, or decryption exception
 text.
 
-The Gateway is **not** a single unified shape — each dialect's
-response is forwarded verbatim. Agents see exactly the native
-upstream shape, so client-side parsing stays standard. The
-normalisation (TokenUsage → cost) happens *next to* the forward, not
-*after* it.
+Each facade returns the agent's expected protocol shape. Native paths preserve
+upstream responses; the Responses and Messages compatibility paths explicitly
+translate supported semantics and reject unsupported ones. Accounting observes
+the actual upstream dialect independently of the agent-visible format.
 
 Streaming is supported on the OpenAI Responses routes, the OpenAI Chat
 provider facade, and on both Anthropic Messages routes. The Gateway accepts
 `stream=true` on `/v1/messages`, `/v1/responses`, `/openai/v1/responses`,
 `/openai/v1/chat/completions`, and `/anthropic/v1/messages`. Responses and
-Anthropic routes forward native SSE streams and record usage from the terminal
-usage-bearing SSE event. The OpenAI Chat provider facade preserves usage by
+native Anthropic paths observe SSE usage while forwarding streams. The
+connection-bound Messages route also supports incremental Chat-to-Messages SSE
+translation, including fragmented tool arguments and usage-only terminal chunks. The OpenAI Chat provider facade preserves usage by
 calling the upstream OpenAI-compatible `/chat/completions` endpoint with
 `stream=false`, recording usage from the full JSON response, and returning a
 synthetic OpenAI `chat.completion.chunk` SSE stream to streaming clients such

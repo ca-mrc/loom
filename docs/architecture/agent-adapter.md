@@ -202,6 +202,13 @@ different network namespaces:
   even when task sandboxes intentionally run under root-owned upstream
   workdirs such as `/root`.
 
+Hosted and local Linux Docker Claude runs use the pinned installed harness,
+shared native capture and authoritative Gateway/relay accounting. Normal mode
+isolates settings and MCP configuration; the Chat profile disables native
+thinking, cache and beta behavior before translation. See
+[hosted harnesses](hosted-agent-harness.md#claude-code) and
+[CLI mode](cli-mode.md#local-claude-runtime) for ownership and lifecycle.
+
 The Codex CLI adapter runs Codex 0.141+ in Responses API mode. Codex
 constructs requests as `<base_url>/responses`, so the adapter
 idempotently appends `/v1` when the injected base URL is bare
