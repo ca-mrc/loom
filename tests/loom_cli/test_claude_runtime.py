@@ -144,3 +144,33 @@ async def test_cancellation_keeps_already_observed_turns_and_kills_process(tmp_p
     generic = project_to_atif(events, task_id="t", agent_name=runtime.name, agent_version=runtime.version)
     document = runtime.build_atif(generic, events)
     assert len(document["steps"]) == 2 and document["metadata"]["final_state"] == "cancelled"
+
+
+async def test_cancel_during_canonical_append_exports_marked_native_partial_trace(tmp_path):
+    import asyncio
+    from datetime import UTC, datetime
+
+    entered = asyncio.Event()
+    class InterruptedWriter(_Writer):
+        async def append(self, event):
+            entered.set()
+            await asyncio.Event().wait()
+    trial_id, writer = uuid4(), InterruptedWriter()
+    relay = _Relay(trial_id)
+    task, _, _ = _inputs()
+    cfg = TrialConfig(agent_name="claude-code", agent_model=ModelSpec(provider="local", name="endpoint/wire-model"), claude_code_mode="chat")
+    runtime = LocalClaudeRuntime(trial_id=trial_id, task_config=task, trial_config=cfg, relay=relay, output_dir=tmp_path)
+    sandbox = _ClaudeSandbox(_lines()[:3])
+    running = asyncio.create_task(runtime.run(instruction="Fix it.", env=sandbox, trajectory=writer,
+        mcp=[], skills_dir=None, step_id=task.steps[0].name))
+    await asyncio.wait_for(entered.wait(), 3)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    base = dict(trial_id=trial_id, emitted_at=datetime.now(UTC), step_id="__trial__", seq=0)
+    events = [TrialStartEvent(**base, task_id="t", agent_name="claude-code", agent_mode="in-box"),
+              TrialEndEvent(**base, final_state="cancelled")]
+    generic = project_to_atif(events, task_id="t", agent_name=runtime.name, agent_version=runtime.version)
+    document = runtime.build_atif(generic, events)
+    assert document["steps"][1]["extra"]["canonical_event_join"] == "partial_prefix"
+    assert document["metadata"]["final_state"] == "cancelled"
