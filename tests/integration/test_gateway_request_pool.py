@@ -529,6 +529,51 @@ async def test_one_timeout_returns_504_and_moves_the_binding(
     assert [row.provider_connection_id for row in await receipts(p)] == [p["ids"][0]]
 
 
+async def test_timeout_spare_skips_keys_in_the_same_quota_group(pool_setup: dict) -> None:
+    p = pool_setup
+    async with p["sessions"]() as session:
+        pool = await session.get(ProviderRequestPool, p["root"])
+        pool.next_member = 1
+        await session.commit()
+
+    async def timeout(request):
+        if request.url.host == "provider-1.example.test":
+            raise httpx.ReadTimeout("upstream")
+
+    p["captures"]["handler"] = timeout
+    assert (await post(p)).status_code == 504
+    async with p["sessions"]() as session:
+        binding = await session.get(ProviderRequestPoolBinding, (p["root"], p["trial_id"]))
+    assert binding is not None and binding.member_connection_id == p["ids"][0]
+    assert (await post(p)).status_code == 200
+    assert [r.url.host for r in p["captures"]["requests"]] == [
+        "provider-1.example.test",
+        "provider-0.example.test",
+    ]
+
+
+async def test_timeout_keeps_the_binding_when_only_same_quota_group_keys_remain(
+    pool_setup: dict,
+) -> None:
+    p = pool_setup
+    async with p["sessions"]() as session:
+        pool = await session.get(ProviderRequestPool, p["root"])
+        pool.next_member = 1
+        root_member = await session.get(ProviderRequestPoolMember, (p["root"], p["root"]))
+        root_member.enabled = False
+        await session.commit()
+
+    async def timeout(request):
+        raise httpx.ReadTimeout("upstream")
+
+    p["captures"]["handler"] = timeout
+    assert (await post(p)).status_code == 504
+    async with p["sessions"]() as session:
+        binding = await session.get(ProviderRequestPoolBinding, (p["root"], p["trial_id"]))
+    assert binding is not None and binding.member_connection_id == p["ids"][1]
+    assert [r.url.host for r in p["captures"]["requests"]] == ["provider-1.example.test"]
+
+
 async def test_live_lease_revocation_stops_timeout_failover(pool_setup: dict) -> None:
     p = pool_setup
 
