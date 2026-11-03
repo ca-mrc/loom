@@ -20,6 +20,7 @@ from loom.db.schema import (
     LlmCall,
     LlmCallIntent,
     ModelSwitchPlan,
+    PriceCatalog,
     ProviderConnection,
     ProviderConnectionTimeoutHealth,
     ProviderModelCache,
@@ -777,6 +778,79 @@ async def test_slow_success_is_not_cut_off_by_the_stored_attempt_timeout(pool_se
     assert response.status_code == 200, response.text
     assert len(p["captures"]["requests"]) == 1
     assert p["captures"]["requests"][0].url.host == "provider-0.example.test"
+
+
+@pytest.mark.parametrize("member_index", [1, 2], ids=["yibu-gen1", "yibu-gen2"])
+async def test_yibu_physical_member_catalog_and_call_price_snapshot(
+    pool_setup: dict, member_index: int,
+) -> None:
+    """Synthetic catalog prices exercise attribution, not current supplier rates."""
+    p = pool_setup
+    catalog_id = f"test:yibu:{uuid4()}"
+    prices = {
+        "student": {
+            "input_usd_per_1m": 10.0, "output_usd_per_1m": 20.0,
+            "cache_read_usd_per_1m": 1.0, "cache_write_usd_per_1m": None,
+        },
+    }
+    async with p["sessions"]() as session:
+        session.add(PriceCatalog(
+            id=catalog_id, name="Synthetic Yibu supplier catalog", supplier_id="yibuapi",
+            source_url="https://yibuapi.com/api/pricing", prices=prices, revision=7,
+            source_metadata={"group": "default", "pricing_version": "fixture-v7"},
+        ))
+        member = await session.get(ProviderConnection, p["ids"][member_index])
+        member.pricing_config = {
+            "pricing_mode": "catalog", "supplier_id": "yibuapi", "catalog_id": catalog_id,
+        }
+        session.add(ProviderRequestPoolBinding(
+            pool_connection_id=p["root"], trial_id=p["trial_id"],
+            member_connection_id=member.id,
+        ))
+        await session.commit()
+
+    async def provider_with_cache(request):
+        return httpx.Response(200, json={
+            "model": "student", "choices": [],
+            "usage": {
+                "prompt_tokens": 100, "completion_tokens": 20,
+                "prompt_tokens_details": {"cached_tokens": 40},
+            },
+        })
+
+    p["captures"]["handler"] = provider_with_cache
+    try:
+        assert (await post(p)).status_code == 200
+        async with p["sessions"]() as session:
+            catalog = await session.get(PriceCatalog, catalog_id)
+            catalog.prices = {"student": {**prices["student"], "input_usd_per_1m": 99.0}}
+            catalog.revision = 8
+            await session.commit()
+        assert (await post(p)).status_code == 200
+        async with p["sessions"]() as session:
+            calls = list((await session.scalars(
+                select(LlmCall).where(LlmCall.trial_id == p["trial_id"])
+                .order_by(LlmCall.captured_at),
+            )).all())
+        assert len(calls) == 2
+        assert [float(call.cost_usd) for call in calls] == pytest.approx([0.00104, 0.00638])
+        for call, revision in zip(calls, [7, 8], strict=True):
+            pool = call.provider_extras["_loom_request_pool"]
+            basis = call.provider_extras["_loom_price_basis"]
+            assert pool["provider_connection_id"] == str(p["ids"][member_index])
+            assert basis["catalog_id"] == catalog_id
+            assert basis["supplier_id"] == "yibuapi"
+            assert basis["revision"] == revision
+            assert basis["currency"] == "USD"
+            assert basis["unit"] == "usd_per_1m_tokens"
+            assert basis["source_model"] == "student"
+            assert basis["input_includes_cache"] is True
+        assert calls[0].provider_extras["_loom_price_basis"]["prices"]["input_usd_per_1m"] == 10
+        assert calls[0].rate_card_hash != calls[1].rate_card_hash
+    finally:
+        async with p["sessions"]() as session:
+            await session.execute(delete(PriceCatalog).where(PriceCatalog.id == catalog_id))
+            await session.commit()
 
 
 async def test_retry_budget_expiry_does_not_rotate_or_suppress_a_provider(pool_setup: dict) -> None:
