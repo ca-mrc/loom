@@ -11,7 +11,10 @@ import loom.service_execution_sandbox_task as controller
 from loom.models.exec import ExecResult
 from loom.models.trial import TrialConfig
 from loom.models.types import ModelSpec
-from loom.service_execution_materialization import automatic_service_execution_rejections, compile_service_execution_plan
+from loom.service_execution_materialization import (
+    automatic_service_execution_rejections,
+    compile_service_execution_plan,
+)
 from loom.service_execution_task import ServiceExecutionTaskError
 from tests.unit.test_service_execution_materialization import _REVISION, _provenance
 from tests.unit.test_service_execution_terminus_plan import _inputs
@@ -89,3 +92,94 @@ def test_both_archive_variants_and_version_check_participate_in_cache_identity()
     assert setup.cache_identity("claude-code") != replace(setup, check_output="different").cache_identity("claude-code")
     with pytest.raises(ValueError, match="declared https"):
         replace(setup, archive_musl=replace(setup.archive_musl, url="https://other.example/release.tgz"))
+
+
+class _ClaudeProcess:
+    def __init__(self, lines, code=0):
+        import json
+        self.lines, self.code, self.killed = lines, code, False
+        self.stdout = self._chunks(b"".join(json.dumps(line).encode() + b"\n" for line in lines))
+        self.stderr = self._chunks(b"")
+
+    async def _chunks(self, data):
+        yield data
+
+    async def wait(self):
+        return self.code
+
+    async def kill(self):
+        self.killed = True
+
+
+class _ClaudeSandbox(_LibcDriver):
+    def __init__(self, lines):
+        super().__init__(b"")
+        self.process = _ClaudeProcess(lines)
+        self.environment = None
+
+    async def exec_streaming(self, argv, *, env_vars, cwd, timeout_sec):
+        self.environment = env_vars
+        self.argv = argv
+        return self.process
+
+
+async def _run_claude(sandbox, directory, *, rows=None):
+    from uuid import uuid4
+    from loom.service_execution_claude_code import run_claude_code
+
+    trial_id = uuid4()
+    task, _, _ = _inputs()
+
+    async def ledger(requested):
+        assert requested == trial_id
+        return rows if rows is not None else [{"id": str(uuid4()), "trial_id": str(trial_id), "step_id": "agent",
+            "model": "code-model", "dialect": "anthropic_facade", "input_tokens": 20, "output_tokens": 5,
+            "cost_usd": 0.01, "rate_card_hash": "test", "provider_extras": {
+                "_loom_model_identity": {"provider": "vendor", "name": "code-model"},
+                "_loom_gateway_route": "anthropic_to_chat", "_loom_cost_confidence": "configured"}}]
+
+    await run_claude_code(driver=sandbox, workspace=directory, task_config=task, trial_config=_trial(),
+        trial_id=trial_id, instruction="Fix the task.", ledger=ledger,
+        model_environment={"ANTHROPIC_BASE_URL": "http://127.0.0.1:43111/anthropic", "ANTHROPIC_AUTH_TOKEN": "placeholder"})
+
+
+async def test_controller_captures_native_and_authoritative_usage_outside_graded_workspace(tmp_path):
+    import json
+    from tests.unit.test_claude_code_capture import _lines
+    from loom.service_execution_claude_code import parse_claude_events
+
+    sandbox = _ClaudeSandbox(_lines())
+    await _run_claude(sandbox, tmp_path)
+    usage = json.loads((tmp_path / "usage.json").read_text())
+    assert usage["call_count"] == 1
+    assert usage["totals"]["cost_usd"] == 0.01  # CLI claimed $999; ledger owns cost.
+    assert usage["totals"]["input_tokens"] == 20
+    events = parse_claude_events((tmp_path / "trajectory.jsonl").read_bytes(), trial=_trial())
+    assert len(events) == 5 and events[-1].model.provider == "vendor"
+    assert (tmp_path / "claude-code/instruction.txt").read_text() == "Fix the task."
+    assert len((tmp_path / "claude-code/events.jsonl").read_text().splitlines()) == 5
+    assert sandbox.environment["CLAUDE_CONFIG_DIR"] == hosted.CLAUDE_CODE_HOME
+    assert sandbox.environment["TMPDIR"] == hosted.CLAUDE_CODE_TMPDIR
+    assert sandbox.environment["PATH"].startswith(hosted.CLAUDE_CODE_INSTALL_ROOT)
+    assert sandbox.environment["MAX_THINKING_TOKENS"] == "0"
+
+
+async def test_terminal_error_keeps_partial_evidence_and_billable_usage(tmp_path):
+    import json
+    from loom.errors import AgentError
+    from tests.unit.test_claude_code_capture import _lines
+
+    lines = _lines()
+    lines[-1].update(subtype="error_during_execution", is_error=True)
+    with pytest.raises(AgentError, match="terminal"):
+        await _run_claude(_ClaudeSandbox(lines), tmp_path)
+    assert json.loads((tmp_path / "usage.json").read_text())["call_count"] == 1
+    assert (tmp_path / "trajectory.jsonl").stat().st_size > 0
+
+
+async def test_success_requires_an_observed_model_call(tmp_path):
+    from loom.errors import AgentError
+    from tests.unit.test_claude_code_capture import _lines
+
+    with pytest.raises(AgentError, match="model call"):
+        await _run_claude(_ClaudeSandbox(_lines()), tmp_path, rows=[])
