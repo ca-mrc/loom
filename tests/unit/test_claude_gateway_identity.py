@@ -87,3 +87,22 @@ def test_chat_reasoning_tokens_remain_observed_counters():
     usage = DIALECTS["openai_chat"].extract_tokens({"usage": {"prompt_tokens": 10, "completion_tokens": 8,
         "completion_tokens_details": {"reasoning_tokens": 5}}})
     assert usage.output_tokens == 8 and usage.provider_extras["reasoning_tokens"] == 5
+
+
+@pytest.mark.parametrize("confidence,expected", [("unavailable", "price_unknown"), ("configured", "priced")])
+def test_export_distinguishes_unknown_price_from_a_configured_zero(confidence, expected):
+    row = LlmCall(id=uuid4(), trial_id=uuid4(), step_id="agent", model="m",
+                  dialect="anthropic_facade", input_tokens=10, output_tokens=1,
+                  cost_usd=Decimal("0"), rate_card_hash="rate", captured_at=datetime.now(UTC), attempt=1,
+                  provider_extras={"_loom_cost_confidence": confidence})
+    safe = serialize_execution_accounting_call(row)
+    event = llm_call_row_to_event(safe, trial_id=row.trial_id, seq=0)
+    assert event.cost_status == expected and event.cost_usd_snapshot == 0
+
+
+@pytest.mark.parametrize("failure", ["upstream_protocol", "client_cancelled"])
+def test_stream_failure_status_survives_typed_export(failure):
+    event = llm_call_row_to_event({"model": "m", "dialect": "anthropic_facade", "provider_extras": {
+        "_loom_call_status": "failed", "_loom_usage_status": "partial", "_loom_failure_category": failure,
+    }}, trial_id=uuid4(), seq=0)
+    assert event.failure_category == failure
