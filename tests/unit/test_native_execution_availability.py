@@ -38,7 +38,7 @@ def test_unknown_agent_is_left_to_catalog_validation() -> None:
 
 
 def test_native_set_is_the_admission_set() -> None:
-    assert frozenset({"direct-completion", "litellm", "terminus-2", "oracle", "codex"}) == NATIVE_EXECUTION_AGENT_NAMES
+    assert frozenset({"direct-completion", "litellm", "terminus-2", "oracle", "codex", "claude-code"}) == NATIVE_EXECUTION_AGENT_NAMES
 
 
 def test_selection_agents_reads_models_dicts_and_single_selection() -> None:

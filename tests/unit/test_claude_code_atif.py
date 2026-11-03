@@ -86,7 +86,10 @@ async def test_source_copy_retains_both_claude_inputs_for_canonical_derivation()
 def test_materialized_claude_usage_and_verifier_come_from_canonical_owners():
     from loom.service_execution_claude_code import claude_usage
     from loom.trajectory.llm_call_events import llm_call_row_to_event
-    from loom_control_plane.service_execution_materializer import build_canonical_events, validate_usage_accounting
+    from loom_control_plane.service_execution_materializer import (
+        build_canonical_events,
+        validate_usage_accounting,
+    )
     from tests.unit.test_native_claude_code import _trial
     from tests.unit.test_native_codex import _result
     from tests.unit.test_service_execution_terminus_plan import _inputs
