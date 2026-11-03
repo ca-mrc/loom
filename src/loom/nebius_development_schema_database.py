@@ -307,6 +307,7 @@ def _grant(db: psycopg.Connection[Any], selection: DevelopmentSchemaSelection) -
                 'public.provider_connection_timeout_health TO loom_gateway')
             db.execute('GRANT SELECT,INSERT ON public.provider_connection_timeout_observations '
                 'TO loom_gateway')
+            db.execute('GRANT SELECT ON public.provider_models_cache TO loom_gateway')
             # 0176 introduced these Gateway-owned bearer budget/dispatch rows.
             db.execute('GRANT SELECT,UPDATE ON public.harbor_baseline_sessions TO loom_gateway; '
                 'GRANT SELECT,INSERT,UPDATE ON public.harbor_baseline_dispatches TO loom_gateway')

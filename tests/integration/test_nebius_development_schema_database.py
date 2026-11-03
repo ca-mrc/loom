@@ -157,6 +157,8 @@ def test_real_retained_schema_upgrades_preserving_identity_and_granting_new_tabl
                     ('loom_gateway', table, granted)).fetchone() == (True,)
                 assert db.execute('SELECT has_table_privilege(%s,%s,%s)',
                     ('loom_gateway', table, denied)).fetchone() == (False,)
+            assert db.execute("SELECT has_table_privilege('loom_gateway','provider_models_cache','SELECT')").fetchone() == (True,)
+            assert db.execute("SELECT has_table_privilege('loom_gateway','provider_models_cache','INSERT,UPDATE,DELETE')").fetchone() == (False,)
             for privilege in ('SELECT', 'INSERT'):
                 assert db.execute("SELECT has_table_privilege('loom_gateway','service_execution_live_events',%s)",
                     (privilege,)).fetchone() == (True,)

@@ -574,6 +574,15 @@ def test_gateway_rotates_configured_pool_without_insert_delete_privileges(
                 with pytest.raises(psycopg.errors.InsufficientPrivilege):
                     db.execute(f"DELETE FROM {table} WHERE false")
                 db.rollback()
+            assert db.execute(
+                "SELECT has_table_privilege(current_user,'provider_models_cache','SELECT'), "
+                "has_table_privilege(current_user,'provider_models_cache','UPDATE'), "
+                "has_table_privilege(current_user,'provider_models_cache','INSERT'), "
+                "has_table_privilege(current_user,'provider_models_cache','DELETE')",
+            ).fetchone() == (True, False, False, False)
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                db.execute("DELETE FROM provider_models_cache WHERE false")
+            db.rollback()
         with psycopg.connect(database_url) as db:
             assert db.execute(
                 "SELECT next_member FROM provider_request_pools WHERE connection_id=%s", (root,),

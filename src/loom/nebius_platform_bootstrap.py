@@ -118,6 +118,9 @@ GATEWAY_TABLES = (
     "rate_cards",
     "price_catalogs",
     "provider_connections",
+    # Pool admission reads cached model visibility before any upstream send.
+    # Refresh and writes stay service-owned.
+    "provider_models_cache",
     "provider_request_pools",
     "provider_request_pool_members",
     "provider_request_pool_bindings",
@@ -297,6 +300,7 @@ def _bootstrap_database(
                         "data_lifecycle_objects",
                         "gateway_dispatch_receipts",
                         "provider_connections",
+                        "provider_models_cache",
                         "provider_request_pools",
                         "provider_request_pool_members",
                         "provider_request_pool_bindings",
