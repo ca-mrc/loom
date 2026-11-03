@@ -898,6 +898,10 @@ class DockerDriver:
         self._require_running()
         plan = compute_iptables_rules(policy)
         cmds = render_iptables_commands(plan)
+        if isinstance(policy, Public) and not isinstance(self.network_policy_baseline, Public):
+            # Public is a no-op only on an untouched namespace. A preceding
+            # restricted agent/verifier phase installed a DROP policy and rules.
+            cmds = ["iptables -P OUTPUT ACCEPT", "iptables -F OUTPUT"]
         if not cmds:
             # Public-equivalent: no enforcement needed. Skip the exec so
             # containers without iptables installed still work.

@@ -302,6 +302,8 @@ class Trial:
                     if self.ctx.tool_network_policy_setter is not None:
                         await self.ctx.tool_network_policy_setter(self.ctx.driver, baseline)
                         result.tool_network_profile = self.ctx.tool_network_profile
+                    else:
+                        await self.ctx.driver.set_network_policy(baseline)
                     # #188 / Phase B: attach the per-node singleton
                     # to this trial's bridge AFTER container creation.
                     # Failure to attach is a hard error — the sandbox
