@@ -63,17 +63,19 @@ async def test_wrong_model_or_connection_mode_is_forbidden(model, connection_typ
     assert exc.value.status_code == 403
 
 
-def test_trusted_identity_and_route_survive_safe_ledger_and_typed_export():
+@pytest.mark.parametrize("extra", [{}, {"tier": "priority", "region": "eu", "max_input_tokens": 10000}])
+def test_trusted_identity_and_route_survive_safe_ledger_and_typed_export(extra):
     row = LlmCall(id=uuid4(), trial_id=uuid4(), step_id="agent", model="code-model",
                   dialect="anthropic_facade", input_tokens=100, output_tokens=10,
                   cost_usd=Decimal("0"), rate_card_hash="unknown", captured_at=datetime.now(UTC), attempt=1,
-                  provider_extras={"_loom_model_identity": {"provider": "vendor", "name": "code-model"},
+                  provider_extras={"_loom_model_identity": {"provider": "vendor", "name": "code-model", **extra},
                                    "_loom_gateway_route": "anthropic_to_chat",
                                    "_loom_compatibility_profile": "claude-code-chat-v1",
                                    "private": "secret"})
     safe = serialize_execution_accounting_call(row)
     event = llm_call_row_to_event(safe, trial_id=row.trial_id, seq=0)
     assert event.model.provider == "vendor" and event.model.name == "code-model"
+    assert all(getattr(event.model, key) == value for key, value in extra.items())
     assert event.gateway_route == "anthropic_to_chat"
     assert event.compatibility_profile == "claude-code-chat-v1"
     assert "secret" not in event.model_dump_json()
