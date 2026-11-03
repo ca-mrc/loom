@@ -188,8 +188,10 @@ async def repair_accounting(
         return report
 
     async def locked_inputs(session: AsyncSession) -> tuple[Trial, Artifact]:
-        current_lease = await session.get(ServiceExecutionLease, lease_id, with_for_update=True)
+        # Match cancellation and materialization: retain both strong locks,
+        # but take the immutable parent before its execution lease.
         current_trial = await session.get(Trial, trial_id, with_for_update=True)
+        current_lease = await session.get(ServiceExecutionLease, lease_id, with_for_update=True)
         current_artifact = await session.get(Artifact, artifact_id, with_for_update=True)
         if current_lease is None or current_trial is None or current_artifact is None:
             raise ValueError("repair identity disappeared")

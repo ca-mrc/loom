@@ -2454,7 +2454,11 @@ async def record_kubernetes_observation(
     payload: dict[str, Any],
     observed_at: datetime,
 ) -> tuple[ServiceExecutionEvent, bool]:
-    """Persist one resourceVersion/state observation exactly once."""
+    """Persist one resourceVersion/state observation exactly once.
+
+    Callers that prelock this lease must already own its Trial lock in the
+    same transaction. Ordinary callers enter with neither row locked.
+    """
     await lock_execution_trial(session, lease_id)
 
     idempotency_key = canonical_digest(

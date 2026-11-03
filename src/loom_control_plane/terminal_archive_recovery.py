@@ -34,6 +34,7 @@ from loom.trajectory.source_spool import ServiceExecutionSourceConfig
 from loom.trajectory.storage import MinioObjectStore
 from loom_control_plane.config import ControlPlaneSettings
 from loom_control_plane.pending_archive_recovery import GitSha, RecoveryRefusedError, Sha256
+from loom_control_plane.service_execution_locks import lock_execution_trial
 from loom_control_plane.service_execution_materializer import (
     MaterializationClaim,
     MaterializationIntegrityError,
@@ -127,6 +128,8 @@ def qualify_deleted(lease: Any, trial: Any, child: Any, *, allow_running: bool =
 
 async def capture_binding(session: AsyncSession, *, team_id: UUID, lease_id: UUID,
                           allow_running: bool = False, lock: bool = False) -> TerminalArchiveBinding:
+    if lock:
+        await lock_execution_trial(session, lease_id)
     lease = await session.get(ServiceExecutionLease, lease_id, with_for_update=lock)
     if lease is None or lease.team_id != team_id:
         raise RecoveryRefusedError("source_identity_missing")
