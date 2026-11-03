@@ -157,9 +157,9 @@ def test_create_happy_path_posts_correct_payload(
 
 
 @pytest.mark.parametrize(("provider_type", "noted"), [
-    ("openai-compatible", False), ("custom", False), ("anthropic", True), ("google", True),
+    ("openai-compatible", False), ("custom", False), ("anthropic", False), ("google", True),
 ])
-def test_create_notes_native_types_are_not_for_agent_runs(
+def test_create_notes_only_types_unavailable_for_agent_runs(
     monkeypatch: pytest.MonkeyPatch,
     mock_server: MockServer,
     capsys: pytest.CaptureFixture[str],
