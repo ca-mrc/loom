@@ -123,8 +123,9 @@ class _ClaudeSandbox(_LibcDriver):
         return self.process
 
 
-async def _run_claude(sandbox, directory, *, rows=None):
+async def _run_claude(sandbox, directory, *, rows=None, row_count=1):
     from uuid import uuid4
+
     from loom.service_execution_claude_code import run_claude_code
 
     trial_id = uuid4()
@@ -136,7 +137,7 @@ async def _run_claude(sandbox, directory, *, rows=None):
             "model": "code-model", "dialect": "anthropic_facade", "input_tokens": 20, "output_tokens": 5,
             "cost_usd": 0.01, "rate_card_hash": "test", "provider_extras": {
                 "_loom_model_identity": {"provider": "vendor", "name": "code-model"},
-                "_loom_gateway_route": "anthropic_to_chat", "_loom_cost_confidence": "configured"}}]
+                "_loom_gateway_route": "anthropic_to_chat", "_loom_cost_confidence": "configured"}} for _ in range(row_count)]
 
     await run_claude_code(driver=sandbox, workspace=directory, task_config=task, trial_config=_trial(),
         trial_id=trial_id, instruction="Fix the task.", ledger=ledger,
@@ -145,8 +146,9 @@ async def _run_claude(sandbox, directory, *, rows=None):
 
 async def test_controller_captures_native_and_authoritative_usage_outside_graded_workspace(tmp_path):
     import json
-    from tests.unit.test_claude_code_capture import _lines
+
     from loom.service_execution_claude_code import parse_claude_events
+    from tests.unit.test_claude_code_capture import _lines
 
     sandbox = _ClaudeSandbox(_lines())
     await _run_claude(sandbox, tmp_path)
@@ -166,6 +168,7 @@ async def test_controller_captures_native_and_authoritative_usage_outside_graded
 
 async def test_terminal_error_keeps_partial_evidence_and_billable_usage(tmp_path):
     import json
+
     from loom.errors import AgentError
     from tests.unit.test_claude_code_capture import _lines
 
@@ -183,3 +186,33 @@ async def test_success_requires_an_observed_model_call(tmp_path):
 
     with pytest.raises(AgentError, match="model call"):
         await _run_claude(_ClaudeSandbox(_lines()), tmp_path, rows=[])
+
+
+async def test_multiple_gateway_calls_keep_contiguous_trace_sequence(tmp_path):
+    from loom.service_execution_claude_code import parse_claude_events
+    from tests.unit.test_claude_code_capture import _lines
+    await _run_claude(_ClaudeSandbox(_lines()), tmp_path, row_count=2)
+    events = parse_claude_events((tmp_path / "trajectory.jsonl").read_bytes(), trial=_trial())
+    assert [event.seq for event in events] == list(range(6))
+
+
+async def test_cancellation_kills_the_owned_process_and_finalizes_evidence(tmp_path):
+    import asyncio
+    import json
+    from tests.unit.test_claude_code_capture import _lines
+
+    waiting = asyncio.Event()
+    class WaitingProcess(_ClaudeProcess):
+        async def wait(self):
+            waiting.set()
+            await asyncio.Event().wait()
+
+    sandbox = _ClaudeSandbox(_lines())
+    sandbox.process = WaitingProcess(_lines())
+    running = asyncio.create_task(_run_claude(sandbox, tmp_path))
+    await asyncio.wait_for(waiting.wait(), 3)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert sandbox.process.killed
+    assert json.loads((tmp_path / "usage.json").read_text())["call_count"] == 1
