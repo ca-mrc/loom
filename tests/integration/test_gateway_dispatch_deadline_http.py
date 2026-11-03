@@ -234,10 +234,12 @@ async def test_held_request_has_signed_dispatch_audit_without_billable_call(
                                LlmCall.cost_usd, LlmCall.provider_extras)
                         .where(LlmCall.trial_id == trial_id)
                     ).mappings().all()
-                    # The native deadline repair retains an attempted OpenAI
-                    # facade call with missing usage. Dispatch remains audited
-                    # independently and no usage or charge is fabricated.
-                    assert len(calls) == int(path == "/openai/v1/chat/completions")
+                    # OpenAI and Anthropic facades retain failed attempts with
+                    # missing usage. Dispatch remains audited independently and
+                    # no usage or charge is fabricated.
+                    assert len(calls) == int(path in {
+                        "/openai/v1/chat/completions", "/anthropic/v1/messages",
+                    })
                     if calls:
                         assert calls[0]["input_tokens"] == calls[0]["output_tokens"] == 0
                         assert calls[0]["cost_usd"] == 0
@@ -387,9 +389,9 @@ async def test_true_stream_deadline_keeps_transport_audit(
         received.append(rest)
 
         async def chunks():
-            yield b"event: ping\ndata: {}\n\n"
+            yield b'event: ping\ndata: {"type":"ping"}\n\n'
             await asyncio.wait_for(release_provider.wait(), timeout=15)
-            yield b"event: message_stop\ndata: {}\n\n"
+            yield b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
 
         return StreamingResponse(
             chunks(),
