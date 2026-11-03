@@ -89,7 +89,7 @@ def test_chat_reasoning_tokens_remain_observed_counters():
     assert usage.output_tokens == 8 and usage.provider_extras["reasoning_tokens"] == 5
 
 
-@pytest.mark.parametrize("confidence,expected", [("unavailable", "price_unknown"), ("configured", "priced")])
+@pytest.mark.parametrize("confidence,expected", [("unavailable", "price_unknown"), ("not_applicable", "price_unknown"), ("configured", "priced")])
 def test_export_distinguishes_unknown_price_from_a_configured_zero(confidence, expected):
     row = LlmCall(id=uuid4(), trial_id=uuid4(), step_id="agent", model="m",
                   dialect="anthropic_facade", input_tokens=10, output_tokens=1,
