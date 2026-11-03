@@ -829,3 +829,48 @@ async def test_incomplete_native_stream_retains_observed_usage_as_failed(facade_
     assert ledger["input_tokens"] == 12
     assert ledger["provider_extras"]["_loom_call_status"] == "failed"
     assert ledger["provider_extras"]["_loom_usage_status"] == "partial"
+
+
+async def test_hosted_model_authorization_works_with_one_database_connection(
+    facade_setup, postgres_url, monkeypatch,
+):
+    """Authorization must finish before dispatch without a nested pool checkout."""
+    from dataclasses import replace
+
+    from sqlalchemy import update
+
+    from loom.db.schema import Trial
+    from loom_llm_gateway.routes import facade_anthropic
+
+    app, jwt, _, trial_id, conn_id, _ = facade_setup
+    original_factory = app.state.session_factory
+    async with original_factory() as session:
+        await session.execute(update(Trial).where(Trial.id == trial_id).values(config={
+            "agent_name": "claude-code", "claude_code_mode": "native",
+            "agent_model": {"provider": "vendor", "name": "claude-opus-4-7"},
+        }))
+        await session.commit()
+
+    engine = create_async_engine(postgres_url, pool_size=1, max_overflow=0, pool_timeout=.2)
+    app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    original_auth = facade_anthropic.verify_facade_auth
+
+    async def hosted_auth(*args, **kwargs):
+        ctx = await original_auth(*args, **kwargs)
+        # Exercise hosted model authorization; lease fencing has its own tests.
+        return replace(ctx, service_execution_lease_id=uuid4())
+
+    async def dispatch(owner):
+        assert engine.pool.checkedout() == 0
+        assert owner.identity.provider == "vendor"
+        return {"model": owner.identity.name}
+
+    monkeypatch.setattr(facade_anthropic, "verify_facade_auth", hosted_auth)
+    monkeypatch.setattr(facade_anthropic.MessagesDispatch, "complete", dispatch)
+    try:
+        response = await _post(app, jwt, **{"x-loom-provider-connection-id": str(conn_id)})
+        assert response.status_code == 200, response.text
+        assert response.json()["model"] == "claude-opus-4-7"
+    finally:
+        app.state.session_factory = original_factory
+        await engine.dispose()
