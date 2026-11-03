@@ -139,3 +139,17 @@ def test_response_identity_cannot_change_mid_stream() -> None:
     converter.feed(_chunk({"content": "First"}))
     with pytest.raises(AnthropicCompatibilityError, match="identity"):
         converter.feed(_event({"id": "other", "choices": []}))
+
+
+@pytest.mark.parametrize("reported", [{"prompt_tokens": 42}, {"prompt_tokens": 42, "completion_tokens": -1}])
+def test_invalid_usage_retains_independently_observed_input_count(reported):
+    from loom_llm_gateway.dialect import DIALECTS
+
+    converter = ChatToAnthropicStream(model="selected")
+    converter.feed(_chunk({"content": "Partial"}))
+    with pytest.raises(AnthropicCompatibilityError):
+        converter.feed(_event({"choices": [], "usage": reported}))
+    usage = DIALECTS["openai_chat"].extract_tokens({"usage": converter.usage})
+    assert usage.input_tokens == 42 and usage.output_tokens == 0
+    assert usage.provider_extras["_loom_usage_status"] == "partial"
+    assert not converter.completed

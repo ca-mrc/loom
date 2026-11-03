@@ -146,13 +146,16 @@ async def test_cancellation_keeps_already_observed_turns_and_kills_process(tmp_p
     assert len(document["steps"]) == 2 and document["metadata"]["final_state"] == "cancelled"
 
 
-async def test_cancel_during_canonical_append_exports_marked_native_partial_trace(tmp_path):
+@pytest.mark.parametrize("persisted", [False, True])
+async def test_cancel_during_canonical_append_exports_marked_native_partial_trace(tmp_path, persisted):
     import asyncio
     from datetime import UTC, datetime
 
     entered = asyncio.Event()
     class InterruptedWriter(_Writer):
         async def append(self, event):
+            if persisted:
+                self.events.append(event)
             entered.set()
             await asyncio.Event().wait()
     trial_id, writer = uuid4(), InterruptedWriter()
@@ -169,7 +172,7 @@ async def test_cancel_during_canonical_append_exports_marked_native_partial_trac
         await running
     base = dict(trial_id=trial_id, emitted_at=datetime.now(UTC), step_id="__trial__", seq=0)
     events = [TrialStartEvent(**base, task_id="t", agent_name="claude-code", agent_mode="in-box"),
-              TrialEndEvent(**base, final_state="cancelled")]
+              *writer.events, TrialEndEvent(**base, final_state="cancelled")]
     generic = project_to_atif(events, task_id="t", agent_name=runtime.name, agent_version=runtime.version)
     document = runtime.build_atif(generic, events)
     assert document["steps"][1]["extra"]["canonical_event_join"] == "partial_prefix"
