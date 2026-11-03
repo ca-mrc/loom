@@ -236,6 +236,15 @@ class DispatchAudit:
                 "error_category=%s database_reason=%s",
                 self.state.request_id, phase, category, _database_reason(exc),
             )
+            if phase in {"commit", "session_exit"}:
+                # PostgreSQL may have committed before its acknowledgement
+                # failed. Transport has not started, so close only this known
+                # receipt's still-admitted provider state. A rolled-back insert
+                # simply matches no row; an observed provider fact wins the CAS.
+                # The middleware records the actual HTTP503/cancellation rather
+                # than claiming response completion before ASGI sends it.
+                self.state.receipt_ids.append(receipt_id)
+                await self._finish(receipt_id, "not_dispatched")
             raise DispatchAuditUnavailableError("gateway dispatch audit unavailable") from None
         self.state.receipt_ids.append(receipt_id)
         return receipt_id

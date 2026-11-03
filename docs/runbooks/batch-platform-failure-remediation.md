@@ -22,6 +22,34 @@ cutoff following #2758. Restoring a blanket 20-second cutoff would reject valid
 slow generations. The actual initial transport policy and signed deadline are
 described in [provider onboarding](../integrations/provider-onboarding.md).
 
+### Admission contention and uncertain commits
+
+The authorized full475 rerun exposed additional internal audit timeouts after
+deployment. Distinguish `gateway_dispatch_admission_failed` with the fixed
+`error_category=timeout` from caller cancellation, upstream transport504 and the
+signed agent deadline. A cancelled phase histogram alone does not establish
+which one occurred or prove CPU/lock contention as the unique physical cause.
+
+Stable trial bindings no longer take an exclusive lock for the entire pool.
+They retain a shared pool lock and an exclusive binding lock until receipt
+commit; first assignment and pool writers remain exclusive. Concurrent real
+PostgreSQL regressions exercise unrelated sticky trials, first-assignment
+round-robin, configuration writers and a stale binding hint. This removes a
+reproducible serialization defect while preserving live admission checks and
+the one-second audit budget.
+
+An audit commit acknowledgement can time out after PostgreSQL has committed
+the receipt. Provider I/O has not started in that path. The known receipt ID is
+retained for bounded `not_dispatched` cleanup and independent HTTP status
+observation. This prevents a confirmed cleanup from leaving a false open
+generation in the connection cap. If cleanup also fails, preserve the unknown
+outcome and sanitized log; do not edit historical rows or blindly resubmit.
+
+Local concurrency and lost-acknowledgement regressions do not establish that
+every historical timeout had the same cause. Track each published candidate
+and its own installed acceptance separately from an already running frozen
+batch; never replace that batch's runtime profile during execution.
+
 ## Optimize before expanding resources
 
 Keep the existing CPU/memory requests and limits, database connection cap,

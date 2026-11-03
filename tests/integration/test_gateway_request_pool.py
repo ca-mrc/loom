@@ -11,8 +11,8 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import delete, select, update
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import delete, select, text, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.auth import mint_step_jwt
 from loom.db.schema import (
@@ -40,6 +40,7 @@ from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.egress_client_pool import EgressClientPool
 from loom_llm_gateway.rate_card import RateCardCache
+from loom_llm_gateway.request_pool import PoolDispatchAudit
 from tests.integration.test_service_execution_leases import (
     _cleanup_service_execution_test_rows,  # noqa: F401
     _reserve,
@@ -167,7 +168,7 @@ async def pool_setup(monkeypatch: pytest.MonkeyPatch, postgres_url: str):
         )
         apps.append(app)
 
-    def token(deadline: datetime | None = None) -> str:
+    def token(deadline: datetime | None = None, *, trial_id=trial_id, lease=lease) -> str:
         return mint_step_jwt(
             team_id=team_id,
             trial_id=trial_id,
@@ -199,6 +200,8 @@ async def pool_setup(monkeypatch: pytest.MonkeyPatch, postgres_url: str):
         token=token,
         settings=settings,
         lease_id=lease.id,
+        target=target,
+        trial_ids=[trial_id],
     )
     try:
         yield data
@@ -207,12 +210,12 @@ async def pool_setup(monkeypatch: pytest.MonkeyPatch, postgres_url: str):
             await app.state.egress_client_pool.aclose()
             await app.state.upstream_client.aclose()
         async with sessions() as session:
-            await session.execute(delete(LlmCall).where(LlmCall.trial_id == trial_id))
+            await session.execute(delete(LlmCall).where(LlmCall.trial_id.in_(data["trial_ids"])))
             await session.execute(
-                update(Trial).where(Trial.id == trial_id).values(provider_connection_id=None)
+                update(Trial).where(Trial.id.in_(data["trial_ids"])).values(provider_connection_id=None)
             )
             await session.execute(
-                delete(ModelSwitchPlan).where(ModelSwitchPlan.trial_id == trial_id)
+                delete(ModelSwitchPlan).where(ModelSwitchPlan.trial_id.in_(data["trial_ids"]))
             )
             await session.execute(
                 delete(ProviderRequestPool).where(ProviderRequestPool.connection_id == root)
@@ -257,6 +260,234 @@ async def receipts(p: dict):
                 )
             ).all()
         )
+
+
+async def _another_pool_trial(p: dict) -> dict:
+    now = datetime.now(UTC)
+    trial_id = uuid4()
+    async with p["sessions"]() as session:
+        original = await session.get(Trial, p["trial_id"])
+        assert original is not None
+        trial = Trial(
+            id=trial_id, team_id=original.team_id, task_id=original.task_id,
+            config=original.config, requires_caps=original.requires_caps,
+            state="queued", attempt_count=0, provider_connection_id=p["root"],
+        )
+        session.add(trial)
+        await session.flush()
+        lease = await _reserve(session, trial_id=trial_id, target=p["target"], now=now)
+        trial.state = "running"
+        lease.observed_state = "running"
+        await session.commit()
+    p["trial_ids"].append(trial_id)
+    return {**p, "trial_id": trial_id, "lease_id": lease.id,
+            "jwt": p["token"](trial_id=trial_id, lease=lease)}
+
+
+async def test_distinct_sticky_trials_admit_without_waiting_for_the_other_policy(
+    pool_setup: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    p = pool_setup
+    second = await _another_pool_trial(p)
+    assert (await post(p)).status_code == 200
+    assert (await post(second, replica=1)).status_code == 200
+    monkeypatch.setattr(dispatch_audit, "_AUDIT_TIMEOUT_SECONDS", 1)
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = PoolDispatchAudit._eligible
+
+    async def hold_first(self, *args, **kwargs):
+        if self.ctx.trial_id == p["trial_id"]:
+            entered.set()
+            await release.wait()
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(PoolDispatchAudit, "_eligible", hold_first)
+    first_request = asyncio.create_task(post(p))
+    other_request = None
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        other_request = asyncio.create_task(post(second, replica=1))
+        response = await asyncio.wait_for(other_request, 3)
+        assert response.status_code == 200, response.text
+        # The first transaction is still inside policy, before receipt commit.
+        assert not first_request.done()
+        assert not release.is_set()
+    finally:
+        release.set()
+        results = await asyncio.gather(
+            first_request, *([other_request] if other_request is not None else []),
+        )
+    assert all(response.status_code == 200 for response in results)
+    assert [row.provider_connection_id for row in await receipts(p)] == [p["ids"][0]] * 2
+    assert [row.provider_connection_id for row in await receipts(second)] == [p["ids"][1]] * 2
+    async with p["sessions"]() as session:
+        assert (await session.get(ProviderRequestPool, p["root"])).next_member == 2
+
+
+async def test_concurrent_first_assignments_preserve_round_robin(pool_setup: dict) -> None:
+    p = pool_setup
+    second = await _another_pool_trial(p)
+    responses = await asyncio.gather(post(p), post(second, replica=1))
+    assert all(response.status_code == 200 for response in responses)
+    async with p["sessions"]() as session:
+        bindings = list((await session.scalars(select(ProviderRequestPoolBinding).where(
+            ProviderRequestPoolBinding.pool_connection_id == p["root"],
+        ))).all())
+        assert len(bindings) == 2
+        assert {binding.member_connection_id for binding in bindings} == set(p["ids"][:2])
+        assert (await session.get(ProviderRequestPool, p["root"])).next_member == 2
+
+
+@pytest.mark.parametrize("change", ["disable", "member"])
+async def test_sticky_admission_keeps_pool_writers_excluded(
+    pool_setup: dict, monkeypatch: pytest.MonkeyPatch, change: str,
+) -> None:
+    p = pool_setup
+    assert (await post(p)).status_code == 200
+    entered, release, writer_started = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original = PoolDispatchAudit._eligible
+    writer_pid = None
+
+    async def hold_first(self, *args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original(self, *args, **kwargs)
+
+    async def edit_pool():
+        nonlocal writer_pid
+        async with p["sessions"]() as session:
+            writer_pid = await session.scalar(text("SELECT pg_backend_pid()"))
+            writer_started.set()
+            pool = await session.scalar(select(ProviderRequestPool).where(
+                ProviderRequestPool.connection_id == p["root"],
+            ).with_for_update())
+            if change == "disable":
+                pool.enabled = False
+            else:
+                member = await session.get(ProviderRequestPoolMember, (p["root"], p["root"]))
+                member.enabled = False
+            await session.commit()
+
+    monkeypatch.setattr(PoolDispatchAudit, "_eligible", hold_first)
+    request = asyncio.create_task(post(p))
+    writer = None
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        writer = asyncio.create_task(edit_pool())
+        await asyncio.wait_for(writer_started.wait(), 3)
+        async with asyncio.timeout(3), p["sessions"]() as session:
+            while not await session.scalar(text("SELECT cardinality(pg_blocking_pids(:pid))"),
+                                          {"pid": writer_pid}):
+                await asyncio.sleep(0.01)
+        assert not writer.done()
+    finally:
+        release.set()
+        response, *_ = await asyncio.gather(request, *([writer] if writer is not None else []))
+    assert response.status_code == 200, response.text
+    monkeypatch.setattr(PoolDispatchAudit, "_eligible", original)
+    if change == "member":
+        assert (await post(p)).status_code == 200
+        assert (await receipts(p))[-1].provider_connection_id == p["ids"][1]
+        async with p["sessions"]() as session:
+            assert (await session.get(ProviderRequestPool, p["root"])).next_member == 1
+    else:
+        async with p["sessions"]() as session:
+            assert (await session.get(ProviderRequestPool, p["root"])).enabled is False
+
+
+async def test_pool_disabled_after_sticky_hint_does_not_dispatch(
+    pool_setup: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    p = pool_setup
+    assert (await post(p)).status_code == 200
+    original = AsyncSession.scalar
+    disabled = False
+
+    async def disable_after_hint(session, statement, *args, **kwargs):
+        nonlocal disabled
+        result = await original(session, statement, *args, **kwargs)
+        if (not disabled and result == p["trial_id"]
+                and str(statement).startswith("SELECT provider_request_pool_bindings.trial_id")):
+            disabled = True
+            async with p["sessions"]() as other:
+                await other.execute(update(ProviderRequestPool).where(
+                    ProviderRequestPool.connection_id == p["root"],
+                ).values(enabled=False))
+                await other.commit()
+        return result
+
+    monkeypatch.setattr(AsyncSession, "scalar", disable_after_hint)
+    response = await post(p)
+    assert response.status_code == 409, response.text
+    assert disabled
+    assert len(await receipts(p)) == 1
+    assert len(p["captures"]["requests"]) == 1
+
+
+async def test_deleted_sticky_hint_restarts_exclusive_assignment(
+    pool_setup: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    p = pool_setup
+    assert (await post(p)).status_code == 200
+    original = AsyncSession.scalar
+    deleted_hint = False
+
+    async def remove_after_hint(session, statement, *args, **kwargs):
+        nonlocal deleted_hint
+        result = await original(session, statement, *args, **kwargs)
+        if (not deleted_hint and result == p["trial_id"]
+                and str(statement).startswith("SELECT provider_request_pool_bindings.trial_id")):
+            deleted_hint = True
+            async with p["sessions"]() as other:
+                await other.execute(delete(ProviderRequestPoolBinding).where(
+                    ProviderRequestPoolBinding.pool_connection_id == p["root"],
+                    ProviderRequestPoolBinding.trial_id == p["trial_id"],
+                ))
+                await other.commit()
+        return result
+
+    monkeypatch.setattr(AsyncSession, "scalar", remove_after_hint)
+    response = await post(p)
+    assert response.status_code == 200, response.text
+    assert deleted_hint
+    rows = await receipts(p)
+    assert len(rows) == 2
+    assert rows[-1].provider_connection_id == p["ids"][1]
+    async with p["sessions"]() as session:
+        binding = await session.get(ProviderRequestPoolBinding, (p["root"], p["trial_id"]))
+        assert binding.member_connection_id == p["ids"][1]
+        assert (await session.get(ProviderRequestPool, p["root"])).next_member == 2
+
+
+@pytest.mark.parametrize(("error_type", "phase"), [
+    (httpx.ConnectTimeout, "connect"), (httpx.ReadTimeout, "read"),
+    (httpx.WriteTimeout, "write"), (httpx.PoolTimeout, "pool"),
+    (httpx.TimeoutException, "unknown"),
+])
+async def test_pool_timeout_preserves_only_safe_transport_phase(
+    pool_setup: dict, caplog: pytest.LogCaptureFixture, error_type, phase: str,
+) -> None:
+    p = pool_setup
+    secret = "private-timeout-endpoint-and-credential"
+
+    async def timeout(request):
+        raise error_type(secret, request=request)
+
+    p["captures"]["handler"] = timeout
+    response = await post(p)
+    assert response.status_code == 504
+    rows = await receipts(p)
+    assert len(rows) == 1 and rows[0].provider_outcome == "transport_error"
+    messages = [record.getMessage() for record in caplog.records
+                if record.getMessage().startswith("request_pool_upstream_timeout ")]
+    assert len(messages) == 1
+    assert f"phase={phase}" in messages[0]
+    assert f"receipt_id={rows[0].id}" in messages[0]
+    assert f"request_id={rows[0].request_id}" in messages[0]
+    assert f"provider_connection_id={p['root']}" in messages[0]
+    assert secret not in caplog.text
+    assert "test-credential-" not in messages[0]
+    assert "provider-0.example.test" not in messages[0]
 
 
 async def test_trial_stays_on_one_member_across_replicas(pool_setup: dict) -> None:
