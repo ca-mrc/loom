@@ -534,12 +534,14 @@ async def _driver_factory(
                 f"--gpu is not supported by --backend {backend}. "
                 "Use --backend modal for GPU trials.",
             )
-        return lambda: DockerDriver(image=image, workspace=cfg.environment.workdir)
+        return lambda: DockerDriver(image=image, workspace=cfg.environment.workdir,
+                                    network_policy_baseline=cfg.environment.baseline_network_policy)
     # backend == "modal"
     from loom_drivers.modal.config import ModalConfig
     from loom_drivers.modal.driver import ModalDriver
     modal_cfg = ModalConfig.from_env()
-    return lambda: ModalDriver(image=image, gpu=gpu, config=modal_cfg)
+    return lambda: ModalDriver(image=image, gpu=gpu, config=modal_cfg,
+                               network_policy_baseline=cfg.environment.baseline_network_policy)
 
 
 @asynccontextmanager

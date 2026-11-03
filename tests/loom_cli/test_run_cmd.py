@@ -216,5 +216,7 @@ async def test_driver_factory_freezes_task_network_policy_before_start(tmp_path,
     task = TaskConfig.model_validate({"schema_version": "1", "task": {"id": "t", "name": "t"},
         "environment": {"os": "linux", "docker_image": "task:fixture", "baseline_network_policy": {"kind": "no-network"}},
         "agent": {"name": "oracle"}, "verifier": {"name": "script"}, "steps": [{"name": "solve"}]})
+    monkeypatch.setenv("MODAL_TOKEN_ID", "fixture-id")
+    monkeypatch.setenv("MODAL_TOKEN_SECRET", "fixture-secret")
     factory = await _driver_factory(backend, task, task_dir=tmp_path, task_checksum="a" * 64)
     assert factory().network_policy_baseline == NoNetwork()
