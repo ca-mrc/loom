@@ -29,6 +29,7 @@ import httpx
 from pydantic import TypeAdapter, ValidationError
 
 from loom.attempt_deadline import AttemptDeadline
+from loom.driver.base import Driver
 from loom.driver.guest_compose import GuestComposeRuntime, GuestComposeServiceDriver
 from loom.driver.service_sandbox import SandboxRPCError, ServiceSandboxDriver
 from loom.errors import AgentError, DriverError, exception_info
@@ -310,7 +311,7 @@ def _remaining(deadline: AttemptDeadline | None, fallback: float) -> float:
     return deadline.remaining() if deadline else fallback
 
 
-async def _check_install(driver: ServiceSandboxDriver | GuestComposeServiceDriver, setup: HarnessSetup, timeout: float) -> bool:
+async def _check_install(driver: Driver | ServiceSandboxDriver | GuestComposeServiceDriver, setup: HarnessSetup, timeout: float) -> bool:
     result = await driver.exec(shlex.join(setup.check), timeout_sec=timeout)
     return result.return_code == 0 and (setup.check_output is None or result.stdout.decode(errors="replace").strip() == setup.check_output)
 
@@ -396,7 +397,7 @@ async def _run_install_command(
 
 
 async def _select_pinned_archive(
-    driver: ServiceSandboxDriver | GuestComposeServiceDriver, setup: HarnessSetup, deadline: AttemptDeadline | None,
+    driver: Driver | ServiceSandboxDriver | GuestComposeServiceDriver, setup: HarnessSetup, deadline: AttemptDeadline | None,
 ) -> PinnedArchive:
     assert setup.archive is not None
     if setup.archive_musl is None:
@@ -412,8 +413,9 @@ async def _select_pinned_archive(
 
 
 async def _install_pinned_archive(
-    driver: ServiceSandboxDriver | GuestComposeServiceDriver, workspace: Path, setup: HarnessSetup,
+    driver: Driver | ServiceSandboxDriver | GuestComposeServiceDriver, workspace: Path, setup: HarnessSetup,
     environment: dict[str, str], deadline: AttemptDeadline | None,
+    *, local_direct: bool = False, archive_cache: Path | None = None,
 ) -> None:
     """Fetch and verify the release in trusted code, then extract it in the sandbox."""
     import base64
@@ -423,32 +425,56 @@ async def _install_pinned_archive(
     assert setup.install_root is not None
     local = workspace / _ARCHIVE_DOWNLOAD
     local.parent.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha512()
-    received = 0
+    # Hosted callers must keep their authorized egress proxy. Only the CLI's
+    # explicit local path can download directly from the pinned release URL.
+    proxy = None if local_direct else environment["https_proxy"]
+    cached = (archive_cache / (hashlib.sha256(archive.integrity.encode()).hexdigest() + ".tgz")
+              if archive_cache is not None else None)
+
+    def valid(path: Path) -> bool:
+        if not path.is_file() or path.stat().st_size > MAX_SETUP_CACHE_BYTES:
+            return False
+        with path.open("rb") as source:
+            digest = hashlib.file_digest(source, "sha512").digest()
+        return "sha512-" + base64.b64encode(digest).decode() == archive.integrity
+
     try:
-        async with httpx.AsyncClient(
-            proxy=environment["https_proxy"], trust_env=False, follow_redirects=False,
-            timeout=httpx.Timeout(_remaining(deadline, setup.timeout_seconds), connect=30),
-        ) as client, client.stream("GET", archive.url) as response:
-            if response.status_code != 200:
-                raise ServiceExecutionTaskError(f"harness archive download failed with HTTP {response.status_code}")
-            with local.open("wb") as sink:
-                async for chunk in response.aiter_bytes(1024 * 1024):
-                    received += len(chunk)
-                    if received > MAX_SETUP_CACHE_BYTES:
-                        raise ServiceExecutionTaskError("harness archive exceeds the size limit")
-                    digest.update(chunk)
-                    sink.write(chunk)
+        if cached is not None and valid(cached):
+            shutil.copyfile(cached, local)
+        else:
+            received = 0
+            async with httpx.AsyncClient(
+                proxy=proxy, trust_env=False, follow_redirects=False,
+                timeout=httpx.Timeout(_remaining(deadline, setup.timeout_seconds), connect=30),
+            ) as client, client.stream("GET", archive.url) as response:
+                if response.status_code != 200:
+                    raise ServiceExecutionTaskError(f"harness archive download failed with HTTP {response.status_code}")
+                with local.open("wb") as sink:
+                    async for chunk in response.aiter_bytes(1024 * 1024):
+                        received += len(chunk)
+                        if received > MAX_SETUP_CACHE_BYTES:
+                            raise ServiceExecutionTaskError("harness archive exceeds the size limit")
+                        sink.write(chunk)
+        # Check the actual upload copy as well: concurrent cache replacement
+        # must never turn a verified entry into unverified sandbox bytes.
+        if not valid(local):
+            raise ServiceExecutionTaskError("harness archive integrity mismatch")
+        if cached is not None:
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=cached.parent, suffix=".tmp", delete=False) as staged:
+                staged_path = Path(staged.name)
+            try:
+                shutil.copyfile(local, staged_path)
+                staged_path.replace(cached)
+            finally:
+                staged_path.unlink(missing_ok=True)
     except httpx.HTTPError as exc:
         local.unlink(missing_ok=True)
         raise ServiceExecutionTaskError("harness archive download failed") from exc
     except BaseException:
         local.unlink(missing_ok=True)
         raise
-    if "sha512-" + base64.b64encode(digest.digest()).decode() != archive.integrity:
-        local.unlink(missing_ok=True)
-        raise ServiceExecutionTaskError("harness archive integrity mismatch")
-    print(f"harness archive verified ({received} bytes)", flush=True)
+    print(f"harness archive verified ({local.stat().st_size} bytes)", flush=True)
     root = shlex.quote(setup.install_root)
     remote = shlex.quote(str(_SANDBOX_RELEASE_ARCHIVE))
     try:
