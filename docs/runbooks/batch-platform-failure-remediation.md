@@ -9,13 +9,15 @@ evidence, not current installed acceptance. Counts overlap across causes.
 
 | Boundary | Repair and acceptance | Remaining evidence |
 | --- | --- | --- |
-| Internal ledger | Select accounting columns without raw provider logs; skip unchanged/already joined trajectory reads; retry transient background reads without cancelling the healthy session. Dispatch and final synchronization remain strict. | Real PostgreSQL/HTTP scope, generation and revocation tests; deployed latency and CPU still need measurement. |
+| Internal ledger | Select accounting columns without raw provider logs; skip unchanged/already joined trajectory reads; retry a transient call-ledger read on the background observer, before a command is recorded, and at final reconciliation. | Real PostgreSQL/HTTP scope, generation and revocation tests; deployed latency and CPU still need measurement. |
 | Trial/lease locks | Acquire Trial before lease across observations, cancellation, output, dispatch and materialization. | A deterministic concurrent cancellation/observation regression fails before the change and passes after it. It proves a concrete lock cycle, not the identity of all 28 historical deadlocks. |
 | Dispatch audit | Keep durable admission before transport and the existing one-second audit deadline. Measure checkout, policy, capacity, execute and commit awaits separately; expose fixed SQLSTATE categories without driver text. | Correlate any remaining admission/observation failures with database wait and CPU measurements. Audit failure never authorizes provider transport. |
 | Retry budget | Bound subsequent sends by the remaining retry budget; retain the configured initial-send timeout and signed attempt deadline. Budget exhaustion has its own cause. | Provider request IDs still require upstream correlation to distinguish supplier, proxy and network delays. |
 | Separate verification | Grade a safely committed main-phase timeout exactly once; preserve execution timeout independently of numeric reward, including zero. Retain capacity-blocked work instead of failing it solely because it waited 30 minutes. | No historical task is automatically retried or regraded. Task-authored scoring failures remain separate. |
 | Startup/verifier diagnosis | Name the internal startup operation and safe transport phase; retain numeric verifier exit code before secondary collection/cleanup failures. | OOM workload allocation and tmux process disappearance need their original task/process evidence; existing runtime diagnostics remain authoritative. |
 | Usage/cost | Missing usage is unknown, partial usage reduces confidence, and incomplete totals are labelled known subtotals. | Provider invoices and missing vendor usage cannot be reconstructed as a confirmed bill by a code change. |
+
+A running sandbox keeps its model token and its call-ledger read when the only target fault is a stale health timestamp. Dispatch and final reconciliation retry that transport failure. New sandbox admission, including a separate verifier, still requires a fresh health report. See [in-flight sandbox authority](../architecture/inflight-sandbox-authority.md).
 
 The stored pool `attempt_timeout_sec` is intentionally not the initial send
 cutoff following #2758. Restoring a blanket 20-second cutoff would reject valid

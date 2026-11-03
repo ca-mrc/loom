@@ -17,7 +17,11 @@ from uuid import UUID
 from loom.agent.direct_provider import DirectCallLedger, DirectProviderConnection
 from loom.agent.terminus2.checkpoint_bridge import HarborCheckpointBridge
 from loom.agent.terminus2.dispatch_checkpoint import install_dispatch_checkpoint
-from loom.agent.terminus2.gateway_ledger import CheckpointBridgeError, LedgerReadUnavailableError
+from loom.agent.terminus2.gateway_ledger import (
+    CheckpointBridgeError,
+    LedgerReadUnavailableError,
+    retry_ledger_read,
+)
 from loom.agent.terminus2.harbor_environment import (
     LoomHarborEnvironment,
     ensure_sandbox_deps,
@@ -1159,10 +1163,9 @@ class LoomTerminus2Runtime:
                         allow_incomplete=True,
                     )
                 except LedgerReadUnavailableError:
-                    # Observation RPC availability must not cancel a running
-                    # agent. Each HTTP read is bounded; wait before retrying.
-                    # Dispatch and final reconciliation remain strict, while
-                    # auth/fencing and persistence errors still stop this loop.
+                    # A missed call-ledger read does not cancel a running agent.
+                    # Dispatch and final reconciliation retry the same transport
+                    # error. Auth, fencing, and persistence errors still stop this loop.
                     poll_delay = 5.0
                 await _write_episode_checkpoint()
                 try:
@@ -1181,11 +1184,17 @@ class LoomTerminus2Runtime:
                 async def record_dispatch(step: dict[str, Any], episode: int) -> None:
                     require_active()
                     previous = [entry.model_dump(mode="json") for entry in agent._trajectory_steps]
-                    if self._attempt_deadline is None:
-                        await bridge.record_dispatch(step, episode=episode, preceding_steps=previous)
-                    else:
-                        async with asyncio.timeout(self._attempt_deadline.require_remaining()):
+
+                    async def _dispatch() -> None:
+                        if self._attempt_deadline is None:
                             await bridge.record_dispatch(step, episode=episode, preceding_steps=previous)
+                        else:
+                            async with asyncio.timeout(self._attempt_deadline.require_remaining()):
+                                await bridge.record_dispatch(
+                                    step, episode=episode, preceding_steps=previous,
+                                )
+
+                    await retry_ledger_read(_dispatch)
                     require_active()
 
                 async def record_loss(text: str) -> None:
@@ -1236,15 +1245,16 @@ class LoomTerminus2Runtime:
             completeness = "partial"
             try:
                 _require_attempt_mutation_active(trajectory, self._attempt_deadline)
-                await bridge.sync_trajectory_file(
+                await retry_ledger_read(lambda: bridge.sync_trajectory_file(
                     trajectory_path,
                     completeness=completeness,
-                )
+                ))
                 await _write_episode_checkpoint()
             except (
                 AttemptDeadlineExceededError,
                 AttemptTrajectoryFencedError,
                 CheckpointBridgeError,
+                LedgerReadUnavailableError,
             ):
                 pass
             raise
@@ -1258,10 +1268,10 @@ class LoomTerminus2Runtime:
         finally:
             try:
                 _require_attempt_mutation_active(trajectory, self._attempt_deadline)
-                await bridge.sync_trajectory_file(
+                await retry_ledger_read(lambda: bridge.sync_trajectory_file(
                     trajectory_path,
                     completeness=completeness,
-                )
+                ))
                 await _write_episode_checkpoint()
                 _require_attempt_mutation_active(trajectory, self._attempt_deadline)
                 _assert_harbor_artifacts_have_no_step_secrets(logs_root, self.direct_provider)

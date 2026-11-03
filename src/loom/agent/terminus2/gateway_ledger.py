@@ -2,18 +2,45 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+import asyncio
+from collections.abc import Awaitable, Callable
+from typing import Any, Protocol, TypeVar
 from uuid import UUID
 
 from loom.errors import AgentError
 
+_T = TypeVar("_T")
+
 
 class LedgerReadUnavailableError(AgentError):
-    """A bounded, retryable observation read failed; identity remains unverified.
+    """A bounded, retryable call-ledger read failed; identity remains unverified.
 
-    Only the background observer may defer this error. Dispatch and final
-    materialization still require an authoritative successful read.
+    The read is the trial's recorded model calls, not a model catalog check.
+    A transport failure is retried on the background observer, before a command
+    is recorded, and at final reconciliation. Auth, fencing, and an ambiguous
+    join still fail closed.
     """
+
+
+async def retry_ledger_read(
+    operation: Callable[[], Awaitable[_T]],
+    *,
+    attempts: int = 3,
+    delay_seconds: float = 5.0,
+    sleep: Callable[[float], Awaitable[None]] | None = None,
+) -> _T:
+    """Retry one call-ledger read. The last failure is raised."""
+    if attempts < 1:
+        raise ValueError("ledger read attempts must be positive")
+    pause = asyncio.sleep if sleep is None else sleep
+    for attempt in range(1, attempts + 1):
+        try:
+            return await operation()
+        except LedgerReadUnavailableError:
+            if attempt == attempts:
+                raise
+            await pause(delay_seconds)
+    raise AssertionError("ledger read retry exhausted without a result")
 
 
 class CheckpointBridgeError(Exception):

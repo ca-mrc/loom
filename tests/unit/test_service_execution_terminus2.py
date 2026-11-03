@@ -530,12 +530,20 @@ def test_adapter_rejects_nonbroker_gateway(url: str) -> None:
 @pytest.mark.parametrize("final_unavailable", [False, True])
 async def test_background_ledger_transport_failure_does_not_cancel_session(tmp_path, monkeypatch, final_unavailable):
     from loom.agent.terminus2 import runtime as module
-    from loom.agent.terminus2.gateway_ledger import LedgerReadUnavailableError
+    from loom.agent.terminus2.gateway_ledger import LedgerReadUnavailableError, retry_ledger_read
 
     _patch_harbor(monkeypatch)
     original = module.HarborCheckpointBridge.sync_trajectory_file
     observed = asyncio.Event()
     calls = []
+
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    async def retry_without_wait(operation):
+        return await retry_ledger_read(operation, sleep=no_wait)
+
+    monkeypatch.setattr(module, "retry_ledger_read", retry_without_wait)
 
     async def sync(self, *args, **kwargs):
         calls.append(kwargs.get("allow_incomplete", False))
@@ -578,7 +586,7 @@ async def test_background_ledger_transport_failure_does_not_cancel_session(tmp_p
         await running
         events = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
         assert any(row["kind"] == "llm_call" and row["gateway_request_id"] == "gw-real-1" for row in events)
-    assert calls == [True, False]
+    assert calls == [True, False] if not final_unavailable else [True, False, False, False]
 
 
 @pytest.mark.asyncio
