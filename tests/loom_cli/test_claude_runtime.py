@@ -106,3 +106,41 @@ async def test_restricted_network_exception_is_only_relay_tcp_port_and_removed_o
     assert "-I OUTPUT" in driver.commands[0] and "-D OUTPUT" in driver.commands[1]
     assert all("-d 172.17.0.1 -p tcp --dport 45678" in c for c in driver.commands)
     assert not any("-F" in c or "/16" in c for c in driver.commands)
+
+
+async def test_cancellation_keeps_already_observed_turns_and_kills_process(tmp_path):
+    import asyncio
+    import json
+    from datetime import UTC, datetime
+
+    from loom.trajectory.attempt_guard import AttemptFence, AttemptTrajectoryGuard
+
+    trial_id, writer = uuid4(), _Writer()
+    relay = _Relay(trial_id)
+    task, _, _ = _inputs()
+    cfg = TrialConfig(agent_name="claude-code", agent_model=ModelSpec(provider="local", name="endpoint/wire-model"), claude_code_mode="chat")
+    runtime = LocalClaudeRuntime(trial_id=trial_id, task_config=task, trial_config=cfg, relay=relay, output_dir=tmp_path)
+    sandbox = _ClaudeSandbox([])
+    waiting = asyncio.Event()
+    async def partial():
+        yield b"".join(json.dumps(item).encode() + b"\n" for item in _lines()[:3])
+        waiting.set()
+        await asyncio.Event().wait()
+    sandbox.process.stdout = partial()
+    fence = AttemptFence()
+    guard = AttemptTrajectoryGuard(writer, fence)
+    running = asyncio.create_task(runtime.run(instruction="Fix it.", env=sandbox, trajectory=guard,
+        mcp=[], skills_dir=None, step_id=task.steps[0].name))
+    await asyncio.wait_for(waiting.wait(), 3)
+    assert len(writer.events) == 3  # visible before process termination
+    fence.latch("agent_timeout")
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert sandbox.process.killed and relay.active is None
+    base = dict(trial_id=trial_id, emitted_at=datetime.now(UTC), step_id="__trial__", seq=0)
+    events = [TrialStartEvent(**base, task_id="t", agent_name="claude-code", agent_mode="in-box"),
+              *writer.events, TrialEndEvent(**base, final_state="cancelled")]
+    generic = project_to_atif(events, task_id="t", agent_name=runtime.name, agent_version=runtime.version)
+    document = runtime.build_atif(generic, events)
+    assert len(document["steps"]) == 2 and document["metadata"]["final_state"] == "cancelled"
