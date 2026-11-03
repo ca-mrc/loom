@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from loom.db.schema import (
+    ServiceExecutionClass,
     ServiceExecutionLease,
     ServiceExecutionTarget,
     TaskImageMaterialization,
@@ -67,8 +68,8 @@ from loom_control_plane.service_execution_task_snapshot import (
 
 _LOG = logging.getLogger(__name__)
 _RESERVATION_REQUEST_NAMESPACE = UUID("aaf78d09-4268-4dc5-81ee-4c2408ce2611")
-# Non-capacity conflicts still have a bounded recovery window. Capacity waits
-# retain the durable committed workspace until admitted or explicitly cancelled.
+# Other handoff conflicts still have a bounded recovery window. Typed capacity
+# and target-readiness waits retain committed output until admission/cancellation.
 VERIFIER_HANDOFF_TIMEOUT = timedelta(minutes=30)
 
 
@@ -735,7 +736,8 @@ async def reserve_next_verifier_executions(
                     placement_policy=placement_policy,
                 ))
         except (ExecutionProvisioningBlockedError, ServiceExecutionConflict) as exc:
-            # Capacity, rollout and target health are waits, bounded per handoff.
+            # Typed provisioning waits retain their handoff; other conflicts
+            # keep the existing bounded recovery window.
             waiting_since = _handoff_pending_since(trial) or parent.deleted_at
             if (not isinstance(exc, ExecutionProvisioningBlockedError)
                     and waiting_since is not None
@@ -839,7 +841,32 @@ async def _reserve_verifier_candidate(
             pool_id=parent_target.logical_pool_id, execution_class_id=plan.execution_class_id, now=current_time,
             placement_policy=placement_policy, region=parent_target.region)
         target_ids = [target.id for target in targets
-                      if requirements.data_residency is None or target.data_residency == requirements.data_residency]
+                      if target.data_residency == parent_target.data_residency
+                      and (requirements.data_residency is None
+                           or target.data_residency == requirements.data_residency)]
+        if not target_ids:
+            configured = select(ServiceExecutionTarget.id).join(
+                ServiceExecutionClass,
+                ServiceExecutionClass.id == ServiceExecutionTarget.execution_class_id,
+            ).where(
+                ServiceExecutionClass.enabled.is_(True),
+                ServiceExecutionTarget.environment == parent_target.environment,
+                ServiceExecutionTarget.logical_pool_id == parent_target.logical_pool_id,
+                ServiceExecutionTarget.execution_class_id == plan.execution_class_id,
+                ServiceExecutionTarget.region == parent_target.region,
+                ServiceExecutionTarget.data_residency == parent_target.data_residency,
+                ServiceExecutionTarget.desired_state == "active",
+            )
+            if requirements.data_residency is not None:
+                configured = configured.where(
+                    ServiceExecutionTarget.data_residency == requirements.data_residency,
+                )
+            if await session.scalar(configured.limit(1)) is not None:
+                # Health/readiness can lapse while capacity waits for hours.
+                # Do not spend that capacity-wait age as a configuration-error
+                # deadline. No reservation bypasses _ready_targets or its fresh
+                # healthy observation requirement on the next pass.
+                raise ExecutionProvisioningBlockedError("execution_target_unavailable")
     blocked = None
     for target_id in target_ids:
         try:

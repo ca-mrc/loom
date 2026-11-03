@@ -120,3 +120,31 @@ internal error, but the underlying reports were not retained; their deeper
 initiating causes cannot be recovered from those exported bytes. This source
 fix does not reconstruct historical reports, change task scripts, regrade or
 rerun tasks. It is not deployed or accepted by the 475-task cohort frozen on `7badcb61b784`.
+
+
+### Deferred verifier health and upload-read authority
+
+Capacity waiting can outlast an agent runtime. When a configured, active,
+compatible target temporarily loses fresh health or readiness, retain the
+committed verifier handoff as a typed provisioning wait. Every retry still
+requires a fresh healthy target before reserving capacity; disabled classes,
+foreign region/residency, invalid workspace and other permanent conflicts keep
+their existing rejection behavior. Do not charge earlier capacity waiting
+against a later target-health lapse or increase the health TTL to hide it.
+
+The actuator validates committed artifact-backed output during finalization.
+Its database role needs SELECT on `artifact_upload_sessions` and
+`artifact_upload_files`, alongside the existing `artifacts` read. Both upload
+tables remain in its explicit read-only inventory: no upload INSERT, UPDATE or
+DELETE authority is granted. Normal idempotent database bootstrap must restore
+these reads, and restricted-role verification must exercise the actual handoff
+and timed-out finalization paths, not only inspect a table-name list.
+
+A database callback failure during a Kubernetes watch can be wrapped as a
+transport error. Inspect the underlying safe exception class/SQLSTATE before
+attributing this to Kubernetes credentials, TLS or API availability. In #2768,
+missing upload-table SELECT interrupted reconciliation, stopped health refresh,
+and then converted old capacity waits to verifier-unavailable outcomes. Source
+repair cannot regrade those historical failures or make the frozen rerun proof
+of the new version. Restore operational authority only through the applicable
+approved maintenance path, then independently read back health and progress.
