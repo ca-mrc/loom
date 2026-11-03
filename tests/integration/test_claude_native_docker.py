@@ -101,8 +101,28 @@ async def test_real_claude_local_read_write_edit_and_verify(claude_task_image, t
             rate_cards=RateCardTable((RateCardEntry("local:fixture", "code-model", 1, 1, 0, 0),)))
         relays.append(instance)
         return instance
+    network_checks = []
+    class InspectedDriver(DockerDriver):
+        async def exec_streaming(self, argv, **kwargs):
+            rules = (await self.exec("iptables -S OUTPUT")).stdout.decode()
+            from urllib.parse import urlsplit
+            endpoint = urlsplit(relays[0].base_url)
+            assert "-P OUTPUT DROP" in rules
+            accepted = [line for line in rules.splitlines() if f"-d {endpoint.hostname}/32" in line and "-j ACCEPT" in line]
+            assert len(accepted) == 1 and f"--dport {endpoint.port}" in accepted[0] and "-p tcp" in accepted[0]
+            network_checks.append("agent")
+            return await super().exec_streaming(argv, **kwargs)
+
+        async def exec(self, command, **kwargs):
+            if command == "sh /workspace/verify.sh":
+                assert relays[0]._active is None
+                rules = (await super().exec("iptables -S OUTPUT")).stdout.decode()
+                assert "--dport" not in rules and "-P OUTPUT DROP" in rules
+                network_checks.append("verifier")
+            return await super().exec(command, **kwargs)
+
     def driver():
-        instance = DockerDriver(image=image, workspace=PurePosixPath("/workspace"))
+        instance = InspectedDriver(image=image, workspace=PurePosixPath("/workspace"))
         drivers.append(instance)
         return instance
     monkeypatch.setattr(runner_module, "LocalClaudeRelay", relay)
@@ -133,6 +153,7 @@ async def test_real_claude_local_read_write_edit_and_verify(claude_task_image, t
     result = await runner.run()
     assert result.state == TrialState.SUCCEEDED, result.model_dump_json(indent=2)
     assert result.reward == {"passed": 1.0} and len(calls) == 4
+    assert network_checks == ["agent", "verifier"]
     assert "native-seed-evidence" in json.dumps(calls[1]["messages"])
     final_messages = json.dumps(calls[-1]["messages"])
     assert all(tool_id in final_messages for tool_id in ("read_seed", "write_proof", "edit_proof"))
