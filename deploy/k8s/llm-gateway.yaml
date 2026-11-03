@@ -34,6 +34,8 @@ spec:
               value: "0.0.0.0"
             - name: LOOM_GW_BIND_PORT
               value: "9100"
+            - name: LOOM_GW_CONNECTION_QUEUE_MAX_WAIT_SEC
+              value: "120.0"
             - name: LOOM_GW_DB_URL
               valueFrom:
                 secretKeyRef:

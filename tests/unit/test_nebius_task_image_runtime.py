@@ -1713,13 +1713,13 @@ def test_large_total_cache_budget_does_not_raise_single_component_limit(
     directory = work / "cache-out/0"
     directory.mkdir(parents=True)
     with (directory / "layer").open("wb") as output:
-        output.truncate(1024**3 + 1)  # sparse: no GiB allocation/read required
+        output.truncate(runtime._CACHE_BYTES + 1)  # sparse: no allocation/read required
     runtime.publish(claim, work, tmp_path / "secrets", receipt_path=tmp_path / "receipt.json")
     assert len(calls) == 1 and not cache.uploads
     assert not any(key.endswith(("manifest.json", ".tar")) for key in cache.objects)
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
     refused = next(row for row in events if row.get("reason") == "byte_budget_exceeded")
-    assert refused["budget_bytes"] == 1024**3
+    assert refused["budget_bytes"] == runtime._CACHE_BYTES
 
 
 @pytest.mark.parametrize("total_mib,kept", [(4096, False), (65536, True)])

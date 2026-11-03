@@ -560,6 +560,20 @@ def test_gateway_rotates_configured_pool_without_insert_delete_privileges(
                     with pytest.raises(psycopg.errors.InsufficientPrivilege):
                         db.execute(statement)
                     db.rollback()
+            for table, privileges in (
+                ("provider_request_pool_bindings", (True, True, True, False)),
+                ("provider_connection_timeout_health", (True, True, True, False)),
+                ("provider_connection_timeout_observations", (True, False, True, False)),
+            ):
+                assert db.execute(
+                    "SELECT has_table_privilege(current_user,%s,'SELECT'), "
+                    "has_table_privilege(current_user,%s,'UPDATE'), "
+                    "has_table_privilege(current_user,%s,'INSERT'), "
+                    "has_table_privilege(current_user,%s,'DELETE')", (table,) * 4,
+                ).fetchone() == privileges
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    db.execute(f"DELETE FROM {table} WHERE false")
+                db.rollback()
         with psycopg.connect(database_url) as db:
             assert db.execute(
                 "SELECT next_member FROM provider_request_pools WHERE connection_id=%s", (root,),
@@ -573,6 +587,21 @@ def test_gateway_rotates_configured_pool_without_insert_delete_privileges(
                     "SELECT has_table_privilege('loom_actuator',%s,'SELECT'), "
                     "has_table_privilege('loom_actuator',%s,'UPDATE')", (table, table),
                 ).fetchone() == (False, False)
+                for role in ("loom_service", "loom_control_plane"):
+                    assert db.execute(
+                        "SELECT has_table_privilege(%s,%s,'SELECT'), "
+                        "has_table_privilege(%s,%s,'INSERT'), "
+                        "has_table_privilege(%s,%s,'UPDATE'), "
+                        "has_table_privilege(%s,%s,'DELETE')", (role, table) * 4,
+                    ).fetchone() == (True, True, True, True)
+            for table in (
+                "provider_request_pool_bindings",
+                "provider_connection_timeout_health",
+                "provider_connection_timeout_observations",
+            ):
+                assert db.execute(
+                    "SELECT has_table_privilege('loom_actuator',%s,'SELECT')", (table,),
+                ).fetchone() == (False,)
                 for role in ("loom_service", "loom_control_plane"):
                     assert db.execute(
                         "SELECT has_table_privilege(%s,%s,'SELECT'), "

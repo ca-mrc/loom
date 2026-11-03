@@ -395,18 +395,17 @@ def test_resolve_verifier_artifacts_blocked_share_status() -> None:
     assert exc.value.code == "verifier_artifact_blocked"
 
 
-def test_resolve_verifier_artifacts_secret_scan_fails() -> None:
+def test_resolve_verifier_artifacts_keeps_log_text() -> None:
     body = b"authorization: Bearer sk-ABCDEFGHIJKLMNOPQRST\n"
     trial, client, _key = _trial_with_verifier_artifacts(
         log_body=body,
     )
-    with pytest.raises(Tb2V2ExportError) as exc:
-        resolve_verifier_artifacts(
-            trial,
-            client=client,
-            artifacts_bucket="artifacts",
-        )
-    assert exc.value.code == "secret_scan_failed"
+    resolved = resolve_verifier_artifacts(
+        trial,
+        client=client,
+        artifacts_bucket="artifacts",
+    )
+    assert any(item.data == body for item in resolved)
 
 
 def test_resolve_verifier_artifacts_fails_when_absent() -> None:

@@ -30,8 +30,9 @@ def test_0187_refuses_busy_relations_before_any_schema_change(
     config.set_main_option('sqlalchemy.url', url.render_as_string(hide_password=False).replace('%', '%%'))
     engine = create_engine(isolated_migration_postgres_url)
     try:
-        if direction == 'upgrade':
-            command.downgrade(config, '0186')
+        # Alembic runs a multi-step downgrade in one transaction, so start
+        # directly at 0187 to observe its own refusal.
+        command.downgrade(config, '0186' if direction == 'upgrade' else '0187')
         with engine.begin() as connection:
             connection.exec_driver_sql(f'LOCK TABLE "{table}" IN {lock_mode} MODE')
             with pytest.raises(DBAPIError, match='could not obtain lock'):

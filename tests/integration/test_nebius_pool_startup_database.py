@@ -470,7 +470,9 @@ def observe(url, spec, *, mode='closed', manager_revision='0176'):
     return rows[0][0]
 
 
-@pytest.mark.parametrize(('revision', 'prefer_warm'), [('0186', None), ('0187', False), ('0187', True)])
+@pytest.mark.parametrize(('revision', 'prefer_warm'), [
+    ('0186', None), ('0187', False), ('0187', True), ('0188', False), ('0188', True),
+])
 async def test_startup_authority_excludes_only_independent_preference(
     isolated_migration_postgres_url, revision, prefer_warm,
 ):
@@ -479,7 +481,7 @@ async def test_startup_authority_excludes_only_independent_preference(
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     url = isolated_migration_postgres_url
-    if revision == '0186':
+    if revision != '0188':
         config = Config('database/migrations/alembic.ini')
         config.set_main_option('sqlalchemy.url', url.replace('%', '%%'))
         await asyncio.to_thread(command.downgrade, config, revision)

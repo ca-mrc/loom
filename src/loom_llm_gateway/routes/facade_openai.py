@@ -43,7 +43,6 @@ Out of scope for this route (explicit follow-ups):
 
 from __future__ import annotations
 
-import asyncio
 import json
 from dataclasses import replace
 from typing import Any
@@ -69,7 +68,7 @@ from loom_llm_gateway.model_switch_correlation import (
     persist_correlated_intent,
 )
 from loom_llm_gateway.request_params import normalize_request_params
-from loom_llm_gateway.request_pool import prepare_request_pool
+from loom_llm_gateway.request_pool import PoolMemberSwitchedError, prepare_request_pool
 from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
     build_raw_provider_log,
@@ -197,20 +196,13 @@ async def openai_chat_facade(
                 "Authorization": f"Bearer {api_key}", "content-type": "application/json",
             }
             upstream = await request.app.state.egress_client_pool.get(row.id)
-            timeout_seconds = min(timeout_seconds, pool_audit.attempt_timeout_sec)
         timeout = upstream_timeout(request, timeout_seconds)
         upstream_attempted = True
-        try:
-            # Bound the whole send as well as individual httpx phases. This
-            # leaves time for a spare member within the existing retry budget.
-            async with asyncio.timeout(timeout_seconds if pool_audit else None):
-                return await upstream.post(
-                    upstream_url, json=upstream_payload,
-                    headers=dispatch_request_headers(upstream_headers),
-                    timeout=timeout, follow_redirects=False,
-                )
-        except TimeoutError:
-            raise httpx.ReadTimeout("bounded upstream send timed out") from None
+        return await upstream.post(
+            upstream_url, json=upstream_payload,
+            headers=dispatch_request_headers(upstream_headers),
+            timeout=timeout, follow_redirects=False,
+        )
 
     try:
         outcome = await send_with_retry(
@@ -238,6 +230,35 @@ async def openai_chat_facade(
                 request_pool_attribution=pool_audit.attribution() if pool_audit else None,
             )
         raise_deadline_http_exception(exc)
+    except PoolMemberSwitchedError as switched:
+        # The timed-out attempt keeps its receipt and pool attribution, but it
+        # must not occupy the correlated call identity. Harbor's retry of this
+        # same turn records the successful call under that identity.
+        timeout_correlation = {
+            key: value
+            for key, value in correlation.items()
+            if key not in {
+                "client_call_id",
+                "agent_execution_id",
+                "agent_run_attempt_id",
+                "episode",
+                "call_ordinal",
+            }
+        }
+        await record_facade_failed_call(
+            request=request,
+            ctx=ctx,
+            row=row,
+            dialect=_FACADE_DIALECT,
+            model=payload["model"],
+            request_payload=payload,
+            failure_category=switched.reason,
+            failure_error_type=type(switched).__name__,
+            attempt=pool_audit.last_attempt if pool_audit else 1,
+            correlation=timeout_correlation,
+            request_pool_attribution=pool_audit.attribution() if pool_audit else None,
+        )
+        raise HTTPException(status_code=504, detail="request pool upstream timeout") from switched
     except httpx.TimeoutException as e:
         await record_facade_failed_call(
             request=request,

@@ -21,8 +21,10 @@ from loom.db.schema import (
     LlmCallIntent,
     ModelSwitchPlan,
     ProviderConnection,
+    ProviderConnectionTimeoutHealth,
     ProviderModelCache,
     ProviderRequestPool,
+    ProviderRequestPoolBinding,
     ProviderRequestPoolMember,
     Secret,
     ServiceExecutionLease,
@@ -256,44 +258,35 @@ async def receipts(p: dict):
         )
 
 
-async def test_round_robin_shared_by_replicas_and_physical_member_cost(pool_setup: dict) -> None:
+async def test_trial_stays_on_one_member_across_replicas(pool_setup: dict) -> None:
     p = pool_setup
     for replica in [0, 1, 0, 1, 0, 1]:
         response = await post(p, replica=replica)
         assert response.status_code == 200, response.text
-    assert [r.url.host for r in p["captures"]["requests"]] == [
-        f"provider-{i}.example.test" for i in [0, 1, 2, 0, 1, 2]
-    ]
+    assert [r.url.host for r in p["captures"]["requests"]] == ["provider-0.example.test"] * 6
     rows = await receipts(p)
-    assert [r.provider_connection_id for r in rows] == p["ids"] * 2
+    assert [r.provider_connection_id for r in rows] == [p["ids"][0]] * 6
     assert all(r.pool_connection_id == p["root"] for r in rows)
     async with p["sessions"]() as session:
         calls = list(
             (
                 await session.scalars(
                     select(LlmCall)
-                    .where(
-                        LlmCall.trial_id == p["trial_id"],
-                    )
+                    .where(LlmCall.trial_id == p["trial_id"])
                     .order_by(LlmCall.captured_at)
                 )
             ).all()
         )
-    assert sorted(round(float(c.cost_usd), 6) for c in calls) == [
-        0.001,
-        0.001,
-        0.002,
-        0.002,
-        0.003,
-        0.003,
-    ]
+        binding = await session.get(ProviderRequestPoolBinding, (p["root"], p["trial_id"]))
+    assert binding is not None and binding.member_connection_id == p["ids"][0]
+    assert [round(float(c.cost_usd), 6) for c in calls] == [0.001] * 6
     assert all(
         c.provider_extras["_loom_request_pool"]["pool_connection_id"] == str(p["root"])
         for c in calls
     )
 
 
-async def test_timeout_spare_success_preserves_history_and_marks_uncertain_cost(
+async def test_timeout_moves_binding_before_504_and_the_spare_keeps_history(
     pool_setup: dict,
 ) -> None:
     p = pool_setup
@@ -311,22 +304,29 @@ async def test_timeout_spare_success_preserves_history_and_marks_uncertain_cost(
             {"role": "user", "content": "terminal observation"},
         ],
     }
+    timed_out = await post(p, body)
+    assert timed_out.status_code == 504, timed_out.text
+    assert "test-credential-0" not in timed_out.text
+    rows = await receipts(p)
+    assert len(rows) == 1
+    assert rows[0].provider_outcome == "transport_error"
+    assert rows[0].failover_reason == "upstream_timeout"
+    assert rows[0].provider_connection_id == p["ids"][0]
+    async with p["sessions"]() as session:
+        binding = await session.get(ProviderRequestPoolBinding, (p["root"], p["trial_id"]))
+        call = await session.scalar(select(LlmCall).where(LlmCall.trial_id == p["trial_id"]))
+    assert binding is not None and binding.member_connection_id == p["ids"][1]
+    assert call.attempt == 1
+    pool_meta = call.provider_extras["_loom_request_pool"]
+    assert pool_meta["possible_duplicate_inference"] is True
+    assert pool_meta["provider_connection_id"] == str(p["ids"][0])
+    assert "test-credential-0" not in json.dumps(call.provider_extras)
     response = await post(p, body)
     assert response.status_code == 200, response.text
     sent = p["captures"]["requests"]
     assert [r.url.host for r in sent] == ["provider-0.example.test", "provider-1.example.test"]
     assert sent[0].content == sent[1].content
     assert sent[0].headers["X-Request-ID"] != sent[1].headers["X-Request-ID"]
-    rows = await receipts(p)
-    assert rows[0].request_id == rows[1].request_id
-    assert [r.provider_outcome for r in rows] == ["transport_error", "response_received"]
-    assert rows[1].failover_reason == "upstream_timeout"
-    async with p["sessions"]() as session:
-        call = await session.scalar(select(LlmCall).where(LlmCall.trial_id == p["trial_id"]))
-        assert call.attempt == 2 and float(call.cost_usd) == pytest.approx(0.002)
-        assert call.provider_extras["_loom_request_pool"]["possible_duplicate_inference"] is True
-        assert "test-credential-0" not in json.dumps(call.provider_extras)
-        assert "test-credential-1" not in json.dumps(call.provider_extras)
     for model in ["teacher", "student"]:
         body["messages"].extend(
             [
@@ -336,6 +336,7 @@ async def test_timeout_spare_success_preserves_history_and_marks_uncertain_cost(
         )
         body["model"] = model
         assert (await post(p, body)).status_code == 200
+    assert [r.url.host for r in sent[1:]] == ["provider-1.example.test"] * 3
     assert [json.loads(r.content)["model"] for r in sent] == [
         "student",
         "student",
@@ -409,15 +410,17 @@ async def test_only_explicit_invalid_credential_is_quarantined(
 
     p["captures"]["handler"] = auth_failure
     response = await post(p)
-    assert response.status_code == (200 if explicit else 401), response.text
+    assert response.status_code == 401, response.text
     assert "test-credential-0" not in response.text
     async with p["sessions"]() as session:
         member = await session.get(ProviderRequestPoolMember, (p["root"], p["root"]))
-        assert member.enabled is (not explicit)
-    assert len(p["captures"]["requests"]) == (2 if explicit else 1)
+        binding = await session.get(ProviderRequestPoolBinding, (p["root"], p["trial_id"]))
+        assert member.enabled is True
+        assert binding is not None and binding.member_connection_id == p["ids"][0]
+    assert len(p["captures"]["requests"]) == 1
 
 
-async def test_shared_quota_429_cools_both_yibu_members_and_honors_retry_after(
+async def test_quota_429_retries_the_same_member_and_does_not_switch(
     pool_setup: dict,
 ) -> None:
     p = pool_setup
@@ -433,19 +436,18 @@ async def test_shared_quota_429_cools_both_yibu_members_and_honors_retry_after(
     p["captures"]["handler"] = quota_failure
     started = asyncio.get_running_loop().time()
     response = await post(p)
-    assert response.status_code == 200, response.text
+    assert response.status_code == 429, response.text
     assert asyncio.get_running_loop().time() - started >= 0.05
-    assert [r.url.host for r in p["captures"]["requests"]] == [
-        "provider-1.example.test",
-        "provider-0.example.test",
-    ]
+    assert [r.url.host for r in p["captures"]["requests"]] == ["provider-1.example.test"] * 3
     async with p["sessions"]() as session:
-        for member_id in p["ids"][1:]:
+        for member_id in p["ids"]:
             member = await session.get(ProviderRequestPoolMember, (p["root"], member_id))
-            assert member.cooldown_until > datetime.now(UTC)
+            assert member.cooldown_until is None
+        binding = await session.get(ProviderRequestPoolBinding, (p["root"], p["trial_id"]))
+        assert binding is not None and binding.member_connection_id == p["ids"][1]
 
 
-async def test_concurrent_requests_rotate_without_any_loom_concurrency_cap(
+async def test_concurrent_requests_stay_on_the_bound_member_without_a_cap(
     pool_setup: dict,
 ) -> None:
     p = pool_setup
@@ -473,9 +475,7 @@ async def test_concurrent_requests_rotate_without_any_loom_concurrency_cap(
         assert maximum == 12
         assert len(p["captures"]["requests"]) == 12
         rows = await receipts(p)
-        assert all(
-            sum(r.provider_connection_id == member for r in rows) == 4 for member in p["ids"]
-        )
+        assert [row.provider_connection_id for row in rows] == [p["ids"][0]] * 12
     finally:
         released.set()
         responses = await asyncio.gather(*calls)
@@ -502,7 +502,7 @@ async def test_signed_deadline_stops_without_spare_dispatch(pool_setup: dict) ->
     assert (await receipts(p))[0].provider_outcome == "deadline"
 
 
-async def test_exhausted_timeout_records_last_member_attempt_and_redacts_errors(
+async def test_one_timeout_returns_504_and_moves_the_binding(
     pool_setup: dict,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -515,16 +515,18 @@ async def test_exhausted_timeout_records_last_member_attempt_and_redacts_errors(
     p["captures"]["handler"] = timeout
     response = await post(p)
     assert response.status_code == 504, response.text
-    assert len(p["captures"]["requests"]) == 3
+    assert len(p["captures"]["requests"]) == 1
     assert all(f"test-credential-{i}" not in response.text + caplog.text for i in range(3))
     async with p["sessions"]() as session:
         call = await session.scalar(select(LlmCall).where(LlmCall.trial_id == p["trial_id"]))
-        assert call.attempt == 3
+        binding = await session.get(ProviderRequestPoolBinding, (p["root"], p["trial_id"]))
+        assert call.attempt == 1
         assert call.provider_extras["_loom_request_pool"]["provider_connection_id"] == str(
-            p["ids"][2]
+            p["ids"][0]
         )
         assert call.provider_extras["_loom_request_pool"]["possible_duplicate_inference"] is True
-    assert [row.provider_connection_id for row in await receipts(p)] == p["ids"]
+        assert binding is not None and binding.member_connection_id == p["ids"][1]
+    assert [row.provider_connection_id for row in await receipts(p)] == [p["ids"][0]]
 
 
 async def test_live_lease_revocation_stops_timeout_failover(pool_setup: dict) -> None:
@@ -660,6 +662,9 @@ async def test_correlated_student_teacher_student_history_survives_timeout(
             "loom_role": role,
         }
         response = await post(p, body)
+        if episode == 1:
+            assert response.status_code == 504, response.text
+            response = await post(p, body)
         assert response.status_code == 200, response.text
         history.extend(
             [
@@ -669,6 +674,12 @@ async def test_correlated_student_teacher_student_history_survives_timeout(
         )
     sent = p["captures"]["requests"]
     assert len(sent) == 4 and sent[0].content == sent[1].content
+    assert [request.url.host for request in sent] == [
+        "provider-0.example.test",
+        "provider-1.example.test",
+        "provider-1.example.test",
+        "provider-1.example.test",
+    ]
     assert all(not any(k.startswith("loom_") for k in json.loads(r.content)) for r in sent)
     assert json.loads(sent[-1].content)["messages"] == history[:-2]
     async with p["sessions"]() as session:
@@ -692,11 +703,210 @@ async def test_correlated_student_teacher_student_history_survives_timeout(
                 )
             ).all()
         )
-        assert [c.client_call_id for c in calls] == call_ids
-        assert [c.role for c in calls] == ["student", "teacher", "student"]
-        assert all(c.correlation_status == "correlated" for c in calls)
+        assert [c.client_call_id for c in calls if c.rate_card_hash != "failed-upstream"] == call_ids
+        assert [c.role for c in calls if c.rate_card_hash != "failed-upstream"] == [
+            "student",
+            "teacher",
+            "student",
+        ]
+        assert all(
+            c.correlation_status == "correlated"
+            for c in calls
+            if c.rate_card_hash != "failed-upstream"
+        )
         assert len(intents) == 3
         plan = await session.scalar(
             select(ModelSwitchPlan).where(ModelSwitchPlan.trial_id == p["trial_id"])
         )
         assert plan.provider_connection_id == p["root"]
+
+
+async def test_slow_success_is_not_cut_off_by_the_stored_attempt_timeout(pool_setup: dict) -> None:
+    p = pool_setup
+
+    async def slow(request):
+        await asyncio.sleep(0.3)
+
+    p["captures"]["handler"] = slow
+    response = await post(p)
+    assert response.status_code == 200, response.text
+    assert len(p["captures"]["requests"]) == 1
+    assert p["captures"]["requests"][0].url.host == "provider-0.example.test"
+
+
+async def test_timeout_burst_suppresses_the_member_for_the_next_assignment(
+    pool_setup: dict,
+) -> None:
+    p = pool_setup
+    async with p["sessions"]() as session:
+        pool = await session.get(ProviderRequestPool, p["root"])
+        pool.timeout_burst_count = 1
+        await session.commit()
+
+    async def timeout(request):
+        raise httpx.ReadTimeout("upstream")
+
+    p["captures"]["handler"] = timeout
+    assert (await post(p)).status_code == 504
+    async with p["sessions"]() as session:
+        health = await session.get(ProviderConnectionTimeoutHealth, p["ids"][0])
+        binding = await session.get(ProviderRequestPoolBinding, (p["root"], p["trial_id"]))
+        assert health is not None and health.suppressed_until is not None
+        assert health.suppressed_until > datetime.now(UTC)
+        assert binding is not None and binding.member_connection_id == p["ids"][1]
+        await session.delete(binding)
+        pool = await session.get(ProviderRequestPool, p["root"])
+        pool.next_member = 0
+        await session.commit()
+    p["captures"]["handler"] = None
+    assert (await post(p)).status_code == 200
+    assert p["captures"]["requests"][-1].url.host == "provider-1.example.test"
+
+
+@pytest.mark.parametrize("status", [400, 500])
+async def test_non_timeout_errors_stay_on_the_bound_member(pool_setup: dict, status: int) -> None:
+    p = pool_setup
+
+    async def fail(request):
+        return httpx.Response(status, json={"error": "same-member"})
+
+    p["captures"]["handler"] = fail
+    response = await post(p)
+    assert response.status_code == status, response.text
+    expected = 1 if status == 400 else 3
+    assert [request.url.host for request in p["captures"]["requests"]] == [
+        "provider-0.example.test"
+    ] * expected
+    async with p["sessions"]() as session:
+        binding = await session.get(ProviderRequestPoolBinding, (p["root"], p["trial_id"]))
+        assert binding is not None and binding.member_connection_id == p["ids"][0]
+
+
+async def test_in_flight_cap_is_shared_by_gateway_replicas(pool_setup: dict) -> None:
+    p = pool_setup
+    released = asyncio.Event()
+    active = 0
+    maximum = 0
+
+    async def block(request):
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        await released.wait()
+        active -= 1
+
+    p["captures"]["handler"] = block
+    async with p["sessions"]() as session:
+        await session.execute(
+            update(ProviderConnection)
+            .where(ProviderConnection.id == p["ids"][0])
+            .values(max_in_flight=2)
+        )
+        await session.commit()
+    calls = [asyncio.create_task(post(p, replica=i % 2)) for i in range(6)]
+    try:
+        async with asyncio.timeout(3):
+            while maximum < 2 or len(p["captures"]["requests"]) < 2:
+                await asyncio.sleep(0.01)
+        await asyncio.sleep(0.2)
+        assert maximum == 2
+        assert len(p["captures"]["requests"]) == 2
+    finally:
+        released.set()
+        responses = await asyncio.gather(*calls)
+    assert all(response.status_code == 200 for response in responses)
+    assert maximum == 2
+
+
+async def test_queue_wait_returns_429_without_calling_the_provider(pool_setup: dict) -> None:
+    p = pool_setup
+    p["settings"].connection_queue_max_wait_sec = 0
+    released = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def block(request):
+        entered.set()
+        await released.wait()
+
+    p["captures"]["handler"] = block
+    async with p["sessions"]() as session:
+        await session.execute(
+            update(ProviderConnection)
+            .where(ProviderConnection.id == p["ids"][0])
+            .values(max_in_flight=1)
+        )
+        await session.commit()
+    held = asyncio.create_task(post(p, replica=0))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        limited = await post(p, replica=1)
+        assert limited.status_code == 429, limited.text
+        assert limited.json()["detail"] == "provider_connection_concurrency_limited"
+        assert limited.headers["retry-after"] == "1"
+        assert len(p["captures"]["requests"]) == 1
+    finally:
+        released.set()
+        await held
+
+
+async def test_stale_admitted_receipt_does_not_consume_a_slot(pool_setup: dict) -> None:
+    p = pool_setup
+    async with p["sessions"]() as session:
+        await session.execute(
+            update(ProviderConnection)
+            .where(ProviderConnection.id == p["ids"][0])
+            .values(max_in_flight=1)
+        )
+        session.add(
+            GatewayDispatchReceipt(
+                request_id=uuid4(),
+                dispatch_ordinal=1,
+                attempt=1,
+                team_id=p["team_id"],
+                trial_id=p["trial_id"],
+                step_id="agent",
+                provider_connection_id=p["ids"][0],
+                dialect="facade_openai",
+                purpose="model_call",
+                provider_outcome="admitted",
+                admitted_at=datetime.now(UTC) - timedelta(hours=1),
+            )
+        )
+        await session.commit()
+    response = await post(p)
+    assert response.status_code == 200, response.text
+    assert len(p["captures"]["requests"]) == 1
+
+
+async def test_open_admitted_receipt_with_a_future_deadline_holds_the_slot(
+    pool_setup: dict,
+) -> None:
+    p = pool_setup
+    p["settings"].connection_queue_max_wait_sec = 0
+    async with p["sessions"]() as session:
+        await session.execute(
+            update(ProviderConnection)
+            .where(ProviderConnection.id == p["ids"][0])
+            .values(max_in_flight=1)
+        )
+        session.add(
+            GatewayDispatchReceipt(
+                request_id=uuid4(),
+                dispatch_ordinal=1,
+                attempt=1,
+                team_id=p["team_id"],
+                trial_id=p["trial_id"],
+                step_id="agent",
+                provider_connection_id=p["ids"][0],
+                dialect="facade_openai",
+                purpose="model_call",
+                provider_outcome="admitted",
+                admitted_at=datetime.now(UTC) - timedelta(hours=1),
+                attempt_deadline_wall_clock=datetime.now(UTC) + timedelta(minutes=10),
+            )
+        )
+        await session.commit()
+    response = await post(p)
+    assert response.status_code == 429, response.text
+    assert response.json()["detail"] == "provider_connection_concurrency_limited"
+    assert not p["captures"]["requests"]

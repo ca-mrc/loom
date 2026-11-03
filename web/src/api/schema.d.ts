@@ -6367,6 +6367,8 @@ export interface components {
             custom_pricing?: {
                 [key: string]: components["schemas"]["ModelPrice"];
             } | null;
+            /** Max In Flight */
+            max_in_flight?: number | null;
             /** Name */
             name: string;
             /** Pricing Mode */
@@ -6416,6 +6418,8 @@ export interface components {
             legacy_pricing: {
                 [key: string]: unknown;
             } | null;
+            /** Max In Flight */
+            max_in_flight: number | null;
             /** Name */
             name: string;
             /**
@@ -6512,6 +6516,8 @@ export interface components {
             custom_pricing?: {
                 [key: string]: components["schemas"]["ModelPrice"];
             } | null;
+            /** Max In Flight */
+            max_in_flight?: number | null;
             /** Pricing Mode */
             pricing_mode?: ("usage_only" | "catalog" | "custom") | null;
             /** Supplier Id */
@@ -6702,6 +6708,16 @@ export interface components {
             members: components["schemas"]["PoolMemberConfig"][];
             /** Required Models */
             required_models: string[];
+            /**
+             * Timeout Burst Count
+             * @default 3
+             */
+            timeout_burst_count: number;
+            /**
+             * Timeout Window Sec
+             * @default 60
+             */
+            timeout_window_sec: number;
         };
         /** RequestPoolResponse */
         RequestPoolResponse: {
@@ -6720,6 +6736,10 @@ export interface components {
             members: components["schemas"]["PoolMemberResponse"][];
             /** Required Models */
             required_models: string[];
+            /** Timeout Burst Count */
+            timeout_burst_count: number;
+            /** Timeout Window Sec */
+            timeout_window_sec: number;
         };
         /** RequestedExecutionSelection */
         RequestedExecutionSelection: {

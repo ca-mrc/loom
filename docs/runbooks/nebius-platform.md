@@ -1404,7 +1404,7 @@ The bucket-wide BuildKit cache budget is independently configurable as
 `task_image_builder.cache_total_mib`. Omission preserves the historical 4096 MiB
 budget; an explicit integer from 1024 through 1048576 MiB is supported. This is
 object-store cache capacity, separate from Pod memory, scratch and the unchanged
-1 GiB per-component cache-export limit. For a 64 GiB total budget, save and apply
+8 GiB per-component cache-export limit. For a 64 GiB total budget, save and apply
 65536 MiB to every enabled builder sharing that cache bucket in one operation:
 
 ```bash
@@ -1669,7 +1669,7 @@ checkpoint; ordinary publications do not scan retained manifests. See
 [task-image cache GC](task-image-cache-gc.md) for batch limits, mixed-version
 rollout/rollback, conditional-write requirements and failure recovery.
 
-The component cache budget is 1 GiB of logical file bytes. It is independent
+The component cache budget is 8 GiB of logical file bytes. It is independent
 of the OCI validator's 3 GiB image limit (archive bytes and logical contents,
 or directory contents) and the 4 GiB cache GC target below. Changing one budget
 must not implicitly change either of the others. The OCI validator also owns
@@ -1679,7 +1679,7 @@ For the cache-sizing assessment and the conditions for a 2 GiB pilot, see
 [task-image cache sizing](../architecture/task-image-materialization.md#cache-budget-sizing).
 
 Legacy tar cache transfer distinguishes logical file bytes from transport
-bytes. The existing 1 GiB logical payload and 10,000-entry limits remain in
+bytes. The existing 8 GiB logical payload and 10,000-entry limits remain in
 effect. Download and unpack allow separately derived headroom for each tar
 header, file padding, bounded PAX/GNU extension records and EOF/record padding;
 an exact-limit payload can therefore round-trip through object storage.
@@ -1699,7 +1699,7 @@ oldest past-grace manifests and legacy tars. A blob's bytes count once and are
 reclaimed only when its last manifest reference disappears. Roots and blobs
 newer than 7 days stay. If those protected objects leave the bucket over the
 4 GiB target, the log emits `reason=grace_protected` and the sweep stops.
-Each component's optional cache export has a 1 GiB logical-file-byte budget.
+Each component's optional cache export has an 8 GiB logical-file-byte budget.
 When a cache tree contains only valid regular files and directories but exceeds
 that budget, publication defers its entire cache export before any cache write,
 with `cache_export` / `deferred` and `reason=byte_budget_exceeded`,

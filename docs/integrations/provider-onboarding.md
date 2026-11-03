@@ -203,13 +203,39 @@ shell-quoted so names containing spaces or apostrophes remain a single argument.
 ### Request-level rotation and timeout failover
 
 An owner can opt an existing OpenAI-compatible connection into a request pool.
-The selected connection remains the logical Batch/Trial/JWT binding; each model
-request chooses a physical member in equal round-robin order. A retryable timeout
-can choose another member within the same retry-count, backoff, and absolute
-attempt-deadline budget. The pool's default per-send timeout is 20 seconds so a
-60-second retry budget can retain room for a spare; configure it for the actual
-model latency. A timeout may already have executed upstream and can cause
-uncertain duplicate inference cost.
+The selected connection remains the logical Batch/Trial/JWT binding. Each trial
+stays on one physical member so prompt cache remains with that provider. The
+first assignment uses the pool cursor; later calls for that trial reuse the
+binding. The binding moves only when that member produces no body within the
+upstream timeout, or returns HTTP 504. The gateway writes the new binding
+before it returns 504, and that request does not start another upstream send.
+The harness retry of the same turn uses the spare and gets a fresh 60-second
+budget. Other statuses stay on the bound member. A 429 may retry that same
+member inside the existing 60-second gateway budget and honors Retry-After.
+A second key in the same quota group is not a spare.
+
+`attempt_timeout_sec` remains stored and defaults to 20. The gateway does not
+use it as the send cutoff. A pooled send waits for the upstream timeout,
+capped by the trial's signed deadline. A timeout may already have executed
+upstream and can cause uncertain duplicate inference cost. The timed-out
+receipt records that possibility. The failed call leaves the turn's client
+call id free so the spare success can be stored.
+
+A burst of timeouts on one physical connection suppresses it for later
+assignments. The defaults are 3 timeouts inside 60 seconds
+(`timeout_burst_count`, `timeout_window_sec`); suppression then lasts
+`cooldown_sec` (default 30). A later successful response clears it. Trials
+that already moved stay on their new member. When no spare is eligible,
+the binding stays and that turn still returns 504. A later call with no
+usable member returns 429 `provider_request_pool_unavailable`.
+
+`max_in_flight` on a provider connection is optional, from 1 to 1000. Null
+means unlimited. When set, both gateway replicas count open admitted
+dispatches for that connection. At the cap, a call waits up to
+`connection_queue_max_wait_sec` (default 120 seconds) and then returns HTTP
+429 `provider_connection_concurrency_limited` with `Retry-After: 1`. The wait
+does not call the provider. Two Loom connections that share one upstream key
+still have separate caps.
 
 First register each upstream endpoint/key through the ordinary provider create
 flow. Secrets remain in SecretStore, and pool membership contains only connection
@@ -227,6 +253,8 @@ Prepare a JSON configuration using the connection IDs from `loom providers show`
   "equivalent_models": true,
   "attempt_timeout_sec": 20,
   "cooldown_sec": 30,
+  "timeout_burst_count": 3,
+  "timeout_window_sec": 60,
   "members": [
     {
       "connection_id": "00000000-0000-0000-0000-000000000001",
@@ -261,19 +289,20 @@ Shared users can read a pool only when they can also access all its members,
 and cannot change it. Each dispatch rechecks current member authorization and
 eligibility. Configuration edits preserve the cursor and existing cooldowns.
 
-Members known or conservatively assumed to share upstream quotas should use the
-same `quota_group`. This label groups cooldowns after an upstream 429; it does
-not impose a concurrency limit. This hosted pool path has no Loom per-key or
-quota-group request concurrency limit or queue. Its HTTP clients do not cap
-active connections; the 20-connection keepalive cache counts only idle reuse.
+Members known or conservatively assumed to share upstream quotas may still
+share a `quota_group` label. That label is recorded with the member. A 429
+does not cool the group or move the trial. The optional concurrency cap is
+`max_in_flight` on the physical provider connection, shared by every pool and
+both gateway replicas. Its HTTP clients do not cap active connections; the
+20-connection keepalive cache counts only idle reuse.
 The optional model proxy uses the highest supported connection/request
 thresholds instead of Envoy's default 1,024-per-cluster limits. This does not
 change physical execution capacity or task-egress I/O admission. See the
 [forwarding concurrency audit](../architecture/model-forwarding-concurrency.md)
 for SDK, proxy, database, cancellation, and accounting boundaries. Separate token
-balances do not prove separate account, RPM/TPM, or upstream-channel capacity. Disabled or
-cooling members are skipped; when no member is usable the Gateway returns an
-explicit retryable response rather than contacting an invalid member.
+balances do not prove separate account, RPM/TPM, or upstream-channel capacity. Disabled,
+suppressed, or still-cooling members are skipped for a new assignment; when no
+member is usable the Gateway returns 504 rather than contacting an invalid member.
 
 Rotation is restricted to trusted hosted Terminus2, non-streaming Chat
 Completions carrying complete messages. Streaming, Responses continuation,

@@ -24,6 +24,11 @@
     "default": "9100",
     "required": false
   },
+  "connection_queue_max_wait_sec": {
+    "annotation": "<class 'float'>",
+    "default": "120.0",
+    "required": false
+  },
   "db_url": {
     "annotation": "<class 'pydantic.networks.PostgresDsn'>",
     "default": "PydanticUndefined",

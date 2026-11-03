@@ -311,7 +311,9 @@ async def test_revision_fence_preserves_charged_effects_and_real_closed_mode_cle
         assert row.phase == 'cleanup_intent' and row.cleanup_observation_id is None
 
 
-@pytest.mark.parametrize(('revision', 'preference'), [('0186', None), ('0187', False), ('0187', True)])
+@pytest.mark.parametrize(('revision', 'preference'), [
+    ('0186', None), ('0187', False), ('0187', True), ('0188', False), ('0188', True),
+])
 async def test_normal_owner_lifecycle_uses_exact_schema_and_independent_policy(
     isolated_migration_postgres_url, tmp_path, revision, preference,
 ):
@@ -337,7 +339,7 @@ async def test_normal_owner_lifecycle_uses_exact_schema_and_independent_policy(
     from tests.integration.test_nebius_pool_startup_database import observe as observe_authority
 
     url = isolated_migration_postgres_url
-    if revision == '0186':
+    if revision != '0188':
         config = Config('database/migrations/alembic.ini')
         config.set_main_option('sqlalchemy.url', url.replace('%', '%%'))
         await asyncio.to_thread(command.downgrade, config, revision)

@@ -45,6 +45,8 @@ class RequestPoolConfig(BaseModel):
     members: list[PoolMemberConfig] = Field(min_length=2, max_length=32)
     attempt_timeout_sec: float = Field(default=20, gt=0, le=200, allow_inf_nan=False)
     cooldown_sec: float = Field(default=30, gt=0, le=3600, allow_inf_nan=False)
+    timeout_burst_count: int = Field(default=3, ge=1, le=1000)
+    timeout_window_sec: float = Field(default=60, gt=0, le=3600, allow_inf_nan=False)
 
     @field_validator("required_models")
     @classmethod
@@ -77,6 +79,8 @@ class RequestPoolResponse(BaseModel):
     required_models: list[str]
     attempt_timeout_sec: float
     cooldown_sec: float
+    timeout_burst_count: int
+    timeout_window_sec: float
     members: list[PoolMemberResponse]
 
 
@@ -89,6 +93,8 @@ def _response(
         required_models=pool.required_models,
         attempt_timeout_sec=pool.attempt_timeout_sec,
         cooldown_sec=pool.cooldown_sec,
+        timeout_burst_count=pool.timeout_burst_count,
+        timeout_window_sec=pool.timeout_window_sec,
         members=[
             PoolMemberResponse(
                 connection_id=m.connection_id,
@@ -235,6 +241,8 @@ async def put_request_pool(
             required_models=payload.required_models,
             attempt_timeout_sec=payload.attempt_timeout_sec,
             cooldown_sec=payload.cooldown_sec,
+            timeout_burst_count=payload.timeout_burst_count,
+            timeout_window_sec=payload.timeout_window_sec,
             enabled=True,
         )
         session.add(pool)
@@ -256,6 +264,8 @@ async def put_request_pool(
     pool.required_models = payload.required_models
     pool.attempt_timeout_sec = payload.attempt_timeout_sec
     pool.cooldown_sec = payload.cooldown_sec
+    pool.timeout_burst_count = payload.timeout_burst_count
+    pool.timeout_window_sec = payload.timeout_window_sec
     pool.enabled = True
     await session.flush()
     members = [

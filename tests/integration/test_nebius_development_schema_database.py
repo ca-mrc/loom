@@ -131,6 +131,15 @@ def test_real_retained_schema_upgrades_preserving_identity_and_granting_new_tabl
                 for privilege in ('SELECT', 'INSERT', 'UPDATE', 'DELETE'):
                     assert db.execute('SELECT has_table_privilege(%s,%s,%s)',
                         (role, table, privilege)).fetchone() == (True,)
+        for table in (
+            'provider_request_pool_bindings',
+            'provider_connection_timeout_health',
+            'provider_connection_timeout_observations',
+        ):
+            for role in roles:
+                for privilege in ('SELECT', 'INSERT', 'UPDATE', 'DELETE'):
+                    assert db.execute('SELECT has_table_privilege(%s,%s,%s)',
+                        (role, table, privilege)).fetchone() == (True,)
         if installed['mode'] == 'shared':
             for table in ('provider_request_pools', 'provider_request_pool_members'):
                 for privilege in ('SELECT', 'UPDATE'):
@@ -139,6 +148,15 @@ def test_real_retained_schema_upgrades_preserving_identity_and_granting_new_tabl
                 for role in ('loom_actuator', 'loom_app_manager_' + installed['data'].hex):
                     assert db.execute('SELECT has_table_privilege(%s,%s,%s)',
                         (role, table, 'SELECT,INSERT,UPDATE,DELETE')).fetchone() == (False,)
+            for table, granted, denied in (
+                ('provider_request_pool_bindings', 'SELECT,INSERT,UPDATE', 'DELETE'),
+                ('provider_connection_timeout_health', 'SELECT,INSERT,UPDATE', 'DELETE'),
+                ('provider_connection_timeout_observations', 'SELECT,INSERT', 'UPDATE,DELETE'),
+            ):
+                assert db.execute('SELECT has_table_privilege(%s,%s,%s)',
+                    ('loom_gateway', table, granted)).fetchone() == (True,)
+                assert db.execute('SELECT has_table_privilege(%s,%s,%s)',
+                    ('loom_gateway', table, denied)).fetchone() == (False,)
             for privilege in ('SELECT', 'INSERT'):
                 assert db.execute("SELECT has_table_privilege('loom_gateway','service_execution_live_events',%s)",
                     (privilege,)).fetchone() == (True,)
@@ -174,7 +192,13 @@ def test_real_retained_schema_upgrades_preserving_identity_and_granting_new_tabl
             restricted_url = make_url(installed['url']).set(username=role,
                 password=installed['password']).render_as_string(hide_password=False)
             with psycopg.connect(restricted_url, autocommit=True) as db:
-                for table in ('provider_request_pools', 'provider_request_pool_members'):
+                for table in (
+                    'provider_request_pools',
+                    'provider_request_pool_members',
+                    'provider_request_pool_bindings',
+                    'provider_connection_timeout_health',
+                    'provider_connection_timeout_observations',
+                ):
                     with pytest.raises(psycopg.errors.InsufficientPrivilege):
                         db.execute(f'SELECT * FROM {table}')
     login = make_url(installed['url']).set(username='loom_service', password=installed['password']).render_as_string(hide_password=False)

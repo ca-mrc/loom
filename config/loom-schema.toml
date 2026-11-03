@@ -463,6 +463,12 @@ python_type = "float"
 default     = 60.0
 description = "Total wall-clock retry budget per request. Retries stop when cumulative wait plus elapsed time exceeds this value, even if attempts remain. The default is below TaskConfig.agent.timeout_sec."
 
+[service_config.connection_queue_max_wait_sec]
+used_by     = ["llm-gateway"]
+python_type = "float"
+default     = 120.0
+description = "How long one gateway request waits for a free in-flight slot on a provider connection. The wait does not call the provider. Exhausting it returns HTTP 429 provider_connection_concurrency_limited."
+
 # ─── Deployment-wide RetryPolicy defaults snapshotted at trial submit ───
 # Operators can tune these per environment without a code change. The submit
 # route snapshots the values

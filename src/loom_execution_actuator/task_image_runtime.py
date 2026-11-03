@@ -72,7 +72,7 @@ _derive_task_image_build_components = derive_task_image_build_components
 _FILE_LIMIT = 2000
 _BUNDLE_BYTES = 512 * 1024 * 1024
 # Logical bytes per component, independent of OCI publication and cache GC.
-_CACHE_BYTES = 1024 * 1024 * 1024
+_CACHE_BYTES = 8 * 1024 * 1024 * 1024
 _CACHE_TOTAL_BYTES = 4 * 1024 * 1024 * 1024
 _CACHE_REUSE_BYTES = 256 * 1024 * 1024
 _CACHE_MANIFEST_FILES = 10000

@@ -99,7 +99,8 @@ async def test_native_phase_deadline_is_signed_clamped_and_cancels_provider_tcp(
         app.state.settings = SimpleNamespace(
             step_jwt_signing_key=SimpleNamespace(get_secret_value=lambda: key),
             legacy_attempt_deadline_compat_sec=0,
-            upstream_timeout_sec=200, llm_retry_max_attempts=5,
+            upstream_timeout_sec=200, connection_queue_max_wait_sec=120,
+            llm_retry_max_attempts=5,
             llm_retry_base_backoff_sec=0.5, llm_retry_jitter_sec=0,
             llm_retry_max_backoff_sec=8, llm_retry_budget_sec=60,
         )
