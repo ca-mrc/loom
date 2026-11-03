@@ -24,6 +24,20 @@ def _event(kind: str, **body: Any) -> bytes:
     ) + "\n\n").encode()
 
 
+def _observed_usage(raw: dict[str, Any]) -> dict[str, Any]:
+    """Keep independently valid counters even when the complete usage is invalid."""
+    def counters(value: dict[str, Any], keys: tuple[str, ...]) -> dict[str, int]:
+        return {key: value[key] for key in keys if isinstance(value.get(key), int)
+                and not isinstance(value[key], bool) and value[key] >= 0}
+
+    result: dict[str, Any] = counters(raw, ("prompt_tokens", "completion_tokens", "total_tokens"))
+    for field, keys in (("prompt_tokens_details", ("cached_tokens", "audio_tokens")),
+                        ("completion_tokens_details", ("reasoning_tokens", "audio_tokens"))):
+        if isinstance(raw.get(field), dict):
+            result[field] = counters(raw[field], keys)
+    return result
+
+
 @dataclass
 class _Block:
     kind: str
@@ -116,10 +130,11 @@ class ChatToAnthropicStream:
                 else:
                     self.response_model = value
         if body.get("usage") is not None:
-            # Validate but retain the original Chat counters, including reasoning
-            # and inclusive cache totals, for the accounting owner.
+            # Preserve observations before strict completion validation, even if
+            # another counter is missing or malformed and this stream fails.
+            if isinstance(body["usage"], dict):
+                self.usage = _observed_usage(body["usage"])
             chat_usage_to_anthropic(body["usage"])
-            self.usage = dict(body["usage"])
         choices = body.get("choices")
         if not isinstance(choices, list) or len(choices) > 1:
             raise AnthropicCompatibilityError("expected one Chat stream choice")
