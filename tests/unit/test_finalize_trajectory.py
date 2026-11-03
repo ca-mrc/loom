@@ -201,3 +201,27 @@ async def test_finalize_attempt_uploads_immutable_atif_identity(
     key = "team/trial-11/attempts/2/atif.json"
     assert finalized.uri == f"s3://trajectories/{key}"
     assert ("trajectories", key) in store.objects
+
+
+async def test_native_builder_is_applied_before_hash_and_upload(tmp_path: Path, store: FakeObjectStore) -> None:
+    import json
+
+    local = tmp_path / "events.jsonl"
+    trial_uuid = uuid4()
+    events = [TrialStartEvent(**_ev(0, trial_uuid), task_id="t", agent_name="claude-code", agent_mode="in-box"),
+              TrialEndEvent(**_ev(1, trial_uuid), final_state="succeeded", reward={"pass": 1.0})]
+    local.write_text("".join(event.model_dump_json() + "\n" for event in events))
+
+    def native_builder(generic, observed):
+        assert observed == events
+        document = generic.model_dump(mode="json")
+        document["steps"] = [{"step_id": 1, "source": "user", "message": "native instruction"}]
+        return document
+
+    finalized = await finalize_trajectory_with_metadata(local_path=local, store=store, team_id="team",
+        trial_id=str(trial_uuid), task_id="t", agent_name="claude-code", agent_version="2.1.183",
+        atif_builder=native_builder)
+    body = store.objects[("trajectories", f"team/{trial_uuid}/atif.json")]
+    assert finalized.sha256 == hashlib.sha256(body).hexdigest() and finalized.size_bytes == len(body)
+    assert json.loads(body)["steps"][0]["message"] == "native instruction"
+    assert json.loads(body)["metadata"]["reward"] == {"pass": 1.0}
