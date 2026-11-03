@@ -200,3 +200,28 @@ def test_unset_local_provider_removes_entry(tmp_xdg_home: Path) -> None:
 def test_unset_local_provider_is_noop_if_missing(tmp_xdg_home: Path) -> None:
     from loom_cli.config import unset_local_provider
     unset_local_provider("never-existed")  # must not raise
+
+
+def test_native_dialect_survives_config_mutations(tmp_xdg_home):
+    cfg = LoomConfig(local_providers={"native": LocalProvider(base_url="https://proxy.test/anthropic",
+        api_dialect="anthropic", served_model_name="served")})
+    save_config(cfg)
+    assert main(["config", "set", "local.native.api_key", "secret"]) == 0
+    assert main(["config", "set", "local.native.base_url", "https://proxy.test/prefix"]) == 0
+    entry = load_config().local_providers["native"]
+    assert entry.api_dialect == "anthropic" and entry.served_model_name == "served" and entry.api_key == "secret"
+    assert main(["config", "set", "local.native.api_dialect", "openai_chat"]) == 0
+    assert load_config().local_providers["native"].api_dialect == "openai_chat"
+    assert main(["config", "set", "local.native.api_dialect", "unknown"]) == 2
+
+
+def test_legacy_local_config_defaults_to_chat_and_invalid_dialect_fails(tmp_xdg_home):
+    from loom_cli.config import config_path
+
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('[local_providers.x]\nbase_url="http://localhost:8000/v1"\n')
+    assert load_config().local_providers["x"].api_dialect == "openai_chat"
+    path.write_text(path.read_text() + 'api_dialect="guess"\n')
+    with pytest.raises(ValueError, match="api_dialect"):
+        load_config()

@@ -198,3 +198,18 @@ async def test_direct_subprocess_rejects_gateway_settings_before_launch(
         with pytest.raises(AgentError, match=r"gateway.*settings|request_params"):
             await agent.run(instruction="task", env=driver, trajectory=writer,
                             mcp=[], skills_dir=None, step_id="agent")
+
+
+@pytest.mark.parametrize("dialect,provider", [("anthropic", "anthropic"), ("openai_chat", "openai")])
+def test_claude_connection_resolves_registered_dialect_and_actual_model(dialect, provider):
+    from loom_cli.agent_connection import resolve_agent_connection
+
+    client = gateway()
+    client.local_providers["dev"].api_dialect = dialect
+    selected = ModelSpec(provider="local", name="dev/vendor/model")
+    connection = resolve_agent_connection(client, selected, dialect="claude-code")
+    assert connection.model.provider == provider and connection.model.name == "vendor/model"
+    assert connection.api_dialect == dialect and selected.provider == "local"
+    if dialect == "anthropic":
+        with pytest.raises(AgentError, match="incompatible"):
+            resolve_agent_connection(client, selected, dialect="openai_responses")

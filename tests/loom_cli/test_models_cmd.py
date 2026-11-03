@@ -105,3 +105,16 @@ def test_test_handles_401_with_api_key_hint(
     err = capsys.readouterr().err
     assert "401" in err
     assert "loom config set local.<name>.api_key" in err
+
+
+def test_native_local_discovery_normalizes_prefix_and_uses_native_auth(monkeypatch):
+    from loom_cli.config import LocalProvider
+    from loom_cli.models_cmd import _probe
+
+    seen = []
+    def get(url, **kwargs):
+        seen.append((url, kwargs["headers"]))
+        return httpx.Response(200, json={"data": [{"id": "claude"}]})
+    monkeypatch.setattr("loom_cli.models_cmd.httpx.get", get)
+    assert _probe(LocalProvider(base_url="https://proxy.test/prefix", api_key="secret", api_dialect="anthropic")) == (0, ["claude"])
+    assert seen == [("https://proxy.test/prefix/v1/models", {"x-api-key": "secret", "anthropic-version": "2023-06-01"})]
