@@ -117,7 +117,7 @@ class _ClaudeSandbox(_LibcDriver):
         self.process = _ClaudeProcess(lines)
         self.environment = None
 
-    async def exec_streaming(self, argv, *, env_vars, cwd, timeout_sec):
+    async def exec_streaming(self, argv, *, env_vars, cwd, timeout_sec=None):
         self.environment = env_vars
         self.argv = argv
         return self.process

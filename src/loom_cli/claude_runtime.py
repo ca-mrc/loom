@@ -16,9 +16,10 @@ from anyio import CancelScope, fail_after
 
 from loom.attempt_deadline import AttemptDeadline
 from loom.claude_code_atif import claude_atif_steps
-from loom.driver.base import Driver
+from loom.driver.base import Driver, ExecHandle
 from loom.errors import AgentError
 from loom.hosted_harness import CLAUDE_CODE, CLAUDE_CODE_VERSION
+from loom.models.exec import ExecResult
 from loom.models.mcp import MCPConnection
 from loom.models.networking import NetworkPolicy, Public
 from loom.models.task import TaskConfig
@@ -90,6 +91,23 @@ class _Invocation:
     succeeded: bool = False
 
 
+@dataclass
+class _LocalSandbox:
+    """Adapt local streaming drivers to the controller's supervised contract.
+
+    Service RPC accepts a process timeout; local Driver streaming does not.
+    The controller's enclosing deadline and kill-on-cancellation own that limit.
+    """
+    driver: Driver
+
+    async def exec(self, command: str, *, timeout_sec: float) -> ExecResult:
+        return await self.driver.exec(command, timeout_sec=timeout_sec)
+
+    async def exec_streaming(self, argv: list[str], *, env_vars: dict[str, str],
+                             cwd: PurePosixPath, timeout_sec: float | None) -> ExecHandle:
+        return await self.driver.exec_streaming(argv, env_vars=env_vars, cwd=cwd)
+
+
 class LocalClaudeRuntime:
     name = "claude-code"
     version = CLAUDE_CODE_VERSION
@@ -141,7 +159,7 @@ class LocalClaudeRuntime:
             async with relay_endpoint_access(env, self.relay.base_url, policy):
                 self.relay.activate(step_id=step_id, deadline=self._deadline)
                 try:
-                    await run_claude_code(driver=env, workspace=invocation.output,
+                    await run_claude_code(driver=_LocalSandbox(env), workspace=invocation.output,
                         task_config=self.task_config.model_copy(update={"steps": [step]}),
                         trial_config=self.trial_config, trial_id=self.trial_id, instruction=instruction,
                         model_environment={"ANTHROPIC_BASE_URL": self.relay.base_url, "ANTHROPIC_AUTH_TOKEN": self.relay.token},

@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from uuid import uuid4
 
 import httpx
@@ -140,7 +140,7 @@ async def test_real_claude_local_read_write_edit_and_verify(claude_task_image, t
     atif_bytes = (directory / "atif.json").read_bytes()
     atif = json.loads(atif_bytes)
     assert result.atif_sha256 == hashlib.sha256(atif_bytes).hexdigest()
-    assert len(atif["steps"]) == 5 and atif["metadata"]["verifier_rewards"] == {"passed": 1.0}
+    assert len(atif["steps"]) == 5 and atif["metadata"]["reward"] == {"passed": 1.0}
     assert [call["function_name"] for step in atif["steps"] for call in step.get("tool_calls", [])] == ["Read", "Write", "Edit"]
     assert atif["accounting"]["call_count"] == 4
     assert atif["accounting"]["totals"]["input_tokens"] == 80 and atif["accounting"]["totals"]["output_tokens"] == 20
