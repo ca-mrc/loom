@@ -506,6 +506,13 @@ Use `loom eval batch cancel <batch-id>` only when you intend to stop the whole
 batch and cascade-cancel every still-active trial (batch state becomes
 `cancelled`).
 
+`loom eval batch cancel <batch-id> --mode drain` cancels trials that have not
+reached verification or output archiving and lets the Verifying and Archiving
+output trials finish. The batch stays `cancelling` until that retained work
+completes, then becomes `cancelled`. `loom eval batch cancel-trials <batch-id>
+<trial-id>...` cancels only the named trials. Succeeded and failed trials are
+skipped, and the batch stays running.
+
 Each archive contains:
 
 - `manifest.json` with source batch ids, selection rule, trial counts, object

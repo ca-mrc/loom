@@ -55,6 +55,7 @@ from loom_control_plane.service_execution import (
     VerifierHandoffUnavailableError,
     committed_handoff_files,
     record_committed_runtime_result,
+    request_trial_execution_cancellation,
 )
 from loom_control_plane.service_execution_locks import lock_execution_trial
 from loom_control_plane.service_execution_task_snapshot import (
@@ -974,6 +975,10 @@ class ServiceExecutionOutputRouteService:
                 runtime_result=runtime_result,
                 observed_at=current.output_committed_at,
             )
+            if trial.cancellation_requested_at is not None:
+                await request_trial_execution_cancellation(
+                    session, trial_id=trial.id, now=current.output_committed_at,
+                )
             await session.commit()
         return {
             **result.model_dump(mode="json"),

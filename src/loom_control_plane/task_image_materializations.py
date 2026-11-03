@@ -269,7 +269,7 @@ def nebius_task_image_consumers(row: Any, *, pool_id: str) -> Select[tuple[Trial
             or_(
                 and_(Trial.batch_id.is_(None), Trial.requires_caps["backend"].astext == "nebius"),
                 and_(Trial.team_id == Batch.team_id, Batch.backend == "nebius",
-                     Batch.state.not_in(("finished", "cancelled"))),
+                     Batch.state.not_in(("finished", "cancelled", "cancelling"))),
             ),
             Trial.requires_caps["worker_pool"].astext == pool_id,
             or_(

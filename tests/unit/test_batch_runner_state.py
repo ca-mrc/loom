@@ -105,3 +105,10 @@ def test_result_status_mixed_terminal_states_is_partial_failed() -> None:
 
 def test_result_status_without_succeeded_trials_is_all_failed() -> None:
     assert _compute_result_status(["failed", "cancelled"]) == "all_failed"
+
+
+def test_cancelling_stays_open_until_the_drain_helper_closes_it() -> None:
+    counts = _empty() | {"succeeded": 2, "cancelled": 1}
+    assert next_batch_state(
+        current="cancelling", expected=3, counts=counts,
+    ) == "cancelling"

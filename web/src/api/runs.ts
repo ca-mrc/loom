@@ -154,8 +154,22 @@ export const runsApi = {
     method: "POST",
     body: JSON.stringify(body),
   }),
-  cancelBatch: (id: string) =>
-    apiFetch<{ batch_id: string; state: string }>(`/api/v1/batches/${id}/cancel`, { method: "POST" }),
+  cancelBatch: (id: string, mode: "full" | "drain" = "full") =>
+    apiFetch<{ batch_id: string; state: string; retained_count?: number; cancelled_count?: number }>(
+      `/api/v1/batches/${id}/cancel`,
+      { method: "POST", body: JSON.stringify({ mode }) },
+    ),
+  cancelBatchTrials: (
+    id: string,
+    trialIds: string[],
+    preserveVerifying = false,
+  ) => apiFetch<{ batch_id: string; results: { trial_id: string; outcome: string }[] }>(
+    `/api/v1/batches/${id}/trials/cancel`,
+    {
+      method: "POST",
+      body: JSON.stringify({ trial_ids: trialIds, preserve_verifying: preserveVerifying }),
+    },
+  ),
   rerunFailedBatch: (id: string) =>
     apiFetch<BatchFailedRerun>(`/api/v1/batches/${id}/rerun-failed`, { method: "POST" }),
 };

@@ -9,7 +9,7 @@ import { Button } from "./Button";
 import ErrorState from "./ErrorState";
 import { StatusPill } from "./StatusPill";
 
-const ACTIVE_STATES = new Set(["submitted", "running"]);
+const ACTIVE_STATES = new Set(["submitted", "running", "cancelling"]);
 
 function deliveryTrialText(delivery: DeliveryExport | undefined): string {
   const count = delivery?.manifest?.trial_count ?? delivery?.manifest?.task_count;

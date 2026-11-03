@@ -1292,17 +1292,57 @@ def _diagnose_batch(args: argparse.Namespace) -> int:
 def _batch_cancel(args: argparse.Namespace) -> int:
     def _body() -> int:
         cfg = require_logged_in()
+        payload: dict[str, Any] = {}
+        if args.mode != "full":
+            payload["mode"] = args.mode
+        if args.reason:
+            payload["reason"] = args.reason
         with authed_client(cfg) as c:
-            resp = c.post(f"/api/v1/batches/{args.batch_id}/cancel")
+            resp = c.post(
+                f"/api/v1/batches/{args.batch_id}/cancel",
+                json=payload or None,
+            )
         body = assert_2xx(resp, action=f"cancel batch {args.batch_id!r}")
+        state = body.get("state", "cancelled")
         print(
             f"Cancelled batch {body.get('batch_id', args.batch_id)} "
-            f"(state={body.get('state', 'cancelled')}).",
+            f"(state={state}).",
         )
-        print(
-            "Note: this cancels the whole batch and still-active trials. "
-            "To stop one hung trial, use `loom eval trial cancel <trial-id>`.",
-        )
+        if state == "cancelling":
+            print(
+                "Verifying and archiving trials keep running. "
+                "The batch becomes cancelled when they finish.",
+            )
+        else:
+            print(
+                "Note: this cancels the whole batch and still-active trials. "
+                "To stop one hung trial, use `loom eval trial cancel <trial-id>`.",
+            )
+        return 0
+
+    return _run_with_error_handling(_body)
+
+
+def _batch_cancel_trials(args: argparse.Namespace) -> int:
+    def _body() -> int:
+        cfg = require_logged_in()
+        payload = {
+            "trial_ids": list(args.trial_id),
+            "preserve_verifying": args.preserve_verifying,
+        }
+        if args.reason:
+            payload["reason"] = args.reason
+        with authed_client(cfg) as c:
+            resp = c.post(
+                f"/api/v1/batches/{args.batch_id}/trials/cancel",
+                json=payload,
+            )
+        body = assert_2xx(resp, action=f"cancel selected trials in batch {args.batch_id!r}")
+        if args.format == "json":
+            _dump_json(body)
+            return 0
+        for item in body.get("results", []):
+            print(f"{item.get('trial_id')} {item.get('outcome')}")
         return 0
 
     return _run_with_error_handling(_body)
@@ -2359,7 +2399,35 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_bx.add_argument("batch_id", help="Batch UUID.")
+    p_bx.add_argument(
+        "--mode",
+        choices=["full", "drain"],
+        default="full",
+        help=(
+            "full cancels every active trial. drain keeps trials that are "
+            "verifying or archiving output and cancels the rest."
+        ),
+    )
+    p_bx.add_argument("--reason", default=None, help="Optional operator reason.")
     p_bx.set_defaults(handler=_batch_cancel)
+
+    p_bxt = batch_sub.add_parser(
+        "cancel-trials",
+        help=(
+            "Cancel explicit trials in a batch. Succeeded and failed trials "
+            "are skipped, and the batch stays running."
+        ),
+    )
+    p_bxt.add_argument("batch_id", help="Batch UUID.")
+    p_bxt.add_argument("trial_id", nargs="+", help="Trial UUIDs that belong to the batch.")
+    p_bxt.add_argument(
+        "--preserve-verifying",
+        action="store_true",
+        help="Keep a selected trial that is already verifying or archiving.",
+    )
+    p_bxt.add_argument("--reason", default=None, help="Optional operator reason.")
+    p_bxt.add_argument("--format", choices=["text", "json"], default="text")
+    p_bxt.set_defaults(handler=_batch_cancel_trials)
 
     p_bdel = batch_sub.add_parser(
         "delivery-bundle",

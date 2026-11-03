@@ -42,7 +42,7 @@ import {
   usageEstimateConfidence,
 } from "../lib/usageCost";
 
-const ACTIVE_STATES = new Set(["submitted", "running"]);
+const ACTIVE_STATES = new Set(["submitted", "running", "cancelling"]);
 const TERMINAL_TRIAL_STATES = new Set(["succeeded", "failed", "cancelled"]);
 
 function needsRefresh(batch: components["schemas"]["BatchDetail"]): boolean {
@@ -130,6 +130,7 @@ export default function BatchDetail(): JSX.Element {
   const { batchId } = useParams<{ batchId: string }>();
   const queryClient = useQueryClient();
   const [cancelOpen, setCancelOpen] = useState(false);
+  const [cancelMode, setCancelMode] = useState<"full" | "drain">("full");
 
   const polling = useAdaptivePolling({
     baseIntervalMs: 5_000,
@@ -163,7 +164,7 @@ export default function BatchDetail(): JSX.Element {
   });
 
   const cancel = useMutation({
-    mutationFn: () => api.cancelBatch(batchId!),
+    mutationFn: (mode: "full" | "drain") => api.cancelBatch(batchId!, mode),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys["batch"](batchId) });
       queryClient.invalidateQueries({ queryKey: queryKeys["batches"]() });
@@ -178,7 +179,7 @@ export default function BatchDetail(): JSX.Element {
   });
 
   const handleCancel = async (): Promise<void> => {
-    await cancel.mutateAsync();
+    await cancel.mutateAsync(cancelMode);
     setCancelOpen(false);
   };
 
@@ -476,10 +477,24 @@ export default function BatchDetail(): JSX.Element {
 
           {ACTIVE_STATES.has(c.state) ? (
             <div className="stack-y-2">
+              {c.state !== "cancelling" ? (
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    cancel.reset();
+                    setCancelMode("drain");
+                    setCancelOpen(true);
+                  }}
+                  title="Cancel trials that have not started verifying or archiving output."
+                >
+                  Cancel and keep verifying
+                </Button>
+              ) : null}
               <Button
                 variant="danger"
                 onClick={() => {
                   cancel.reset();
+                  setCancelMode("full");
                   setCancelOpen(true);
                 }}
                 title="Stop queued or running trials in this batch."
@@ -887,10 +902,12 @@ export default function BatchDetail(): JSX.Element {
           cancel.reset();
           setCancelOpen(false);
         }}
-        title="Cancel batch"
+        title={cancelMode === "drain" ? "Cancel and keep verifying" : "Cancel batch"}
         target={`${c.name} (${c.id})`}
-        consequence="Queued and running trials will transition to cancellation. Completed results remain."
-        confirmLabel="Cancel batch"
+        consequence={cancelMode === "drain"
+          ? "Trials that are verifying or archiving output finish. Trials that have not reached those stages are cancelled. The batch stays cancelling until the retained work completes."
+          : "Queued and running trials will transition to cancellation, including trials that are verifying or archiving. Completed results remain."}
+        confirmLabel={cancelMode === "drain" ? "Cancel and keep verifying" : "Cancel batch"}
         pendingLabel="Cancelling…"
         confirmation={{ type: "simple" }}
         pending={cancel.isPending}

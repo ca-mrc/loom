@@ -3647,6 +3647,10 @@ export interface components {
         CancellationRequest: {
             /** Reason */
             reason?: string | null;
+            /** Mode */
+            mode?: "full" | "drain";
+            /** Preserve Verifying */
+            preserve_verifying?: boolean;
         };
         /** CatalogCreate */
         CatalogCreate: {
@@ -6177,6 +6181,12 @@ export interface components {
             batch_id: string;
             /** State */
             state: string;
+            /** Mode */
+            mode?: string;
+            /** Cancelled Count */
+            cancelled_count?: number;
+            /** Retained Count */
+            retained_count?: number;
         } & {
             [key: string]: unknown;
         };

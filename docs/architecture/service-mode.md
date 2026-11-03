@@ -563,14 +563,19 @@ do not serialize on one shared token row under high concurrency.
 
 ## Auto-cancellation: trial source-state awareness
 
-Batch cancellation commits the cancelled parent before requesting child
-cancellation. Control Plane child submission takes the same parent row lock and
-rejects new children once the batch is cancelled or finished; existing idempotent
+Batch cancellation commits the parent fence before requesting child
+cancellation. `mode=full` (the default) commits `cancelled` immediately.
+`mode=drain` commits `cancelling` and leaves `finished_at` empty. Control Plane
+child submission takes the same parent row lock and rejects new children once
+the batch is `cancelling`, `cancelled`, or finished; existing idempotent
 submissions remain readable. The batch runner retries active children whose
 cancellation request has not yet reached the Control Plane, including after an
-HTTP failure or service restart. Hard-budget cancellation uses the same fence and
-recovery path. A cancelled batch therefore stops further fanout immediately while
-its existing children finish their normal cancellation and cleanup.
+HTTP failure or service restart. A drain retry skips trials marked
+`cancellation_retained_at`. Hard-budget cancellation stays on `mode=full`.
+A full cancellation therefore stops further fanout immediately while its
+existing children finish their normal cancellation and cleanup. A drain stays
+`cancelling` until retained verifying and archiving trials finish, then becomes
+`cancelled`.
 New native execution reservations also lock and recheck the parent before
 committing, so an already queued child cannot start after that fence while its
 cancellation HTTP request is delayed or unavailable. Exact lease replays and
