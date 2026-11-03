@@ -84,3 +84,31 @@ async def test_capture_via_stream_json(make_handle) -> None:
         {"type": "tool_use", "name": "Read", "input": {"path": "main.py"}},
         {"type": "assistant", "text": "Done."},
     ]
+
+
+def test_controlled_invocation_isolates_settings_and_pins_all_model_slots() -> None:
+    from loom_launcher.adapters.claude_code import ClaudeCodeAdapter
+
+    env = {"CLAUDE_CONFIG_DIR": "/tmp/loom-harness/claude-code-home", "CLAUDE_CODE_SIMPLE": "1"}
+    argv = ClaudeCodeAdapter().build_invocation(instruction="work", workdir=PurePosixPath("/workspace"),
+        model=ModelSpec(provider="vendor", name="selected"), env=env, runtime_mode="chat")
+    assert "--setting-sources ''" in argv[2] and "--strict-mcp-config" in argv[2]
+    assert '--mcp-config' in argv[2] and '{"mcpServers":{}}' in argv[2]
+    assert "--bare" not in argv[2] and "CLAUDE_CODE_SIMPLE" not in env
+    assert env["CLAUDE_CONFIG_DIR"] == "/tmp/loom-harness/claude-code-home"
+    for key in ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"):
+        assert env[key] == "selected"
+    assert env["MAX_THINKING_TOKENS"] == "0"
+    assert env["CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING"] == "1"
+    assert env["DISABLE_PROMPT_CACHING"] == "1"
+
+
+def test_native_profile_does_not_disable_native_thinking_or_cache() -> None:
+    from loom_launcher.adapters.claude_code import ClaudeCodeAdapter
+
+    env = {}
+    ClaudeCodeAdapter().build_invocation(instruction="work", workdir=PurePosixPath("/workspace"),
+        model=ModelSpec(provider="anthropic", name="selected"), env=env, runtime_mode="native")
+    assert not {"MAX_THINKING_TOKENS", "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "DISABLE_PROMPT_CACHING"} & env.keys()
+    assert env["DISABLE_AUTOUPDATER"] == "1"
