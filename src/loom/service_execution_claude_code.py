@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shlex
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -50,6 +50,7 @@ async def run_claude_code(
     trial_id: UUID, instruction: str, model_environment: Mapping[str, str], ledger: Any,
     deadline: AttemptDeadline | None = None,
     wire_model: ModelSpec | None = None,
+    event_sink: Callable[[TrajectoryEvent], Awaitable[None]] | None = None,
 ) -> None:
     from loom_launcher.adapter import ModelSpec as LauncherModelSpec
     from loom_launcher.adapters.claude_code import ClaudeCodeAdapter
@@ -93,11 +94,16 @@ async def run_claude_code(
                                                  timeout_sec=deadline.remaining() if deadline else None)
             async def stdout() -> None:
                 size = 0
+                delivered = 0
                 with native_path.open("ab") as native:
                     async for chunk in handle.stdout:
                         native.write(chunk[:max(0, MAX_CLAUDE_NATIVE_BYTES - size)])
                         size += len(chunk)
                         capture.feed(chunk)
+                        if event_sink is not None:
+                            for event in capture.events[delivered:]:
+                                await event_sink(event)
+                            delivered = len(capture.events)
 
             async def drain(stream: AsyncIterator[bytes]) -> None:
                 # CLI stderr can contain request diagnostics. It is drained, not

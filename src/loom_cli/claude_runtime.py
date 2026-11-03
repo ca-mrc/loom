@@ -29,7 +29,6 @@ from loom.models.types import OS, ModelSpec
 from loom.service_execution_claude_code import (
     CLAUDE_NATIVE_EVENTS,
     claude_usage,
-    parse_claude_events,
     run_claude_code,
 )
 from loom.trajectory.atif import AtifTrajectory
@@ -155,26 +154,23 @@ class LocalClaudeRuntime:
             return [{**row, "step_id": "agent"} for row in await self.relay.get_trial_llm_calls(trial_id)
                     if row["id"] not in prior and row["step_id"] == step_id]
 
-        try:
-            async with relay_endpoint_access(env, self.relay.base_url, policy):
-                self.relay.activate(step_id=step_id, deadline=self._deadline)
-                try:
-                    await run_claude_code(driver=_LocalSandbox(env), workspace=invocation.output,
-                        task_config=self.task_config.model_copy(update={"steps": [step]}),
-                        trial_config=self.trial_config, trial_id=self.trial_id, instruction=instruction,
-                        model_environment={"ANTHROPIC_BASE_URL": self.relay.base_url, "ANTHROPIC_AUTH_TOKEN": self.relay.token},
-                        ledger=invocation_ledger, deadline=self._deadline, wire_model=self.relay.connection.model)
-                    invocation.succeeded = True
-                finally:
-                    with CancelScope(shield=True), fail_after(10):
-                        await self.relay.deactivate()
-        finally:
-            path = invocation.output / "trajectory.jsonl"
-            if path.exists():
-                for event in parse_claude_events(path.read_bytes(), trial=self.trial_config, trial_id=self.trial_id):
-                    if isinstance(event, (AgentThoughtEvent, ToolUseEvent)):
-                        await trajectory.append(event.model_copy(update={"step_id": step_id, "seq": 0}))
-                        invocation.event_count += 1
+        async def observe(event: TrajectoryEvent) -> None:
+            await trajectory.append(event.model_copy(update={"step_id": step_id, "seq": 0}))
+            invocation.event_count += 1
+
+        async with relay_endpoint_access(env, self.relay.base_url, policy):
+            self.relay.activate(step_id=step_id, deadline=self._deadline)
+            try:
+                await run_claude_code(driver=_LocalSandbox(env), workspace=invocation.output,
+                    task_config=self.task_config.model_copy(update={"steps": [step]}),
+                    trial_config=self.trial_config, trial_id=self.trial_id, instruction=instruction,
+                    model_environment={"ANTHROPIC_BASE_URL": self.relay.base_url, "ANTHROPIC_AUTH_TOKEN": self.relay.token},
+                    ledger=invocation_ledger, deadline=self._deadline, wire_model=self.relay.connection.model,
+                    event_sink=observe)
+                invocation.succeeded = True
+            finally:
+                with CancelScope(shield=True), fail_after(10):
+                    await self.relay.deactivate()
 
     def build_atif(self, generic: AtifTrajectory, events: list[TrajectoryEvent]) -> dict[str, Any]:
         document = generic.model_dump(mode="json")
