@@ -2569,18 +2569,29 @@ async def get_batch(
     effective_trials = _effective_trials(original_trials, rerun_trials)
     effective_summary = _summary_from_trials(effective_trials)
     effective_reward = _rollup_from_trials(effective_trials)
-    effective_usage = await _usage_totals_for_trials(s, effective_trials)
-    effective_combination_summary = await combination_summary_for_batch(
-        s,
-        combinations=b.combinations,
-        trials=effective_trials,
-        expected_trial_count=b.expected_trial_count,
-        required_worker_pool_count=len(b.required_worker_pools or []),
-        fanout_errors=b.fanout_errors,
+    # Without reruns the effective set is the original Trials in the same
+    # order, so reuse their aggregates instead of re-reading every call (#2771).
+    # Duplicate Trial keys collapse in `_effective_trials`, hence the length check.
+    same_trials = not rerun_trials and len(effective_trials) == len(original_trials)
+    effective_usage = (
+        usage if same_trials else await _usage_totals_for_trials(s, effective_trials)
     )
-    effective_llm_call_counts = await _llm_call_counts_for_trials(
-        s,
-        effective_trials,
+    effective_combination_summary = (
+        combination_summary
+        if same_trials
+        else await combination_summary_for_batch(
+            s,
+            combinations=b.combinations,
+            trials=effective_trials,
+            expected_trial_count=b.expected_trial_count,
+            required_worker_pool_count=len(b.required_worker_pools or []),
+            fanout_errors=b.fanout_errors,
+        )
+    )
+    effective_llm_call_counts = (
+        llm_call_counts
+        if same_trials
+        else await _llm_call_counts_for_trials(s, effective_trials)
     )
     effective_llm_evidence = summarize_llm_evidence_for_trials(
         effective_trials,
