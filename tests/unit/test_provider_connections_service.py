@@ -356,7 +356,7 @@ async def test_probe_anthropic_uses_xapikey_and_version_header() -> None:
     )
     assert result.status == "valid"
     req = captured[0]
-    assert str(req.url) == "https://api.anthropic.com/models"
+    assert str(req.url) == "https://api.anthropic.com/v1/models"
     assert req.headers["x-api-key"] == "ant-XYZ"
     assert req.headers["anthropic-version"] == "2023-06-01"
     assert "Authorization" not in req.headers
