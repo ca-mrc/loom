@@ -210,3 +210,42 @@ async def test_local_runner_rejects_invalid_verifier_before_start(
         await runner.run()
 
     assert driver.state == "constructed"
+
+
+@pytest.mark.parametrize("dialect,mode", [("anthropic", "native"), ("openai_chat", "chat")])
+async def test_local_docker_claude_owns_relay_and_native_finalization(tmp_path, monkeypatch, dialect, mode):
+    import httpx
+    import loom_cli.local_runner as module
+    from loom_cli.claude_runtime import LocalClaudeRuntime
+    from loom_cli.config import LocalProvider
+
+    driver = FakeDriver()
+    driver.capabilities = driver.capabilities.model_copy(update={"backend": "docker"})
+    runner = _runner(tmp_path, {"name": "pytest"}, driver)
+    model = ModelSpec(provider="local", name="endpoint/model")
+    runner.task_config = runner.task_config.model_copy(update={
+        "agent": runner.task_config.agent.model_copy(update={"name": "claude-code", "model": model})})
+    runner.trial_config = TrialConfig(agent_name="claude-code", agent_model=model)
+    runner.local_providers = {"endpoint": LocalProvider(base_url="https://endpoint.test/v1", api_dialect=dialect)}
+    observed = []
+    async def host():
+        return "127.0.0.1"
+    async def trial(self):
+        ctx = self.ctx
+        assert isinstance(ctx.agent, LocalClaudeRuntime)
+        assert ctx.trial_config.claude_code_mode == mode
+        assert ctx.llm_calls_fetcher == ctx.agent.relay.get_trial_llm_calls
+        assert ctx.atif_builder == ctx.agent.build_atif
+        observed.append(ctx.agent.relay.base_url)
+        async with httpx.AsyncClient(trust_env=False) as client:
+            response = await client.post(observed[0] + "/v1/messages",
+                headers={"Authorization": "Bearer " + ctx.agent.relay.token}, json={})
+            assert response.status_code == 403  # no model authority before agent phase
+        raise RuntimeError("stop after trial context inspection")
+    monkeypatch.setattr(module, "local_docker_relay_host", host, raising=False)
+    monkeypatch.setattr(module.Trial, "run", trial)
+    with pytest.raises(RuntimeError, match="stop after trial"):
+        await runner.run()
+    async with httpx.AsyncClient(trust_env=False) as client:
+        with pytest.raises(httpx.ConnectError):
+            await client.get(observed[0] + "/health")
