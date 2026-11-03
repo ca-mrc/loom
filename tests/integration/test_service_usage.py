@@ -495,6 +495,9 @@ async def test_price_snapshots_read_only_trial_scoped_price_bases(
     original, rerun, unrelated = uuid4(), uuid4(), uuid4()
     raw_log = {"raw_response": "x" * 4096, "provider_request_id": "req-1"}
     calls = [
+        # Inserted first, so a scan meets it first: the lookup must keep looking
+        # for a call that carries the basis.
+        (original, hash_r1, dict(raw_log)),
         (original, hash_r1, {**raw_log, "_loom_price_basis": basis_r1}),
         (original, hash_r1, {**raw_log, "_loom_price_basis": basis_r1}),
         (original, card_hash, {"_loom_cost_source": "rate-card"}),
@@ -579,6 +582,9 @@ async def test_price_snapshots_read_only_trial_scoped_price_bases(
             assert "llm_calls.trial_id IN" in sql
             assert "llm_calls.provider_extras," not in sql
             assert "DISTINCT" not in sql or "provider_extras" not in sql
+            # A raw-log key test in a filter lets Postgres run it before the
+            # Trial filter and detoast every Batch's calls with the hash (#2771).
+            assert "provider_extras ?" not in sql
     finally:
         with engine.begin() as db:
             db.execute(delete(RateCard).where(RateCard.id == card.id))

@@ -217,7 +217,11 @@ Trial and Batch reads resolve `price_snapshots` from the calls of the Trials
 being read. A provider-price hash is the digest of its basis, so the read takes
 one call per unresolved hash and extracts only `_loom_price_basis`, never the
 full raw `provider_extras`. Batch detail resolves original and effective
-snapshots in one shared lookup (#2687).
+snapshots in one shared lookup (#2687). The lookup never filters on
+`provider_extras`: Postgres may evaluate a raw-log key test before the Trial
+filter, which reads the raw log of every call that shares the hash in any
+Batch. It filters on Trial and hash only, and stops at the first of those
+calls that carries a basis (#2771).
 
 Since migration 0182 the Gateway also copies `_loom_cost_source`,
 `_loom_cost_confidence` and `_loom_usage_status` into the `llm_calls` columns
