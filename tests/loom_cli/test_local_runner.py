@@ -215,6 +215,7 @@ async def test_local_runner_rejects_invalid_verifier_before_start(
 @pytest.mark.parametrize("dialect,mode", [("anthropic", "native"), ("openai_chat", "chat")])
 async def test_local_docker_claude_owns_relay_and_native_finalization(tmp_path, monkeypatch, dialect, mode):
     import httpx
+
     import loom_cli.local_runner as module
     from loom_cli.claude_runtime import LocalClaudeRuntime
     from loom_cli.config import LocalProvider

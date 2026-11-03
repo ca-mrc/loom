@@ -24,6 +24,7 @@ from loom.installed_agent_capture import (
 from loom.models.task import TaskConfig
 from loom.models.trajectory import TrajectoryEvent
 from loom.models.trial import TrialConfig
+from loom.models.types import ModelSpec
 
 CLAUDE_USAGE_SCHEMA = "loom.service-execution-claude-code-usage.v1"
 CLAUDE_NATIVE_EVENTS = Path("claude-code/events.jsonl")
@@ -48,6 +49,7 @@ async def run_claude_code(
     *, driver: Any, workspace: Path, task_config: TaskConfig, trial_config: TrialConfig,
     trial_id: UUID, instruction: str, model_environment: Mapping[str, str], ledger: Any,
     deadline: AttemptDeadline | None = None,
+    wire_model: ModelSpec | None = None,
 ) -> None:
     from loom_launcher.adapter import ModelSpec as LauncherModelSpec
     from loom_launcher.adapters.claude_code import ClaudeCodeAdapter
@@ -70,9 +72,11 @@ async def run_claude_code(
         **model_environment, "CLAUDE_CONFIG_DIR": CLAUDE_CODE_HOME, "HOME": CLAUDE_CODE_HOME,
         "TMPDIR": CLAUDE_CODE_TMPDIR, "PATH": f"{CLAUDE_CODE_INSTALL_ROOT}:/usr/local/bin:/usr/bin:/bin",
     }
+    invocation_model = wire_model or model
     argv = ClaudeCodeAdapter().build_invocation(
         instruction=instruction, workdir=task_config.environment.workdir,
-        model=LauncherModelSpec(provider=model.provider, name=model.name, tier=model.tier, region=model.region),
+        model=LauncherModelSpec(provider=invocation_model.provider, name=invocation_model.name,
+                               tier=invocation_model.tier, region=invocation_model.region),
         env=environment, runtime_mode=trial_config.claude_code_mode,
     )
     calls: list[Any] = []

@@ -73,7 +73,7 @@ async def test_local_controller_preserves_wire_identity_native_trace_and_release
             assert not terminal_error
         assert relay.active is None
     assert len(list(tmp_path.glob("*/claude-code/events.jsonl"))) == 2
-    assert "wire-model" in sandbox.argv and "endpoint/wire-model" not in sandbox.argv
+    assert "--model wire-model" in " ".join(sandbox.argv) and "endpoint/wire-model" not in " ".join(sandbox.argv)
     assert sandbox.environment["ANTHROPIC_AUTH_TOKEN"] == "trial-token"
     assert len(writer.events) == 8 and not any(isinstance(e, LLMCallEvent) for e in writer.events)
     assert all(e.step_id == task.steps[0].name for e in writer.events)
