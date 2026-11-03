@@ -643,11 +643,16 @@ def test_rendered_refresh_probes_and_migration_execute_against_real_tls_database
 
 
 @pytest.mark.parametrize('sqlstate', ['08006', None])
-def test_rendered_job_diagnostics_recovers_safe_final_record(sqlstate):
+def test_rendered_job_diagnostics_recovers_safe_final_record(sqlstate, monkeypatch):
     from datetime import UTC, datetime
+    from io import BytesIO
     from types import SimpleNamespace
 
+    from kubernetes import client
+    from urllib3.response import HTTPResponse
+
     calls = []
+    responses = []
     terminated = SimpleNamespace(exit_code=1, reason='Error', started_at=datetime(2026, 11, 2, tzinfo=UTC),
         finished_at=datetime(2026, 11, 2, 0, 0, 1, tzinfo=UTC))
     pod = SimpleNamespace(metadata=SimpleNamespace(name='fixture-pod'), status=SimpleNamespace(init_container_statuses=[],
@@ -656,17 +661,22 @@ def test_rendered_job_diagnostics_recovers_safe_final_record(sqlstate):
         'migration_revision': '0187', 'message': 'private-message',
         'dsn': 'postgresql://private-user:private-password@private-host/loom'}
 
-    class Core:
-        def list_namespaced_pod(self, *args, **kwargs):
-            return SimpleNamespace(items=[pod])
+    def log_response(_url, *, query_params, **kwargs):
+        calls.append(dict(query_params))
+        raw = '{"error_type": "Operational' if len(calls) == 1 else json.dumps(diagnostic) + '\n'
+        response = HTTPResponse(body=BytesIO(raw.encode()), status=200, preload_content=False)
+        responses.append(response)
+        return response
 
-        def read_namespaced_pod_log(self, *args, **kwargs):
-            calls.append(kwargs)
-            return '{"error_type": "Operational' if len(calls) == 1 else json.dumps(diagnostic) + '\n'
-
-    error = AssertionError('rendered Job failed')
-    _add_rendered_job_failure(Core(), 'fixture-namespace', 'fixture-job', error)
-    assert [(call['tail_lines'], call['limit_bytes']) for call in calls] == [(80, 16384), (4, 2048)]
+    with client.ApiClient() as api:
+        core = client.CoreV1Api(api)
+        monkeypatch.setattr(core, 'list_namespaced_pod', lambda *args, **kwargs: SimpleNamespace(items=[pod]))
+        # Exercise the real client's response handling: it parses a sole JSON
+        # log record even though the generated endpoint declares a string.
+        monkeypatch.setattr(api.rest_client, 'GET', log_response)
+        error = AssertionError('rendered Job failed')
+        _add_rendered_job_failure(core, 'fixture-namespace', 'fixture-job', error)
+    assert [(call['tailLines'], call['limitBytes']) for call in calls] == [(80, 16384), (4, 2048)]
     note = error.__notes__[0]
     row, = json.loads(note.removeprefix('rendered Job termination: '))
     assert row['sqlstate'] == sqlstate and row['error_type'] == 'OperationalError'
@@ -674,6 +684,7 @@ def test_rendered_job_diagnostics_recovers_safe_final_record(sqlstate):
     assert row['started_at'] == '2026-11-02T00:00:00+00:00'
     assert row['finished_at'] == '2026-11-02T00:00:01+00:00'
     assert all(private not in note for private in ('private-message', 'private-user', 'private-password', 'private-host', 'dsn'))
+    assert all(response.closed for response in responses)
 
 
 @pytest.mark.parametrize('raw', ['null', '[]', 'garbage', '{',
