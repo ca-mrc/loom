@@ -52,6 +52,7 @@ from loom_service.environment_management.child import load_child_registration
 from loom_service.environment_management.installation import ManagementInstallation
 from loom_service.environment_management.registry import ManagementError
 from loom_service.environment_management.runtime import EnvironmentRuntime
+from loom_service.json_compression import JsonCompressionMiddleware
 from loom_service.metrics import (
     HTTP_REQUEST_LATENCY_SEC,
     HTTP_REQUESTS_TOTAL,
@@ -523,6 +524,11 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     register_api_routes(
         app, management=management, include_local_execution=local_execution_enabled(),
     )
+
+    # Innermost, next to the routes: the `@app.middleware` layers below
+    # re-stream every body, so outside them no response is a single message.
+    # Nothing between the ingress and this service compresses JSON (#2771).
+    app.add_middleware(JsonCompressionMiddleware)
 
     @app.middleware("http")
     async def _browser_origin_middleware(  # type: ignore[no-untyped-def]
