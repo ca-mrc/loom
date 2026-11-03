@@ -44,7 +44,7 @@ from loom.trajectory.llm_call_events import llm_call_row_to_event
 from loom.trajectory.object_identity import TrajectoryObjectIdentity
 from loom.trajectory.storage import ObjectStore
 from loom.trajectory.writer import TrajectoryWriter
-from loom.trial.finalize import finalize_trajectory_with_metadata
+from loom.trial.finalize import AtifBuilder, finalize_trajectory_with_metadata
 from loom.trial.step_runner import run_step
 from loom.trial.watchdog_cancellation import (
     WatchdogTriggerReason,
@@ -91,6 +91,7 @@ class TrialContext:
     # rows are injected (legacy v0.7 behavior — agents that bypassed
     # the Gateway have no llm_calls).
     llm_calls_fetcher: Callable[[UUID], Awaitable[list[dict[str, Any]]]] | None = None
+    atif_builder: AtifBuilder | None = None
     # #188 / Phase B: sandbox-isolation hooks. When the worker has
     # `LOOM_WORKER_SANDBOX_ISOLATION=1`, these are populated:
     # - `sandbox_network` is the per-trial bridge name passed to
@@ -506,6 +507,7 @@ class Trial:
                             agent_version=self.ctx.agent.version,
                             bucket=self.ctx.trajectory_bucket,
                             attempt_count=self.ctx.attempt_count,
+                            atif_builder=self.ctx.atif_builder,
                         )
                     ),
                     timeout=_FINALIZE_TIMEOUT_SEC,
