@@ -17,7 +17,7 @@ from uuid import UUID
 from loom.agent.direct_provider import DirectCallLedger, DirectProviderConnection
 from loom.agent.terminus2.checkpoint_bridge import HarborCheckpointBridge
 from loom.agent.terminus2.dispatch_checkpoint import install_dispatch_checkpoint
-from loom.agent.terminus2.gateway_ledger import CheckpointBridgeError
+from loom.agent.terminus2.gateway_ledger import CheckpointBridgeError, LedgerReadUnavailableError
 from loom.agent.terminus2.harbor_environment import (
     LoomHarborEnvironment,
     ensure_sandbox_deps,
@@ -1152,13 +1152,21 @@ class LoomTerminus2Runtime:
         async def _poll_checkpoints() -> None:
             while not poll_stop.is_set():
                 _require_attempt_mutation_active(trajectory, self._attempt_deadline)
-                await bridge.sync_trajectory_file(
-                    trajectory_path,
-                    allow_incomplete=True,
-                )
+                poll_delay = 0.5
+                try:
+                    await bridge.sync_trajectory_file(
+                        trajectory_path,
+                        allow_incomplete=True,
+                    )
+                except LedgerReadUnavailableError:
+                    # Observation RPC availability must not cancel a running
+                    # agent. Each HTTP read is bounded; wait before retrying.
+                    # Dispatch and final reconciliation remain strict, while
+                    # auth/fencing and persistence errors still stop this loop.
+                    poll_delay = 5.0
                 await _write_episode_checkpoint()
                 try:
-                    await asyncio.wait_for(poll_stop.wait(), timeout=0.5)
+                    await asyncio.wait_for(poll_stop.wait(), timeout=poll_delay)
                 except TimeoutError:
                     continue
 

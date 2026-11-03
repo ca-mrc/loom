@@ -271,22 +271,35 @@ async def _reject_detached_gc_claims(session: AsyncSession, state: RecoveryState
 async def _load(
     session: AsyncSession, request: RecoveryRequest, *, locked: bool,
 ) -> RecoveryState:
-    # Lifecycle/GC table locks prevent a conflicting version or GC journal INSERT
-    # between the final predicate check and commit. Row locks alone cannot do so.
     if locked:
         await session.execute(text("SET LOCAL lock_timeout = '2s'"))
         await session.execute(text("SET LOCAL statement_timeout = '5s'"))
+    # Match materialization's Trial → Lease → Artifact order. Read only an
+    # ownership hint before the lease lock, then revalidate the locked artifact.
+    trial = await session.get(Trial, request.trial_id, with_for_update=locked)
+    owner = (await session.execute(select(
+        Artifact.control_producer_id, Artifact.trial_id, ServiceExecutionLease.trial_id,
+    ).outerjoin(ServiceExecutionLease, ServiceExecutionLease.id == Artifact.control_producer_id)
+      .where(Artifact.id == request.artifact_id))).one_or_none()
+    _require(owner is not None, "artifact_missing")
+    assert owner is not None
+    lease_id, artifact_trial_id, lease_trial_id = owner
+    _require(lease_id is not None, "native_producer_required")
+    _require(lease_trial_id is not None, "owner_missing")
+    _require(artifact_trial_id == lease_trial_id == request.trial_id, "native_owner_or_commit_conflict")
+    lease = await session.get(ServiceExecutionLease, lease_id, with_for_update=locked)
+    artifact = await session.get(Artifact, request.artifact_id, with_for_update=locked)
+    _require(artifact is not None, "artifact_missing")
+    assert artifact is not None
+    _require(artifact.control_producer_id == lease_id, "native_owner_or_commit_conflict")
+    if locked:
+        # Retain the strong lifecycle/GC table locks against journal INSERTs,
+        # but never hold them while waiting for a Trial owner/materializer.
         await session.execute(text(
             "LOCK TABLE data_lifecycle_authorities, data_lifecycle_objects, "
             "data_lifecycle_gc_items, data_lifecycle_gc_authorities, data_lifecycle_gc_runs, admin_audit_events "
             "IN SHARE ROW EXCLUSIVE MODE"
         ))
-    artifact = await session.get(Artifact, request.artifact_id, with_for_update=locked)
-    _require(artifact is not None, "artifact_missing")
-    assert artifact is not None
-    _require(artifact.control_producer_id is not None, "native_producer_required")
-    lease = await session.get(ServiceExecutionLease, artifact.control_producer_id, with_for_update=locked)
-    trial = await session.get(Trial, request.trial_id, with_for_update=locked)
     upload = await session.get(ArtifactUploadSession, artifact.artifact_upload_session_id, with_for_update=locked)
     authority = await session.get(DataLifecycleAuthority, artifact.lifecycle_authority_id, with_for_update=locked)
     _require(all(row is not None for row in (lease, trial, upload, authority)), "owner_missing")

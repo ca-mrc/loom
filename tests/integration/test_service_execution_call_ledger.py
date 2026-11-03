@@ -80,7 +80,8 @@ async def test_call_ledger_selects_current_lease_and_generation_and_fences_revoc
                         "reasoning_tokens": 2,
                         "_loom_raw_provider_log": {"service_execution": {
                             "lease_id": lease_key, "generation": generation,
-                        }, "request": {"body": {"messages": ["private prompt"]}}},
+                        }, "request": {"body": {"messages": ["private prompt"]}},
+                        "response": {"body": {"choices": [{"finish_reason": "stop"}]}}},
                     },
                 ))
             await session.commit()
@@ -103,6 +104,7 @@ async def test_call_ledger_selects_current_lease_and_generation_and_fences_revoc
             assert body["trial_id"] == str(trial_id) and body["team_id"] == str(team_id)
             assert [row["id"] for row in body["items"]] == [str(ids[0])]
             assert body["items"][0]["provider_extras"] == {"reasoning_tokens": 2}
+            assert body["items"][0]["finish_reason"] == "stop"
             response = await client.get(
                 "/internal/service-execution/llm-calls?trial_id=foreign", headers=headers,
             )
@@ -274,3 +276,73 @@ async def test_non_native_calls_are_not_model_bound(facade_setup) -> None:  # no
         }, headers={"Authorization": f"Bearer {token}", "x-loom-provider-connection-id": str(connection_id)})
     assert response.status_code == 200, response.text
     assert len(captures["requests"]) == 1
+
+
+async def test_projected_ledger_matches_full_rows_without_transferring_provider_logs(postgres_url):
+    """Equivalent scoped reads on local PG; timings are evidence, not an SLO."""
+    import hashlib
+    import json
+    import statistics
+    import time
+
+    from loom.llm_call_ledger import serialize_execution_accounting_call
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    ids = []
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=datetime.now(UTC))
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=datetime.now(UTC))
+            for index in range(40):
+                row_id = uuid4()
+                ids.append(row_id)
+                session.add(LlmCall(
+                    id=row_id, team_id=lease.team_id, trial_id=trial_id, step_id="agent",
+                    model="glm-5.2", dialect="openai_facade", input_tokens=10, output_tokens=5,
+                    cost_usd=Decimal("0.01"), rate_card_hash="test-rate", attempt=1,
+                    captured_at=datetime.now(UTC), provider_extras={
+                        "reasoning_tokens": 2, "_loom_raw_provider_log": {
+                            "service_execution": {"lease_id": str(lease.id), "generation": lease.generation},
+                            "request": {"body": hashlib.shake_256(str(index).encode()).hexdigest(8192)},
+                            "response": {"body": {"choices": [{"finish_reason": "stop"}]}},
+                        },
+                    },
+                ))
+            await session.commit()
+            binding = LlmCall.provider_extras["_loom_raw_provider_log"]["service_execution"]
+            original = select(LlmCall).where(
+                LlmCall.team_id == lease.team_id, LlmCall.trial_id == trial_id,
+                LlmCall.step_id == "agent", binding["lease_id"].astext == str(lease.id),
+                binding["generation"].astext == str(lease.generation),
+            ).order_by(LlmCall.captured_at, LlmCall.id)
+            samples = {"full_orm": [], "projected": []}
+            for repetition in range(12):
+                for mode in (("full_orm", "projected") if repetition % 2 else ("projected", "full_orm")):
+                    started = time.perf_counter()
+                    if mode == "full_orm":
+                        full = (await session.scalars(original)).all()
+                        expected = [serialize_execution_accounting_call(row) for row in full]
+                    else:
+                        actual = await read_service_execution_llm_calls(session, lease)
+                    if repetition >= 2:
+                        samples[mode].append(time.perf_counter() - started)
+                assert actual == expected
+            old_json_bytes = sum(len(json.dumps(row.provider_extras).encode()) for row in full)
+            safe_json_bytes = sum(len(json.dumps(row["provider_extras"]).encode()) for row in actual)
+            assert old_json_bytes > 650000
+            assert safe_json_bytes < 2000
+            measurement = {
+                "rows": len(actual), "full_extras_json_bytes": old_json_bytes,
+                "projected_extras_json_bytes": safe_json_bytes,
+                "median_read_and_serialize_ms": {
+                    mode: round(statistics.median(values) * 1000, 3) for mode, values in samples.items()
+                },
+                "scope": "disposable local PostgreSQL; synthetic 40-call ledger; no hosted throughput claim",
+            }
+            print("ledger_projection_measurement=" + json.dumps(measurement, sort_keys=True))
+    finally:
+        async with sessions() as session:
+            await session.execute(delete(LlmCall).where(LlmCall.id.in_(ids)))
+            await session.commit()
+        await engine.dispose()

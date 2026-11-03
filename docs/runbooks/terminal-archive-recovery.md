@@ -19,6 +19,14 @@ runtime result/reward/attempt are preserved. A successful `materializing` Trial
 becomes succeeded only after ordinary validated canonical commit. Each source
 is bounded to 1,024 files and 512 MiB. The independent source store is retained.
 
+Recovery owner locks follow the ordinary materializer's Trial → execution lease
+→ Artifact order. Terminal archive qualification takes the Trial lock before
+locking its parent/verifier pair. Object-version apply also acquires its owner
+rows before its existing lifecycle/GC table locks and revalidates the Artifact's
+producer after locking it. All strong row/table locks and qualification checks
+remain in place; a recovery waiting on a Trial does not hold that Trial's lease
+or Artifact against the current materializer or canceller.
+
 Before selecting recovery targets, dispatch the protected read-only lease census:
 
 ```bash

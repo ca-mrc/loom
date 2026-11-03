@@ -87,6 +87,7 @@ from loom_control_plane.metrics import (
     SERVICE_EXECUTION_DUPLICATE_DELIVERIES_TOTAL,
     SERVICE_EXECUTION_STALE_GENERATIONS_TOTAL,
 )
+from loom_control_plane.service_execution_locks import lock_execution_trial
 
 _EXECUTION_UNIT_NAMESPACE = UUID("a2f6a80b-b27c-4ae1-b9a0-8c743edb0fa5")
 _TERMINAL_EVENT_KINDS = frozenset({"cancelled", "timed_out", "failed", "finalized", "deleted"})
@@ -1101,6 +1102,7 @@ async def enqueue_execution_transition(
     payload: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> ServiceExecutionCommand:
+    await lock_execution_trial(session, lease_id)
     if desired_state not in _DESIRED_TO_COMMAND:
         raise ServiceExecutionConflict("invalid execution desired state")
     lease = (
@@ -1330,6 +1332,7 @@ async def mark_execution_output_unavailable(
     allow_cancel_before_deadline: bool = False,
 ) -> ServiceExecutionLease:
     """Close a revoked Pod's bounded output window before resource deletion."""
+    await lock_execution_trial(session, lease_id)
 
     if not reason or len(reason) > 120:
         raise ServiceExecutionConflict("invalid output unavailable reason")
@@ -1566,6 +1569,8 @@ async def verify_trial_execution_fence(
             .limit(1)
         )
     if lock:
+        # Cancellation/reservation already own this parent before a lease.
+        await session.execute(select(Trial.id).where(Trial.id == trial_id).with_for_update())
         statement = statement.with_for_update()
     lease = (await session.execute(statement)).scalar_one_or_none()
     if lease is None:
@@ -1615,6 +1620,7 @@ async def recover_execution_node_attribution(
     apply: bool = False,
 ) -> dict[str, object]:
     """Recover only missing placement from unambiguous, lease-bound Pod evidence."""
+    await lock_execution_trial(session, lease_id)
     lease = (
         await session.execute(
             select(ServiceExecutionLease)
@@ -1892,6 +1898,7 @@ async def record_execution_event(
     observed_at: datetime,
     idempotency_key: str | None = None,
 ) -> tuple[ServiceExecutionEvent, bool]:
+    await lock_execution_trial(session, lease_id, key_share=event_kind == "finalized")
     if event_kind not in {
         "created",
         "started",
@@ -2370,7 +2377,11 @@ async def record_execution_event(
             lease.error_class = "permanent"
             lease.error_code = "oom_killed"
             lease.error_message = diagnosis["message"]
-            diagnosed_trial = await session.get(Trial, lease.trial_id, with_for_update=True)
+            # Failure annotation changes no parent key. Match finalization's
+            # existing non-key lock rather than upgrading after the lease lock.
+            diagnosed_trial = await session.get(
+                Trial, lease.trial_id, with_for_update={"key_share": True},
+            )
             if (diagnosed_trial is not None and diagnosed_trial.state == "failed"
                     and diagnosed_trial.attempt_count == lease.attempt):
                 diagnosed_trial.failure_reason = "oom_killed"
@@ -2443,7 +2454,12 @@ async def record_kubernetes_observation(
     payload: dict[str, Any],
     observed_at: datetime,
 ) -> tuple[ServiceExecutionEvent, bool]:
-    """Persist one resourceVersion/state observation exactly once."""
+    """Persist one resourceVersion/state observation exactly once.
+
+    Callers that prelock this lease must already own its Trial lock in the
+    same transaction. Ordinary callers enter with neither row locked.
+    """
+    await lock_execution_trial(session, lease_id)
 
     idempotency_key = canonical_digest(
         {
@@ -2508,6 +2524,7 @@ async def retry_unscheduled_execution_after_deadline(
     observed_at: datetime,
 ) -> bool:
     """Recover an unstarted capacity wait through the existing fenced cleanup."""
+    await lock_execution_trial(session, lease_id)
 
     lease = await session.get(ServiceExecutionLease, lease_id, with_for_update=True)
     if (
@@ -2559,6 +2576,7 @@ async def record_committed_runtime_result(
     observed_at: datetime,
 ) -> ServiceExecutionEvent:
     """Advance a committed runtime result to the durable finalize intent."""
+    await lock_execution_trial(session, lease_id)
 
     lease = await session.get(ServiceExecutionLease, lease_id, with_for_update=True)
     if lease is None or lease.generation != generation:
@@ -2646,7 +2664,7 @@ async def _committed_result_finalization_payload(
         "output_manifest_sha256": lease.output_manifest_sha256,
         "output_marker_sha256": lease.output_marker_sha256,
     }
-    if runtime_result.status == "succeeded" and defers_verification(lease):
+    if runtime_result.status in {"succeeded", "timed_out"} and defers_verification(lease):
         trial = await session.get(Trial, lease.trial_id, with_for_update=True)
         if trial is None:
             raise ServiceExecutionConflict("trial not found")
@@ -2657,8 +2675,30 @@ async def _committed_result_finalization_payload(
                 "failure_reason": "cancelled",
                 "failure_message": "service execution cancelled before verification",
             }
+        if runtime_result.status == "timed_out":
+            # A deadline is scoreable only after the main process ran and its
+            # exact workspace was safely committed. Setup timeouts cannot grade
+            # an absent or partially uploaded workspace.
+            plan = ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json)
+            try:
+                if not any(phase.role == plan.main.role and phase.timed_out
+                           for phase in runtime_result.phases):
+                    raise ValueError("agent phase did not reach its deadline")
+                from loom.service_execution_materialization import build_verifier_handoff_manifest
+
+                files, _ = await committed_handoff_files(session, parent=lease)
+                build_verifier_handoff_manifest(
+                    task_revision_sha256=plan.task_revision_sha256, committed_files=files,
+                )
+            except ValueError:
+                return {
+                    "trial_state": "failed", "result": result,
+                    "failure_reason": "timed_out",
+                    "failure_message": "agent timed out without a safe committed verifier workspace",
+                }
         # The agent's evidence is committed; its own verifier lease grades it
-        # after this pod releases capacity.
+        # after this pod releases capacity. Its original runtime status remains
+        # in result, independently of the future numeric score.
         return {
             "trial_state": "running",
             "result": {
@@ -2825,8 +2865,10 @@ async def _verifier_finalization_payload(
         },
     }
     if runtime_result.status == "succeeded":
-        return {"trial_state": "materializing", "result": result,
-                "failure_reason": None, "failure_message": None}
+        agent_timed_out = trial.result.get("runtime_result", {}).get("status") == "timed_out"
+        return {"trial_state": "failed" if agent_timed_out else "materializing", "result": result,
+                "failure_reason": "timed_out" if agent_timed_out else None,
+                "failure_message": "agent timed out; committed workspace was graded" if agent_timed_out else None}
     if runtime_result.status == "cancelled":
         return {"trial_state": "cancelled", "result": {**result, "cancelled": True},
                 "failure_reason": "cancelled", "failure_message": "service execution cancelled"}
@@ -2889,6 +2931,7 @@ async def finalize_committed_service_execution(
     observed_at: datetime,
 ) -> bool:
     """Finalize and enqueue cleanup after Kubernetes confirms termination."""
+    await lock_execution_trial(session, lease_id)
 
     lease = await session.get(ServiceExecutionLease, lease_id, with_for_update=True)
     if lease is None:
@@ -2932,6 +2975,7 @@ async def finalize_failed_service_execution(
     flight can commit its real result. Reconciliation reuses the first durable
     terminal observation, including after restart; it never refreshes the timer.
     """
+    await lock_execution_trial(session, lease_id)
 
     lease = await session.get(ServiceExecutionLease, lease_id, with_for_update=True)
     if lease is None:

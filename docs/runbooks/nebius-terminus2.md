@@ -673,6 +673,17 @@ timeout or failed cleanup never permits this continuation. The Trial remains
 failed with `timed_out`, even when the verifier returns a numeric reward; that
 reward and available artifacts remain available for diagnosis.
 
+The same scoring rule applies to a separate verifier after the main agent phase
+reports a timeout and the exact workspace handoff is committed and validated.
+The original timeout result is retained; grading adds a numeric score without
+claiming that the agent completed within its deadline. Setup timeouts, incomplete
+handoffs, cancellation and stale attempts do not enter this path. Verification
+starts only after the parent pod releases its resources. A max-node or provider
+quota wait preserves the committed workspace and pending verification until
+capacity is available or the user cancels; waiting does not consume another
+agent attempt or create a second verifier grant. Inspect the pending handoff and
+capacity reason before recommending more resources.
+
 Harbor startup uses packaged LiteLLM metadata with build-time fallback, described
 in [the controller image guide](../../deploy/harbor-runtime.md). It does not
 download a price table during the agent's execution budget.

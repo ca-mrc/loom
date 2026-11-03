@@ -116,3 +116,11 @@ CONNECTION_QUEUE_LIMITED_TOTAL = Counter(
     # admitted_after_wait | queue_timeout | deadline
     labelnames=("outcome",),
 )
+
+DISPATCH_DATABASE_SECONDS = Histogram(
+    "loom_gateway_dispatch_database_seconds",
+    "Dispatch audit database awaits, including connection acquisition.",
+    # Fixed operation/phase/outcome enums; no request, connection or Trial IDs.
+    labelnames=("operation", "phase", "outcome"),
+    buckets=(0.005, 0.025, 0.1, 0.25, 0.5, 1.0, 2.0),
+)

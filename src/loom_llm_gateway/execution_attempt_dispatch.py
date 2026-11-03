@@ -120,6 +120,9 @@ async def authorize_trial_execution_dispatch(
         .limit(1)
     )
     if lock:
+        # Do not leave multi-table row lock order to the join plan: cancellation
+        # holds the Trial first and then fences its current lease.
+        await session.execute(select(Trial.id).where(Trial.id == ctx.trial_id).with_for_update())
         statement = statement.with_for_update(of=(ServiceExecutionLease, Trial))
     row = (await session.execute(statement)).one_or_none()
     if row is None:

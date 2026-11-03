@@ -167,8 +167,6 @@ class HarborCheckpointBridge:
     ) -> int:
         if not path.is_file():
             return 0
-        if self._cp_client is not None:
-            await self._gateway_ledger.refresh(self._cp_client)
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
@@ -177,6 +175,18 @@ class HarborCheckpointBridge:
         if self._redact_payload is not None:
             data = self._redact_payload(data)
         steps = data.get("steps") or []
+        # Dispatch already joined its authoritative call before any keystrokes.
+        # Observing that turn, the initial prompt, or an unchanged file needs no
+        # RPC. Unjoined steps remain unseen when their row has not arrived yet.
+        needs_ledger = any(
+            isinstance(step, dict) and step.get("source") == "agent"
+            and isinstance(step.get("step_id"), int)
+            and step["step_id"] not in self._seen_step_ids
+            and step["step_id"] not in self._dispatched_steps
+            for step in steps
+        )
+        if needs_ledger and self._cp_client is not None:
+            await self._gateway_ledger.refresh(self._cp_client)
         return await self._sync_steps(
             steps, completeness=completeness, allow_incomplete=allow_incomplete,
         )

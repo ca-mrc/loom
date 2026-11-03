@@ -19,6 +19,7 @@ from loom.models.resource_usage import (
     TrialResourceUsageReport,
 )
 from loom.resource_usage_store import report_values
+from loom_control_plane.service_execution_locks import lock_execution_trial
 from loom_execution_actuator.contracts import ActuatorContractError, KubernetesJobObservation
 
 
@@ -103,6 +104,9 @@ async def persist_native_usage(
     source: Literal["kubelet_summary", "native_node_observer"] = "kubelet_summary",
 ) -> None:
     """The actuator's DB transaction owns authority; no new public write surface."""
+    # A new usage row takes a Trial FK key-share lock on flush. Acquire the
+    # parent before the lease so cancellation cannot hold Trial and wait on us.
+    await lock_execution_trial(session, lease.id)
     current = await session.scalar(
         select(ServiceExecutionLease).where(ServiceExecutionLease.id == lease.id).with_for_update()
     )

@@ -180,6 +180,39 @@ Changes apply to later calls only. Usage projections show unknown prices as
 known subtotals with unpriced-call counts. These are estimates, not invoices.
 Hard monetary budgets continue to require a usable estimate.
 
+### Repairing token-only Yibu pool members
+
+A Yibu connection in `usage_only` mode remains token-only even when the shared
+Yibu catalog is populated. A request pool uses the selected physical member's
+pricing configuration; configuring only its logical root does not price the
+other members. Inspect each member with `loom providers show NAME --format json`.
+
+First confirm the account's actual purchasing group. The shared
+`supplier:yibuapi` catalog represents the supplier's **default** group; do not
+apply it to another group or infer the group from a connection name or endpoint.
+For confirmed default-group members, a platform administrator can synchronize
+the supplier catalog and explicitly select it on each affected connection:
+
+```bash
+loom providers catalogs sync supplier:yibuapi
+loom providers update yibu-AgenticDataGen1 --pricing-mode catalog \
+  --supplier-id yibuapi --catalog-id supplier:yibuapi
+loom providers update yibu-AgenticDataGen2 --pricing-mode catalog \
+  --supplier-id yibuapi --catalog-id supplier:yibuapi
+```
+
+When using an admin credential, pass the ordinary `--admin-actor` required for
+connection updates. For another purchasing group, use its verified prices in a
+separate appropriate catalog instead of changing the shared default catalog.
+Read back each connection's mode, supplier and catalog, and verify the catalog
+source, group, revision and exact requested model before using it.
+
+Later successful calls should retain the selected physical connection and the
+catalog revision, USD-per-million unit and cache prices in `_loom_price_basis`.
+Catalog refreshes affect later calls only. Existing token-only calls are not
+retroactively priced, and missing usage or cache billing fields remain unknown;
+do not treat those rows as free or infer an invoice from the public price table.
+
 Trial and Batch reads resolve `price_snapshots` from the calls of the Trials
 being read. A provider-price hash is the digest of its basis, so the read takes
 one call per unresolved hash and extracts only `_loom_price_basis`, never the

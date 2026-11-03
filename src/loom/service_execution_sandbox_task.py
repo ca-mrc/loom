@@ -235,18 +235,33 @@ async def _execution_identity(gateway: str) -> tuple[UUID, UUID]:
     url = urlsplit(gateway)
     if url.scheme != "http" or url.hostname not in {"127.0.0.1", "::1"}:
         raise ServiceExecutionTaskError("execution requires a loopback Gateway")
-    async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
-        async with client.stream("GET", gateway.rstrip("/") + "/internal/loom/llm-calls") as response:
-            response.raise_for_status()
-            body = bytearray()
-            async for chunk in response.aiter_bytes():
-                body.extend(chunk)
-                if len(body) > 16 * 1024 * 1024:
-                    raise ServiceExecutionTaskError("execution ledger exceeds limit")
-    envelope = json.loads(body)
-    if envelope.get("step_id") != "agent":
-        raise ServiceExecutionTaskError("execution ledger has an invalid step")
-    return UUID(envelope["trial_id"]), UUID(envelope["team_id"])
+    try:
+        async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
+            async with client.stream("GET", gateway.rstrip("/") + "/internal/loom/llm-calls") as response:
+                response.raise_for_status()
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > 16 * 1024 * 1024:
+                        raise ServiceExecutionTaskError("execution ledger exceeds limit")
+    except httpx.HTTPError as exc:
+        reason = (
+            "read_timeout" if isinstance(exc, httpx.ReadTimeout)
+            else "connect_timeout" if isinstance(exc, httpx.ConnectTimeout)
+            else "pool_timeout" if isinstance(exc, httpx.PoolTimeout)
+            else "write_timeout" if isinstance(exc, httpx.WriteTimeout)
+            else f"http_{exc.response.status_code}" if isinstance(exc, httpx.HTTPStatusError)
+            else "transport_error"
+        )
+        # Neither HTTP exception text nor its request/response is safe evidence.
+        raise ServiceExecutionTaskError(f"execution_identity ledger GET failed: {reason}") from None
+    try:
+        envelope = json.loads(body)
+        if not isinstance(envelope, dict) or envelope.get("step_id") != "agent":
+            raise ValueError("invalid step")
+        return UUID(envelope["trial_id"]), UUID(envelope["team_id"])
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise ServiceExecutionTaskError("execution_identity ledger GET failed: invalid_response") from None
 
 
 # Workspace harness phases this controller implements (see `run_agent`).
@@ -1065,7 +1080,9 @@ async def _run_verifier(
         sys.stdout.buffer.write(result.stdout)
         sys.stderr.buffer.write(result.stderr)
         if result.return_code != 0:
-            retain_failure("exec", ServiceExecutionTaskError("isolated verifier process failed"))
+            retain_failure("exec", ServiceExecutionTaskError(
+                f"isolated verifier process failed (exit_code={result.return_code})",
+            ))
         # Capture already produced reports before cleanup can fail. These are
         # partial evidence until both validation and cleanup succeed; returning
         # a reward never changes a failed phase into successful execution.

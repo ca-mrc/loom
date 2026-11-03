@@ -42,6 +42,7 @@ from loom.trajectory.source_spool import ServiceExecutionSourceConfig
 from loom.trajectory.storage import MinioObjectStore
 from loom_control_plane.config import ControlPlaneSettings
 from loom_control_plane.service_execution import defers_verification
+from loom_control_plane.service_execution_locks import lock_execution_trial
 from loom_control_plane.service_execution_materializer import (
     MaterializationClaim,
     MaterializationIntegrityError,
@@ -155,6 +156,7 @@ async def claim_pending_archive(
         raise RecoveryRefusedError("rollout_guard_held")
     if list(await session.scalars(text("SELECT version_num FROM alembic_version"))) != [request.schema_head]:
         raise RecoveryRefusedError("schema_binding_changed")
+    await lock_execution_trial(session, request.lease_id)
     lease = await session.get(ServiceExecutionLease, request.lease_id, with_for_update=True)
     trial = await session.get(Trial, request.trial_id, with_for_update=True)
     artifact = await session.get(Artifact, request.artifact_id, with_for_update=True)
@@ -356,6 +358,7 @@ class OracleRecoveryMaterializer(ServiceExecutionMaterializer):
         """
         now = datetime.now(UTC)
         async with self._session_factory() as session:
+            await lock_execution_trial(session, claim.lease_id)
             lease = await session.get(ServiceExecutionLease, claim.lease_id, with_for_update=True)
             if (lease is None or lease.id != self.request.lease_id
                     or lease.materialization_state != "running"

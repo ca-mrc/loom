@@ -29,7 +29,11 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from loom.auth import AuthContext
 from loom.db.schema import GatewayDispatchReceipt, ProviderConnection
 from loom_llm_gateway.attempt_deadline import AttemptDeadlineReachedError, GatewayAttemptDeadline
-from loom_llm_gateway.metrics import CONNECTION_QUEUE_LIMITED_TOTAL, CONNECTION_QUEUE_WAIT_SECONDS
+from loom_llm_gateway.metrics import (
+    CONNECTION_QUEUE_LIMITED_TOTAL,
+    CONNECTION_QUEUE_WAIT_SECONDS,
+    DISPATCH_DATABASE_SECONDS,
+)
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -62,6 +66,34 @@ def dispatch_request_headers(headers: dict[str, str]) -> dict[str, str]:
 # Audit cleanup never borrows the attempt's provider-execution budget. The
 # bounded inline await creates no detached task and cannot swallow cancellation.
 _AUDIT_TIMEOUT_SECONDS = 1.0
+
+
+async def _database_await(awaitable: Awaitable[T], *, operation: str, phase: str) -> T:
+    started = time.monotonic()
+    outcome = "ok"
+    try:
+        return await awaitable
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
+    except Exception:
+        outcome = "error"
+        raise
+    finally:
+        DISPATCH_DATABASE_SECONDS.labels(operation, phase, outcome).observe(
+            max(0.0, time.monotonic() - started)
+        )
+
+
+def _database_reason(exc: Exception) -> str:
+    # SQLSTATE is matched to fixed categories; never stringify driver errors.
+    state = getattr(getattr(exc, "orig", None), "sqlstate", None)
+    return {
+        "40P01": "deadlock", "40001": "serialization", "55P03": "lock_timeout",
+        "57014": "query_cancelled",
+    }.get(state, "other") if isinstance(state, str) else "other"
+
+
 _DIALECTS = frozenset(
     {
         "openai",
@@ -157,13 +189,28 @@ class DispatchAudit:
             attempt_deadline_wall_clock=self.ctx.attempt_deadline_wall_clock,
         )
         assert self.state.session_factory is not None
+        phase = "session"
         try:
             async with asyncio.timeout(_AUDIT_TIMEOUT_SECONDS):
                 async with self.state.session_factory() as session:
-                    await self._prepare_dispatch(session, values)
-                    await self._limit_in_flight(session, values)
-                    await session.execute(insert(GatewayDispatchReceipt).values(**values))
-                    await session.commit()
+                    phase = "checkout"
+                    await _database_await(session.connection(), operation="admission", phase=phase)
+                    phase = "policy"
+                    await _database_await(
+                        self._prepare_dispatch(session, values), operation="admission", phase=phase,
+                    )
+                    phase = "capacity"
+                    await _database_await(
+                        self._limit_in_flight(session, values), operation="admission", phase=phase,
+                    )
+                    phase = "execute"
+                    await _database_await(
+                        session.execute(insert(GatewayDispatchReceipt).values(**values)),
+                        operation="admission", phase=phase,
+                    )
+                    phase = "commit"
+                    await _database_await(session.commit(), operation="admission", phase=phase)
+                    phase = "session_exit"
         except ConnectionAtCapacityError:
             raise
         except HTTPException:
@@ -185,8 +232,9 @@ class DispatchAudit:
                 else "other"
             )
             logger.error(
-                "gateway_dispatch_admission_failed request_id=%s error_category=%s",
-                self.state.request_id, category,
+                "gateway_dispatch_admission_failed request_id=%s phase=%s "
+                "error_category=%s database_reason=%s",
+                self.state.request_id, phase, category, _database_reason(exc),
             )
             raise DispatchAuditUnavailableError("gateway dispatch audit unavailable") from None
         self.state.receipt_ids.append(receipt_id)
@@ -503,10 +551,12 @@ async def _persist_observation(
         with CancelScope(shield=True):
             async with asyncio.timeout(_AUDIT_TIMEOUT_SECONDS):
                 async with state.session_factory() as session:
+                    phase = "checkout"
+                    await _database_await(session.connection(), operation=observation, phase=phase)
                     phase = "execute"
-                    await session.execute(statement)
+                    await _database_await(session.execute(statement), operation=observation, phase=phase)
                     phase = "commit"
-                    await session.commit()
+                    await _database_await(session.commit(), operation=observation, phase=phase)
                     phase = "session_exit"
     except asyncio.CancelledError:
         # A repeated cancellation may interrupt cleanup. Keep the durable
@@ -525,8 +575,8 @@ async def _persist_observation(
         )
         logger.error(
             "gateway_dispatch_observation_failed request_id=%s observation=%s "
-            "phase=%s error_category=%s",
-            state.request_id, observation, phase, category,
+            "phase=%s error_category=%s database_reason=%s",
+            state.request_id, observation, phase, category, _database_reason(exc),
         )
 
 

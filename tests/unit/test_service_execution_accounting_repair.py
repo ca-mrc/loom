@@ -55,7 +55,7 @@ def case(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     original_event = SimpleNamespace(seq=0, kind="trial_start", payload={"old": True},
                                      source="service-execution-materializer", lifecycle_authority_id=authority)
     data = SimpleNamespace(lease=lease, trial=trial, artifact=artifact, team_id=team_id, store=store,
-                           events=[original_event], commits=0, enters=0, change_on_commit=None)
+                           events=[original_event], commits=0, enters=0, change_on_commit=None, locked_gets=[])
     event = TrialStartEvent(trial_id=trial_id, step_id="trial", seq=0, emitted_at=now,
                            task_id="task-1", agent_name="terminus-2", agent_mode="out-of-box")
     projector = AsyncMock()  # Projection itself has separate full ledger regression tests.
@@ -104,6 +104,8 @@ def case(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     original_get = Session.get
 
     async def get(self, model, identity, **kwargs):
+        if kwargs.get("with_for_update"):
+            data.locked_gets.append(model.__name__)
         return artifact if model is Artifact else await original_get(self, model, identity, **kwargs)
 
     Session.get = get
@@ -418,3 +420,8 @@ async def test_matching_materializer_json_format_does_not_publish_redundant_revi
     objects = copy.deepcopy(case.store.objects)
     assert (await repair.repair_accounting(**case.kwargs, apply=True))["status"] == "already_corrected"
     assert case.store.objects == objects and case.commits == 1
+
+
+async def test_accounting_repair_locks_trial_before_lease(case):
+    await repair.repair_accounting(**case.kwargs, apply=True)
+    assert case.locked_gets[:3] == ["Trial", "ServiceExecutionLease", "Artifact"]

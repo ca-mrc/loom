@@ -64,7 +64,7 @@ def llm_call_row_to_event(
                           if extras.get("_loom_failure_category") in (
                               "upstream_timeout", "upstream_transport", "upstream_http_4xx",
                               "upstream_http_5xx", "upstream_http_error", "attempt_deadline_reached",
-                              "upstream_protocol", "client_cancelled",
+                              "upstream_protocol", "client_cancelled", "gateway_retry_budget_exhausted",
                           ) else None),
         input_tokens=int(row.get("input_tokens") or 0),
         cached_input_tokens=int(

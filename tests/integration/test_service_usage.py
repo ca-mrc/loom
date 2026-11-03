@@ -212,6 +212,54 @@ async def test_usage_groups_by_day(
     assert day2["trials_currently_failed"] == 0
 
 
+async def test_configured_price_without_usage_is_unknown_in_usage_api(
+    usage_setup: tuple[FastAPI, str, str, str, str],
+    postgres_url: str,
+) -> None:
+    app, raw, _admin, team_str, task_id = usage_setup
+    trial_id = uuid4()
+    captured_at = datetime(2026, 6, 5, 12, tzinfo=UTC)
+    engine = create_engine(postgres_url)
+    try:
+        with engine.begin() as db:
+            db.execute(insert(Trial).values(
+                id=trial_id, task_id=task_id, team_id=UUID(team_str),
+                state="succeeded", config={}, requires_caps={},
+                submitted_at=captured_at, finished_at=captured_at,
+                result={"aggregate_reward": 0.0},
+            ))
+            db.execute(insert(LlmCall).values(
+                id=uuid4(), team_id=UUID(team_str), trial_id=trial_id,
+                step_id="main", model="gpt-4", dialect="openai_chat",
+                input_tokens=0, output_tokens=0, cost_usd=Decimal("0"),
+                rate_card_hash="facade:operator-supplied",
+                provider_extras={
+                    "_loom_usage_status": "missing",
+                    "_loom_cost_source": "operator-supplied",
+                    "_loom_cost_confidence": "configured",
+                },
+                captured_at=captured_at,
+            ))
+    finally:
+        engine.dispose()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://svc",
+    ) as client:
+        response = await client.get(
+            "/api/v1/usage",
+            params={"team_id": team_str, "start": "2026-06-05", "end": "2026-06-05"},
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    assert response.status_code == 200, response.text
+    bucket = response.json()["buckets"][0]
+    assert bucket["total_cost_usd"] == 0
+    assert bucket["estimated_cost_usd"] is None
+    assert bucket["cost_currency"] is None
+    assert bucket["cost_estimate_confidence"] == "missing"
+    assert bucket["missing_usage_llm_calls_count"] == 1
+    assert bucket["usage_reporting_status"] == "missing"
+
+
 async def test_local_no_card_usage_is_unknown_across_read_apis(
     usage_setup: tuple[FastAPI, str, str, str, str],
     postgres_url: str,

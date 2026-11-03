@@ -42,7 +42,7 @@ async def separate_setup(monkeypatch):
     monkeypatch.setattr(activation, "setup", setup)
 
 
-async def commit_output(sessions, current, store, *, reward=None):
+async def commit_output(sessions, current, store, *, reward=None, status="succeeded"):
     from uuid import UUID, uuid4
 
     from loom.execution_runtime_contract import ExecutionRuntimePlanV1
@@ -83,6 +83,9 @@ async def commit_output(sessions, current, store, *, reward=None):
         else {"verifier/output.json": canonical_document({"rewards": {"passed": reward}})}
     )
     result["verifier_rewards"] = {"passed": reward} if reward is not None else None
+    result.update(status=status, partial_evidence=status != "succeeded")
+    if status == "timed_out":
+        result["phases"][-1].update(timed_out=True, exit_code=124)
     result["outputs"] = [
         {
             **declaration.model_dump(mode="json"),
@@ -159,8 +162,8 @@ async def commit_output(sessions, current, store, *, reward=None):
     return await route.commit(lease=current, session_id=upload_id, upload_token=token)
 
 
-async def complete_execution(sessions, case, current, store, *, reward=None):
-    await commit_output(sessions, current, store, reward=reward)
+async def complete_execution(sessions, case, current, store, *, reward=None, status="succeeded"):
+    await commit_output(sessions, current, store, reward=reward, status=status)
     case.sdk.pods[0]["status"] = {"phase": "Succeeded"}
     await case.actuator.reconcile_full_once()
     await case.actuator.reconcile_full_once()
@@ -175,12 +178,12 @@ async def complete_execution(sessions, case, current, store, *, reward=None):
     return done
 
 
-async def finish_parent(sessions, case):
+async def finish_parent(sessions, case, *, status="succeeded"):
     from loom.trajectory.storage import FakeObjectStore
 
     await start(sessions, case)
     case.store = FakeObjectStore()
-    return await complete_execution(sessions, case, await lease(sessions, case), case.store)
+    return await complete_execution(sessions, case, await lease(sessions, case), case.store, status=status)
 
 
 async def test_separate_parent_waits_for_target_verifier_support_without_claims(sessions, separate_setup):
@@ -204,11 +207,13 @@ async def test_separate_parent_waits_for_target_verifier_support_without_claims(
 
 
 @pytest.mark.parametrize("node_share", [False, True])
+@pytest.mark.parametrize("parent_status", ["succeeded", "timed_out"])
 async def test_global_verifier_proposal_and_grant_preserve_parent_attempt(
     sessions,
     tmp_path,
     separate_setup,
     node_share,
+    parent_status,
 ):
     async with connected(sessions, tmp_path) as case:
         if node_share:
@@ -227,7 +232,7 @@ async def test_global_verifier_proposal_and_grant_preserve_parent_attempt(
                 outbox=case.outbox, allocation_reader=case.driver.management
             ).select_next()
             assert case.proposal.request.execution.node_allocation is not None
-        parent = await finish_parent(sessions, case)
+        parent = await finish_parent(sessions, case, status=parent_status)
         selections = await asyncio.gather(
             *(PoolExecutionSelector(outbox=case.outbox).select_next() for _ in range(2))
         )
@@ -349,7 +354,10 @@ async def test_global_verifier_proposal_and_grant_preserve_parent_attempt(
             trial = await session.get(Trial, case.trial_id)
             parent = await session.get(ServiceExecutionLease, parent.id)
             child = await session.get(ServiceExecutionLease, child.id)
-            assert trial.state == "succeeded" and trial.result["reward"] == {"passed": 0}
+            assert trial.state == ("succeeded" if parent_status == "succeeded" else "failed")
+            assert trial.result["runtime_result"]["status"] == parent_status
+            assert trial.failure_reason == (None if parent_status == "succeeded" else "timed_out")
+            assert trial.result["reward"] == {"passed": 0}
             assert trial.result["aggregate_reward"] == 0
             assert parent.materialization_state == child.materialization_state == "committed"
             assert parent.canonical_trajectory_sha256 == child.canonical_trajectory_sha256
@@ -636,29 +644,33 @@ async def test_global_verifier_guard_rejects_foreign_parent_and_retains_history(
         assert (await case.outbox.get(selected.request.key)).phase == "cancelled"
 
 
-async def test_global_verifier_capacity_timeout_is_terminal_without_agent_retry(
+async def test_global_verifier_capacity_wait_preserves_committed_work_until_admission(
     sessions,
     tmp_path,
     separate_setup,
 ):
     async with connected(sessions, tmp_path) as case:
-        await finish_parent(sessions, case)
-        selected = await PoolExecutionSelector(outbox=case.outbox).select_next()
+        parent = await finish_parent(sessions, case)
+        # No grant or child exists during the wait, even beyond the former 30m
+        # handoff deadline. Existing capacity may become available later.
         async with sessions.begin() as session:
             trial = await session.get(Trial, case.trial_id)
             trial.result = {
                 **trial.result,
                 "verifier_execution": {
                     **trial.result["verifier_execution"],
-                    "pending_since": (datetime.now(UTC) - timedelta(minutes=31)).isoformat(),
+                    "pending_since": (datetime.now(UTC) - timedelta(hours=2)).isoformat(),
                 },
             }
-        assert (await case.driver.advance(selected.request.key)).phase == "cancelled"
-        assert await PoolExecutionSelector(outbox=case.outbox).select_next() is None
+        selected = await PoolExecutionSelector(outbox=case.outbox).select_next()
+        assert selected.request.execution.parent_lease_id == parent.id
+        assert (await case.outbox.refresh_selection(selected.request.key)).phase == "selected"
         async with sessions() as session:
             trial = await session.get(Trial, case.trial_id)
-            assert trial.state == "failed" and trial.failure_reason == "verifier_unavailable"
+            assert trial.state == "running" and trial.failure_reason is None
             assert trial.attempt_count == 1
-            assert (
-                await session.scalar(select(func.count()).select_from(ServiceExecutionLease)) == 1
-            )
+            assert await session.scalar(select(func.count()).select_from(ServiceExecutionLease)) == 1
+        assert (await case.driver.advance(selected.request.key)).phase == "active"
+        assert await PoolExecutionSelector(outbox=case.outbox).select_next() is None
+        async with sessions() as session:
+            assert await session.scalar(select(func.count()).select_from(ServiceExecutionLease)) == 2

@@ -14,6 +14,8 @@ LLM call in `loom_llm_gateway/routes/*`. Tests cover:
 """
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,6 +23,7 @@ import httpx
 import pytest
 
 from loom.errors import is_retryable
+from loom_llm_gateway.attempt_deadline import AttemptDeadlineReachedError, GatewayAttemptDeadline
 from loom_llm_gateway.retry import RetryOutcome, send_with_retry
 
 
@@ -393,3 +396,84 @@ async def test_outcome_attempt_on_budget_short_circuit() -> None:
     )
     assert outcome.response.status_code == 503
     assert outcome.attempt == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_send_cannot_run_past_the_remaining_retry_budget() -> None:
+    settings = _StubSettings(
+        llm_retry_budget_sec=0.03,
+        llm_retry_base_backoff_sec=0,
+    )
+    calls = 0
+    cancelled = False
+
+    async def send() -> httpx.Response:
+        nonlocal calls, cancelled
+        calls += 1
+        if calls == 1:
+            return _resp(503)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled = True
+        raise AssertionError("unreachable")
+
+    with pytest.raises(httpx.TimeoutException, match="gateway retry budget exhausted"):
+        await asyncio.wait_for(
+            send_with_retry(send, settings=settings, dialect="test"),
+            timeout=0.5,
+        )
+    assert calls == 2
+    assert cancelled
+
+
+@pytest.mark.asyncio
+async def test_initial_slow_success_is_not_cut_off_by_the_retry_budget() -> None:
+    settings = _StubSettings(llm_retry_budget_sec=0.01)
+
+    async def send() -> httpx.Response:
+        await asyncio.sleep(0.03)
+        return _resp(200)
+
+    outcome = await send_with_retry(send, settings=settings, dialect="test")
+    assert outcome.response.status_code == 200
+    assert outcome.attempt == 1
+
+
+@pytest.mark.asyncio
+async def test_signed_deadline_still_wins_over_the_retry_budget() -> None:
+    settings = _StubSettings(llm_retry_budget_sec=10, llm_retry_base_backoff_sec=0)
+    deadline = GatewayAttemptDeadline(time.monotonic() + 0.03)
+    calls = 0
+
+    async def send() -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _resp(503)
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    with pytest.raises(AttemptDeadlineReachedError):
+        await send_with_retry(send, settings=settings, dialect="test", deadline=deadline)
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_received_success_is_not_discarded_after_retry_budget_clock_observation() -> None:
+    settings = _StubSettings(llm_retry_budget_sec=60, llm_retry_base_backoff_sec=0)
+    clock = [0.0]
+    calls = 0
+
+    async def send() -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            clock[0] = 59.0
+            return _resp(503)
+        clock[0] = 61.0
+        return _resp(200)
+
+    result = await send_with_retry(send, settings=settings, dialect="test", now=lambda: clock[0])
+    assert result.response.status_code == 200
+    assert result.attempt == 2

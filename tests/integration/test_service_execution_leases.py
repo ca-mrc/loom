@@ -4457,9 +4457,15 @@ async def test_service_execution_reloads_lease_before_projection(
         await engine.dispose()
 
 
+@pytest.mark.parametrize("oom_diagnosis", [False, True])
 async def test_finalized_projection_preserves_trial_key_share_compatibility(
-    postgres_url: str,
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch, oom_diagnosis: bool,
 ) -> None:
+    if oom_diagnosis:
+        monkeypatch.setattr(
+            "loom.execution_diagnosis_store.read_execution_failure",
+            lambda *args: asyncio.sleep(0, result={"reason": "oom_killed", "message": "memory limit"}),
+        )
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(UTC)

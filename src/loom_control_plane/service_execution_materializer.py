@@ -21,7 +21,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
-from sqlalchemy import Text, and_, func, or_, select
+from sqlalchemy import Select, Text, and_, func, or_, select
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -107,6 +107,7 @@ from loom_control_plane.service_execution import (
     defers_verification,
     recover_deleted_committed_trial,
 )
+from loom_control_plane.service_execution_locks import lock_execution_trial
 from loom_control_plane.service_execution_task_snapshot import (
     ServiceExecutionTaskSnapshotError,
     resolve_service_execution_task_snapshot,
@@ -787,10 +788,11 @@ def defers_verification_result(runtime_result: ExecutionRuntimeResultV1, trial_r
 def requires_deferred_verifier_handoff(
     lease: ServiceExecutionLease, trial_result: dict[str, Any] | None,
 ) -> bool:
-    """True only when a succeeded separate attempt never wrote a handoff (#2521).
+    """A succeeded separate attempt must always have written a handoff.
 
-    Finalize writes ``verifier_execution`` only on ``succeeded``. A committed
-    ``timed_out`` / failed / cancelled attempt is causal, not missing output.
+    Timeouts can now hand off a safely committed workspace, but older timeouts
+    and those without a safe workspace remain valid ungraded partial evidence.
+    Their absence of a handoff is not an archival integrity error.
     """
     if not defers_verification(lease) or isinstance((trial_result or {}).get("verifier_execution"), dict):
         return False
@@ -804,7 +806,7 @@ def _merge_verifier_execution(
 ) -> tuple[ExecutionRuntimeResultV1, bytes | None]:
     """One attempt outcome from the agent's result and its deferred verifier's."""
     handoff = trial_result["verifier_execution"]
-    if attempt.status != "succeeded":
+    if attempt.status not in {"succeeded", "timed_out"}:
         raise MaterializationIntegrityError("verifier_handoff_identity_drift")
     if handoff.get("state") != "committed":
         # Grading never happened; the agent's evidence is archived as partial.
@@ -825,12 +827,32 @@ def _merge_verifier_execution(
     ):
         raise MaterializationIntegrityError("verifier_runtime_result_projection_drift")
     status = verifier.status if verifier.status in {"succeeded", "cancelled"} else "verifier_error"
+    if status == "succeeded" and attempt.status == "timed_out":
+        # Grading supplies a score, not proof that the agent finished in time.
+        status = "timed_out"
     return attempt.model_copy(update={
         "status": status,
         "verifier_rewards": verifier.verifier_rewards,
         "finished_at": max(attempt.finished_at, verifier.finished_at),
         "partial_evidence": attempt.partial_evidence or verifier.partial_evidence,
     }), verifier_inputs.get(_VERIFIER_PATH)
+
+
+async def _claim_candidate_lease(
+    session: AsyncSession, query: Select[tuple[ServiceExecutionLease]],
+) -> ServiceExecutionLease | None:
+    """Skip busy Trials before acquiring their lease, then recheck eligibility."""
+    lease_id = await session.scalar(
+        query.with_only_columns(ServiceExecutionLease.id)
+        .with_for_update(of=Trial, skip_locked=True)
+    )
+    if lease_id is None:
+        return None
+    return cast(ServiceExecutionLease | None, await session.scalar(
+        query.where(ServiceExecutionLease.id == lease_id)
+        .with_for_update(of=ServiceExecutionLease, skip_locked=True)
+        .execution_options(populate_existing=True)
+    ))
 
 
 class ServiceExecutionMaterializer:
@@ -873,10 +895,11 @@ class ServiceExecutionMaterializer:
         audit_key = "usage_roundoff_archival_recovery" if usage_roundoff else "legacy_verifier_archival_recovery"
         now = datetime.now(UTC)
         async with self._session_factory() as session:
+            await lock_execution_trial(session, lease_id)
             lease = await session.get(ServiceExecutionLease, lease_id, with_for_update=True)
             if lease is None or lease.team_id != team_id:
                 return False
-            trial = await session.get(Trial, lease.trial_id, with_for_update=True)
+            trial = await session.get(Trial, lease.trial_id, with_for_update={"key_share": True})
             if (
                 trial is None or trial.team_id != team_id or trial.attempt_count != lease.attempt
                 or trial.state != "failed" or trial.failure_reason != "output_unavailable"
@@ -940,61 +963,59 @@ class ServiceExecutionMaterializer:
     ) -> MaterializationClaim | None:
         current = now or datetime.now(UTC)
         async with self._session_factory() as session:
-            lease = (
-                await session.execute(
-                    select(ServiceExecutionLease)
-                    .join(Trial, Trial.id == ServiceExecutionLease.trial_id)
-                    .where(
-                        ServiceExecutionLease.output_commit_state == "committed",
-                        *([ServiceExecutionLease.id == lease_id] if lease_id is not None else []),
-                        or_(
-                            and_(
-                                ServiceExecutionLease.finalized_at.is_not(None),
-                                # A deferred verifier is archived with its parent attempt.
-                                ServiceExecutionLease.execution_role == "attempt",
-                                Trial.state.in_(("materializing", "succeeded", "failed", "cancelled")),
-                            ),
-                            and_(
-                                ServiceExecutionLease.finalized_at.is_(None),
-                                ServiceExecutionLease.desired_state == "deleted",
-                                ServiceExecutionLease.observed_state == "deleted",
-                                ServiceExecutionLease.deleted_at.is_not(None),
-                                ServiceExecutionLease.cleanup_state == "complete",
-                                ServiceExecutionLease.execution_role == "attempt",
-                                ServiceExecutionLease.output_generation
-                                == ServiceExecutionLease.resource_generation,
-                                Trial.attempt_count == ServiceExecutionLease.attempt,
-                                Trial.state.in_(
-                                    ("claimed", "running", "materializing", "succeeded", "failed", "cancelled")
-                                ),
+            query = (
+                select(ServiceExecutionLease)
+                .join(Trial, Trial.id == ServiceExecutionLease.trial_id)
+                .where(
+                    ServiceExecutionLease.output_commit_state == "committed",
+                    *([ServiceExecutionLease.id == lease_id] if lease_id is not None else []),
+                    or_(
+                        and_(
+                            ServiceExecutionLease.finalized_at.is_not(None),
+                            # A deferred verifier is archived with its parent attempt.
+                            ServiceExecutionLease.execution_role == "attempt",
+                            Trial.state.in_(("materializing", "succeeded", "failed", "cancelled")),
+                        ),
+                        and_(
+                            ServiceExecutionLease.finalized_at.is_(None),
+                            ServiceExecutionLease.desired_state == "deleted",
+                            ServiceExecutionLease.observed_state == "deleted",
+                            ServiceExecutionLease.deleted_at.is_not(None),
+                            ServiceExecutionLease.cleanup_state == "complete",
+                            ServiceExecutionLease.execution_role == "attempt",
+                            ServiceExecutionLease.output_generation
+                            == ServiceExecutionLease.resource_generation,
+                            Trial.attempt_count == ServiceExecutionLease.attempt,
+                            Trial.state.in_(
+                                ("claimed", "running", "materializing", "succeeded", "failed", "cancelled")
                             ),
                         ),
-                        or_(
-                            (
-                                (ServiceExecutionLease.materialization_state == "pending")
-                                & (
-                                    ServiceExecutionLease.materialization_next_attempt_at
-                                    <= current
-                                )
-                            ),
-                            (
-                                (ServiceExecutionLease.materialization_state == "running")
-                                & (
-                                    ServiceExecutionLease.materialization_claim_expires_at
-                                    <= current
-                                )
-                            ),
+                    ),
+                    or_(
+                        (
+                            (ServiceExecutionLease.materialization_state == "pending")
+                            & (
+                                ServiceExecutionLease.materialization_next_attempt_at
+                                <= current
+                            )
                         ),
-                    )
-                    .order_by(
-                        ServiceExecutionLease.materialization_next_attempt_at.asc().nullsfirst(),
-                        ServiceExecutionLease.output_committed_at.asc(),
-                        ServiceExecutionLease.id.asc(),
-                    )
-                    .with_for_update(skip_locked=True)
-                    .limit(1)
+                        (
+                            (ServiceExecutionLease.materialization_state == "running")
+                            & (
+                                ServiceExecutionLease.materialization_claim_expires_at
+                                <= current
+                            )
+                        ),
+                    ),
                 )
-            ).scalar_one_or_none()
+                .order_by(
+                    ServiceExecutionLease.materialization_next_attempt_at.asc().nullsfirst(),
+                    ServiceExecutionLease.output_committed_at.asc(),
+                    ServiceExecutionLease.id.asc(),
+                )
+                .limit(1)
+            )
+            lease = await _claim_candidate_lease(session, query)
             if lease is None:
                 return None
             await self._qualify_claim(session, lease)
@@ -1569,6 +1590,7 @@ class ServiceExecutionMaterializer:
     async def _commit(self, claim: MaterializationClaim, result: MaterializationResult) -> bool:
         now = datetime.now(UTC)
         async with self._session_factory() as session:
+            await lock_execution_trial(session, claim.lease_id)
             lease = await session.get(ServiceExecutionLease, claim.lease_id, with_for_update=True)
             if (
                 lease is None
@@ -1576,7 +1598,7 @@ class ServiceExecutionMaterializer:
                 or lease.materialization_claim_id != claim.claim_id
             ):
                 return False
-            trial = await session.get(Trial, lease.trial_id, with_for_update=True)
+            trial = await session.get(Trial, lease.trial_id, with_for_update={"key_share": True})
             artifact = await session.get(Artifact, result.artifact_id, with_for_update=True)
             if (
                 trial is None
@@ -1830,6 +1852,7 @@ class ServiceExecutionMaterializer:
     async def _retry(self, claim: MaterializationClaim, exc: Exception) -> None:
         now = datetime.now(UTC)
         async with self._session_factory() as session:
+            await lock_execution_trial(session, claim.lease_id)
             lease = await session.get(ServiceExecutionLease, claim.lease_id, with_for_update=True)
             if (
                 lease is None
@@ -1856,6 +1879,7 @@ class ServiceExecutionMaterializer:
     ) -> None:
         now = datetime.now(UTC)
         async with self._session_factory() as session:
+            await lock_execution_trial(session, claim.lease_id)
             lease = await session.get(ServiceExecutionLease, claim.lease_id, with_for_update=True)
             if (
                 lease is None
@@ -1863,7 +1887,7 @@ class ServiceExecutionMaterializer:
                 or lease.materialization_claim_id != claim.claim_id
             ):
                 return
-            trial = await session.get(Trial, lease.trial_id, with_for_update=True)
+            trial = await session.get(Trial, lease.trial_id, with_for_update={"key_share": True})
             if trial is None:
                 return
             await self._settle_verifier_source(session, lease=lease, trial=trial, now=now, committed=False,
@@ -1889,33 +1913,32 @@ class ServiceExecutionMaterializer:
     ) -> SourceCleanupClaim | None:
         current = now or datetime.now(UTC)
         async with self._session_factory() as session:
-            lease = (
-                await session.execute(
-                    select(ServiceExecutionLease)
-                    .where(
-                        ServiceExecutionLease.materialization_state == "committed",
-                        or_(
-                            (
-                                (ServiceExecutionLease.source_cleanup_state == "retained")
-                                & (ServiceExecutionLease.source_retain_until <= current)
-                            ),
-                            (
-                                (ServiceExecutionLease.source_cleanup_state == "running")
-                                & (
-                                    ServiceExecutionLease.source_cleanup_claim_expires_at
-                                    <= current
-                                )
-                            ),
+            query = (
+                select(ServiceExecutionLease)
+                .join(Trial, Trial.id == ServiceExecutionLease.trial_id)
+                .where(
+                    ServiceExecutionLease.materialization_state == "committed",
+                    or_(
+                        (
+                            (ServiceExecutionLease.source_cleanup_state == "retained")
+                            & (ServiceExecutionLease.source_retain_until <= current)
                         ),
-                    )
-                    .order_by(
-                        ServiceExecutionLease.source_retain_until.asc(),
-                        ServiceExecutionLease.id.asc(),
-                    )
-                    .with_for_update(skip_locked=True)
-                    .limit(1)
+                        (
+                            (ServiceExecutionLease.source_cleanup_state == "running")
+                            & (
+                                ServiceExecutionLease.source_cleanup_claim_expires_at
+                                <= current
+                            )
+                        ),
+                    ),
                 )
-            ).scalar_one_or_none()
+                .order_by(
+                    ServiceExecutionLease.source_retain_until.asc(),
+                    ServiceExecutionLease.id.asc(),
+                )
+                .limit(1)
+            )
+            lease = await _claim_candidate_lease(session, query)
             if lease is None:
                 return None
             claim_id = uuid4()
@@ -1968,6 +1991,7 @@ class ServiceExecutionMaterializer:
     async def _finish_source_cleanup(self, claim: SourceCleanupClaim) -> None:
         now = datetime.now(UTC)
         async with self._session_factory() as session:
+            await lock_execution_trial(session, claim.lease_id)
             lease = await session.get(ServiceExecutionLease, claim.lease_id, with_for_update=True)
             if (
                 lease is None
@@ -1988,6 +2012,7 @@ class ServiceExecutionMaterializer:
     ) -> None:
         now = datetime.now(UTC)
         async with self._session_factory() as session:
+            await lock_execution_trial(session, claim.lease_id)
             lease = await session.get(ServiceExecutionLease, claim.lease_id, with_for_update=True)
             if (
                 lease is None

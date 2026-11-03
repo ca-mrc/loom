@@ -113,21 +113,22 @@ class _HistoricalSnapshotSession(_HistoricalLedgerSession):
     def _historical_projection(state: ORMExecuteState) -> None:
         if not state.is_select:
             return
-        entities = [item.get("entity") for item in state.statement.column_descriptions]
-        if Task in entities:
+        # Loader options apply only to whole ORM entities, not scalar identity
+        # projections used by the Trial-before-lease lock helper.
+        whole = {item.get("entity") for item in state.statement.column_descriptions
+                 if item.get("expr") is item.get("entity")}
+        if Task in whole:
             # Current Task metadata may contain columns added after the historical
             # schema. Keep the real snapshot resolver, but use its old projection;
             # fail if the replay starts depending on any other Task field.
             state.statement = state.statement.options(
                 load_only(Task.id, Task.config, Task.source, Task.source_provenance, raiseload=True))
-        if Trial in entities:
+        if Trial in whole:
             # 0172's origin is intentionally absent on this historical schema.
             # Recovery must not depend on it, synthesize it, or lazy-load it.
             state.statement = state.statement.options(defer(Trial.pool_origin, raiseload=True))
         # 0173's verifier retry number is likewise absent before that revision.
         # Loader options only apply when the whole entity is selected.
-        whole = {item.get("entity") for item in state.statement.column_descriptions
-                 if item.get("expr") is item.get("entity")}
         if ServiceExecutionLease in whole:
             state.statement = state.statement.options(
                 defer(ServiceExecutionLease.verifier_retry, raiseload=True))

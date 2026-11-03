@@ -69,7 +69,7 @@ from loom_llm_gateway.model_switch_correlation import (
 )
 from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.request_pool import PoolMemberSwitchedError, prepare_request_pool
-from loom_llm_gateway.retry import send_with_retry
+from loom_llm_gateway.retry import RetryBudgetExceededError, send_with_retry
 from loom_llm_gateway.routes._facade_common import (
     build_raw_provider_log,
     compute_facade_cost_estimate,
@@ -267,7 +267,10 @@ async def openai_chat_facade(
             dialect=_FACADE_DIALECT,
             model=payload["model"],
             request_payload=payload,
-            failure_category="upstream_timeout",
+            failure_category=(
+                "gateway_retry_budget_exhausted"
+                if isinstance(e, RetryBudgetExceededError) else "upstream_timeout"
+            ),
             failure_error_type=type(e).__name__,
             attempt=pool_audit.last_attempt if pool_audit else 1,
             correlation=correlation,
@@ -275,7 +278,8 @@ async def openai_chat_facade(
         )
         raise HTTPException(
             status_code=504,
-            detail=("request pool upstream timeout" if pool_audit
+            detail=("gateway retry budget exhausted" if isinstance(e, RetryBudgetExceededError)
+                    else "request pool upstream timeout" if pool_audit
                     else f"upstream timeout against {upstream_url}: {e}"),
         ) from e
     except httpx.RequestError as e:

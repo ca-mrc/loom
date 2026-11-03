@@ -247,6 +247,56 @@ async def snapshot(r):
                 (trial.state, trial.failure_reason, trial.result, trial.attempt_count))
 
 
+@pytest.mark.parametrize("operation", ["object-version", "terminal-archive"])
+async def test_recovery_waits_on_trial_before_owning_lease_or_artifact(recovery, operation):
+    from loom_control_plane.object_version_recovery import RecoveryRequest, _load
+    from loom_control_plane.pending_archive_recovery import RecoveryRefusedError
+    from loom_control_plane.terminal_archive_recovery import capture_binding
+
+    r = recovery
+    trial_id, artifact_id = UUID(r.payload["trial_id"]), UUID(r.payload["artifact_id"])
+    pid_ready = asyncio.Future()
+    worker = None
+
+    async def recover_rows():
+        async with r.sessions() as session:
+            pid_ready.set_result(await session.scalar(text("SELECT pg_backend_pid()")))
+            if operation == "object-version":
+                await _load(session, RecoveryRequest.model_validate(r.payload), locked=True)
+            else:
+                trial = await session.get(Trial, trial_id)
+                # The object-recovery fixture has no verifier. Refusal is
+                # expected after owner locks, without weakening qualification.
+                with pytest.raises(RecoveryRefusedError, match="verifier_identity_missing"):
+                    await capture_binding(session, team_id=trial.team_id, lease_id=r.lease_id, lock=True)
+
+    try:
+        async with r.sessions() as owner:
+            await owner.get(Trial, trial_id, with_for_update=True)
+            owner_pid = await owner.scalar(text("SELECT pg_backend_pid()"))
+            worker = asyncio.create_task(recover_rows())
+            pid = await pid_ready
+            async with r.sessions() as inspector:
+                async with asyncio.timeout(5):
+                    while not await inspector.scalar(text(
+                        "SELECT :owner = ANY(pg_blocking_pids(:worker))"
+                    ), {"owner": owner_pid, "worker": pid}):
+                        await asyncio.sleep(0.01)
+                        await inspector.rollback()
+            # A Trial owner (materialization/cancellation) must still be able
+            # to lock its Lease and Artifact while recovery waits on the Trial.
+            await owner.execute(text("SET LOCAL lock_timeout='250ms'"))
+            assert await owner.get(ServiceExecutionLease, r.lease_id, with_for_update=True)
+            assert await owner.get(Artifact, artifact_id, with_for_update=True)
+            await owner.commit()
+        await asyncio.wait_for(worker, 5)
+    finally:
+        if worker is not None:
+            if not worker.done():
+                worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+
 @pytest.mark.parametrize("historical_fields", [False, True])
 @pytest.mark.parametrize("legacy_index_attempt", [False, True])
 async def test_preview_apply_and_replay_repair_every_published_mirror(

@@ -56,6 +56,7 @@ from loom_control_plane.service_execution import (
     committed_handoff_files,
     record_committed_runtime_result,
 )
+from loom_control_plane.service_execution_locks import lock_execution_trial
 from loom_control_plane.service_execution_task_snapshot import (
     ServiceExecutionTaskSnapshotError,
     resolve_service_execution_task_snapshot,
@@ -428,6 +429,7 @@ async def authorize_service_execution_peer(
         .execution_options(populate_existing=True)
     )
     if lock:
+        await lock_execution_trial(session, identity.lease_id)
         statement = statement.with_for_update()
     lease = (await session.execute(statement)).scalar_one_or_none()
     if lease is None:
@@ -658,6 +660,7 @@ class ServiceExecutionOutputRouteService:
             request_digest=request_digest,
         )
         async with self._session_factory() as session:
+            await lock_execution_trial(session, lease.id)
             current = await session.get(ServiceExecutionLease, lease.id, with_for_update=True)
             if (
                 current is None
@@ -830,6 +833,7 @@ class ServiceExecutionOutputRouteService:
             raise ServiceExecutionBrokerError("output_commit_manifest_drift")
         record = manifest.artifacts[0]
         async with self._session_factory() as session:
+            await lock_execution_trial(session, lease.id)
             current = await session.get(ServiceExecutionLease, lease.id, with_for_update=True)
             upload = await session.get(ArtifactUploadSession, session_id, with_for_update=True)
             if (

@@ -230,7 +230,7 @@ class LLMCallEvent(_EventBase):
     failure_category: Literal[
         "upstream_timeout", "upstream_transport", "upstream_http_4xx",
         "upstream_http_5xx", "upstream_http_error", "attempt_deadline_reached",
-        "upstream_protocol", "client_cancelled",
+        "upstream_protocol", "client_cancelled", "gateway_retry_budget_exhausted",
     ] | None = None
 
     # Usage — RAW, NOT derived (spec H5)

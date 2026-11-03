@@ -13,6 +13,7 @@ from loom_control_plane.service_execution import (
     ServiceExecutionConflict,
     record_kubernetes_observation,
 )
+from loom_control_plane.service_execution_locks import lock_execution_trial
 from tests.integration.test_service_execution_leases import (
     _cleanup_service_execution_test_rows,  # noqa: F401
     _reserve,
@@ -20,14 +21,17 @@ from tests.integration.test_service_execution_leases import (
 )
 
 
-async def _wait_for_lease_lock(session: AsyncSession, backend_pid: int) -> None:
-    # Observe the actual PostgreSQL lock wait, rather than timing two coroutines.
-    # Both command and watch paths must be stopped at the same lease fence.
+async def _wait_for_observation_fence(
+    session: AsyncSession, backend_pid: int, blocking_pid: int,
+) -> None:
+    # Observe the actual blocker instead of timing two coroutines. Observers
+    # serialize through the complete Trial→Lease fence, in that order.
     async with asyncio.timeout(5):
         while True:
             waiting = await session.scalar(
-                text("SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = :pid"),
-                {"pid": backend_pid},
+                text("SELECT wait_event_type = 'Lock' AND :blocker = ANY(pg_blocking_pids(pid)) "
+                     "FROM pg_stat_activity WHERE pid = :pid"),
+                {"pid": backend_pid, "blocker": blocking_pid},
             )
             if waiting:
                 return
@@ -59,7 +63,12 @@ async def test_concurrent_observation_uses_existing_ordinal_after_lease_lock(
         }
 
         async with sessions() as first, sessions() as second, sessions() as observer:
+            # The API also locks the parent. A transaction that enters it with
+            # a lease lock must already own the Trial, as production callers do.
+            await lock_execution_trial(first, lease_id)
             await first.get(ServiceExecutionLease, lease_id, with_for_update=True)
+            first_pid = await first.scalar(text("SELECT pg_backend_pid()"))
+            assert isinstance(first_pid, int)
             second_pid = await second.scalar(text("SELECT pg_backend_pid()"))
             assert isinstance(second_pid, int)
 
@@ -75,9 +84,10 @@ async def test_concurrent_observation_uses_existing_ordinal_after_lease_lock(
                 return event.id, duplicate
 
             delivery = asyncio.create_task(duplicate_delivery())
-            await _wait_for_lease_lock(observer, second_pid)
-            # The first observer commits while the other caller waits for its
-            # lease lock. The second caller must refresh the key/ordinal then.
+            await _wait_for_observation_fence(observer, second_pid, first_pid)
+            # The first observer commits while the other waits for this fence.
+            # The second must refresh the key/ordinal after acquiring its lease,
+            # preserving exact replay and rejecting changed payloads.
             original, duplicate = await record_kubernetes_observation(
                 first,
                 lease_id=lease_id,

@@ -38,6 +38,7 @@ from loom_llm_gateway.execution_attempt_dispatch import (
     admitted_service_execution_models,
     authorize_trial_execution_dispatch,
 )
+from loom_llm_gateway.retry import RetryBudgetExceededError
 from loom_llm_gateway.routes._facade_common import (
     decrypt_facade_api_key,
     resolve_facade_connection,
@@ -497,6 +498,10 @@ class PoolDispatchAudit(DispatchAudit):
     ) -> Any:
         try:
             response = await super().send(operation, deadline=deadline, attempt=attempt)
+        except RetryBudgetExceededError:
+            # Gateway policy expiry is not a member health observation and
+            # must not suppress a provider or rotate the sticky binding.
+            raise
         except httpx.TimeoutException:
             await self._switch_after_timeout("upstream_timeout")
             raise PoolMemberSwitchedError("upstream_timeout") from None

@@ -67,8 +67,8 @@ from loom_control_plane.service_execution_task_snapshot import (
 
 _LOG = logging.getLogger(__name__)
 _RESERVATION_REQUEST_NAMESPACE = UUID("aaf78d09-4268-4dc5-81ee-4c2408ce2611")
-# A handed-off attempt waits for capacity like any queued work, but not forever:
-# its committed workspace is graded or the Trial fails as verifier_unavailable.
+# Non-capacity conflicts still have a bounded recovery window. Capacity waits
+# retain the durable committed workspace until admitted or explicitly cancelled.
 VERIFIER_HANDOFF_TIMEOUT = timedelta(minutes=30)
 
 
@@ -737,7 +737,9 @@ async def reserve_next_verifier_executions(
         except (ExecutionProvisioningBlockedError, ServiceExecutionConflict) as exc:
             # Capacity, rollout and target health are waits, bounded per handoff.
             waiting_since = _handoff_pending_since(trial) or parent.deleted_at
-            if waiting_since is not None and current_time - waiting_since >= VERIFIER_HANDOFF_TIMEOUT:
+            if (not isinstance(exc, ExecutionProvisioningBlockedError)
+                    and waiting_since is not None
+                    and current_time - waiting_since >= VERIFIER_HANDOFF_TIMEOUT):
                 _fail_verifier_handoff(trial, reason=getattr(exc, "reason", None) or str(exc),
                                        now=current_time)
             else:

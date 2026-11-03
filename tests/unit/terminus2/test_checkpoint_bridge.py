@@ -382,3 +382,43 @@ async def test_bridge_poll_skips_agent_step_until_episode_row_exists(
         client._rows = [_correlated_row(gw_id="ep1", episode=1)]
         synced = await bridge.sync_trajectory_file(traj, allow_incomplete=True)
         assert synced == 1
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_poll_does_not_read_ledger_without_an_unjoined_step(tmp_path: Path) -> None:
+    from unittest.mock import AsyncMock
+
+    client = _CpClient([])
+    client.get_trial_llm_calls = AsyncMock(return_value=[])
+    writer = AsyncMock()
+    bridge = HarborCheckpointBridge(
+        trajectory=writer, trial_id=uuid4(), step_id="agent",
+        model=ModelSpec(provider="openai", name="glm-5.2"), cp_client=client,
+    )
+    path = tmp_path / "trajectory.json"
+    path.write_text(json.dumps({"steps": [{"step_id": 1, "source": "user", "message": "go"}]}))
+    assert await bridge.sync_trajectory_file(path, allow_incomplete=True) == 1
+    for _ in range(10):
+        assert await bridge.sync_trajectory_file(path, allow_incomplete=True) == 0
+    client.get_trial_llm_calls.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_observation_of_dispatched_step_needs_no_ledger_refresh(tmp_path: Path) -> None:
+    from unittest.mock import AsyncMock
+
+    client = _CpClient([_llm_row()])
+    client.get_trial_llm_calls = AsyncMock(return_value=client._rows)
+    bridge = HarborCheckpointBridge(
+        trajectory=AsyncMock(), trial_id=uuid4(), step_id="agent",
+        model=ModelSpec(provider="openai", name="glm-5.2"), cp_client=client,
+    )
+    step = {"step_id": 2, "source": "agent", "message": "done", "metrics": {
+        "input_tokens": 10, "output_tokens": 5,
+    }, "tool_calls": [], "observation": {"results": [{"content": "ok"}]}}
+    await bridge.record_dispatch(step, episode=1)
+    client.get_trial_llm_calls.reset_mock()
+    path = tmp_path / "trajectory.json"
+    path.write_text(json.dumps({"steps": [step]}))
+    assert await bridge.sync_trajectory_file(path, allow_incomplete=True) == 1
+    client.get_trial_llm_calls.assert_not_awaited()
