@@ -45,7 +45,8 @@ def test_native_turns_keep_tool_ids_and_original_instruction_without_cli_costs()
     ]
     assert document["metadata"]["final_state"] == "succeeded"
     assert document["accounting"]["totals"]["cost_usd"] == 0  # No ledger events in this fixture.
-    assert "999" not in json.dumps(document)
+    assert document["accounting"]["call_count"] == 0
+    assert all("metrics" not in step for step in document["steps"])
 
 
 def test_successful_materialization_requires_native_evidence():
