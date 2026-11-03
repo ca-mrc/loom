@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -17,8 +17,8 @@ from loom_control_plane.service_execution_materializer import (
 from tests.unit.test_claude_code_capture import _lines
 
 
-def _case(lines=None, final_state="succeeded"):
-    trial_id = uuid4()
+def _case(lines=None, final_state="succeeded", *, trial_id=None):
+    trial_id = trial_id or uuid4()
     instruction = "Fix the task, preserving its tests."
     raw = b"".join(json.dumps(item).encode() + b"\n" for item in (_lines() if lines is None else lines))
     capture = ClaudeCapture(trial_id=trial_id, instruction=instruction)
@@ -32,7 +32,8 @@ def _case(lines=None, final_state="succeeded"):
 
 
 def test_native_turns_keep_tool_ids_and_original_instruction_without_cli_costs():
-    raw, instruction, events = _case()
+    # Identifiers may contain the same digits as the CLI-reported cost.
+    raw, instruction, events = _case(trial_id=UUID("00000999-0000-4000-8000-000000000000"))
     document = json.loads(build_canonical_atif(events, task_id="task", agent_name="claude-code", agent_version="2.1.183",
         claude_native=raw, claude_instruction=instruction.encode()))
     assert len(document["steps"]) == 3
