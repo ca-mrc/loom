@@ -70,9 +70,10 @@ async def test_relay_binds_model_auth_route_and_usage_without_exposing_provider_
             await client.get(url + "/health")
 
 
-async def test_translated_stream_preserves_tools_and_distinguishes_configured_zero_price():
+@pytest.mark.parametrize("input_price,expected_cost", [(0, 0), (1, 0.00007)])
+async def test_translated_stream_preserves_tools_and_distinguishes_configured_zero_price(input_price, expected_cost):
     relay = _relay("openai_chat", lambda _: httpx.Response(200, content=_wire(), headers={"content-type": "text/event-stream"}),
-        rates=(RateCardEntry("local:endpoint", "code-model", 0, 0, 0, 0),))
+        rates=(RateCardEntry("local:endpoint", "code-model", input_price, 0, 0, 0),))
     await relay.start(host="127.0.0.1")
     try:
         relay.activate(step_id="main")
@@ -80,8 +81,9 @@ async def test_translated_stream_preserves_tools_and_distinguishes_configured_ze
             result = await client.post("/v1/messages", headers={"Authorization": f"Bearer {relay.token}"}, json=_payload(stream=True))
             assert result.status_code == 200 and '"tool_use"' in result.text and "message_stop" in result.text
         rows = await relay.get_trial_llm_calls(relay.trial_id)
-        assert len(rows) == 1 and rows[0]["input_tokens"] == 70
+        assert len(rows) == 1 and rows[0]["input_tokens"] == 100
         assert rows[0]["provider_extras"]["cache_read_input_tokens"] == 30
+        assert rows[0]["cost_usd"] == pytest.approx(expected_cost)
         assert rows[0]["provider_extras"]["_loom_cost_confidence"] == "configured"
     finally:
         await relay.aclose()
@@ -126,3 +128,21 @@ async def test_concurrent_trials_have_independent_tokens_models_and_phase_author
         assert len(rows) == 1 and rows[0]["provider_extras"]["_loom_failure_category"] == "upstream_http_4xx"
     finally:
         await asyncio.gather(first.aclose(), second.aclose())
+
+
+async def test_phase_revocation_cancels_an_open_stream_before_verifier_can_run():
+    slow = _SlowNativeStream()
+    relay = _relay("anthropic", lambda _: httpx.Response(200, stream=slow, headers={"content-type": "text/event-stream"}))
+    await relay.start(host="127.0.0.1")
+    try:
+        relay.activate(step_id="main")
+        async with httpx.AsyncClient(base_url=relay.base_url, trust_env=False) as client:
+            request = asyncio.create_task(client.post("/v1/messages", headers={"Authorization": f"Bearer {relay.token}"}, json=_payload(stream=True)))
+            await asyncio.wait_for(slow.waiting.wait(), 2)
+            await asyncio.wait_for(relay.deactivate(), 5)
+            await asyncio.gather(request, return_exceptions=True)
+        assert slow.closed
+        rows = await relay.get_trial_llm_calls(relay.trial_id)
+        assert len(rows) == 1 and rows[0]["provider_extras"]["_loom_call_status"] == "failed"
+    finally:
+        await relay.aclose()
