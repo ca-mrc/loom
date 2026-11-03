@@ -6,7 +6,7 @@ import json
 import logging
 import sys
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID
 
 from loom.models.types import ModelSpec
@@ -27,6 +27,7 @@ class DirectProviderConnection:
     api_key: str = field(repr=False)
     base_url: str | None = None
     api_key_env: str | None = None
+    api_dialect: Literal["openai_chat", "anthropic", "gemini"] | None = None
 
     @property
     def harbor_model_name(self) -> str:

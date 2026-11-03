@@ -301,6 +301,8 @@ class UpstreamDirectGatewayClient:
                 f"typically ending in /v1). Currently registered: "
                 f"{registered}.",
             )
+        if provider.api_dialect != "openai_chat":
+            raise ValueError("direct-completion requires an openai_chat local endpoint; use claude-code for Anthropic")
         try:
             import openai
         except ImportError as exc:  # pragma: no cover — dep declared in pyproject
