@@ -436,14 +436,16 @@ class PoolDispatchAudit(DispatchAudit):
         suppressed.add(self.row.id)
         required = set(pool.required_models)
         start = 0
+        timed_out_group = self.quota_group
         for index, member in enumerate(members):
             if member.connection_id == self.row.id:
                 start = index + 1
+                timed_out_group = member.quota_group
                 break
         spare: ProviderRequestPoolMember | None = None
         for offset in range(len(members)):
             member = members[(start + offset) % len(members)]
-            if member.connection_id == self.row.id:
+            if member.connection_id == self.row.id or member.quota_group == timed_out_group:
                 continue
             if await self._eligible(session, member, now, suppressed, required) is None:
                 continue
