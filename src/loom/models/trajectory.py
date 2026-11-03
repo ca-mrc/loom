@@ -230,6 +230,7 @@ class LLMCallEvent(_EventBase):
     failure_category: Literal[
         "upstream_timeout", "upstream_transport", "upstream_http_4xx",
         "upstream_http_5xx", "upstream_http_error", "attempt_deadline_reached",
+        "upstream_protocol", "client_cancelled",
     ] | None = None
 
     # Usage — RAW, NOT derived (spec H5)
@@ -243,6 +244,7 @@ class LLMCallEvent(_EventBase):
 
     # Derived (recomputable)
     cost_usd_snapshot: float = Field(ge=0)
+    cost_status: Literal["priced", "price_unknown"] | None = Field(default=None, exclude_if=lambda value: value is None)
 
     # Timing
     duration_sec: float = Field(ge=0)

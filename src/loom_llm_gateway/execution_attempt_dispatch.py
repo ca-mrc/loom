@@ -248,8 +248,8 @@ async def authorize_anthropic_trial_model(
 
 
 __all__ = [
-    "authorize_anthropic_trial_model",
     "admitted_service_execution_models",
+    "authorize_anthropic_trial_model",
     "authorize_execution_attempt_dispatch",
     "authorize_trial_execution_dispatch",
     "authorize_trial_model",

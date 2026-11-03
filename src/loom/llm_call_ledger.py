@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import LlmCall, ServiceExecutionLease
+from loom.models.types import ModelSpec
 from loom.request_params import coerce_request_params
 
 
@@ -84,9 +85,11 @@ def serialize_execution_accounting_call(row: LlmCall) -> dict[str, Any]:
         "_loom_failure_category": {
             "upstream_timeout", "upstream_transport", "upstream_http_4xx",
             "upstream_http_5xx", "upstream_http_error", "attempt_deadline_reached",
+            "upstream_protocol", "client_cancelled",
         },
         "_loom_gateway_route": {"native_responses", "chat_translation", "native_anthropic", "anthropic_to_chat"},
         "_loom_compatibility_profile": {"claude-code-chat-v1"},
+        "_loom_cost_confidence": {"configured", "estimated", "unavailable", "not_applicable"},
     }.items():
         value = extras.get(key)
         if isinstance(value, str) and value in allowed:
@@ -95,11 +98,10 @@ def serialize_execution_accounting_call(row: LlmCall) -> dict[str, Any]:
     if identity is not None:
         # This key is authored by Gateway from frozen trial configuration, never
         # copied from an upstream usage object or client request.
-        if (not isinstance(identity, dict) or set(identity) != {"provider", "name"}
-                or not isinstance(identity["provider"], str) or not identity["provider"]
-                or identity["name"] != row.model):
+        model = ModelSpec.model_validate(identity)
+        if not model.provider or model.name != row.model:
             raise ValueError("invalid Gateway model identity")
-        payload["provider_extras"]["_loom_model_identity"] = dict(identity)
+        payload["provider_extras"]["_loom_model_identity"] = model.model_dump(exclude_defaults=True, exclude_none=True)
     raw = extras.get("_loom_raw_provider_log")
     response = raw.get("response") if isinstance(raw, dict) else None
     body = response.get("body") if isinstance(response, dict) else None
