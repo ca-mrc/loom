@@ -38,13 +38,21 @@ def llm_call_row_to_event(
     extras = row.get("provider_extras") or {}
     if not isinstance(extras, Mapping):
         extras = {}
+    identity = extras.get("_loom_model_identity")
+    if identity is not None and (
+        not isinstance(identity, Mapping) or set(identity) != {"provider", "name"}
+        or not isinstance(identity["provider"], str) or not identity["provider"]
+        or identity["name"] != row.get("model")
+    ):
+        raise ValueError("invalid Gateway model identity")
     return LLMCallEvent(
         emitted_at=_captured_at(row.get("captured_at")),
         trial_id=trial_id,
         step_id=str(row.get("step_id") or "__trial__"),
         seq=seq,
         model=ModelSpec(
-            provider=_PROVIDER_BY_DIALECT.get(str(row.get("dialect") or ""), "unknown"),
+            provider=(identity["provider"] if isinstance(identity, Mapping) else
+                      _PROVIDER_BY_DIALECT.get(str(row.get("dialect") or ""), "unknown")),
             name=str(row.get("model") or "unknown"),
         ),
         rate_card_hash=str(row.get("rate_card_hash") or ""),
@@ -93,6 +101,10 @@ def llm_call_row_to_event(
             str(row["response_model"]) if row.get("response_model") else None
         ),
         role=row.get("role") if row.get("role") in {"student", "teacher"} else None,
+        gateway_route=(extras.get("_loom_gateway_route") if extras.get("_loom_gateway_route")
+                       in {"native_anthropic", "anthropic_to_chat"} else None),
+        compatibility_profile=("claude-code-chat-v1" if extras.get("_loom_compatibility_profile")
+                               == "claude-code-chat-v1" else None),
     )
 
 

@@ -135,11 +135,14 @@ def _openai_cache_usage(u: dict[str, Any], key: str) -> dict[str, Any]:
 def _openai_chat(r: dict[str, Any]) -> TokenUsage:
     raw = r.get("usage")
     u = raw if isinstance(raw, dict) else {}
+    details = u.get("completion_tokens_details")
+    reasoning = details.get("reasoning_tokens") if isinstance(details, dict) else None
     return TokenUsage(
         input_tokens=_coerce_token_count(u.get("prompt_tokens")),
         output_tokens=_coerce_token_count(u.get("completion_tokens")),
         provider_extras={**usage_reporting_extras(raw, required_keys=("prompt_tokens", "completion_tokens")),
-                         **_openai_cache_usage(u, "prompt_tokens_details")},
+                         **_openai_cache_usage(u, "prompt_tokens_details"),
+                         **({"reasoning_tokens": _coerce_token_count(reasoning)} if reasoning is not None else {})},
     )
 
 

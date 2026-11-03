@@ -262,6 +262,12 @@ class LLMCallEvent(_EventBase):
     requested_model: str | None = None
     response_model: str | None = None
     role: Literal["student", "teacher"] | None = None
+    gateway_route: Literal["native_anthropic", "anthropic_to_chat"] | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+    compatibility_profile: Literal["claude-code-chat-v1"] | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
 
 
 # Agent (continued) + verifier + network + sys ────────────────────────────────
