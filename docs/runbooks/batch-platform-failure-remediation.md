@@ -92,3 +92,31 @@ Do not submit paid model calls solely to create a measurement count.
 Expansion is a recommendation, not an applied configuration. Preserve existing
 workspaces, output commits, cancellation fences and cleanup ownership. Local
 tests, protected CI and merge do not prove deployed repair or supplier recovery.
+
+
+### Missing native verifier reward
+
+A missing numeric reward is a failed verification boundary, not a zero score.
+The native private-input bridge records the original `test.sh` exit code beside
+`harbor_reward_error`; later report-download or cleanup errors remain secondary.
+On an existing verifier exec/report failure, the controller first quiesces the
+sandbox, then attempts to retain `/logs/verifier` before teardown. Successful
+verification, including reward zero, does not perform this capture.
+
+The optional private outputs `diagnostics/verifier-files.tar` and
+`diagnostics/verifier-files.json` preserve regular reports with an 8 MiB archive
+budget, 1 MiB per file, 128-entry limit and three-second capture timeout inside
+the existing cleanup grace. The existing native archive/file RPC owns transport;
+no unbounded legacy fallback is used. Parent symlinks, archive traversal, links
+and special files cannot become retained files. Oversized, missing or unsafe
+evidence is explicitly partial/unavailable. Capture failures never turn a
+failed verifier into success or override its primary error. These are optional
+artifacts under ordinary Trial authority, not another gate or scoring input.
+
+The two original 475-task rerun samples `24f97b1e-6375-4a78-a932-36b3ed65bf74` and
+`6baed40c-8f82-4239-9de9-6e2c87a5c3c0` retain a missing reward and generic
+exit-one wrapper failure. Their task wrappers deliberately remove rewards on
+internal error, but the underlying reports were not retained; their deeper
+initiating causes cannot be recovered from those exported bytes. This source
+fix does not reconstruct historical reports, change task scripts, regrade or
+rerun tasks. It is not deployed or accepted by the 475-task cohort frozen on `7badcb61b784`.

@@ -236,7 +236,10 @@ def test_separate_mode_emits_the_existing_deferred_verifier_contract() -> None:
     assert {o.relative_path for o in verifier.output_declarations} <= {
         "diagnostics/verifier-exception.json", "verifier/output.json", "artifacts/verifier/ctrf.json",
         "diagnostics/workspace-handoff.json",
+        "diagnostics/verifier-files.tar", "diagnostics/verifier-files.json",
     }
+    diagnostics = [o for o in verifier.output_declarations if o.relative_path.startswith("diagnostics/verifier-files.")]
+    assert len(diagnostics) == 2 and all(not o.required for o in diagnostics)
 
 
 def test_guest_extension_keeps_two_colocated_guests_for_any_workspace_harness() -> None:

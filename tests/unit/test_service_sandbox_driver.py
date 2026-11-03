@@ -795,3 +795,93 @@ async def test_empty_upload_changed_before_request_never_sends_headers(tmp_path:
         driver._client = client
         with pytest.raises(DriverError, match="source grew"):
             await driver._upload_file(source, PurePosixPath("/tmp/loom-workspace-" + "a" * 32 + ".tar"), workspace_archive=True)
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+async def test_failure_diagnostic_download_has_explicit_server_and_local_budget(tmp_path, rejected):
+    import httpx
+
+    from loom.models.exec import ExecResult
+
+    commands = []
+    class ArchiveDriver(ServiceSandboxDriver):
+        async def exec(self, cmd, **kwargs):
+            commands.append(cmd)
+            assert kwargs["timeout_sec"] == 2
+            return ExecResult(return_code=0, stdout=b"", stderr=b"", duration_sec=0)
+
+    base = driver_for(tmp_path / "unused.sock", limit=65536)
+    driver = ArchiveDriver(tmp_path / "unused.sock", capabilities=base.capabilities,
+                           network_policy=Public(), max_transfer_bytes=65536)
+
+    async def handle(request):
+        assert request.url.path == "/workspace-archive"
+        assert request.url.params["max_bytes"] == "4096"
+        if rejected:
+            return httpx.Response(413, headers={"X-Loom-Sandbox-Error":"file_too_large"}, text="private-report")
+        return httpx.Response(200, content=b"report")
+
+    target = tmp_path / "diagnostics.tar"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="http://sandbox") as client:
+        driver._client, driver._started = client, True
+        if rejected:
+            with pytest.raises(SandboxRPCError):
+                await driver.export_diagnostic_archive(PurePosixPath("/logs/verifier"), target, max_bytes=4096)
+            assert not target.exists()
+        else:
+            await driver.export_diagnostic_archive(PurePosixPath("/logs/verifier"), target, max_bytes=4096)
+            assert target.read_bytes() == b"report"
+    assert "test ! -L /logs" in commands[0] and "test ! -L /logs/verifier" in commands[0]
+    assert "ulimit -f 4" in commands[1]
+    assert commands[-1].startswith("rm -f -- /tmp/loom-workspace-")
+    assert driver._max_workspace_archive == 65536
+
+
+@pytest.mark.parametrize("symlink", [False, True])
+async def test_native_failure_diagnostic_archive_runs_posix_capture_with_fixed_root(tmp_path, symlink):
+    import shlex
+    import subprocess
+    import tarfile
+
+    import httpx
+
+    from loom.models.exec import ExecResult
+
+    source = tmp_path / "logs"
+    source.mkdir()
+    (source / "report.json").write_text('{"exit":70}')
+    requested = source
+    if symlink:
+        requested = tmp_path / "linked-logs"
+        requested.symlink_to(source, target_is_directory=True)
+
+    class LocalArchiveDriver(ServiceSandboxDriver):
+        async def exec(self, cmd, **kwargs):
+            cmd = cmd.replace("/logs/verifier", shlex.quote(str(requested)))
+            cmd = cmd.replace("test ! -L /logs", "true")
+            result = await asyncio.to_thread(subprocess.run, ["/bin/sh", "-c", cmd],
+                                            capture_output=True, timeout=kwargs["timeout_sec"])
+            return ExecResult(return_code=result.returncode, stdout=result.stdout, stderr=result.stderr, duration_sec=0)
+
+    base = driver_for(tmp_path / "unused.sock", limit=65536)
+    driver = LocalArchiveDriver(tmp_path / "unused.sock", capabilities=base.capabilities,
+                                network_policy=Public(), max_transfer_bytes=65536)
+
+    async def handle(request):
+        path = Path(request.url.params["path"])
+        assert path.name.startswith("loom-workspace-") and path.parent == Path("/tmp")
+        payload = path.read_bytes()
+        assert len(payload) <= int(request.url.params["max_bytes"])
+        return httpx.Response(200, content=payload)
+
+    target = tmp_path / "diagnostics.tar"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="http://sandbox") as client:
+        driver._client, driver._started = client, True
+        if symlink:
+            with pytest.raises(DriverError, match="directory unavailable"):
+                await driver.export_diagnostic_archive(PurePosixPath("/logs/verifier"), target, max_bytes=65536)
+            assert not target.exists()
+            return
+        await driver.export_diagnostic_archive(PurePosixPath("/logs/verifier"), target, max_bytes=65536)
+    with tarfile.open(target) as archive:
+        assert archive.extractfile("./report.json").read() == b'{"exit":70}'
