@@ -206,6 +206,9 @@ class MessagesDispatch:
                              else "upstream_timeout" if isinstance(exc, httpx.TimeoutException)
                              else "upstream_transport" if isinstance(exc, httpx.RequestError)
                              else "upstream_protocol")
+            # Close inside the handler so the dispatch audit receives the
+            # original exception before it becomes a downstream SSE error.
+            await self.close_stream()
             yield b"event: error\ndata: " + json.dumps({"type": "error", "error": {
                 "type": "api_error", "message": "Loom Messages stream failed: " + self._failure,
             }}).encode() + b"\n\n"
