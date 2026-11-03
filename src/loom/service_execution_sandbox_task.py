@@ -44,6 +44,7 @@ from loom.hosted_harness import (
     MAX_SETUP_CACHE_BYTES,
     HarnessSetup,
     HostedHarnessSpec,
+    PinnedArchive,
     hosted_harness,
     workspace_controller_phases,
 )
@@ -248,7 +249,7 @@ async def _execution_identity(gateway: str) -> tuple[UUID, UUID]:
 
 
 # Workspace harness phases this controller implements (see `run_agent`).
-CONTROLLER_PHASES = frozenset({"terminus-2", "oracle", "codex"})
+CONTROLLER_PHASES = frozenset({"terminus-2", "oracle", "codex", "claude-code"})
 
 
 def _workspace_spec(trial: TrialConfig) -> HostedHarnessSpec:
@@ -285,8 +286,8 @@ def installed_agent_model_environment(
     if guest and url.hostname != "127.0.0.1":
         # QEMU user networking forwards only IPv4 loopback.
         raise ServiceExecutionTaskError("installed agent model access requires the loopback broker")
-    # Both OpenAI protocols are served under /v1 (chat/completions, responses).
-    return {base_url_env: _sandbox_loopback(url, guest).rstrip("/") + "/v1", api_key_env: WORKLOAD_PROXY_API_KEY}
+    suffix = "/anthropic" if spec.gateway_protocol == "anthropic-messages" else "/v1"
+    return {base_url_env: _sandbox_loopback(url, guest).rstrip("/") + suffix, api_key_env: WORKLOAD_PROXY_API_KEY}
 
 
 def _setup_proxy_environment(guest: bool = False) -> dict[str, str]:
@@ -311,7 +312,7 @@ def _remaining(deadline: AttemptDeadline | None, fallback: float) -> float:
 
 async def _check_install(driver: ServiceSandboxDriver | GuestComposeServiceDriver, setup: HarnessSetup, timeout: float) -> bool:
     result = await driver.exec(shlex.join(setup.check), timeout_sec=timeout)
-    return result.return_code == 0
+    return result.return_code == 0 and (setup.check_output is None or result.stdout.decode(errors="replace").strip() == setup.check_output)
 
 
 async def _restore_cached_install(
@@ -394,6 +395,22 @@ async def _run_install_command(
         raise ServiceExecutionTaskError(f"harness setup failed with exit status {code}")
 
 
+async def _select_pinned_archive(
+    driver: ServiceSandboxDriver | GuestComposeServiceDriver, setup: HarnessSetup, deadline: AttemptDeadline | None,
+) -> PinnedArchive:
+    assert setup.archive is not None
+    if setup.archive_musl is None:
+        return setup.archive
+    result = await driver.exec("uname -m; LC_ALL=C ldd --version 2>&1", timeout_sec=_remaining(deadline, setup.timeout_seconds))
+    lines = result.stdout.decode(errors="replace").lower().splitlines()
+    libc = "\n".join(lines[1:])
+    musl = "musl libc" in libc
+    glibc = "glibc" in libc or "gnu libc" in libc or "gnu c library" in libc
+    if not lines or lines[0].strip() != "x86_64" or musl == glibc:
+        raise ServiceExecutionTaskError("harness archive platform is unsupported or ambiguous")
+    return setup.archive_musl if musl else setup.archive
+
+
 async def _install_pinned_archive(
     driver: ServiceSandboxDriver | GuestComposeServiceDriver, workspace: Path, setup: HarnessSetup,
     environment: dict[str, str], deadline: AttemptDeadline | None,
@@ -402,8 +419,8 @@ async def _install_pinned_archive(
     import base64
     import hashlib
 
-    archive = setup.archive
-    assert archive is not None and setup.install_root is not None
+    archive = await _select_pinned_archive(driver, setup, deadline)
+    assert setup.install_root is not None
     local = workspace / _ARCHIVE_DOWNLOAD
     local.parent.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha512()
@@ -677,16 +694,20 @@ async def run_agent(
                         trial_id=trial_id, team_id=team_id, instruction=instruction, gateway_url=gateway,
                         deadline=deadline,
                     )
-                elif spec.controller_phase == "codex":
+                elif spec.controller_phase in {"codex", "claude-code"}:
+                    from loom.service_execution_claude_code import run_claude_code
                     from loom.service_execution_codex import run_codex
                     from loom.service_execution_terminus2 import LeaseGatewayClient
 
                     ledger = LeaseGatewayClient(gateway_url=gateway, trial_id=trial_id, team_id=team_id)
-                    await run_codex(
+                    claude = spec.controller_phase == "claude-code"
+                    run_installed = run_claude_code if claude else run_codex
+                    await run_installed(
                         driver=driver, workspace=output, task_config=task, trial_config=trial,
                         trial_id=trial_id, instruction=instruction, deadline=deadline,
                         model_environment=installed_agent_model_environment(
-                            spec, base_url_env="OPENAI_BASE_URL", api_key_env="OPENAI_API_KEY",
+                            spec, base_url_env="ANTHROPIC_BASE_URL" if claude else "OPENAI_BASE_URL",
+                            api_key_env="ANTHROPIC_AUTH_TOKEN" if claude else "OPENAI_API_KEY",
                             guest=in_guest(task, trial),
                         ),
                         ledger=ledger.get_trial_llm_calls,

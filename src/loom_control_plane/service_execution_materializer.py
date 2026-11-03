@@ -76,6 +76,7 @@ from loom.pipeline.artifact_commit import (
     ArtifactManifestV1,
 )
 from loom.pipeline.keys import canonical_document
+from loom.service_execution_claude_code import claude_usage, parse_claude_events
 from loom.service_execution_codex import codex_usage, parse_codex_events
 from loom.service_execution_oracle import oracle_usage, parse_oracle_events
 from loom.service_execution_terminus_trace import (
@@ -125,6 +126,8 @@ _USAGE_PATH = "accounting/usage.json"
 _VERIFIER_PATH = "verifier/output.json"
 # Codex's session log (`hosted_harness.CODEX`), the source of its ATIF steps.
 _CODEX_SESSION_PATH = "artifacts/codex/session.jsonl"
+_CLAUDE_NATIVE_PATH = "artifacts/claude-code/events.jsonl"
+_CLAUDE_INSTRUCTION_PATH = "artifacts/claude-code/instruction.txt"
 _HARBOR_SUBAGENT_ARCHIVE_PATH = "artifacts/harbor/" + HARBOR_SUBAGENT_ARCHIVE
 _RESULT_PATH = "result.json"
 _EXCEPTION_PATHS = {"diagnostics/agent-exception.json", "diagnostics/verifier-exception.json"}
@@ -318,13 +321,13 @@ def validate_usage_accounting(
         if not matches_terminus_usage(document, terminus_usage(events, trial_config)):
             raise MaterializationIntegrityError("usage_output_identity_drift")
         return
-    if trace_format == "codex":
+    if trace_format in {"codex", "claude-code"}:
         try:
-            events = parse_codex_events(trace_body, trial=trial_config)
+            events = (parse_claude_events if trace_format == "claude-code" else parse_codex_events)(trace_body, trial=trial_config)
         except ValueError as exc:
             raise MaterializationIntegrityError("trajectory_invalid") from exc
         # Same roundoff-tolerant comparison; the expected document carries the schema.
-        if not matches_terminus_usage(document, codex_usage(events, trial_config)):
+        if not matches_terminus_usage(document, (claude_usage if trace_format == "claude-code" else codex_usage)(events, trial_config)):
             raise MaterializationIntegrityError("usage_output_identity_drift")
         return
     calls = _parse_trace_calls(trace_body)
@@ -441,7 +444,7 @@ def build_canonical_events(
     trace_format = _trace_format(trial_config.agent_name)
     terminus = trace_format == "terminus"
     oracle = trace_format == "oracle"
-    codex = trace_format == "codex"
+    codex = trace_format in {"codex", "claude-code"}
     calls = [] if terminus or oracle or codex else _parse_trace_calls(trace_body)
     if oracle and gateway_calls:
         # A no-model solver that reached the Gateway is not an Oracle run.
@@ -457,7 +460,8 @@ def build_canonical_events(
         elif oracle and trace_body is not None:
             native_events = parse_oracle_events(trace_body, trial_id=trial_id)
         elif codex:
-            native_events = parse_codex_events(trace_body, trial=trial_config, trial_id=trial_id)
+            native_events = (parse_claude_events if trace_format == "claude-code" else parse_codex_events)(
+                trace_body, trial=trial_config, trial_id=trial_id)
             if gateway_calls is not None:
                 # The DB ledger, not the runtime's copy, owns model accounting.
                 native_events = reconcile_terminus_ledger(
@@ -630,6 +634,8 @@ def build_canonical_events(
 def build_canonical_atif(
     events: Sequence[TrajectoryEvent], *, task_id: str, agent_name: str, agent_version: str,
     codex_session: bytes | None = None,
+    claude_native: bytes | None = None,
+    claude_instruction: bytes | None = None,
 ) -> bytes:
     """Use the existing per-turn Harbor exporter for Terminus execution.
 
@@ -641,6 +647,24 @@ def build_canonical_atif(
     generic = project_to_atif(
         events, task_id=task_id, agent_name=agent_name, agent_version=agent_version,
     )
+    if _trace_format(agent_name) == "claude-code":
+        from loom.claude_code_atif import claude_atif_steps
+        from loom.errors import AgentError
+
+        if claude_native is None or claude_instruction is None:
+            if generic.metadata.final_state == "succeeded":
+                raise MaterializationIntegrityError("claude_native_evidence_missing")
+            return generic.model_dump_json(indent=2).encode("utf-8")
+        model = next((event.model for event in events if isinstance(event, LLMCallEvent)), None)
+        try:
+            steps = claude_atif_steps(claude_native, claude_instruction.decode(), trial_id=UUID(generic.session_id),
+                events=events, model_name=model.name if model else None, succeeded=generic.metadata.final_state == "succeeded")
+        except (AgentError, ValueError) as exc:
+            raise MaterializationIntegrityError("claude_native_evidence_invalid") from exc
+        document = generic.model_dump(mode="json")
+        document["steps"] = steps
+        document["accounting"] = claude_usage(list(events), TrialConfig(agent_name=agent_name, agent_model=model))
+        return json.dumps(document, ensure_ascii=False, indent=2).encode()
     if _trace_format(agent_name) == "codex" and codex_session is not None:
         return _codex_atif(events, generic, codex_session, agent_name=agent_name)
     if _trace_format(agent_name) != "terminus":
@@ -1193,6 +1217,8 @@ class ServiceExecutionMaterializer:
                 _USAGE_PATH,
                 _VERIFIER_PATH,
                 _CODEX_SESSION_PATH,
+                _CLAUDE_NATIVE_PATH,
+                _CLAUDE_INSTRUCTION_PATH,
                 _HARBOR_SUBAGENT_ARCHIVE_PATH,
                 *_EXCEPTION_PATHS,
             }:
@@ -1323,7 +1349,7 @@ class ServiceExecutionMaterializer:
                 raise MaterializationIntegrityError("verifier_handoff_missing")
             gateway_calls = (await read_service_execution_llm_calls(
                 session, lease, generation=lease.output_generation,
-            )) if _trace_format(trial.config.get("agent_name")) in {"terminus", "oracle", "codex"} else None
+            )) if _trace_format(trial.config.get("agent_name")) in {"terminus", "oracle", "codex", "claude-code"} else None
             frozen_plan = getattr(lease, "runtime_contract_json", None) or {}
             mainland_profile_raw = frozen_plan.get("mainland_proxy_profile")
             frozen_sidecars = frozen_plan.get("sidecars", [])
@@ -1429,13 +1455,14 @@ class ServiceExecutionMaterializer:
                 derivation_inputs.get(_HARBOR_SUBAGENT_ARCHIVE_PATH),
                 destination_prefix=destination_prefix,
             ))
-        if gateway_calls is not None and ledger_format in {"terminus", "codex"}:
+        if gateway_calls is not None and ledger_format in {"terminus", "codex", "claude-code"}:
             # Preserve the immutable runtime projection as source evidence. The
             # canonical accounting is independently derived from the DB ledger.
             corrected = {
                 _TRACE_PATH: _canonical_jsonl(events),
                 _USAGE_PATH: canonical_document(
-                    (codex_usage if ledger_format == "codex" else terminus_usage)(list(events), trial_config),
+                    (claude_usage if ledger_format == "claude-code" else
+                     codex_usage if ledger_format == "codex" else terminus_usage)(list(events), trial_config),
                 ),
                 "accounting/gateway-calls.json": canonical_document({
                     "schema_version": "loom.gateway-lease-ledger.v1", "calls": gateway_calls,
@@ -1471,6 +1498,8 @@ class ServiceExecutionMaterializer:
                 default_image_version=default_image_version(runtime_profile, runtime_result),
             ),
             codex_session=derivation_inputs.get(_CODEX_SESSION_PATH),
+            claude_native=derivation_inputs.get(_CLAUDE_NATIVE_PATH),
+            claude_instruction=derivation_inputs.get(_CLAUDE_INSTRUCTION_PATH),
         )
         identity = TrajectoryObjectIdentity(
             bucket=self._trajectories_bucket,

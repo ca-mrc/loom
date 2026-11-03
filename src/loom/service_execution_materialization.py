@@ -658,6 +658,11 @@ def automatic_service_execution_rejections(
             reasons.append("harness_model_forbidden")
     elif trial.agent_model is None or trial.agent_model.source != "api":
         reasons.append("api_model_required")
+    if spec is not None and spec.trace_format == "claude-code":
+        if trial.claude_code_mode is None:
+            reasons.append("claude_code_mode_required")
+        if trial.request_params:
+            reasons.append("claude_code_request_params_unsupported")
     if trial.extra_mcp_servers or trial.extra_skills:
         reasons.append("extended_agent_runtime_unsupported")
     if (

@@ -23,7 +23,7 @@ ExecutionKind = Literal["response-only", "workspace"]
 ModelUse = Literal["required", "forbidden"]
 DriverCapability = Literal["exec", "exec_streaming", "upload", "download"]
 # How the materializer validates the harness trace and usage documents.
-TraceFormat = Literal["completion-calls", "terminus", "oracle", "codex"]
+TraceFormat = Literal["completion-calls", "terminus", "oracle", "codex", "claude-code"]
 # Behaviour that only some harnesses implement, independent of topology.
 HarnessFeature = Literal["agent_continuation", "pinned_versions", "task_resource_requests"]
 # Which trusted image runs the controller phase. `service-runner`: the
@@ -31,7 +31,7 @@ HarnessFeature = Literal["agent_continuation", "pinned_versions", "task_resource
 # the deployment's digest-pinned controller image (or a pinned version's).
 ControllerImage = Literal["service-runner", "harness-controller"]
 # The Gateway wire format the harness speaks; None for a model-free harness.
-GatewayProtocol = Literal["openai-chat-completions", "openai-responses"]
+GatewayProtocol = Literal["openai-chat-completions", "openai-responses", "anthropic-messages"]
 Readiness = Literal["ready", "unavailable"]
 
 # Trusted controller entry points. The sandbox module also owns the fixed
@@ -132,6 +132,8 @@ class HarnessSetup:
 
     install: tuple[str, ...] = ()
     archive: PinnedArchive | None = None
+    # Optional fixed Linux amd64 musl variant; archive is then the glibc build.
+    archive_musl: PinnedArchive | None = None
     sources: tuple[InstallSource, ...]
     timeout_seconds: int
     # Absolute sandbox directory the install writes everything into. With
@@ -140,6 +142,7 @@ class HarnessSetup:
     install_root: str | None = None
     # Command proving an install (fresh or restored) is usable, e.g. `--version`.
     check: tuple[str, ...] = ()
+    check_output: str | None = None
     # Peak sandbox disk the setup needs: installed bytes plus any transient
     # archive. Admission rejects a task whose sandbox cannot hold it (#2362).
     disk_mib: int = 0
@@ -154,6 +157,13 @@ class HarnessSetup:
                 raise ValueError("a pinned archive is extracted into a declared install_root")
             if self.archive.host not in {source.host for source in self.sources if source.protocol == "https"}:
                 raise ValueError("pinned archive host must be a declared https install source")
+        if self.archive_musl is not None:
+            if self.archive is None:
+                raise ValueError("musl archive requires a primary glibc archive")
+            if self.archive_musl.host not in {source.host for source in self.sources if source.protocol == "https"}:
+                raise ValueError("musl archive host must be a declared https install source")
+        if self.check_output is not None and (not self.check or not self.check_output.strip()):
+            raise ValueError("check_output requires a check and nonempty expected output")
         if not self.sources:
             raise ValueError("harness setup requires declared install sources")
         if not 0 < self.timeout_seconds <= MAX_SETUP_TIMEOUT_SECONDS:
@@ -183,6 +193,9 @@ class HarnessSetup:
             "harness": harness, "install": list(self.install),
             **({"archive": [self.archive.url, self.archive.integrity, self.archive.strip_components]}
                if self.archive is not None else {}),
+            **({"archive_musl": [self.archive_musl.url, self.archive_musl.integrity, self.archive_musl.strip_components]}
+               if self.archive_musl is not None else {}),
+            **({"check_output": self.check_output} if self.check_output is not None else {}),
             "sources": [[source.protocol, source.host] for source in self.sources],
             "install_root": self.install_root, "check": list(self.check),
         }
@@ -370,7 +383,40 @@ CODEX = HostedHarnessSpec(
     version=CODEX_VERSION,
 )
 
-HOSTED_HARNESSES: Mapping[str, HostedHarnessSpec] = _index((DIRECT_COMPLETION, TERMINUS_2, ORACLE, CODEX))
+CLAUDE_CODE_VERSION = "2.1.183"
+CLAUDE_CODE_INSTALL_ROOT = "/tmp/loom-harness/claude-code"
+CLAUDE_CODE_HOME = "/tmp/loom-harness/claude-code-home"
+CLAUDE_CODE_TMPDIR = "/tmp/loom-harness/claude-code-tmp"
+CLAUDE_CODE = HostedHarnessSpec(
+    name="claude-code", execution_kind="workspace", controller_module=SANDBOX_CONTROLLER_MODULE,
+    controller_phase="claude-code", controller_image="harness-controller", model="required",
+    gateway_protocol="anthropic-messages", trace_format="claude-code",
+    required_driver_capabilities=frozenset({"exec", "exec_streaming", "upload", "download"}),
+    native_outputs=(
+        NativeOutput("agent/claude-code/events.jsonl", "artifacts/claude-code/events.jsonl", "agent_native", True),
+        NativeOutput("agent/claude-code/instruction.txt", "artifacts/claude-code/instruction.txt", "agent_native", True),
+    ),
+    setup=HarnessSetup(
+        archive=PinnedArchive(
+            url=f"https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-{CLAUDE_CODE_VERSION}.tgz",
+            integrity="sha512-Ik4jBKW40pYyheJ+p890DMIPGgeFXuuCwQV4fWGHAyCEuBYoFYmTWiNEJIFZqIhbbX0YxfOhxacQ/xZSp6kvEw==",
+            strip_components=1,
+        ),
+        archive_musl=PinnedArchive(
+            url=f"https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64-musl/-/claude-code-linux-x64-musl-{CLAUDE_CODE_VERSION}.tgz",
+            integrity="sha512-8hBZ8rsHszPwLILIosViMtJUBVjCq6BDCV4IHQcW3Zx1paoY8+GHogUJlyrPZFXuq7QAhwgtT/+YUMHawjNhzA==",
+            strip_components=1,
+        ),
+        sources=(InstallSource("registry.npmjs.org"),), timeout_seconds=900,
+        install_root=CLAUDE_CODE_INSTALL_ROOT, check=(f"{CLAUDE_CODE_INSTALL_ROOT}/claude", "--version"),
+        check_output=f"{CLAUDE_CODE_VERSION} (Claude Code)",
+        # The 223 MiB executable and ~70 MiB release/cache archive coexist.
+        disk_mib=512,
+    ),
+    version=CLAUDE_CODE_VERSION,
+)
+
+HOSTED_HARNESSES: Mapping[str, HostedHarnessSpec] = _index((DIRECT_COMPLETION, TERMINUS_2, ORACLE, CODEX, CLAUDE_CODE))
 
 # Names and aliases the native execution path can run today. OpenHands and
 # Codex are supported product entries without a hosted spec yet (#2054).
@@ -398,6 +444,11 @@ def workspace_controller_phases() -> tuple[str, ...]:
 
 
 __all__ = [
+    "CLAUDE_CODE",
+    "CLAUDE_CODE_HOME",
+    "CLAUDE_CODE_INSTALL_ROOT",
+    "CLAUDE_CODE_TMPDIR",
+    "CLAUDE_CODE_VERSION",
     "CODEX",
     "CODEX_HOME",
     "CODEX_INSTALL_ROOT",

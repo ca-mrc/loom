@@ -199,6 +199,7 @@ async def test_multiple_gateway_calls_keep_contiguous_trace_sequence(tmp_path):
 async def test_cancellation_kills_the_owned_process_and_finalizes_evidence(tmp_path):
     import asyncio
     import json
+
     from tests.unit.test_claude_code_capture import _lines
 
     waiting = asyncio.Event()
