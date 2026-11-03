@@ -78,11 +78,12 @@ ls /tmp/loom-smoke/<trial-id>/
   atif.json          # ATIF v1.7 projection
 ```
 
-Local agents connect directly to the selected configured provider. The task
-sandbox receives the selected key for installed agents, so use trusted task
-images and agents. See the [local connection matrix](architecture/cli-mode.md#stateless-agent-factory)
-for compatible providers and endpoint reachability. Direct-completion Google
-calls use `google-genai` with a Gemini Developer API key. These examples describe
+Local model access follows the [local connection matrix](architecture/cli-mode.md#stateless-agent-factory).
+Claude Code's Docker path keeps the upstream key on the CLI host. The sandbox
+receives a token for the trial's local relay. Installed adapters that connect
+directly receive the selected key in the sandbox, so use trusted task images
+and agents. The matrix lists compatible providers and endpoint reachability.
+Direct-completion Google calls use `google-genai` with a Gemini Developer API key. These examples describe
 the interface; live provider/agent-version acceptance remains separate.
 
 Installed-agent command shape:
