@@ -45,6 +45,7 @@ export interface AgentEntry extends AgentReadinessLike {
   description: string;
   supported_providers: string[];
   supported_model_sources: string[];
+  supported_connection_types?: string[];
   requires_capabilities?: string[];
   provides_capabilities?: string[];
   readiness_status?: "ready" | "unavailable";

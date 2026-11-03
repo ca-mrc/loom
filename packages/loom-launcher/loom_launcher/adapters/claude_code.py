@@ -12,6 +12,7 @@ import shlex
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+from typing import Literal
 from typing import cast as _cast
 from uuid import UUID
 
@@ -89,9 +90,21 @@ class ClaudeCodeAdapter:
         workdir: PurePosixPath,
         model: ModelSpec,
         env: dict[str, str],
+        runtime_mode: Literal["native", "chat"] = "native",
     ) -> list[str]:
         env["DISABLE_TELEMETRY"] = "1"
         env["CLAUDE_CODE_AUTO_UPDATE"] = "false"
+        env.update({"DISABLE_AUTOUPDATER": "1", "DISABLE_ERROR_REPORTING": "1",
+                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"})
+        # Simple/bare mode removes Write even when explicitly allowed.
+        env.pop("CLAUDE_CODE_SIMPLE", None)
+        env.setdefault("CLAUDE_CONFIG_DIR", "/tmp/loom-harness/claude-code-home")
+        for key in ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"):
+            env[key] = model.name
+        if runtime_mode == "chat":
+            env.update({"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1", "MAX_THINKING_TOKENS": "0",
+                        "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1", "DISABLE_PROMPT_CACHING": "1"})
         allowed_tools = " ".join(shlex.quote(tool) for tool in _CLAUDE_CODE_ALLOWED_TOOLS)
         visible_tools = ",".join(_CLAUDE_CODE_ALLOWED_TOOLS)
         return [
@@ -104,6 +117,7 @@ class ClaudeCodeAdapter:
                 f"--tools {shlex.quote(visible_tools)} "
                 f"--allowedTools {allowed_tools} "
                 f"--no-session-persistence "
+                f"--setting-sources '' --strict-mcp-config --mcp-config '{{\"mcpServers\":{{}}}}' "
                 f"--model {shlex.quote(model.name)} "
                 f"--print {shlex.quote(instruction)}"
             ),

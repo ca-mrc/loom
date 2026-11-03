@@ -172,15 +172,24 @@ export function useAgentModelPicker({
   const connectionList = useMemo(
     () =>
       (providerConnections.data?.items ?? [])
-        .filter((c) => OPENAI_SHAPED_CONNECTION_TYPES.has(c.type))
+        .filter((c) => compatibilityAgent?.supported_connection_types
+          ? compatibilityAgent.supported_connection_types.includes(c.type)
+          : OPENAI_SHAPED_CONNECTION_TYPES.has(c.type))
         .sort((a, b) => a.name.localeCompare(b.name)),
-    [providerConnections.data],
+    [providerConnections.data, compatibilityAgent],
   );
 
   const selectedConnection = useMemo(
     () => connectionList.find((c) => c.id === value.providerConnectionId),
     [connectionList, value.providerConnectionId],
   );
+
+  useEffect(() => {
+    const connection = providerConnections.data?.items.find((c) => c.id === value.providerConnectionId);
+    if (!compatibilityAgent || !connection || connectionList.some((c) => c.id === connection.id)) return;
+    onChange({ ...value, providerConnectionId: undefined, providerConnectionName: undefined,
+      modelProvider: "", modelName: "", manualModel: false });
+  }, [providerConnections.data, compatibilityAgent, connectionList, value, onChange]);
 
   // Every model on the selected connection that this agent can use. Search
   // only narrows what the dropdown lists; the selected model's identity and

@@ -111,7 +111,13 @@ def _probe(provider: LocalProvider) -> tuple[int, list[str]]:
     """Return (exit_code, list_of_model_ids). Exit 0 on success."""
     url = provider.base_url.rstrip("/") + "/models"
     headers = {}
-    if provider.api_key:
+    if provider.api_dialect == "anthropic":
+        from loom.anthropic_protocol import anthropic_api_base_url
+        url = anthropic_api_base_url(provider.base_url) + "/models"
+        headers["anthropic-version"] = "2023-06-01"
+        if provider.api_key:
+            headers["x-api-key"] = provider.api_key
+    elif provider.api_key:
         headers["Authorization"] = f"Bearer {provider.api_key}"
     try:
         resp = httpx.get(url, headers=headers, timeout=5.0)

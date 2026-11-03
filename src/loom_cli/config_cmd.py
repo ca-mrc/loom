@@ -18,8 +18,10 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from dataclasses import replace
+from typing import cast
 
-from loom_cli.config import LocalProvider, load_config, save_config
+from loom_cli.config import LocalAPIDialect, LocalProvider, load_config, save_config
 
 _VALID_PROVIDERS = frozenset({"anthropic", "openai", "google"})
 _LOCAL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
@@ -60,10 +62,10 @@ def _set(key: str, value: str) -> int:
         cfg.server_url = value
     elif key.startswith("local."):
         parts = key.split(".")
-        if len(parts) != 3 or parts[2] not in ("base_url", "api_key"):
+        if len(parts) != 3 or parts[2] not in ("base_url", "api_key", "api_dialect"):
             print(
                 f"unknown key {key!r}; local provider keys are "
-                "`local.<name>.base_url` or `local.<name>.api_key`",
+                "`local.<name>.base_url`, `local.<name>.api_key` or `local.<name>.api_dialect`",
                 file=sys.stderr,
             )
             return 2
@@ -91,7 +93,7 @@ def _set(key: str, value: str) -> int:
             # Warn but don't reject — llama.cpp's `--port 8080`
             # default has no prefix, and someone might be running a
             # reverse-proxy at /.
-            if "/v1" not in value:
+            if "/v1" not in value and (existing is None or existing.api_dialect == "openai_chat"):
                 print(
                     f"warning: base_url {value!r} doesn't contain '/v1' — "
                     "most local servers (vLLM, ollama, lm-studio) need "
@@ -102,10 +104,8 @@ def _set(key: str, value: str) -> int:
             if existing is None:
                 cfg.local_providers[name] = LocalProvider(base_url=value)
             else:
-                cfg.local_providers[name] = LocalProvider(
-                    base_url=value, api_key=existing.api_key,
-                )
-        else:  # api_key
+                cfg.local_providers[name] = replace(existing, base_url=value)
+        else:
             if existing is None:
                 print(
                     f"local provider {name!r} not registered; set "
@@ -113,13 +113,17 @@ def _set(key: str, value: str) -> int:
                     file=sys.stderr,
                 )
                 return 2
-            cfg.local_providers[name] = LocalProvider(
-                base_url=existing.base_url, api_key=value,
-            )
+            if field == "api_dialect":
+                if value not in {"openai_chat", "anthropic"}:
+                    print("api_dialect must be openai_chat or anthropic", file=sys.stderr)
+                    return 2
+                cfg.local_providers[name] = replace(existing, api_dialect=cast(LocalAPIDialect, value))
+            else:
+                cfg.local_providers[name] = replace(existing, api_key=value)
     else:
         print(
             f"unknown key {key!r}; supported: token.<provider>, "
-            "server_url, local.<name>.base_url, local.<name>.api_key",
+            "server_url, local.<name>.base_url, local.<name>.api_key, local.<name>.api_dialect",
             file=sys.stderr,
         )
         return 2
@@ -153,6 +157,7 @@ def _show() -> int:
         print("local_providers:")
         for name, p in sorted(cfg.local_providers.items()):
             print(f"  {name}.base_url = {p.base_url}")
+            print(f"  {name}.api_dialect = {p.api_dialect}")
             if p.api_key is not None:
                 print(f"  {name}.api_key = {_redact(p.api_key)}")
     return 0

@@ -17,6 +17,7 @@ from loom.db.schema import (
     Trial,
 )
 from loom.execution_runtime_contract import ExecutionRuntimePlanV1
+from loom.models.types import ModelSpec
 from loom.pipeline.keys import canonical_digest
 
 
@@ -221,8 +222,35 @@ async def authorize_trial_model(
         raise HTTPException(status_code=403, detail="service execution model forbidden")
 
 
+async def authorize_anthropic_trial_model(
+    session: AsyncSession, ctx: AuthContext, *, model: str, connection_type: str,
+) -> ModelSpec:
+    """Keep the selected model namespace independent of the Messages wire API.
+
+    Claude's mode is frozen at admission from its authorized connection. Neither
+    a request field nor the upstream response can supply the canonical identity.
+    Other runtimes retain the existing provider/name authorization rule.
+    Reuse the caller's transaction so authorization never waits for a second
+    pool checkout while connection resolution holds the first.
+    """
+    native = connection_type == "anthropic"
+    fallback = ModelSpec(provider="anthropic" if native else "openai", name=model)
+    if ctx.service_execution_lease_id is None or ctx.trial_id is None:
+        return fallback
+    config = (await session.execute(select(Trial.config).where(Trial.id == ctx.trial_id))).scalar_one_or_none()
+    if isinstance(config, dict) and config.get("agent_name") == "claude-code":
+        selected = config.get("agent_model")
+        if (isinstance(selected, dict) and selected.get("name") == model
+                and selected.get("provider") and config.get("claude_code_mode") == ("native" if native else "chat")):
+            return ModelSpec.model_validate(selected)
+    elif (fallback.provider, model) in admitted_service_execution_models(config):
+        return fallback
+    raise HTTPException(status_code=403, detail="service execution model or Claude connection mode forbidden")
+
+
 __all__ = [
     "admitted_service_execution_models",
+    "authorize_anthropic_trial_model",
     "authorize_execution_attempt_dispatch",
     "authorize_trial_execution_dispatch",
     "authorize_trial_model",

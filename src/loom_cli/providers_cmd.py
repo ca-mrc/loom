@@ -178,11 +178,10 @@ def _optional_admin_actor_headers(
     return {"X-Loom-Admin-Actor": admin_actor}, None
 
 
-# Agent batches and trials accept only OpenAI-shaped connections (#2054).
-_AGENT_RUN_TYPES = frozenset({"openai-compatible", "custom"})
+_AGENT_RUN_TYPES = frozenset({"openai-compatible", "custom", "anthropic"})
 _NATIVE_TYPE_NOTICE = (
     "note: agent batches and trials can't use this connection; they accept "
-    "only openai-compatible and custom connections."
+    "OpenAI-compatible connections, or Anthropic connections for Claude Code."
 )
 
 
@@ -758,8 +757,8 @@ def dispatch(argv: list[str]) -> int:
         choices=["openai-compatible", "anthropic", "google", "custom"],
         help=(
             "Provider type. Does not determine supplier pricing. Agent "
-            "batches and trials accept only openai-compatible and custom; "
-            "anthropic and google are for features that call them natively."
+            "batches and trials accept openai-compatible and custom; "
+            "Claude Code also accepts anthropic. Google is for native pipeline calls."
         ),
     )
     p_create.add_argument("--base-url", required=True,

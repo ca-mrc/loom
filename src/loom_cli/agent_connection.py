@@ -15,7 +15,8 @@ _BASE_URLS = {
     "google": "https://generativelanguage.googleapis.com",
 }
 _PROVIDERS_BY_DIALECT = {
-    "anthropic": {"anthropic"},
+    "claude-code": {"anthropic", "openai", "local"},
+    "anthropic": {"anthropic", "local"},
     "gemini": {"google"},
     "openai_chat": {"openai", "local"},
     "openai_responses": {"openai", "local"},
@@ -37,13 +38,19 @@ def resolve_agent_connection(
         local = gateway.local_providers.get(server)
         if local is None:
             raise AgentError(f"local provider {server!r} is not registered")
+        if dialect is not None and dialect != "claude-code" and local.api_dialect != (
+            "openai_chat" if dialect == "openai_responses" else dialect
+        ):
+            raise AgentError(f"local provider dialect {local.api_dialect!r} is incompatible with agent dialect {dialect!r}")
         url = urlsplit(local.base_url)
         if (url.scheme not in {"http", "https"} or not url.hostname or url.username
                 or url.password or url.query or url.fragment):
             raise AgentError("local provider base_url must be an HTTP(S) endpoint without credentials or query")
         return DirectProviderConnection(
-            model=model.model_copy(update={"provider": "openai", "name": name}),
+            model=model.model_copy(update={"provider": "anthropic" if local.api_dialect == "anthropic" else "openai", "name": name}),
             api_key=local.api_key or "EMPTY", base_url=local.base_url,
+            api_dialect=local.api_dialect,
+            api_key_env="ANTHROPIC_API_KEY" if local.api_dialect == "anthropic" else None,
         )
     if model.provider not in _BASE_URLS:
         raise AgentError(f"unsupported direct provider {model.provider!r}")
@@ -58,4 +65,5 @@ def resolve_agent_connection(
     return DirectProviderConnection(
         model=model, api_key=key, base_url=base_url,
         api_key_env="ANTHROPIC_API_KEY" if model.provider == "anthropic" else None,
+        api_dialect="anthropic" if model.provider == "anthropic" else "gemini" if model.provider == "google" else "openai_chat",
     )

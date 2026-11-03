@@ -98,6 +98,19 @@ def _safe_bootstrap_diagnostic(raw: str) -> dict:
     return safe
 
 
+def _bounded_raw_pod_log(core, name, namespace, *, container, tail_lines, limit_bytes):
+    # The generated client's string deserializer converts a sole JSON record
+    # to Python repr. Read bounded bytes so the safe JSON projection sees the
+    # actual log, and release the response even when reading fails.
+    response = core.read_namespaced_pod_log(name, namespace, container=container,
+        tail_lines=tail_lines, limit_bytes=limit_bytes, _request_timeout=(2, 3), _preload_content=False)
+    try:
+        return response.read(limit_bytes).decode('utf-8', errors='replace')
+    finally:
+        response.close()
+        response.release_conn()
+
+
 def _add_rendered_job_failure(core, namespace: str, name: str, error: AssertionError) -> None:
     """Retain bounded termination facts and finite codes, never raw Pod logs."""
     rows = []
@@ -115,8 +128,8 @@ def _add_rendered_job_failure(core, namespace: str, name: str, error: AssertionE
                 } else "other"
                 row = {"container": status.name, "reason": reason,
                     "exit_code": terminated.exit_code, "codes": []}
-                raw = core.read_namespaced_pod_log(pod.metadata.name, namespace,
-                    container=status.name, tail_lines=80, limit_bytes=16384, _request_timeout=(2, 3))
+                raw = _bounded_raw_pod_log(core, pod.metadata.name, namespace,
+                    container=status.name, tail_lines=80, limit_bytes=16384)
                 for needle, code in (
                     ("ModuleNotFoundError", "module_missing"), ("ImportError", "import_failure"),
                     ("OperationalError", "database_operational"), ("ProgrammingError", "database_programming"),
@@ -137,8 +150,8 @@ def _add_rendered_job_failure(core, namespace: str, name: str, error: AssertionE
                 diagnostic = _safe_bootstrap_diagnostic(raw)
                 # Request the final record independently of the broad read;
                 # retain only its whitelist projection, never raw text.
-                tail = core.read_namespaced_pod_log(pod.metadata.name, namespace,
-                    container=status.name, tail_lines=4, limit_bytes=2048, _request_timeout=(2, 3))
+                tail = _bounded_raw_pod_log(core, pod.metadata.name, namespace,
+                    container=status.name, tail_lines=4, limit_bytes=2048)
                 diagnostic.update(_safe_bootstrap_diagnostic(tail))
                 row.update(diagnostic)
                 for field in ('started_at', 'finished_at'):
@@ -643,11 +656,16 @@ def test_rendered_refresh_probes_and_migration_execute_against_real_tls_database
 
 
 @pytest.mark.parametrize('sqlstate', ['08006', None])
-def test_rendered_job_diagnostics_recovers_safe_final_record(sqlstate):
+def test_rendered_job_diagnostics_recovers_safe_final_record(sqlstate, monkeypatch):
     from datetime import UTC, datetime
+    from io import BytesIO
     from types import SimpleNamespace
 
+    from kubernetes import client
+    from urllib3.response import HTTPResponse
+
     calls = []
+    responses = []
     terminated = SimpleNamespace(exit_code=1, reason='Error', started_at=datetime(2026, 11, 2, tzinfo=UTC),
         finished_at=datetime(2026, 11, 2, 0, 0, 1, tzinfo=UTC))
     pod = SimpleNamespace(metadata=SimpleNamespace(name='fixture-pod'), status=SimpleNamespace(init_container_statuses=[],
@@ -656,17 +674,22 @@ def test_rendered_job_diagnostics_recovers_safe_final_record(sqlstate):
         'migration_revision': '0187', 'message': 'private-message',
         'dsn': 'postgresql://private-user:private-password@private-host/loom'}
 
-    class Core:
-        def list_namespaced_pod(self, *args, **kwargs):
-            return SimpleNamespace(items=[pod])
+    def log_response(_url, *, query_params, **kwargs):
+        calls.append(dict(query_params))
+        raw = '{"error_type": "Operational' if len(calls) == 1 else json.dumps(diagnostic) + '\n'
+        response = HTTPResponse(body=BytesIO(raw.encode()), status=200, preload_content=False)
+        responses.append(response)
+        return response
 
-        def read_namespaced_pod_log(self, *args, **kwargs):
-            calls.append(kwargs)
-            return '{"error_type": "Operational' if len(calls) == 1 else json.dumps(diagnostic) + '\n'
-
-    error = AssertionError('rendered Job failed')
-    _add_rendered_job_failure(Core(), 'fixture-namespace', 'fixture-job', error)
-    assert [(call['tail_lines'], call['limit_bytes']) for call in calls] == [(80, 16384), (4, 2048)]
+    with client.ApiClient() as api:
+        core = client.CoreV1Api(api)
+        monkeypatch.setattr(core, 'list_namespaced_pod', lambda *args, **kwargs: SimpleNamespace(items=[pod]))
+        # Exercise the real client's response handling: it parses a sole JSON
+        # log record even though the generated endpoint declares a string.
+        monkeypatch.setattr(api.rest_client, 'GET', log_response)
+        error = AssertionError('rendered Job failed')
+        _add_rendered_job_failure(core, 'fixture-namespace', 'fixture-job', error)
+    assert [(call['tailLines'], call['limitBytes']) for call in calls] == [(80, 16384), (4, 2048)]
     note = error.__notes__[0]
     row, = json.loads(note.removeprefix('rendered Job termination: '))
     assert row['sqlstate'] == sqlstate and row['error_type'] == 'OperationalError'
@@ -674,6 +697,7 @@ def test_rendered_job_diagnostics_recovers_safe_final_record(sqlstate):
     assert row['started_at'] == '2026-11-02T00:00:00+00:00'
     assert row['finished_at'] == '2026-11-02T00:00:01+00:00'
     assert all(private not in note for private in ('private-message', 'private-user', 'private-password', 'private-host', 'dsn'))
+    assert all(response.closed for response in responses)
 
 
 @pytest.mark.parametrize('raw', ['null', '[]', 'garbage', '{',

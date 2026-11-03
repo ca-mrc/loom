@@ -78,11 +78,12 @@ ls /tmp/loom-smoke/<trial-id>/
   atif.json          # ATIF v1.7 projection
 ```
 
-Local agents connect directly to the selected configured provider. The task
-sandbox receives the selected key for installed agents, so use trusted task
-images and agents. See the [local connection matrix](architecture/cli-mode.md#stateless-agent-factory)
-for compatible providers and endpoint reachability. Direct-completion Google
-calls use `google-genai` with a Gemini Developer API key. These examples describe
+Local model access follows the [local connection matrix](architecture/cli-mode.md#stateless-agent-factory).
+Claude Code's Docker path keeps the upstream key on the CLI host. The sandbox
+receives a token for the trial's local relay. Installed adapters that connect
+directly receive the selected key in the sandbox, so use trusted task images
+and agents. The matrix lists compatible providers and endpoint reachability.
+Direct-completion Google calls use `google-genai` with a Gemini Developer API key. These examples describe
 the interface; live provider/agent-version acceptance remains separate.
 
 Installed-agent command shape:
@@ -911,6 +912,62 @@ When New Batch links you to a provider's Models tab to refresh,
 preflight, or manually add a model, use the "Back to New Batch" link on
 that page to return to the batch form after the model catalog is ready.
 
+### Claude Code connections
+
+Claude Code runs the pinned 2.1.183 executable with Bash, Read, Write, Edit, Glob
+and Grep. Hosted submissions select a team Provider Connection; Loom derives
+and freezes native or translated mode for each selection, including batch
+combinations and reruns. A connection must support the selected model's tool
+calls and usage reporting. A successful text-only model preflight does not
+qualify its tool behavior.
+
+For laptop-only runs, a local Linux x86-64 Docker daemon is required for the
+pinned runtime and relay. Both glibc and musl task images are supported; they
+need `tar`, `gzip`, the matching runtime libraries and Bash for Bash tool use.
+Loom downloads and SHA512-verifies the official release, caches its archive at
+`$XDG_CACHE_HOME/loom/harness-archives` (default `~/.cache/loom/harness-archives`),
+and installs it in the task sandbox. The upstream endpoint is contacted by the
+CLI host, so a model server on `127.0.0.1` is reachable. The sandbox receives only
+a trial token for the local relay. Remote Docker daemons, Docker Desktop and
+`mainland_proxy` are not supported by this local relay path.
+
+```bash
+# Native Anthropic service
+loom config set token.anthropic YOUR_KEY
+loom run ./task --agent claude-code --model anthropic/YOUR_MODEL
+
+# Registered OpenAI-compatible Chat Completions endpoint
+loom config set local.coding.base_url http://127.0.0.1:8000/v1
+loom config set local.coding.api_dialect openai_chat
+loom run ./task --agent claude-code --model local/coding/YOUR_MODEL
+
+# Or register an Anthropic-compatible endpoint, with optional authentication
+loom config set local.native.base_url https://example.com/proxy/v1
+loom config set local.native.api_dialect anthropic
+loom config set local.native.api_key YOUR_KEY
+loom run ./task --agent claude-code --model local/native/YOUR_MODEL
+```
+
+`api_dialect` defaults to `openai_chat` for existing local registrations.
+Anthropic base URLs can include a proxy prefix and an optional terminal `/v1`;
+discovery, preflight and runtime use the same normalized path.
+
+The Chat compatibility profile preserves text, streamed function calls and
+matching tool results. It disables native thinking, prompt caching and
+experimental betas; Anthropic effort has no translated equivalent. Images,
+server-side tools and other unsupported native semantics fail explicitly.
+Claude Code rejects nonempty Loom `request_params` rather than silently
+ignoring generation overrides.
+
+Local output includes `events.jsonl`, per-message `atif.json` and native
+`native/<invocation>/claude-code/events.jsonl` plus the instruction. Calls and
+costs come from the relay ledger; Claude's own cost summary is diagnostic.
+Missing prices are reported as unknown, distinct from an explicitly configured
+zero rate. Hosted output follows the same evidence contract through Gateway
+and materialization. Source and deterministic Docker coverage establish these
+runtime contracts; deployment and live-provider qualification remain specific
+to the selected environment and endpoint.
+
 ### Supported agents and model access
 
 Hosted submissions (New Batch, `POST /api/v1/batches`, `POST /api/v1/trials`
@@ -924,14 +981,15 @@ admission also depends on the deployment's execution support described below:
 | `openhands-sdk` (shown as "openhands"; `openhands` still accepted) | Required | Chat Completions |
 | `terminus-2` | Required | Chat Completions |
 | `codex` | Required | Responses to the Gateway, which uses the upstream's native Responses API or its Chat Completions translation |
+| `claude-code` | Required | Anthropic Messages, passed to a native connection or translated to streaming Chat Completions |
 
-Other agents (SWE-agent, Mini SWE-agent, Aider, OpenCode, Claude Code,
+Other agents (SWE-agent, Mini SWE-agent, Aider, OpenCode,
 Gemini CLI, Kimi CLI, Qwen CLI) stay listed so historical runs remain readable,
 but new submissions are rejected with the reason.
 
 On hosted (Nebius) deployments, native execution currently runs
-`direct-completion` (and its `litellm` alias), `terminus-2`, `oracle` and `codex`.
-Codex uses the [installed-harness contract](architecture/hosted-agent-harness.md#installed-harnesses).
+`direct-completion` (and its `litellm` alias), `terminus-2`, `oracle`, `codex`
+and `claude-code`. Codex and Claude Code use the [installed-harness contract](architecture/hosted-agent-harness.md#installed-harnesses).
 OpenHands is a product entry that is not yet connected to native execution:
 `/api/v1/agents` reports it as `unavailable`, and hosted submissions naming it
 are rejected before admission. Source support does not establish that a selected
@@ -969,14 +1027,12 @@ uv run python scripts/ops/build_agent_model_acceptance_taskset.py --task workspa
 loom tasksets submit /tmp/ts-2054-ws
 ```
 
-Every model-backed selection needs an explicitly selected, authorized
-OpenAI-compatible Provider Connection (`openai-compatible` or `custom`), owned by
-or shared with your team. There is no fallback to platform credentials, and
-native Anthropic/Google connections are not accepted for agents. You can still
-create those types for features that call them natively, such as Pipeline judge
-bindings; the connection form, list and `loom providers create` label them as
-not usable for agent runs. The service resolves each selection once at
-submission:
+Every model-backed selection needs an explicitly selected, authorized Provider
+Connection owned by or shared with your team. Claude Code accepts `anthropic`,
+`openai-compatible` and `custom`; other admitted model agents require
+`openai-compatible` or `custom`. Native Google connections remain available for
+features such as Pipeline judge bindings. There is no fallback to platform
+credentials. The service resolves each selection once at submission:
 
 - The model that runs is `agent_model.name`. `provider_model_id` may be omitted;
   when given (on the combination or inherited from the batch) it must name the
@@ -2227,6 +2283,9 @@ Config persists to `$XDG_CONFIG_HOME/loom/config.toml` (defaults to
 ```
 loom config set token.<provider> <key>    # provider in {anthropic, openai, google}
 loom config set server_url <url>          # optional Loom service URL
+loom config set local.<name>.base_url <url>
+loom config set local.<name>.api_dialect openai_chat  # or anthropic
+loom config set local.<name>.api_key <key>  # optional
 loom config show
 ```
 

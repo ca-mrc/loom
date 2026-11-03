@@ -97,6 +97,14 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
 
       <ModelPriceNotice connection={connectionList.find(c => c.id === value.providerConnectionId)} model={value.modelName} />
 
+      {selectedAgent?.name === "claude-code" && selectedConnection && (
+        <p className="text-xs text-slate-600">
+          {selectedConnection.type === "anthropic"
+            ? "Native Anthropic Messages. Claude Code controls generation settings."
+            : "Claude requests are translated to OpenAI Chat. Workspace tools require a model that supports streamed tool calls. Thinking, prompt caching and Claude context management are disabled; native effort settings are not translated. Claude Code controls generation settings."}
+        </p>
+      )}
+
       {connectionList.length === 0 && !providerConnections.isPending ? (
         <div className="rounded border border-slate-200 bg-slate-50 p-4 text-center text-sm">
           <p className="text-slate-600">No provider connections yet.</p>

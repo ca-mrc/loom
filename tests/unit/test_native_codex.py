@@ -397,3 +397,21 @@ async def test_off_model_ledger_call_fails_the_run(tmp_path) -> None:
     trial_id = uuid4()
     with pytest.raises(ValueError, match="another model identity"):
         await _run(_CodexSandbox(), tmp_path, trial_id, [_row(trial_id, model="gpt-5")])
+
+
+async def test_local_archive_cache_revalidates_bytes_and_keeps_hosted_proxy_required(monkeypatch, tmp_path):
+    payload, sandbox = b"release-bytes", _Sandbox()
+    seen = _serve(monkeypatch, payload)
+    cache = tmp_path / "cache"
+    setup = _setup_for(payload)
+    with pytest.raises(KeyError, match="https_proxy"):
+        await controller._install_pinned_archive(sandbox, tmp_path, setup, {}, None)
+    await controller._install_pinned_archive(sandbox, tmp_path, setup, {}, None, local_direct=True, archive_cache=cache)
+    await controller._install_pinned_archive(sandbox, tmp_path, setup, {}, None, local_direct=True, archive_cache=cache)
+    assert len(seen) == 1 and len(sandbox.uploads) == 2
+    cached = list(cache.glob("*.tgz"))
+    assert len(cached) == 1
+    cached[0].write_bytes(b"tampered")
+    await controller._install_pinned_archive(sandbox, tmp_path, setup, {}, None, local_direct=True, archive_cache=cache)
+    assert len(seen) == 2 and cached[0].read_bytes() == payload
+    assert not list(cache.glob("*.tmp"))

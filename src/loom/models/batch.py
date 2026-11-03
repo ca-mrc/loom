@@ -12,6 +12,7 @@ trial_config + Batch.n_per_task as they did before this PR.
 
 from __future__ import annotations
 
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -35,6 +36,7 @@ class Combination(BaseModel):
     # doesn't call an LLM (oracle, in-box runtimes), but the field
     # must be present.
     agent_model: ModelSpec | None
+    claude_code_mode: Literal["native", "chat"] | None = Field(default=None, exclude_if=lambda value: value is None)
 
     # Per-Combination sample count. 1..100 (same bounds as Batch.n_per_task).
     n_per_task: int = Field(default=1, ge=1, le=100)

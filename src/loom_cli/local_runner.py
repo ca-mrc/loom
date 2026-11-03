@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID
 
+from loom.agent.base import AgentRuntime
 from loom.agent.subprocess import SubprocessAgent
 from loom.agent.terminus2.runtime import LoomTerminus2Runtime
 from loom.driver.base import Driver
@@ -32,7 +33,10 @@ from loom.trajectory.storage import ObjectStore
 from loom.trial.phase_network import controlled_tool_policy_setter
 from loom.trial.trial import Trial, TrialContext
 from loom.verifier.factory import task_verifier_factory
+from loom_cli.agent_connection import resolve_agent_connection
 from loom_cli.agent_factory import build_agent_factory
+from loom_cli.claude_gateway import LocalClaudeRelay
+from loom_cli.claude_runtime import LocalClaudeRuntime, local_docker_relay_host
 from loom_cli.config import LocalProvider
 from loom_cli.upstream_gateway import UpstreamDirectGatewayClient
 
@@ -79,25 +83,40 @@ class LocalRunner:
             tokens=self.upstream_gateway_tokens,
             local_providers=self.local_providers,
         )
-        agent_factory = build_agent_factory(
-            team_id=self.team_id, trial_id=self.trial_id,
-        )
-        agent = agent_factory(
-            self.task_dir, gateway,
-            self.task_config.agent.model,
-            self.task_config.agent.name,
-        )
+        driver = self.driver_factory()
+        trial_dir = self.output_dir / str(self.trial_id)
+        trial_dir.mkdir(parents=True, exist_ok=True)
+        relay: LocalClaudeRelay | None = None
+        agent: AgentRuntime
+        if self.task_config.agent.name == "claude-code":
+            if cfg.request_params:
+                raise AgentError("Claude Code does not support Loom generation overrides")
+            if cfg.mainland_proxy:
+                raise AgentError("mainland_proxy does not support the in-sandbox Claude Code runtime")
+            if cfg.agent_model is None:
+                raise AgentError("Claude Code requires a model")
+            selected_model = cfg.agent_model
+            connection = resolve_agent_connection(gateway, selected_model, dialect="claude-code")
+            mode = "native" if connection.api_dialect == "anthropic" else "chat"
+            if cfg.claude_code_mode is not None and cfg.claude_code_mode != mode:
+                raise AgentError("Claude connection mode conflicts with the selected provider")
+            cfg = cfg.model_copy(update={"claude_code_mode": mode})
+            if driver.capabilities.backend != "docker" and mode == "chat":
+                raise AgentError("Claude OpenAI-compatible local runs require the local Docker backend")
+            if driver.capabilities.backend == "docker":
+                relay = LocalClaudeRelay(trial_id=self.trial_id, model=selected_model, connection=connection)
+        if relay is not None:
+            agent = LocalClaudeRuntime(trial_id=self.trial_id, task_config=self.task_config,
+                trial_config=cfg, relay=relay, output_dir=trial_dir / "native")
+        else:
+            agent_factory = build_agent_factory(team_id=self.team_id, trial_id=self.trial_id)
+            agent = agent_factory(self.task_dir, gateway, self.task_config.agent.model, self.task_config.agent.name)
         if isinstance(agent, SubprocessAgent) and cfg.request_params:
             raise AgentError("local subprocess request_params require an agent-native configuration; gateway controls are unsupported")
         if isinstance(agent, LoomTerminus2Runtime):
             agent.request_params = dict(cfg.request_params)
             agent.harbor_config = cfg.harbor_config
         verifier = task_verifier_factory(self.task_config)()
-        driver = self.driver_factory()
-
-        trial_dir = self.output_dir / str(self.trial_id)
-        trial_dir.mkdir(parents=True, exist_ok=True)
-
         ctx = TrialContext(
             trial_id=self.trial_id, team_id=self.team_id,
             task_config=self.task_config, task_checksum=self.task_checksum,
@@ -105,13 +124,21 @@ class LocalRunner:
             driver=driver, agent=agent, verifier=verifier,
             object_store=self.object_store,
             local_trajectory_path=trial_dir / "events.jsonl",
-            llm_calls_fetcher=None,
+            llm_calls_fetcher=relay.get_trial_llm_calls if relay is not None else None,
+            atif_builder=agent.build_atif if isinstance(agent, LocalClaudeRuntime) else None,
             # Separate verification always gets a fresh driver from the same
             # factory the CLI used for the agent sandbox (#2418).
             verifier_driver_factory=self.driver_factory,
         )
         tool_gateway: MainlandProxyGateway | None = None
         try:
+            if relay is not None:
+                host = await local_docker_relay_host()
+                try:
+                    await relay.start(host=host)
+                except OSError as exc:
+                    raise AgentError("Claude relay requires a Docker bridge on this host; remote daemons and Docker Desktop are unsupported") from exc
+                ctx.sandbox_extra_hosts = (("loom-claude-relay", host),)
             if cfg.mainland_proxy:
                 if driver.capabilities.backend != "docker" or not driver.capabilities.supports_custom_network:
                     raise AgentError("mainland_proxy requires the Docker execution backend")
@@ -138,7 +165,11 @@ class LocalRunner:
                 if tool_gateway is not None:
                     await tool_gateway.stop()
             finally:
-                await gateway.aclose()
+                try:
+                    if relay is not None:
+                        await relay.aclose()
+                finally:
+                    await gateway.aclose()
         try:
             atif_bytes = await self.object_store.get_object(
                 bucket="trajectories",

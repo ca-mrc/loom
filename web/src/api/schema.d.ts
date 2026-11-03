@@ -3809,6 +3809,8 @@ export interface components {
             agent_name: string;
             /** Agent Version */
             agent_version?: string | null;
+            /** Claude Code Mode */
+            claude_code_mode?: ("native" | "chat") | null;
             /** Label */
             label?: string | null;
             /**
@@ -3828,6 +3830,8 @@ export interface components {
             agent_name: string;
             /** Agent Version */
             agent_version?: string | null;
+            /** Claude Code Mode */
+            claude_code_mode?: ("native" | "chat") | null;
             /** Label */
             label?: string | null;
             /** N Per Task */

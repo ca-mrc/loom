@@ -10,7 +10,7 @@ Lives at `$XDG_CONFIG_HOME/loom/config.toml` (default
   LLM servers (vLLM, ollama, llama.cpp, lm-studio). Each server has
   a name + base_url + optional api_key. The name disambiguates
   between multiple local servers; the base_url is the
-  OpenAI-compatible endpoint (typically ends in `/v1`).
+  endpoint with an explicit OpenAI Chat or Anthropic Messages dialect.
 
 All fields are optional — a fresh install has no file and
 `load_config()` returns an empty `LoomConfig`.
@@ -24,12 +24,14 @@ import tempfile
 import tomllib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import tomli_w
 
 from loom_cli.contexts import ManagedApplicationBinding, ManagedEnvironmentBinding, current_context
 
 CONFIG_FILENAME = "config.toml"
+LocalAPIDialect = Literal["openai_chat", "anthropic"]
 
 
 def _xdg_config_home() -> Path:
@@ -47,11 +49,16 @@ def config_path() -> Path:
 
 @dataclass
 class LocalProvider:
-    """One registered locally-served OpenAI-compatible LLM server."""
+    """A named direct endpoint with an explicit wire protocol."""
 
     base_url: str
     api_key: str | None = None
     served_model_name: str | None = None
+    api_dialect: LocalAPIDialect = "openai_chat"
+
+    def __post_init__(self) -> None:
+        if self.api_dialect not in {"openai_chat", "anthropic"}:
+            raise ValueError("local provider api_dialect must be openai_chat or anthropic")
 
 
 @dataclass
@@ -101,6 +108,8 @@ class LoomConfig:
                     entry["api_key"] = p.api_key
                 if p.served_model_name is not None:
                     entry["served_model_name"] = p.served_model_name
+                if p.api_dialect != "openai_chat":
+                    entry["api_dialect"] = p.api_dialect
                 local[name] = entry
             out["local_providers"] = local
         return out
@@ -168,6 +177,7 @@ def load_config() -> LoomConfig:
             base_url=base_url,
             api_key=api_key,
             served_model_name=served_model_name,
+            api_dialect=entry.get("api_dialect", "openai_chat"),
         )
     cfg = LoomConfig(
         tokens=tokens,
@@ -236,6 +246,7 @@ def set_local_provider(
     base_url: str,
     api_key: str | None = None,
     served_model_name: str | None = None,
+    api_dialect: LocalAPIDialect = "openai_chat",
 ) -> None:
     """Persist a `[local_providers.<name>]` entry to
     `~/.config/loom/config.toml`. Overwrites any existing entry with
@@ -245,6 +256,7 @@ def set_local_provider(
         base_url=base_url,
         api_key=api_key,
         served_model_name=served_model_name,
+        api_dialect=api_dialect,
     )
     save_config(cfg)
 

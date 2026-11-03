@@ -68,8 +68,7 @@ export function providerTestAge(value?: string | null): string {
   return minutes < 60 ? `Tested ${minutes} minutes ago` : minutes < 1440 ? `Tested ${Math.floor(minutes / 60)} hours ago` : `Tested ${Math.floor(minutes / 1440)} days ago`;
 }
 
-// Agent batches and trials accept only OpenAI-shaped connections (#2054).
-export const AGENT_RUN_PROVIDER_TYPES = ["openai-compatible", "custom"];
+export const AGENT_RUN_PROVIDER_TYPES = ["openai-compatible", "custom", "anthropic"];
 
 export const NATIVE_TYPE_NOTICE =
-  "Agent batches and trials can't use this connection: they accept only openai-compatible and custom connections.";
+  "Agent batches and trials can't use this connection. Choose an OpenAI-compatible connection, or an Anthropic connection for Claude Code.";

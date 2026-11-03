@@ -83,11 +83,12 @@ func TestNativeTrajectoryCoalescesAdjacentBoundariesAndFlushesOnClose(t *testing
 		}
 	})
 	defer stop()
-	options := fastLiveOptions()
+	// This tests batching, so use the normal request/close budgets. The fast
+	// failure-test deadline can expire under load and trigger a valid retry.
+	options := defaultNativeTrajectoryOptions()
 	// No periodic flush occurs: adjacent boundaries should wait for the
 	// existing cadence, while close must still deliver their ordered tail.
 	options.pollInterval = time.Hour
-	options.stopTimeout = 2 * time.Second
 	workspace := t.TempDir()
 	p := testPlan(workspace, phase{Role: "agent", Argv: []string{"/bin/true"}, WorkingDirectory: workspace, TimeoutSeconds: 5})
 	p.MaxArtifactBytes = 1024 * 1024

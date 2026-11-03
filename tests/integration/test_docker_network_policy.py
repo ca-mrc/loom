@@ -68,3 +68,11 @@ async def test_allowlist_permits_specific_domain(docker_driver_with_iptables):  
     assert r.stdout.startswith(b"2") or r.stdout.startswith(b"3"), (
         f"expected 2xx/3xx, got rc={r.return_code} stdout={r.stdout!r} stderr={r.stderr!r}"
     )
+
+
+async def test_public_restores_output_after_restricted_phase(docker_driver_with_iptables):
+    driver = docker_driver_with_iptables
+    await driver.set_network_policy(NoNetwork())
+    await driver.set_network_policy(Public())
+    rules = (await driver.exec("iptables -S OUTPUT", user="root")).stdout.decode()
+    assert "-P OUTPUT ACCEPT" in rules and "-j DROP" not in rules

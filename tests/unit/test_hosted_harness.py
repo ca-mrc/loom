@@ -54,7 +54,7 @@ def test_registry_resolves_names_and_aliases() -> None:
     assert hosted_harness("no-such-agent") is None
     assert hosted_harness("codex") is CODEX
     assert hosted_harness(None) is None
-    assert NATIVE_EXECUTION_AGENT_NAMES == {"direct-completion", "litellm", "terminus-2", "oracle", "codex"}
+    assert NATIVE_EXECUTION_AGENT_NAMES == {"direct-completion", "litellm", "terminus-2", "oracle", "codex", "claude-code"}
     assert is_workspace_harness("oracle") and not is_workspace_harness("litellm")
     assert not is_workspace_harness("no-such-agent")
 

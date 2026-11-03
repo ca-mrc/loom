@@ -490,13 +490,14 @@ def test_provider_compatibility_matrix_records_status_dimensions() -> None:
     assert oracle_openai["status"] == "skipped"
     assert "no-model" in oracle_openai["skip_reason"]
 
-    # #2054: this phase supports OpenAI-compatible endpoints only.
+    # Claude also supports native Anthropic connections.
     assert {e["id"] for e in payload["provider_endpoint_types"]} == {
         "yibuapi-openai-compatible",
         "user-hosted-openai-compatible",
+        "anthropic-compatible",
     }
     assert payload["summary"]["supported"] > 0
-    assert payload["summary"].get("blocked", 0) == 0
+    assert payload["summary"]["blocked"] == 4
     assert payload["summary"]["skipped"] == len(payload["provider_endpoint_types"])
     assert sum(payload["summary"].values()) == len(payload["cells"])
 
@@ -551,7 +552,7 @@ def test_provider_compatibility_matrix_excludes_deferred_agents() -> None:
     payload = qa_cmd._provider_compatibility_matrix_to_json_payload(matrix)
     agents = {cell["agent"] for cell in payload["cells"]}
 
-    for deferred in ("kimi-cli", "claude-code", "gemini-cli", "opencode", "swe-agent"):
+    for deferred in ("kimi-cli", "gemini-cli", "opencode", "swe-agent"):
         assert deferred not in agents
 
 def test_provider_compatibility_evidence_override_is_serialized() -> None:
@@ -691,3 +692,16 @@ def test_provider_compatibility_plan_cli_loads_safe_evidence_file(
     )
     assert cell["usage"] == "tokens-only"
     assert cell["live_smoke"]["llm_calls_count"] == 1
+
+
+def test_claude_matrix_discloses_generation_limits_and_both_routes():
+    matrix = qa_cmd._build_provider_compatibility_matrix()
+    payload = qa_cmd._provider_compatibility_matrix_to_json_payload(matrix)
+    cells = [cell for cell in payload["cells"] if cell["agent"] == "claude-code"]
+    assert len(cells) == 3
+    for cell in cells:
+        assert cell["status"] == "supported"
+        assert cell["request_params"] == "unsupported"
+        assert cell["max_tokens"] == "unsupported"
+        assert cell["usage"] == "pending_live_smoke"
+    assert {cell["protocol_surface"] for cell in cells} == {"anthropic-messages", "messages-to-chat"}

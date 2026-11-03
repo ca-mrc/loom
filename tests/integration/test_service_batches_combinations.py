@@ -1118,3 +1118,28 @@ async def test_nebius_batch_rejects_agents_without_native_execution(
     assert r.status_code == 400, r.text
     detail = r.json()["detail"]
     assert detail.startswith("combinations[1]: agent 'openhands' is not yet runnable")
+
+
+@pytest.mark.parametrize("provider_type,mode", [("anthropic", "native"), ("openai-compatible", "chat")])
+async def test_claude_submission_persists_derived_mode(setup, postgres_url, provider_type, mode):
+    from sqlalchemy import update
+
+    app, raw = setup
+    conn_id = _insert_connection(postgres_url, raw, f"Claude {mode}", ("code-model",))
+    engine = create_engine(postgres_url)
+    with sessionmaker(engine)() as session:
+        session.execute(update(ProviderConnection).where(ProviderConnection.id == conn_id).values(provider_type=provider_type))
+        session.commit()
+    engine.dispose()
+    config = {"agent_name": "claude-code", "agent_model": {"provider": "vendor", "name": "code-model"},
+              "provider_connection_id": str(conn_id)}
+    response = await _post(app, raw, {"name": f"Claude {mode}", "purpose": "evaluation",
+        "task_filter": {"license": "MIT", "subset_kind": "first_n", "n": 1}, "trial_config": {}, "combinations": [config]})
+    assert response.status_code == 201, response.text
+    stored = _stored_combinations(postgres_url, response.json()["batch_id"])
+    assert stored[0]["claude_code_mode"] == mode
+    assert stored[0]["agent_model"]["provider"] == "vendor"
+    config["claude_code_mode"] = "chat" if mode == "native" else "native"
+    rejected = await _post(app, raw, {"name": "conflicting mode", "purpose": "evaluation",
+        "task_filter": {"license": "MIT", "subset_kind": "first_n", "n": 1}, "trial_config": {}, "combinations": [config]})
+    assert rejected.status_code == 400 and "conflicts" in rejected.text

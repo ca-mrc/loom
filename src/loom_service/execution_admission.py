@@ -218,6 +218,7 @@ def submission_trials(
                 **trial_config,
                 "agent_name": combination.agent_name,
                 "agent_version": combination.agent_version,
+                "claude_code_mode": combination.claude_code_mode,
                 "agent_model": (
                     combination.agent_model.model_dump(mode="json")
                     if combination.agent_model is not None

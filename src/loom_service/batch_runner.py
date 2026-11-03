@@ -196,6 +196,10 @@ def _materialize_trial_config(
     else:
         out.pop("agent_version", None)
     out["agent_model"] = combination.get("agent_model")
+    if combination.get("claude_code_mode") is not None:
+        out["claude_code_mode"] = combination["claude_code_mode"]
+    else:
+        out.pop("claude_code_mode", None)
     return apply_plan_mode(out, mode=out.get("model_switch_plan_mode"))
 
 

@@ -5,14 +5,20 @@ Spec §3.7. Pure transform — re-runnable when ATIF schema bumps.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
+from typing import Any
 
-from loom.trajectory.atif import project_to_atif
+from loom.models.trajectory import TrajectoryEvent
+from loom.trajectory.atif import AtifTrajectory, project_to_atif
 from loom.trajectory.object_identity import TrajectoryObjectIdentity
 from loom.trajectory.reader import TrajectoryReader
 from loom.trajectory.storage import ObjectStore
+
+AtifBuilder = Callable[[AtifTrajectory, list[TrajectoryEvent]], dict[str, Any]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,11 +40,13 @@ async def finalize_trajectory_with_metadata(
     agent_version: str,
     bucket: str = "trajectories",
     attempt_count: int | None = None,
+    atif_builder: AtifBuilder | None = None,
 ) -> FinalizedTrajectory:
     """Project, upload, and return exact immutable-object evidence."""
     reader = TrajectoryReader(local_path)
+    events = list(reader.iter_all())
     atif = project_to_atif(
-        reader.iter_all(),
+        events,
         task_id=task_id,
         agent_name=agent_name,
         agent_version=agent_version,
@@ -49,7 +57,8 @@ async def finalize_trajectory_with_metadata(
         trial_id=trial_id,
         attempt_count=attempt_count,
     ).atif_key
-    body = atif.model_dump_json(indent=2).encode("utf-8")
+    body = (atif.model_dump_json(indent=2).encode("utf-8") if atif_builder is None else
+            json.dumps(atif_builder(atif, events), ensure_ascii=False, indent=2).encode("utf-8"))
     write_result = await store.put_object_with_metadata(
         bucket=bucket,
         key=key,

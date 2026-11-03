@@ -40,6 +40,7 @@ def provider_submission_configs(
             **trial_config,
             "agent_name": combo.get("agent_name"),
             "agent_model": combo.get("agent_model"),
+            "claude_code_mode": combo.get("claude_code_mode"),
         }
         for index, combo in enumerate(combinations)
         if (indices is None or index in indices)

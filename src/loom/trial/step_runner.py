@@ -231,6 +231,8 @@ async def _run_step_impl(
                 await verifier_env.start(options=_isolated_verifier_start_options(ctx))
                 if ctx.tool_network_policy_setter is not None:
                     await ctx.tool_network_policy_setter(verifier_env, baseline_policy)
+                else:
+                    await verifier_env.set_network_policy(baseline_policy)
                 # The verifier driver receives a fresh public bundle plus its
                 # private verifier-only files.  We then copy only non-private
                 # agent workspace files across the process boundary; an agent

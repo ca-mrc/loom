@@ -355,7 +355,7 @@ async def test_live_stream_disconnect_retains_drain_and_closes_upstream(
             writer.write(
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
                 b"Connection: close\r\n\r\n"
-                b'event: message_start\ndata: {"message":{"usage":{"input_tokens":2}}}\n\n'
+                b'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":2}}}\n\n'
             )
             await writer.drain()
             eof = asyncio.create_task(reader.read())

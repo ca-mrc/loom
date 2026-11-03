@@ -47,7 +47,7 @@ environment it actually needs:
 | Shape | Use when | Current implementation |
 |---|---|---|
 | Response-only | The model returns text and never reads or executes in the task image. | `direct-completion`; `litellm` is an alias. No private task sandbox. Verification is in the same execution attempt. |
-| Workspace-reading | The harness reads files or runs commands in the task image. | `terminus-2`. Use the private task-sandbox topology, shared verifier lifecycle and deferred verifier-plan contract. |
+| Workspace-reading | The harness reads files or runs commands in the task image. | `terminus-2`, `codex`, `claude-code`. Use the private task-sandbox topology, shared verifier lifecycle and deferred verifier-plan contract. |
 | Private-solution | A trusted baseline needs `solution/` or another input forbidden to model agents. | `oracle`, with no model. Same private task-sandbox topology as workspace-reading, plus a distinct input policy: only Oracle's own sandbox receives `solution/**`, and it is removed before the workspace snapshot and grading. |
 
 ## Harness specification
@@ -66,13 +66,13 @@ declares only harness-owned facts:
 | `execution_kind` | `response-only` (no task sandbox) or `workspace` (private task sandbox). Private-solution harnesses are `workspace` with `stages_solution`. |
 | `controller_module`, `controller_phase` | The trusted entry point frozen into `plan.main`: `python -m <module> <phase>`. Response-only harnesses use `loom.service_execution_task`; workspace harnesses use `loom.service_execution_sandbox_task`, which also owns the fixed `verify-sandbox` phase. Phases are unique per execution kind. |
 | `controller_image` | `service-runner` (the deployed runner image frozen as the plan's task image) or `harness-controller` (the deployment's digest-pinned controller image, or a pinned version's). A missing controller binding fails closed at submission (`terminus_controller_unavailable`) and at compilation. |
-| `model`, `gateway_protocol` | `required` with exactly one Gateway wire format (today `openai-chat-completions`), or `forbidden` with none for a model-free baseline (`harness_model_forbidden`). |
+| `model`, `gateway_protocol` | `required` with exactly one Gateway wire format (`openai-chat-completions`, `openai-responses` or `anthropic-messages`), or `forbidden` with none for a model-free baseline (`harness_model_forbidden`). |
 | `readiness` | Hosted support state. An `unavailable` harness stays in the product catalog but is not natively runnable. |
 | `stages_solution` | Private-solution input policy. Allowed only when `model` is `forbidden`. |
 | `features` | Behaviour only some harnesses implement: `agent_continuation`, `pinned_versions`, `task_resource_requests`. |
 | `required_driver_capabilities` | Sandbox-driver operations the controller phase uses. If they exceed `NATIVE_SANDBOX_DRIVER_CAPABILITIES`, the harness is not natively runnable and admission fails closed (`direct_completion_required`). |
 | `native_outputs` | Harness-owned evidence files the plan declares (for example Harbor's trajectory). Common outputs are the planner's. |
-| `trace_format` | How the materializer validates the trace and usage (`completion-calls`, `terminus`, `oracle`, `codex`). |
+| `trace_format` | How the materializer validates the trace and usage (`completion-calls`, `terminus`, `oracle`, `codex`, `claude-code`). |
 | `task_declared_separate_verifier` | Frozen historical projection for requirements derived without a Trial: a task declaring this harness with `env_mode: separate` gets a separate verifier. Only Terminus-2 sets it; stored requirement digests depend on it, so new harnesses leave it off. |
 
 `NATIVE_EXECUTION_AGENT_NAMES` is derived from the registry, so the catalog
@@ -187,8 +187,8 @@ the agent runs. The trusted controller supervises them and keeps private
 verifier and solution inputs, Gateway authorization, canonical evidence and
 durable outputs ([#2288](https://github.com/qianyi-sun/loom/issues/2288),
 [#2310](https://github.com/qianyi-sun/loom/issues/2310)). Terminus-2 keeps its
-controller-side model loop. Codex CLI is the currently admitted native installed
-harness. OpenHands SDK is a follow-up for this harness shape and remains
+controller-side model loop. Codex CLI and Claude Code are admitted native
+installed harnesses. OpenHands SDK is a follow-up for this harness shape and remains
 unavailable for native admission pending its runtime integration and qualification.
 
 ### Native process interface
@@ -341,12 +341,40 @@ native container and guest (QEMU) execution (#2362).
   - Materialization reconciles the trace against the DB ledger and recomputes
     usage (`loom.service-execution-codex-usage.v1`).
 
+### Claude Code
+
+`CLAUDE_CODE` pins version 2.1.183 and declares the Messages wire protocol,
+required native events and instruction evidence, and `trace_format="claude-code"`.
+The setup selects a declared Linux x64 glibc or musl archive from the task
+sandbox's architecture/libc, verifies SHA512 before upload, and checks the exact
+CLI version. Both archive identities participate in the install cache key.
+Unlike Codex, these binaries require their matching dynamic runtime libraries.
+Task images also need tar/gzip, and Bash for Bash tool use. The declared setup
+allowance is 512 MiB, including the roughly 220 MiB binary and 70 MiB archive.
+
+The `claude-code` controller phase uses normal headless mode with isolated HOME,
+config and temp directories under `/tmp/loom-harness/`. It disables account and
+background traffic, pins every model slot, and exposes only Bash/Read/Write/
+Edit/Glob/Grep. The authorized connection determines the frozen
+`claude_code_mode`: native Messages or `claude-code-chat-v1` translation.
+Nonempty Loom generation overrides are rejected at admission and execution.
+
+Native `stream-json` is bounded and captured with tool IDs, tool results,
+message turns and terminal errors. Exit zero alone is insufficient: the CLI
+must report success, valid tool joins and an observed successful model call with
+usage. Raw native events and the instruction are required artifacts. The
+materializer checks their semantic join against canonical events, emits one
+ATIF step per assistant message, retains verifier metadata and reconciles
+accounting against Gateway rows. CLI-reported cost is never authoritative;
+partial failed calls preserve observed usage and missing prices remain unknown.
+
 ### Model access
 
 An installed agent reaches the model through the Pod-local runtime broker.
 Containers in a Pod share one network namespace, so the task sandbox can reach
 the broker's loopback listener. `installed_agent_model_environment` gives the
-agent only that URL (`LOOM_GATEWAY_URL` + `/v1`) and the fixed placeholder key
+agent only that URL (`LOOM_GATEWAY_URL` + `/v1` for Codex or `/anthropic` for
+Claude) and the fixed placeholder key
 `loom_workload_proxy`. The authority chain:
 
 | Layer | Guarantee |

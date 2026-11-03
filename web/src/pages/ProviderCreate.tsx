@@ -76,7 +76,7 @@ export default function ProviderCreate(): JSX.Element {
               User-managed model server
             </h2>
             <p className="mt-1 text-sm text-slate-600">
-              Register your existing OpenAI-compatible inference URL and API key
+              Register your OpenAI-compatible or Anthropic inference URL and API key
               with this form. The server must be reachable from Loom.
             </p>
           </section>

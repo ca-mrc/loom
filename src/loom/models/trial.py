@@ -267,6 +267,8 @@ class TrialConfig(BaseModel):
     agent_name: str = Field(min_length=1)
     agent_version: AgentVersion | None = None
     agent_model: ModelSpec | None
+    # Derived from the authorized connection, never inferred from model name.
+    claude_code_mode: Literal["native", "chat"] | None = Field(default=None, exclude_if=lambda value: value is None)
 
     # #672 family-runs: optional per-batch override merged with the
     # benchmark catalog's ``family_run_defaults`` at batch-accept time.
@@ -311,6 +313,11 @@ class TrialConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _merge_harbor_config(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            if value.get("agent_name") == "claude-code" and value.get("request_params"):
+                raise ValueError("Claude Code does not support request_params overrides")
+            if value.get("agent_name") != "claude-code" and value.get("claude_code_mode") is not None:
+                raise ValueError("claude_code_mode requires claude-code")
         if isinstance(value, dict) and value.get("harbor_config") is not None:
             return apply_harbor_config_dict(dict(value))
         return value

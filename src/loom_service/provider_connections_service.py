@@ -271,7 +271,9 @@ def _probe_url_and_headers(
     - anthropic: `GET <base>/models` with `x-api-key` + version header
     - google: `GET <base>/models?key=<API_KEY>` (Google API style)
     """
-    base = base_url.rstrip("/")
+    from loom.anthropic_protocol import anthropic_api_base_url
+
+    base = anthropic_api_base_url(base_url) if provider_type == "anthropic" else base_url.rstrip("/")
     if provider_type == "anthropic":
         return (
             f"{base}/models",
@@ -301,7 +303,9 @@ def _preflight_base_path_headers_body(
     surface so entitlement failures such as 403 "model not enabled" are
     caught before a batch is submitted.
     """
-    base = base_url.rstrip("/")
+    from loom.anthropic_protocol import anthropic_api_base_url
+
+    base = anthropic_api_base_url(base_url) if provider_type == "anthropic" else base_url.rstrip("/")
     if provider_type == "anthropic":
         return (
             base,

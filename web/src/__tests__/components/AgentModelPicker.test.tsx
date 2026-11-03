@@ -40,6 +40,9 @@ function mockPickerEndpoints(
       if (url.includes("/api/v1/agents")) {
         return json({
           items: [
+            { name: "claude-code", needs_model: true, kind: "adapter", description: "Claude Code",
+              supported_providers: ["*"], supported_model_sources: ["api"],
+              supported_connection_types: ["anthropic", "openai-compatible", "custom"] },
             {
               name: "direct-completion",
               needs_model: true,
@@ -72,6 +75,7 @@ function mockPickerEndpoints(
       if (url.includes("/api/v1/provider-connections")) {
         return json({
           items: [
+            { id: "conn-native", name: "Native Anthropic", type: "anthropic", status: "valid" },
             {
               id: "conn-1",
               name: "Lab vLLM",
@@ -361,4 +365,26 @@ describe("Harbor agent versions", () => {
     expect(await screen.findByRole("option", { name: "removed-version (unavailable)" })).toBeDisabled();
     expect(screen.getByLabelText("Agent version")).toHaveValue("removed-version");
   });
+});
+
+
+it("offers native and translated connections for Claude and clears native selection on agent change", async () => {
+  mockPickerEndpoints();
+  const user = userEvent.setup();
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  function Picker() {
+    const [value, setValue] = useState<AgentModelValue>({ ...INITIAL_VALUE, agentName: "claude-code" });
+    return <><AgentModelPicker value={value} onChange={setValue} /><output data-testid="selection">{JSON.stringify(value)}</output></>;
+  }
+  render(<QueryClientProvider client={queryClient}><MemoryRouter><Picker /></MemoryRouter></QueryClientProvider>);
+  const connection = await screen.findByLabelText(/^Provider connection$/i);
+  await screen.findByRole("option", { name: /Native Anthropic/ });
+  await user.selectOptions(connection, "conn-native");
+  expect(screen.getByText(/Native Anthropic Messages/)).toBeInTheDocument();
+  await user.selectOptions(connection, "conn-1");
+  expect(screen.getByText(/translated to OpenAI Chat/)).toBeInTheDocument();
+  await user.selectOptions(connection, "conn-native");
+  await user.selectOptions(screen.getByLabelText(/^Agent$/i), "direct-completion");
+  expect(screen.queryByRole("option", { name: /Native Anthropic/ })).not.toBeInTheDocument();
+  expect(screen.getByTestId("selection").textContent).not.toContain("conn-native");
 });
