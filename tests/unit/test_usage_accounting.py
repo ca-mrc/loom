@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+
 from loom_service.usage_accounting import summarize_usage_counts
 
 
@@ -142,6 +144,37 @@ def test_all_missing_usage_does_not_report_a_priced_zero_as_free() -> None:
     assert summary["estimated_cost_usd"] is None
     assert summary["cost_currency"] is None
     assert summary["cost_estimate_confidence"] == "missing"
+
+
+@pytest.mark.parametrize(
+    ("token_only", "price_unknown", "failed_upstream", "cost_status", "confidence"),
+    [
+        (0, 1, 0, "price_unknown", "unavailable"),
+        (1, 0, 0, "not_applicable", "not_applicable"),
+        (0, 0, 1, "failed_upstream", "unavailable"),
+    ],
+)
+@pytest.mark.parametrize("usage_status", ["missing", "partial"])
+def test_incomplete_usage_preserves_unpriced_cost_confidence(
+    token_only: int, price_unknown: int, failed_upstream: int,
+    cost_status: str, confidence: str, usage_status: str,
+) -> None:
+    summary = summarize_usage_counts(
+        llm_calls_count=1, total_prompt_tokens=0, total_completion_tokens=0,
+        total_cost_usd=Decimal("0"), priced_llm_calls_count=0,
+        token_only_llm_calls_count=token_only,
+        price_unknown_llm_calls_count=price_unknown,
+        failed_upstream_llm_calls_count=failed_upstream,
+        missing_usage_llm_calls_count=int(usage_status == "missing"),
+        partial_usage_llm_calls_count=int(usage_status == "partial"),
+    )
+
+    assert summary["estimated_cost_usd"] is None
+    assert summary["cost_currency"] is None
+    assert summary["cost_status"] == cost_status
+    assert summary["cost_estimate_confidence"] == confidence
+    assert summary["usage_reporting_status"] == usage_status
+    assert summary["usage_estimate_confidence"] == usage_status
 
 
 def test_explicit_priced_zero_with_complete_usage_is_preserved() -> None:
