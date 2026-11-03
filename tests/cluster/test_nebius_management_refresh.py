@@ -98,6 +98,19 @@ def _safe_bootstrap_diagnostic(raw: str) -> dict:
     return safe
 
 
+def _bounded_raw_pod_log(core, name, namespace, *, container, tail_lines, limit_bytes):
+    # The generated client's string deserializer converts a sole JSON record
+    # to Python repr. Read bounded bytes so the safe JSON projection sees the
+    # actual log, and release the response even when reading fails.
+    response = core.read_namespaced_pod_log(name, namespace, container=container,
+        tail_lines=tail_lines, limit_bytes=limit_bytes, _request_timeout=(2, 3), _preload_content=False)
+    try:
+        return response.read(limit_bytes).decode('utf-8', errors='replace')
+    finally:
+        response.close()
+        response.release_conn()
+
+
 def _add_rendered_job_failure(core, namespace: str, name: str, error: AssertionError) -> None:
     """Retain bounded termination facts and finite codes, never raw Pod logs."""
     rows = []
@@ -115,8 +128,8 @@ def _add_rendered_job_failure(core, namespace: str, name: str, error: AssertionE
                 } else "other"
                 row = {"container": status.name, "reason": reason,
                     "exit_code": terminated.exit_code, "codes": []}
-                raw = core.read_namespaced_pod_log(pod.metadata.name, namespace,
-                    container=status.name, tail_lines=80, limit_bytes=16384, _request_timeout=(2, 3))
+                raw = _bounded_raw_pod_log(core, pod.metadata.name, namespace,
+                    container=status.name, tail_lines=80, limit_bytes=16384)
                 for needle, code in (
                     ("ModuleNotFoundError", "module_missing"), ("ImportError", "import_failure"),
                     ("OperationalError", "database_operational"), ("ProgrammingError", "database_programming"),
@@ -137,8 +150,8 @@ def _add_rendered_job_failure(core, namespace: str, name: str, error: AssertionE
                 diagnostic = _safe_bootstrap_diagnostic(raw)
                 # Request the final record independently of the broad read;
                 # retain only its whitelist projection, never raw text.
-                tail = core.read_namespaced_pod_log(pod.metadata.name, namespace,
-                    container=status.name, tail_lines=4, limit_bytes=2048, _request_timeout=(2, 3))
+                tail = _bounded_raw_pod_log(core, pod.metadata.name, namespace,
+                    container=status.name, tail_lines=4, limit_bytes=2048)
                 diagnostic.update(_safe_bootstrap_diagnostic(tail))
                 row.update(diagnostic)
                 for field in ('started_at', 'finished_at'):
