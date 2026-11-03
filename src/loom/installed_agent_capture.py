@@ -78,5 +78,3 @@ def parse_installed_agent_events(
             call_ids.add(event.gateway_request_id)
         events.append(event)
     return events
-
-
