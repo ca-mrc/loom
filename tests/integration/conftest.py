@@ -704,6 +704,24 @@ def retain_pool_schema(postgres_url: str, revision: str = "0176") -> None:
     url = make_url(postgres_url).set(drivername="postgresql+psycopg").render_as_string(hide_password=False)
     cfg.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
     command.downgrade(cfg, revision)
+    # Current models name the drain columns on every trial and batch write.
+    # Historical pool revisions do not have them; they are nullable and unused
+    # by those tests, so add them without changing the pinned Alembic version.
+    if revision != "0189":
+        engine = create_engine(url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "ALTER TABLE trials ADD COLUMN IF NOT EXISTS cancellation_retained_at TIMESTAMPTZ"
+                ))
+                connection.execute(text(
+                    "ALTER TABLE batches ADD COLUMN IF NOT EXISTS cancellation_requested_at TIMESTAMPTZ"
+                ))
+                connection.execute(text(
+                    "ALTER TABLE batches ADD COLUMN IF NOT EXISTS cancellation_mode TEXT"
+                ))
+        finally:
+            engine.dispose()
 
 
 @pytest.fixture
