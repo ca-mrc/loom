@@ -406,6 +406,73 @@ async def _submit_inline_task_set(
 
 
 @pytest.mark.asyncio
+async def test_shutdown_requeues_claimed_jobs_for_immediate_retry(materialization_setup) -> None:
+    """A cancelled worker hands back every job it claimed, without spending an attempt (#2791).
+
+    Before the fix both jobs stayed claimed until the claim TTL expired.
+    """
+    app, tokens, _teams = materialization_setup
+    first = await _submit_inline_task_set(app, token=tokens["team_a"])
+    second = await _submit_inline_task_set(
+        app,
+        token=tokens["team_a"],
+        manifest=_MANIFEST_INLINE.replace("name: inline-tasks", "name: inline-tasks-second"),
+    )
+    started = asyncio.Event()
+
+    async def hang(*_args, **_kwargs) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    settings = app.state.settings
+    worker = asyncio.create_task(
+        run_once(
+            session_factory=app.state.session_factory,
+            minio_client=app.state.minio_client,
+            artifacts_bucket=settings.artifacts_bucket,
+            upstream_cache_root=settings.taskset_materializer_upstream_cache_root,
+            batch_size=2,
+            claim_ttl_sec=settings.taskset_materializer_claim_ttl_sec,
+            transform_config=TransformSandboxConfig(enabled=False, network_isolated=True),
+        )
+    )
+    with patch.object(taskset_materializer, "_materialize_claimed_job", hang):
+        await asyncio.wait_for(started.wait(), timeout=10)
+        async with app.state.session_factory() as session:
+            claimed = {
+                job.task_set_id: job.lease_epoch
+                for job in (await session.execute(select(TaskSetMaterializationJob))).scalars()
+            }
+        assert set(claimed) == {first, second}
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+    async with app.state.session_factory() as session:
+        jobs = (await session.execute(select(TaskSetMaterializationJob))).scalars().all()
+    assert {job.task_set_id for job in jobs} == {first, second}
+    for job in jobs:
+        assert job.state == "queued"
+        assert job.claimed_by is None and job.lease_heartbeat_at is None
+        assert job.next_attempt_at is None
+        assert job.attempt_count == 0
+        assert job.lease_epoch == claimed[job.task_set_id] + 1
+
+    await run_once(
+        session_factory=app.state.session_factory,
+        minio_client=app.state.minio_client,
+        artifacts_bucket=settings.artifacts_bucket,
+        upstream_cache_root=settings.taskset_materializer_upstream_cache_root,
+        batch_size=2,
+        claim_ttl_sec=settings.taskset_materializer_claim_ttl_sec,
+        transform_config=TransformSandboxConfig(enabled=False, network_isolated=True),
+    )
+    async with app.state.session_factory() as session:
+        assert (await session.get(TaskSet, first)).status == "ready"
+        assert (await session.get(TaskSet, second)).status == "ready"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["upload", "commit_rollback", "commit_ack_lost"])
 async def test_intake_failure_retains_discoverable_inputs_until_gc(
     materialization_setup,

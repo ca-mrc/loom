@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 # information in the durable lease owner column.
 _CLAIMED_BY = f"taskset-materializer-{uuid4()}"
 _RETRY_BACKOFF_SEC = (30, 120, 300)
+# Kubernetes' default grace period is 30s; leave most of it to other shutdown work.
+_SHUTDOWN_RELINQUISH_TIMEOUT_SEC = 5.0
 
 
 @dataclass(frozen=True)
@@ -133,6 +135,7 @@ async def relinquish_if_current(
     session: AsyncSession,
     *,
     lease: MaterializationLease,
+    refund_attempt: bool = False,
 ) -> None:
     """Cooperatively revoke one current lease without touching staged output.
 
@@ -140,6 +143,8 @@ async def relinquish_if_current(
     control.  The increment makes any delayed owner fail the same CAS checks
     used after a stale-heartbeat reclaim, while the cleared ``next_attempt_at``
     lets an authorized deployment canary claim the queued job immediately.
+    ``refund_attempt`` returns the claim's attempt when the owner, not the
+    job, is the reason it stopped (a service shutdown).
     """
     now = datetime.now(UTC)
     await _update_job_for_lease(
@@ -155,9 +160,31 @@ async def relinquish_if_current(
             "started_at": None,
             "next_attempt_at": None,
             "updated_at": now,
+            **({"attempt_count": TaskSetMaterializationJob.attempt_count - 1}
+               if refund_attempt else {}),
         },
     )
     await session.commit()
+
+
+async def _relinquish_on_shutdown(
+    session_factory: async_sessionmaker[AsyncSession],
+    leases: list[MaterializationLease],
+) -> None:
+    """Requeue leases this worker still owns so another worker claims them now.
+
+    Without this, a cancelled worker's jobs stay claimed until the claim TTL
+    expires (#2791). A lease that already moved on fails its fence and is skipped.
+    """
+    for lease in leases:
+        try:
+            async with session_factory() as session:
+                await relinquish_if_current(session, lease=lease, refund_attempt=True)
+            logger.info("taskset_materializer relinquished job_id=%s on shutdown", lease.job_id)
+        except LeaseLost:
+            pass
+        except Exception:
+            logger.exception("taskset_materializer could not relinquish job_id=%s", lease.job_id)
 
 
 async def _claim_jobs(
@@ -683,7 +710,7 @@ async def run_once(
             claimed_by=_CLAIMED_BY,
         )
 
-    for lease in leases:
+    for index, lease in enumerate(leases):
         try:
             await _materialize_claimed_job(
                 session_factory,
@@ -699,6 +726,14 @@ async def run_once(
             )
         except LeaseLost:
             logger.info("taskset_materializer lease lost job_id=%s", lease.job_id)
+        except asyncio.CancelledError:
+            # Shutdown: hand back this job and the claimed ones not yet started.
+            with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+                await asyncio.wait_for(
+                    asyncio.shield(_relinquish_on_shutdown(session_factory, leases[index:])),
+                    timeout=_SHUTDOWN_RELINQUISH_TIMEOUT_SEC,
+                )
+            raise
         except Exception:
             logger.exception("taskset_materializer failed job_id=%s", lease.job_id)
             async with session_factory() as session:
