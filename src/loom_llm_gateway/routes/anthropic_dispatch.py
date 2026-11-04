@@ -198,6 +198,14 @@ class MessagesDispatch:
                 except StopAsyncIteration:
                     break
                 converted = self._tracker.feed(chunk)
+                if self._tracker.completed:
+                    # The protocol terminal event, not transport EOF, ends the
+                    # call. Finalize before a client stops reading message_stop.
+                    self._tracker.finish()
+                    await self.close_stream()
+                    if converted:
+                        yield converted
+                    return
                 if converted:
                     yield converted
             self._tracker.finish()

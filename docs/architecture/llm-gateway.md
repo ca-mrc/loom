@@ -196,6 +196,10 @@ experimental features in the pinned harness. Anthropic effort has no Chat
 mapping. Unsupported images, server tools and native semantic fields fail
 before upstream I/O. Stream failure after output is never retried into a second
 response; observed usage survives timeout/cancellation, with one ledger row.
+Both hosted and local Messages streams close the upstream and record usage at
+the validated protocol terminal event (`message_stop` or Chat `[DONE]`), before
+delivering completion to the client. They do not wait for HTTP EOF after that
+event. Incomplete streams and invalid terminal usage still fail.
 
 Trusted ledger extras retain the admitted ModelSpec, native/translated route,
 compatibility profile, provider response alias, call/usage status and cost

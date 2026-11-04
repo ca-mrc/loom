@@ -45,7 +45,7 @@ from tests.integration.gateway_db import (
     insert_gateway_trial,
 )
 from tests.unit.test_anthropic_chat_stream import _wire
-from tests.unit.test_claude_gateway_lifecycle import _TerminalThenTimeout, _native_wire
+from tests.unit.test_claude_gateway_lifecycle import _native_wire, _TerminalThenTimeout
 
 _TEST_MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
 

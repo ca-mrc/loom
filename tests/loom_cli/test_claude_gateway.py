@@ -12,7 +12,11 @@ from loom.models.types import ModelSpec
 from loom_cli.claude_gateway import LocalClaudeRelay
 from loom_cli.rate_cards import RateCardEntry, RateCardTable
 from tests.unit.test_anthropic_chat_stream import _wire
-from tests.unit.test_claude_gateway_lifecycle import _SlowNativeStream, _TerminalThenTimeout, _native_wire
+from tests.unit.test_claude_gateway_lifecycle import (
+    _native_wire,
+    _SlowNativeStream,
+    _TerminalThenTimeout,
+)
 
 
 def _relay(dialect, handler, rates=()):
