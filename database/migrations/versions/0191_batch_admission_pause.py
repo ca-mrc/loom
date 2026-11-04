@@ -1,7 +1,7 @@
 """Platform-admin pause of one batch's pre-start queue.
 
-Revision ID: 0190
-Revises: 0189
+Revision ID: 0191
+Revises: 0190
 
 Adds the batch-level admission hold. A paused batch stays ``running``; only
 new attempt reservations are refused while ``admission_paused_at`` is set.
@@ -11,8 +11,8 @@ released before their pod was scheduled, so the retry budget excludes them.
 
 from alembic import op
 
-revision = "0190"
-down_revision = "0189"
+revision = "0191"
+down_revision = "0190"
 branch_labels = None
 depends_on = None
 

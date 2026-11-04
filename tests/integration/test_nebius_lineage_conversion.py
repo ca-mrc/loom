@@ -223,6 +223,9 @@ def test_conversion_preserves_history_and_reaches_dev(
                 # 0189 adds the drain retention marker. Historical trials stay
                 # unmarked and must not be treated as retained.
                 row["cancellation_retained_at"] = None
+                # 0191 adds the admission-pause refund counter. Historical
+                # trials were never released by a pause.
+                row["admission_pause_releases"] = 0
             for row in before["llm_calls"]:
                 # 0176 adds baseline attribution; historical calls retain their
                 # original subject and must not acquire a baseline session.
