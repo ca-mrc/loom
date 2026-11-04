@@ -33,6 +33,7 @@ import { modelLabel } from "../lib/modelLabel";
 import { networkPolicyGroupsLabel, networkPolicyLabel } from "../lib/networkPolicy";
 import { ownershipLabel } from "../lib/ownership";
 import { provenanceLabel } from "../lib/provenanceLabel";
+import { progressLabels } from "../lib/trialProgress";
 import { batchInspectionCommands } from "../lib/quickstartSnippets";
 import { batchResultPresentation, batchStateVariant, trialStateVariant } from "../lib/statusVariant";
 import { formatTokenUsage } from "../lib/tokenUsage";
@@ -205,6 +206,10 @@ export default function BatchDetail(): JSX.Element {
     matchedTaskCount: resolvedTasks ? resolvedTasks.length : Number.isInteger(inferredTaskCount) ? inferredTaskCount : undefined,
   });
   const trialConfigSummary = humanizeTrialConfig(c.trial_config);
+  const stageCounts = c.progress
+    ? Object.entries(c.progress.stages).flatMap(([stage, count]) =>
+        typeof count === "number" && count > 0 ? [[stage, count] as const] : [])
+    : null;
   const rerunnableFailedCount = c.rerunnable_failed_count ?? 0;
   const effectiveSucceeded = c.effective_trial_summary?.succeeded ?? 0;
   const effectiveFailed = c.effective_trial_summary?.failed ?? 0;
@@ -719,14 +724,14 @@ export default function BatchDetail(): JSX.Element {
               <StatCard label="Latest execution attempts" value={c.service_execution_summary.lease_count} />
               <StatCard label="Canonical bundles ready" value={c.service_execution_summary.canonical_ready_count} />
               <StatCard label="Output committed" value={c.service_execution_summary.output_commit_states.committed ?? 0} />
-              <StatCard label="Archiving output" value={c.service_execution_summary.lifecycle_stages.materializing ?? 0} />
+              <StatCard label="Materializing" value={c.service_execution_summary.lifecycle_stages.materializing ?? 0} />
             </div>
             <details>
               <summary className="cursor-pointer text-sm font-medium text-slate-800">
                 Latest execution attempt stages
               </summary>
               <p className="mt-2 text-sm text-slate-600">
-                Only trials with an execution attempt are included. Queued trials and failures before execution can be absent, and output archiving can continue after a trial finishes. These stages are tracked separately from the trial states below.
+                Only trials with an execution attempt are included. Queued trials and failures before execution can be absent. Materializing counts leases whose output is still being stored. Verifying and archiving in Task progress use the Monitor stage, which this lease list does not.
               </p>
               <div role="group" aria-label="Latest execution attempt state counts" className="mt-2 flex flex-wrap gap-2">
                 {Object.entries(c.service_execution_summary.lifecycle_stages)
@@ -752,16 +757,15 @@ export default function BatchDetail(): JSX.Element {
         <details className="group">
           <summary
             className="flex cursor-pointer items-center gap-2 border-b border-slate-200 px-5 py-4 text-sm font-semibold text-slate-800"
-            title="Expand the per-state trial counts for this batch."
+            title="Expand the stored trial.state counts for this batch."
           >
             <span className="min-w-0 flex-1">
               <span>Trial counts by state</span>
               <span role="group" aria-label="Trial state counts" className="mt-2 flex flex-wrap gap-2 font-normal">
-                {Object.entries(c.trial_summary)
-                  .filter(([, count]) => count > 0)
+                {(stageCounts ?? Object.entries(c.trial_summary).filter(([, count]) => count > 0))
                   .map(([state, count]) => (
                     <StatusPill key={state} variant={trialStateVariant(state)}>
-                      {state} {count}
+                      {stageCounts ? progressLabels[state] ?? state : state} {count}
                     </StatusPill>
                   ))}
               </span>
@@ -771,6 +775,9 @@ export default function BatchDetail(): JSX.Element {
             </span>
           </summary>
           <Card.Body className="p-0">
+            <p className="px-4 py-3 text-xs text-slate-600">
+              Stored trial.state. A trial stays running while its latest stage is verifying or archiving.
+            </p>
             <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Trial states scroll area">
               <table aria-label="Trial states" className="min-w-full stack-divide-y stack-divide-slate-200 text-sm">
                 <thead>

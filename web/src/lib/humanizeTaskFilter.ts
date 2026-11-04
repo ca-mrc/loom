@@ -17,6 +17,7 @@ const KNOWN_TASK_FILTER_KEYS = new Set([
   "subset_kind",
   "tag_filters",
   "task_ids",
+  "task_set_id",
   "task_set_ids",
 ]);
 
@@ -49,8 +50,11 @@ export function humanizeTaskFilter(
     };
   }
 
-  const taskSets = Array.isArray(filter.task_set_ids) ? filter.task_set_ids.map(String) : [];
+  const taskSets = taskSetIdsFromFilter(filter);
   if (taskSets.length) details.unshift(...taskSets.map((id) => `Task set: ${id}`));
+  if (subset !== "explicit" && Array.isArray(filter.task_ids) && filter.task_ids.length > 0) {
+    details.push(`Pinned tasks: ${filter.task_ids.length}`);
+  }
   const benchmarkLabel = taskSets.length ? `${taskSets.length} task set${taskSets.length === 1 ? "" : "s"}` : benchmarkSummary(benchmarkIds);
 
   if (subset === "first_n" || subset === "last_n") {
@@ -79,6 +83,12 @@ export function humanizeTaskFilter(
     details,
     diagnostics,
   };
+}
+
+function taskSetIdsFromFilter(filter: Record<string, unknown>): string[] {
+  if (Array.isArray(filter.task_set_ids)) return filter.task_set_ids.map(String);
+  if (typeof filter.task_set_id === "string" && filter.task_set_id) return [filter.task_set_id];
+  return [];
 }
 
 function benchmarkIdsFromFilter(filter: Record<string, unknown>): string[] {
