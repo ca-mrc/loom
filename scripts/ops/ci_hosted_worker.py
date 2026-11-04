@@ -12,8 +12,8 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-RUNNER_URL = "https://github.com/actions/runner/releases/download/v2.336.0/actions-runner-linux-x64-2.336.0.tar.gz"
-RUNNER_SHA256 = "04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d"
+RUNNER_URL = "https://github.com/actions/runner/releases/download/v2.338.2/actions-runner-linux-x64-2.338.2.tar.gz"
+RUNNER_SHA256 = "baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40"
 MARKER = Path("/etc/loom-ci-ephemeral-runner")
 
 
