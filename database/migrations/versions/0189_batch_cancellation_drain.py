@@ -26,12 +26,14 @@ def upgrade() -> None:
         ALTER TABLE batches ADD CONSTRAINT batches_state_chk
             CHECK (state IN ('submitted', 'running', 'cancelling', 'finished', 'cancelled'));
         ALTER TABLE batches
-            ADD COLUMN cancellation_requested_at TIMESTAMPTZ,
-            ADD COLUMN cancellation_mode TEXT,
+            ADD COLUMN IF NOT EXISTS cancellation_requested_at TIMESTAMPTZ;
+        ALTER TABLE batches
+            ADD COLUMN IF NOT EXISTS cancellation_mode TEXT;
+        ALTER TABLE batches
             ADD CONSTRAINT batches_cancellation_mode_chk
                 CHECK (cancellation_mode IS NULL OR cancellation_mode IN ('full', 'drain'));
         ALTER TABLE trials
-            ADD COLUMN cancellation_retained_at TIMESTAMPTZ;
+            ADD COLUMN IF NOT EXISTS cancellation_retained_at TIMESTAMPTZ;
     """)
 
 
