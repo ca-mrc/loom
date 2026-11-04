@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from pydantic import BaseModel, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError, field_validator
 from sqlalchemy import and_, func, literal_column, or_, select, update
 
 from loom.auth import AuthContext
@@ -980,6 +980,12 @@ def _serialize(
         "task_filter": b.task_filter,
         "trial_config": b.trial_config,
         "state": b.state,
+        "admission_paused_at": (
+            b.admission_paused_at.isoformat() if b.admission_paused_at else None
+        ),
+        "admission_paused_reason": (
+            redact_text(b.admission_paused_reason) if b.admission_paused_reason else None
+        ),
         "result_status": b.result_status,
         "failure_reason": b.failure_reason,
         "failure_message": (redact_text(b.failure_message) if b.failure_message else None),
@@ -2691,6 +2697,8 @@ async def get_batch(
         "combination_summary": combination_summary,
         "effective_combination_summary": effective_combination_summary,
     }
+    if b.admission_paused_at is not None:
+        extra["admission_held_count"] = int(summary.get("queued", 0))
     if include_debug:
         llm_calls = await _llm_calls_for_trials(s, original_trials)
         worker_pool_names = await _worker_pool_names_for_trials(s, original_trials)
@@ -3433,3 +3441,130 @@ async def cancel_batch_trials(
             outcome = "cancelled"
         results.append({"trial_id": str(trial_id), "outcome": outcome})
     return {"batch_id": str(batch_id), "results": results}
+
+
+class _AdmissionControlRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def _strip_reason(cls, value: object) -> object:
+        return (value.strip() or None) if isinstance(value, str) else value
+
+
+_ADMISSION_PAUSABLE_STATES = frozenset({"submitted", "running"})
+
+
+async def _set_batch_admission(
+    request: Request,
+    sc: Any,
+    *,
+    batch_id: UUID,
+    pause: bool,
+    payload: _AdmissionControlRequest | None,
+    fallback_actor: str | None,
+) -> dict[str, Any]:
+    from loom_control_plane.batch_admission import (
+        clear_resumed_queued_trials,
+        count_admission_held,
+        count_pending_release,
+    )
+
+    s, ctx = sc
+    actor = await actor_from_context(s, ctx, fallback_actor)
+    # FOR UPDATE conflicts with the reservation fence's FOR KEY SHARE, so a
+    # racing reservation either commits first (and is drained) or sees the flag.
+    b = (await s.execute(
+        select(Batch).where(Batch.id == batch_id).with_for_update(),
+    )).scalar_one_or_none()
+    if b is None:
+        raise HTTPException(status_code=404, detail="batch not found")
+    if pause and b.state not in _ADMISSION_PAUSABLE_STATES:
+        raise HTTPException(status_code=409, detail=f"batch is {b.state}")
+    reason = payload.reason if payload else None
+    changed = (b.admission_paused_at is None) if pause else (b.admission_paused_at is not None)
+    if pause and changed:
+        b.admission_paused_at = datetime.now(UTC)
+        b.admission_paused_reason = reason
+    elif not pause and changed:
+        b.admission_paused_at = None
+        b.admission_paused_reason = None
+    await s.flush()
+    held = await count_admission_held(s, batch_id=batch_id)
+    pending = await count_pending_release(s, batch_id=batch_id) if pause else 0
+    unchanged_key = "already_paused" if pause else "already_resumed"
+    await write_admin_audit_event(
+        s,
+        actor=actor,
+        action="batch.admission.pause" if pause else "batch.admission.resume",
+        target_type="batch",
+        target_id=str(batch_id),
+        request=request,
+        metadata={
+            "team_id": str(b.team_id),
+            "reason_present": bool(reason),
+            unchanged_key: not changed,
+            "held_count": held,
+            "pending_release_count": pending,
+        },
+    )
+    body = {
+        "batch_id": str(batch_id),
+        "state": b.state,
+        "admission_paused_at": (
+            b.admission_paused_at.isoformat() if b.admission_paused_at else None
+        ),
+        "admission_paused_reason": (
+            redact_text(b.admission_paused_reason) if b.admission_paused_reason else None
+        ),
+        "changed": changed,
+        "held_count": held,
+        "pending_release_count": pending,
+    }
+    await s.commit()
+    if not pause:
+        # Trial locks are taken only after the batch lock is released, the
+        # same Trial-before-Batch order reservation and the drain use.
+        await clear_resumed_queued_trials(s, batch_id=batch_id)
+        await s.commit()
+    return body
+
+
+@router.post(
+    "/admin/batches/{batch_id}/pause-admission",
+    response_model=wire.PostAdminBatchesIdAdmissionResponse,
+)
+async def pause_batch_admission(
+    request: Request,
+    sc: AdminSessionAndCtx,
+    batch_id: UUID,
+    payload: _AdmissionControlRequest | None = None,
+    x_loom_admin_actor: Annotated[str | None, Header()] = None,
+) -> dict[str, Any]:
+    """Hold trials waiting to start; started trials, verifiers and cancel continue.
+
+    The scheduler releases already-reserved, never-started attempts on its next
+    tick without spending their retry budget.
+    """
+    return await _set_batch_admission(
+        request, sc, batch_id=batch_id, pause=True, payload=payload,
+        fallback_actor=x_loom_admin_actor,
+    )
+
+
+@router.post(
+    "/admin/batches/{batch_id}/resume-admission",
+    response_model=wire.PostAdminBatchesIdAdmissionResponse,
+)
+async def resume_batch_admission(
+    request: Request,
+    sc: AdminSessionAndCtx,
+    batch_id: UUID,
+    payload: _AdmissionControlRequest | None = None,
+    x_loom_admin_actor: Annotated[str | None, Header()] = None,
+) -> dict[str, Any]:
+    """Let held trials compete for admission again, in their original order."""
+    return await _set_batch_admission(
+        request, sc, batch_id=batch_id, pause=False, payload=payload,
+        fallback_actor=x_loom_admin_actor,
+    )

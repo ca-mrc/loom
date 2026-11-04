@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema_startup import service_schema_head
 from loom_control_plane.routes.workers import _REQUEUE_TRIAL_RETRY_SQL
+from tests.integration.conftest import allow_current_cancellation_columns
 from tests.integration.test_capacity_guard_migrations import _guard_config
 from tests.integration.test_protected_claim_application_migration import _config
 from tests.integration.test_trial_legacy_claim_identity import _claim, _seed
@@ -23,6 +24,11 @@ async def test_upgrade_does_not_invent_identity_for_historical_claim(
 ) -> None:
     config = _config(isolated_migration_postgres_url)
     await asyncio.to_thread(command.downgrade, config, "0146")
+    # The current trial model writes admission_pause_releases. This case stays
+    # on 0146, so add that column without moving the Alembic revision.
+    await asyncio.to_thread(
+        allow_current_cancellation_columns, isolated_migration_postgres_url,
+    )
     engine = create_async_engine(isolated_migration_postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     try:

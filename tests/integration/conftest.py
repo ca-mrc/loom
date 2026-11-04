@@ -691,11 +691,11 @@ def isolated_migration_postgres_url(migration_template_postgres_url: str) -> Ite
 
 
 def allow_current_cancellation_columns(postgres_url: str) -> None:
-    """Add nullable drain columns without moving the pinned Alembic revision.
+    """Add drain and admission-pause columns without moving the Alembic revision.
 
-    Historical tests that stay below 0189 and then use the current trial or
-    batch models need these columns. Callers that upgrade through 0189 must
-    not call this, or that migration fails on a duplicate column.
+    Historical tests that stay below 0189 or 0191 and then use the current
+    trial or batch models need these columns. Both migrations add them with
+    ``IF NOT EXISTS``, so a later upgrade through them still succeeds.
     """
     url = make_url(postgres_url).set(drivername="postgresql+psycopg").render_as_string(hide_password=False)
     engine = create_engine(url)
@@ -709,6 +709,16 @@ def allow_current_cancellation_columns(postgres_url: str) -> None:
             ))
             connection.execute(text(
                 "ALTER TABLE batches ADD COLUMN IF NOT EXISTS cancellation_mode TEXT"
+            ))
+            connection.execute(text(
+                "ALTER TABLE batches ADD COLUMN IF NOT EXISTS admission_paused_at TIMESTAMPTZ"
+            ))
+            connection.execute(text(
+                "ALTER TABLE batches ADD COLUMN IF NOT EXISTS admission_paused_reason TEXT"
+            ))
+            connection.execute(text(
+                "ALTER TABLE trials ADD COLUMN IF NOT EXISTS "
+                "admission_pause_releases INTEGER NOT NULL DEFAULT 0"
             ))
     finally:
         engine.dispose()
@@ -724,10 +734,10 @@ def retain_pool_schema(
 
     Run the real downgrade rather than relabeling a current-head database. This
     must only be used by historical pool tests on their isolated databases.
-    Callers that then run the real Alembic upgrade must pass
-    ``include_current_columns=False`` so 0189 can add the drain columns itself.
+    Callers that then run the real Alembic upgrade may pass
+    ``include_current_columns=False`` so 0189 and 0191 add their columns.
     """
-    if revision not in {"0175", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187", "0188", "0189"}:
+    if revision not in {"0175", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187", "0188", "0189", "0190", "0191"}:
         raise ValueError("unsupported retained pool test revision")
     repo_root = Path(__file__).resolve().parents[2]
     cfg = AlembicConfig(str(repo_root / "database" / "migrations" / "alembic.ini"))
@@ -738,7 +748,7 @@ def retain_pool_schema(
     # Current models name the drain columns on every trial and batch write.
     # Historical pool revisions do not have them; they are nullable and unused
     # by those tests, so add them without changing the pinned Alembic version.
-    if include_current_columns and revision != "0189":
+    if include_current_columns and revision != "0191":
         allow_current_cancellation_columns(url)
 
 

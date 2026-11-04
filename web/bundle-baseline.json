@@ -41,8 +41,8 @@
       "gzipBytes": 18634
     },
     "src/components/providers/ProviderForm.tsx": {
-      "bytes": 28650,
-      "gzipBytes": 9263
+      "bytes": 31071,
+      "gzipBytes": 10221
     },
     "src/components/providers/RotateKeyModal.tsx": {
       "bytes": 11530,

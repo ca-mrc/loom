@@ -69,6 +69,50 @@ a running Trial keeps its observation timestamp unset until teardown is confirme
 Inspect `GET /api/v1/admin/audit-events` for the exact Trial/Batch target IDs,
 actor, reason and request ID when verifying administrator cancellation.
 
+## Administrator batch admission pause
+
+Use an admission pause to hold one batch's pre-start queue, for example while
+another batch needs the capacity, and keep every result produced so far.
+
+```bash
+loom admin batches pause-admission <batch-id> --reason "make room for TB4 canary"
+loom admin batches resume-admission <batch-id>
+```
+
+The API equivalents are `POST /api/v1/admin/batches/{id}/pause-admission`
+(optional body `{"reason": "..."}`, at most 500 characters) and
+`POST /api/v1/admin/batches/{id}/resume-admission`. The Batch detail page offers
+the same controls to platform administrators.
+
+While paused:
+
+- The batch stays `running`. `admission_paused_at` and `admission_paused_reason`
+  appear on the batch, and `admission_held_count` reports the trials waiting to
+  start.
+- No new attempt is reserved for the batch. The flag is checked inside the same
+  locked transaction that grants admission, cost and provisioning, so no
+  reservation can slip past a committed pause.
+- Each scheduler tick releases attempts that were reserved but have no pod yet.
+  They go back to `queued` through the fenced retry cleanup, which releases
+  their admission, cost and provisioning reservations. The released attempt
+  number is recorded in `trials.admission_pause_releases` and excluded from the
+  retry ceiling, so a pause never uses up a trial's retries. Pool-routed
+  claims are released through the pool manager's cancel-unstarted receipt in
+  the same way.
+- Trials that already started keep running, verifying and archiving. Image
+  builds for held trials continue, so a resumed trial can start right away.
+- Retries of started trials go back to `queued` and stay held until resume.
+- Batch and trial cancellation work as usual and take precedence over the pause.
+
+Pausing a `cancelling`, `finished` or `cancelled` batch returns 409. Resume
+always succeeds and clears the flag. Repeated calls are idempotent: the first
+pause time is kept, and each call writes `batch.admission.pause` or
+`batch.admission.resume` to `admin_audit_events` with `already_paused` or
+`already_resumed`, `held_count` and `pending_release_count`. The pause response
+reports `pending_release_count`, the number of reserved, never-started attempts
+the next scheduler tick will release. Confirm the release completed by checking
+that the batch has no `claimed` trial without `started_at`.
+
 ## Locked operator environment
 
 Use the repository lock and workspace packages for release commands:

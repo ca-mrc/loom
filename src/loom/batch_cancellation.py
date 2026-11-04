@@ -30,15 +30,18 @@ def reservation_allowed(
     retained: bool,
     cancellation_requested: bool,
     handoff_pending: bool,
+    admission_paused: bool = False,
 ) -> bool:
     """Whether a batch may receive a new execution lease.
 
     A cancelling batch still admits the verifier of a trial that was retained
-    and whose handoff is pending. Attempt leases stay fenced.
+    and whose handoff is pending. Attempt leases stay fenced. A batch whose
+    admission is paused admits no new attempt, but still grades the trials
+    that already started.
     """
 
     if parent_state in {"submitted", "running"}:
-        return True
+        return not (admission_paused and execution_role == "attempt")
     return (
         parent_state == CANCELLING
         and execution_role == "verifier"
@@ -210,6 +213,8 @@ def parent_accepts_reservation(
     parent_state: str | None,
     trial: Any,
     execution_role: str,
+    *,
+    admission_paused: bool = False,
 ) -> bool:
     return reservation_allowed(
         parent_state,
@@ -217,4 +222,5 @@ def parent_accepts_reservation(
         retained=getattr(trial, "cancellation_retained_at", None) is not None,
         cancellation_requested=getattr(trial, "cancellation_requested_at", None) is not None,
         handoff_pending=handoff_is_pending(trial),
+        admission_paused=admission_paused,
     )

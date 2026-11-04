@@ -34,6 +34,8 @@ export type BatchCreate = paths["/api/v1/batches"]["post"]["responses"][201]["co
 export type BatchFailedRerun =
   paths["/api/v1/batches/{batch_id}/rerun-failed"]["post"]["responses"][201]["content"]["application/json"];
 
+export type BatchAdmissionControl = components["schemas"]["PostAdminBatchesIdAdmissionResponse"];
+
 export type DeliveryExport =
   paths["/api/v1/batches/{batch_id}/delivery-export"]["get"]["responses"][200]["content"]["application/json"];
 
@@ -172,4 +174,14 @@ export const runsApi = {
   ),
   rerunFailedBatch: (id: string) =>
     apiFetch<BatchFailedRerun>(`/api/v1/batches/${id}/rerun-failed`, { method: "POST" }),
+  pauseBatchAdmission: (id: string, reason?: string) =>
+    apiFetch<BatchAdmissionControl>(`/api/v1/admin/batches/${encodeURIComponent(id)}/pause-admission`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reason?.trim() || null }),
+    }),
+  resumeBatchAdmission: (id: string) =>
+    apiFetch<BatchAdmissionControl>(`/api/v1/admin/batches/${encodeURIComponent(id)}/resume-admission`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
 };

@@ -28,6 +28,16 @@ def _allow_current_cancellation_columns(url: str) -> None:
             connection.execute(text(
                 "ALTER TABLE batches ADD COLUMN IF NOT EXISTS cancellation_mode TEXT"
             ))
+            connection.execute(text(
+                "ALTER TABLE batches ADD COLUMN IF NOT EXISTS admission_paused_at TIMESTAMPTZ"
+            ))
+            connection.execute(text(
+                "ALTER TABLE batches ADD COLUMN IF NOT EXISTS admission_paused_reason TEXT"
+            ))
+            connection.execute(text(
+                "ALTER TABLE trials ADD COLUMN IF NOT EXISTS "
+                "admission_pause_releases INTEGER NOT NULL DEFAULT 0"
+            ))
     finally:
         engine.dispose()
 

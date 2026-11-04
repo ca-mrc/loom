@@ -10,6 +10,7 @@ from sqlalchemy import func, select, text, update
 from loom.db.nebius_pool_outbox_schema import NebiusPoolExecutionOutbox
 from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolRequest
 from loom.db.schema import (
+    Batch,
     ExecutionAdmissionReservation,
     ExecutionCostReservation,
     ServiceExecutionLease,
@@ -129,7 +130,7 @@ async def test_waiting_withdrawal_cancels_without_attempt_or_local_budget(sessio
         await assert_unclaimed(sessions, trial_id)
 
 
-@pytest.mark.parametrize("damage", ["cancel", "rollout", "participant"])
+@pytest.mark.parametrize("damage", ["cancel", "rollout", "participant", "admission-pause"])
 async def test_attached_selection_loses_activation_authority_without_freeing_capacity(sessions, damage):
     journal, trial_id, target = await setup(sessions)
     proposed = await journal.propose(trial_id=trial_id, target_id=target.target_id)
@@ -141,6 +142,10 @@ async def test_attached_selection_loses_activation_authority_without_freeing_cap
         async with sessions.begin() as session:
             if damage == "cancel":
                 await session.execute(update(Trial).where(Trial.id == trial_id).values(cancellation_requested_at=datetime.now(UTC)))
+            elif damage == "admission-pause":
+                batch_id = await session.scalar(select(Trial.batch_id).where(Trial.id == trial_id))
+                await session.execute(update(Batch).where(Batch.id == batch_id).values(
+                    admission_paused_at=datetime.now(UTC)))
             else:
                 await session.execute(text("INSERT INTO nebius_rollout_guard(id,owner,candidate_sha) VALUES(1,'test',:sha)"),
                     {"sha": "a" * 40})
@@ -208,6 +213,31 @@ async def test_confirmed_never_started_grant_releases_local_cost_and_claim_witho
         assert trial.state == "queued" and trial.attempt_count == 1
     next_proposal = await journal.propose(trial_id=trial_id, target_id=proposed.request.target_id)
     assert next_proposal.request.key.local_work_id != proposed.request.key.local_work_id
+
+
+async def test_admission_pause_withdraws_attached_grant_and_refunds_attempt(sessions, tmp_path):
+    from loom_execution_actuator.pool_execution_driver import PoolExecutionDriver
+
+    journal, trial_id, proposed, app, token = await selected(sessions, tmp_path)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as http:
+        management = client(http, token)
+        attached = await journal.accept_grant(proposed.request.key, await management.prepare(proposed.request))
+        async with sessions.begin() as session:
+            batch_id = await session.scalar(select(Trial.batch_id).where(Trial.id == trial_id))
+            await session.execute(update(Batch).where(Batch.id == batch_id).values(
+                admission_paused_at=datetime.now(UTC)))
+        withdrawn = await PoolExecutionDriver(outbox=journal, management=management).advance(proposed.request.key)
+        assert withdrawn.phase == "cancelled" and withdrawn.lease_id == attached.lease_id
+    async with sessions() as session:
+        lease = await session.get(ServiceExecutionLease, attached.lease_id)
+        assert lease.cleanup_state == "complete" and lease.desired_state == "deleted"
+        assert (lease.error_class, lease.error_code) == ("transient", "admission_paused")
+        assert (await session.scalar(select(ExecutionCostReservation))).state == "released"
+        assert (await session.scalar(select(ExecutionAdmissionReservation))).state == "released"
+        trial = await session.get(Trial, trial_id)
+        assert trial.state == "queued" and trial.cancellation_requested_at is None
+        assert (trial.attempt_count, trial.admission_pause_releases) == (1, 1)
+        assert trial.scheduling_observation["reason"] == "admission_paused"
 
 
 @pytest.mark.parametrize("damage", ["unattached", "foreign-plan", "foreign-grant"])

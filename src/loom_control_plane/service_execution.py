@@ -547,7 +547,7 @@ async def _can_reselect_unstarted_execution(
         or previous.desired_state != "deleted"
         or previous.deleted_at is None
         or previous.cleanup_state != "complete"
-        or previous.error_code != "unschedulable"
+        or previous.error_code not in {"unschedulable", "admission_paused"}
         or previous.pod_started_at is not None
         or previous.pod_scheduled_at is not None
         or previous.node_name is not None
@@ -1086,10 +1086,18 @@ async def reserve_trial_execution(
         # publication's lock order. Hold it until commit: cancellation either
         # follows this existing lease or wins and rolls back this new reservation.
         # An exact request replay returned above and still owns cleanup authority.
-        parent_state = await session.scalar(
-            select(Batch.state).where(Batch.id == trial.batch_id).with_for_update(key_share=True),
-        )
-        if not parent_accepts_reservation(parent_state, trial, execution_role):
+        # An admission pause takes this row FOR UPDATE, which conflicts with
+        # this key-share lock, so the pause either drains this lease or wins.
+        parent = (await session.execute(
+            select(Batch.state, Batch.admission_paused_at)
+            .where(Batch.id == trial.batch_id)
+            .with_for_update(key_share=True),
+        )).one_or_none()
+        parent_state = parent.state if parent is not None else None
+        paused = parent is not None and parent.admission_paused_at is not None
+        if not parent_accepts_reservation(
+            parent_state, trial, execution_role, admission_paused=paused,
+        ):
             raise ServiceExecutionParentTerminalError("batch no longer accepts execution")
     return lease
 
@@ -2557,7 +2565,8 @@ async def retry_unscheduled_execution_after_deadline(
     lease.error_class = "transient"
     lease.error_code = (
         "infra_recovery_exhausted"
-        if attempt_ceiling is not None and trial.attempt_count >= attempt_ceiling
+        if attempt_ceiling is not None
+        and trial.attempt_count - trial.admission_pause_releases >= attempt_ceiling
         else "unschedulable"
     )
     # Existing attempts remain immutable history. Cleanup releases the same

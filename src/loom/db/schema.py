@@ -3691,6 +3691,11 @@ class Batch(Base):
         nullable=True,
     )
     cancellation_mode: Mapped[str | None] = mapped_column(Text, nullable=True)
+    admission_paused_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    admission_paused_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by_token_prefix: Mapped[str] = mapped_column(Text, nullable=False)
     submitted_by_user_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
@@ -4009,6 +4014,12 @@ class Trial(Base):
         nullable=True,
     )
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Attempt numbers released by a batch admission pause before their pod
+    # was scheduled. Lease attempt numbers are unique, so these are refunded from
+    # the retry budget instead: ``attempt_count - admission_pause_releases``.
+    admission_pause_releases: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     next_attempt_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True
     )

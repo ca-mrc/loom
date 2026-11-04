@@ -38,6 +38,49 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/batches/{batch_id}/pause-admission": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pause Batch Admission
+         * @description Hold trials waiting to start; started trials, verifiers and cancel continue.
+         *
+         *     The scheduler releases already-reserved, never-started attempts on its next
+         *     tick without spending their retry budget.
+         */
+        post: operations["pause_batch_admission_api_v1_admin_batches__batch_id__pause_admission_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/batches/{batch_id}/resume-admission": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resume Batch Admission
+         * @description Let held trials compete for admission again, in their original order.
+         */
+        post: operations["resume_batch_admission_api_v1_admin_batches__batch_id__resume_admission_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/judge-execution-profiles/{recipe_name}/{recipe_version}/{profile_name}": {
         parameters: {
             query?: never;
@@ -3100,6 +3143,10 @@ export interface components {
         };
         /** Batch */
         Batch: {
+            /** Admission Paused At */
+            admission_paused_at?: string | null;
+            /** Admission Paused Reason */
+            admission_paused_reason?: string | null;
             /** Backend */
             backend: string;
             /** Budget Consumed Usd */
@@ -3225,6 +3272,12 @@ export interface components {
         };
         /** BatchDetail */
         BatchDetail: {
+            /** Admission Held Count */
+            admission_held_count?: number;
+            /** Admission Paused At */
+            admission_paused_at?: string | null;
+            /** Admission Paused Reason */
+            admission_paused_reason?: string | null;
             /** Aggregate Reward */
             aggregate_reward: number | null;
             /** Backend */
@@ -6241,6 +6294,25 @@ export interface components {
             /** Quota Group */
             quota_group: string;
         };
+        /** PostAdminBatchesIdAdmissionResponse */
+        PostAdminBatchesIdAdmissionResponse: {
+            /** Admission Paused At */
+            admission_paused_at: string | null;
+            /** Admission Paused Reason */
+            admission_paused_reason: string | null;
+            /** Batch Id */
+            batch_id: string;
+            /** Changed */
+            changed: boolean;
+            /** Held Count */
+            held_count: number;
+            /** Pending Release Count */
+            pending_release_count: number;
+            /** State */
+            state: string;
+        } & {
+            [key: string]: unknown;
+        };
         /** PostBatchesDryRunResponse */
         PostBatchesDryRunResponse: {
             /** Accepted */
@@ -8795,6 +8867,11 @@ export interface components {
             /** Name */
             name: string;
         };
+        /** _AdmissionControlRequest */
+        _AdmissionControlRequest: {
+            /** Reason */
+            reason?: string | null;
+        };
         /** _ApproveRegistrationReq */
         _ApproveRegistrationReq: {
             /**
@@ -9279,6 +9356,82 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    pause_batch_admission_api_v1_admin_batches__batch_id__pause_admission_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-loom-admin-actor"?: string | null;
+                authorization?: string | null;
+            };
+            path: {
+                batch_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["_AdmissionControlRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PostAdminBatchesIdAdmissionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resume_batch_admission_api_v1_admin_batches__batch_id__resume_admission_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-loom-admin-actor"?: string | null;
+                authorization?: string | null;
+            };
+            path: {
+                batch_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["_AdmissionControlRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PostAdminBatchesIdAdmissionResponse"];
                 };
             };
             /** @description Validation Error */

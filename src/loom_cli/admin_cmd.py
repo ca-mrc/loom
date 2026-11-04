@@ -899,6 +899,50 @@ def _mint_team_token(args: argparse.Namespace) -> int:
     return 0
 
 
+def _batch_admission(args: argparse.Namespace) -> int:
+    """POST pause-admission or resume-admission for one batch."""
+    pause = args.batches_op == "pause-admission"
+    try:
+        cfg = require_logged_in()
+    except NotLoggedInError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 2
+    headers: dict[str, str] = {}
+    if args.admin_actor is not None:
+        headers["X-Loom-Admin-Actor"] = args.admin_actor
+    body: dict[str, object] = {"reason": args.reason} if pause and args.reason else {}
+    try:
+        with authed_client(cfg) as c:
+            resp = c.post(
+                f"/api/v1/admin/batches/{args.batch_id}/{args.batches_op}",
+                json=body,
+                headers=headers or None,
+            )
+            data = assert_2xx(resp, action=args.batches_op.replace("-", " "))
+    except HttpStatusError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 1
+    except httpx.RequestError as e:
+        sys.stderr.write(f"error: could not reach {cfg.server_url}: {e}\n")
+        return 2
+
+    if getattr(args, "format", "text") == "json":
+        json.dump(data, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+    verb = "paused" if pause else "resumed"
+    note = "" if data.get("changed") else f" (already {verb})"
+    sys.stdout.write(f"Batch {data['batch_id']} trial starts {verb}{note}.\n")
+    sys.stdout.write(f"  state:            {data['state']}\n")
+    sys.stdout.write(f"  waiting to start: {data['held_count']}\n")
+    if pause:
+        sys.stdout.write(
+            f"  pending release:  {data['pending_release_count']} reserved, never-started "
+            "attempts; the scheduler releases them on its next tick\n",
+        )
+    return 0
+
+
 def _revoke_team_token(args: argparse.Namespace) -> int:
     if not _HEX_8_PREFIX_RE.fullmatch(args.prefix):
         sys.stderr.write(
@@ -1926,6 +1970,24 @@ def dispatch(argv: list[str]) -> int:
         help="Required audit actor for the real operator/admin submitting.",
     )
     p_submit_on_behalf.set_defaults(handler=_admin_submit_batch_on_behalf)
+
+    for op, help_text in (
+        ("pause-admission", "Hold trials waiting to start. Started trials, verification and cancel continue."),
+        ("resume-admission", "Let held trials compete for execution capacity again."),
+    ):
+        p_admission = batches_sub.add_parser(op, help=help_text)
+        p_admission.add_argument("batch_id", help="Batch UUID.")
+        if op == "pause-admission":
+            p_admission.add_argument(
+                "--reason", default=None, help="Optional audit reason (max 500 characters).",
+            )
+        p_admission.add_argument(
+            "--admin-actor",
+            default=None,
+            help="Audit actor. Required when the login has no user identity.",
+        )
+        p_admission.add_argument("--format", choices=("text", "json"), default="text")
+        p_admission.set_defaults(handler=_batch_admission)
 
     # ── rate-cards subgroup ───────────────────────────────────────────
     p_rate_cards = sub.add_parser(

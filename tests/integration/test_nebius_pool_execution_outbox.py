@@ -10,6 +10,7 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import DBAPIError
 
 from loom.db.schema import (
+    Batch,
     ExecutionAdmissionReservation,
     ExecutionBudgetPolicy,
     ExecutionCapacityPolicy,
@@ -144,13 +145,17 @@ async def test_concurrent_grant_replay_attaches_once_with_final_immutable_job_id
         assert command.payload_json["lease_id"] == str(first.lease_id)
 
 
-@pytest.mark.parametrize("damage", ["trial-config", "task-config", "target", "cancel", "budget", "attempt-ceiling"])
+@pytest.mark.parametrize("damage", ["trial-config", "task-config", "target", "cancel", "budget", "attempt-ceiling",
+                                    "admission-pause"])
 async def test_changed_selection_or_local_denial_cancels_grant_without_claim(sessions, damage):
     journal, trial_id, target = await setup(sessions)
     proposed = await journal.propose(trial_id=trial_id, target_id=target.target_id)
     async with sessions.begin() as session:
         trial = await session.get(Trial, trial_id)
-        if damage == "trial-config":
+        if damage == "admission-pause":
+            await session.execute(update(Batch).where(Batch.id == trial.batch_id).values(
+                admission_paused_at=datetime.now(UTC)))
+        elif damage == "trial-config":
             trial.config = {**trial.config, "agent_name": "changed"}
         elif damage == "task-config":
             task = await session.get(Task, trial.task_id)

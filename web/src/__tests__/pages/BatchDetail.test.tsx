@@ -163,11 +163,54 @@ function mockBatch(
     reason: "no_delivery_export",
   },
   cancelStatus = 200,
+  platformAdmin = false,
 ): FetchMock {
   return vi
     .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : String(input);
+      if (platformAdmin && url.includes("/api/v1/auth/me")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              user: {
+                id: "admin",
+                username: "Admin",
+                email: "admin@example.com",
+                display_name: "Admin",
+                is_platform_admin: true,
+              },
+              teams: [],
+              current_team: null,
+              role: "platform_admin",
+              scopes: ["admin:platform"],
+              is_platform_admin: true,
+              csrf_token: "csrf",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }
+      const admission = url.match(
+        new RegExp(`/api/v1/admin/batches/${BATCH_ID}/(pause|resume)-admission$`),
+      );
+      if (admission && init?.method === "POST") {
+        const paused = admission[1] === "pause";
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              batch_id: BATCH_ID,
+              state: body.state,
+              admission_paused_at: paused ? "2026-11-04T10:00:00Z" : null,
+              admission_paused_reason: null,
+              changed: true,
+              held_count: 3,
+              pending_release_count: 1,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }
       if (
         url.endsWith(`/api/v1/batches/${BATCH_ID}/cancel`) &&
         init?.method === "POST"
@@ -540,6 +583,76 @@ describe("BatchDetail run plan", () => {
     ]) {
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey });
     }
+  });
+
+  it("offers the admission pause only to platform admins", async () => {
+    mockBatch();
+    renderBatchDetail();
+    await screen.findByRole("button", { name: "Cancel batch" });
+    expect(
+      screen.queryByRole("button", { name: "Pause trial starts" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("lets a platform admin pause trial starts with a reason", async () => {
+    const fetchMock = mockBatch(BATCH_BODY, null, {}, undefined, 200, true);
+    const user = userEvent.setup();
+    renderBatchDetail();
+
+    await user.click(
+      await screen.findByRole("button", { name: "Pause trial starts" }),
+    );
+    const dialog = screen.getByRole("dialog", { name: "Pause trial starts" });
+    await user.type(within(dialog).getByLabelText("Reason (optional)"), "provider incident");
+    await user.click(within(dialog).getByRole("button", { name: "Pause trial starts" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining(`/api/v1/admin/batches/${BATCH_ID}/pause-admission`),
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ reason: "provider incident" }),
+        }),
+      );
+      expect(
+        screen.queryByRole("dialog", { name: "Pause trial starts" }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  it("shows a paused batch and resumes trial starts", async () => {
+    const fetchMock = mockBatch(
+      {
+        ...BATCH_BODY,
+        admission_paused_at: "2026-11-04T10:00:00Z",
+        admission_paused_reason: "provider incident",
+        admission_held_count: 3,
+      },
+      null,
+      {},
+      undefined,
+      200,
+      true,
+    );
+    const user = userEvent.setup();
+    renderBatchDetail();
+
+    const banner = await screen.findByText("New trial starts are paused");
+    expect(banner.parentElement).toHaveTextContent("3 waiting to start");
+    expect(banner.parentElement).toHaveTextContent("Reason: provider incident");
+    await user.click(
+      await screen.findByRole("button", { name: "Resume trial starts" }),
+    );
+    const dialog = screen.getByRole("dialog", { name: "Resume trial starts" });
+    expect(within(dialog).queryByLabelText("Reason (optional)")).not.toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Resume trial starts" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining(`/api/v1/admin/batches/${BATCH_ID}/resume-admission`),
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
   });
 
   it("keeps cancellation failure and context available for retry", async () => {
