@@ -1107,6 +1107,10 @@ async def _run_verifier(
             try:
                 if driver_started:
                     await driver.stop_processes()
+                    if failure is not None:
+                        from loom.verifier_diagnostics import capture_verifier_diagnostics
+
+                        await capture_verifier_diagnostics(driver, workspace / ".loom/verifier")
             except Exception as exc:
                 retain_failure("stop_processes", exc)
             finally:

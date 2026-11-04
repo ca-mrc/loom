@@ -126,4 +126,8 @@ def native_verifier_workdir_run_sh_bytes() -> bytes:
     return _NATIVE_VERIFIER_RUN_SH.replace(
         b'(cd "$task_dir" && bash "$task_dir/tests/test.sh")',
         b'(cd "${LOOM_HARBOR_WORKDIR:-$task_dir}" && bash "$task_dir/tests/test.sh")',
+    ).replace(
+        b'    print("harbor_reward_error=" + str(exc), file=sys.stderr)',
+        b'    print("harbor_test_sh_returncode=" + str(int(sys.argv[3])), file=sys.stderr)\n'
+        b'    print("harbor_reward_error=" + str(exc), file=sys.stderr)',
     )

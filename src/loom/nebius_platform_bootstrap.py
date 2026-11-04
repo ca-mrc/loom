@@ -66,6 +66,9 @@ ACTUATOR_TABLES = (
     "nebius_rollout_guard",
     "trial_resource_usage",
     "artifacts",
+    # Finalization verifies the committed workspace before deferred grading.
+    "artifact_upload_sessions",
+    "artifact_upload_files",
     *COMMON_EXECUTION_TABLES,
     "batches",
     # Generic native claims must observe retained global-build ownership even
@@ -317,7 +320,7 @@ def _bootstrap_database(
                         "execution_target_price_bindings",
                     }
                     if role == "loom_actuator":
-                        read_only.add("artifacts")
+                        read_only.update({"artifacts", "artifact_upload_sessions", "artifact_upload_files"})
                     writable = sql.SQL(", ").join(
                         sql.Identifier(table) for table in inventory if table not in read_only
                     )
