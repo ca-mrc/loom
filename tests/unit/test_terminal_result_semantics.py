@@ -5,6 +5,7 @@ import pytest
 from loom.terminal_result_semantics import (
     aggregate_reward_scalar,
     is_scored_agent_timeout,
+    is_ungraded_agent_trajectory,
     projected_result_conflicts,
     terminal_result_conflicts,
 )
@@ -110,6 +111,79 @@ def test_named_rewards_have_a_shared_scalar_projection(
     original = None if rewards is None else dict(rewards)
     assert aggregate_reward_scalar(rewards) == expected
     assert rewards == original
+
+
+def _captured_trajectory() -> dict:
+    return {
+        "relative_path": "artifacts/harbor/trajectory.json",
+        "kind": "agent_native",
+        "state": "captured",
+    }
+
+
+def _ungraded_timeout_result() -> dict:
+    return {
+        "runtime_result": {
+            "schema_version": "loom.execution-runtime-result.v1",
+            "execution_role": "attempt",
+            "status": "timed_out",
+            "failure_reason": None,
+            "phases": [{"role": "agent", "exit_code": 124, "timed_out": True}],
+            "outputs": [_captured_trajectory()],
+        },
+    }
+
+
+def _ungraded_verifier_result() -> dict:
+    result = _ungraded_timeout_result()
+    runtime = result["runtime_result"]
+    runtime["status"] = "succeeded"
+    runtime["phases"] = [{"role": "agent", "exit_code": 0, "timed_out": False}]
+    return result
+
+
+def test_ungraded_timeout_and_verifier_error_keep_a_committed_trajectory() -> None:
+    config = {"agent_name": "terminus-2"}
+    timeout = _ungraded_timeout_result()
+    verifier = _ungraded_verifier_result()
+    assert is_ungraded_agent_trajectory(
+        state="failed", result=timeout, failure_reason="timed_out", config=config,
+    )
+    assert is_ungraded_agent_trajectory(
+        state="failed", result=verifier, failure_reason="verifier_error", config=config,
+    )
+    assert not is_scored_agent_timeout(state="failed", result=timeout, failure_reason="timed_out")
+    assert not is_ungraded_agent_trajectory(
+        state="failed", result=_scored_timeout_result(), failure_reason="timed_out", config=config,
+    )
+
+
+@pytest.mark.parametrize(
+    ("state", "reason", "mutate"),
+    [
+        ("failed", "task_error", None),
+        ("cancelled", "cancelled", None),
+        ("failed", "verifier_unavailable", None),
+        ("failed", "oom_killed", None),
+        ("failed", "timed_out", "reward"),
+        ("failed", "timed_out", "drop_trajectory"),
+        ("failed", "verifier_error", "other_agent"),
+    ],
+)
+def test_other_failures_stay_out_of_ungraded_delivery(
+    state: str, reason: str, mutate: str | None,
+) -> None:
+    result = _ungraded_timeout_result() if reason == "timed_out" else _ungraded_verifier_result()
+    config = {"agent_name": "terminus-2"}
+    if mutate == "reward":
+        result["reward"] = {"passed": 0.0}
+    elif mutate == "drop_trajectory":
+        result["runtime_result"]["outputs"] = []
+    elif mutate == "other_agent":
+        config = {"agent_name": "oracle"}
+    assert not is_ungraded_agent_trajectory(
+        state=state, result=result, failure_reason=reason, config=config,
+    )
 
 
 def test_projection_rejects_success_with_terminal_failure_reason() -> None:
