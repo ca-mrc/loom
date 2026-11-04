@@ -690,11 +690,18 @@ def isolated_migration_postgres_url(migration_template_postgres_url: str) -> Ite
     )
 
 
-def retain_pool_schema(postgres_url: str, revision: str = "0176") -> None:
+def retain_pool_schema(
+    postgres_url: str,
+    revision: str = "0176",
+    *,
+    include_current_columns: bool = True,
+) -> None:
     """Prepare an owned test database for an explicitly audited pool revision.
 
     Run the real downgrade rather than relabeling a current-head database. This
     must only be used by historical pool tests on their isolated databases.
+    Callers that then run the real Alembic upgrade must pass
+    ``include_current_columns=False`` so 0189 can add the drain columns itself.
     """
     if revision not in {"0175", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187", "0188", "0189"}:
         raise ValueError("unsupported retained pool test revision")
@@ -707,7 +714,7 @@ def retain_pool_schema(postgres_url: str, revision: str = "0176") -> None:
     # Current models name the drain columns on every trial and batch write.
     # Historical pool revisions do not have them; they are nullable and unused
     # by those tests, so add them without changing the pinned Alembic version.
-    if revision != "0189":
+    if include_current_columns and revision != "0189":
         engine = create_engine(url)
         try:
             with engine.begin() as connection:

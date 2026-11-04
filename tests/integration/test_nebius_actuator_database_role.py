@@ -341,7 +341,12 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
     from tests.integration.conftest import retain_pool_schema
 
     if upgrade_from is not None:
-        await asyncio.to_thread(retain_pool_schema, url.render_as_string(hide_password=False), upgrade_from)
+        await asyncio.to_thread(
+            retain_pool_schema,
+            url.render_as_string(hide_password=False),
+            upgrade_from,
+            include_current_columns=False,
+        )
         with psycopg.connect(global_role_database, autocommit=True) as db:
             assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [(upgrade_from,)]
             with pytest.raises(psycopg.errors.RaiseException, match='journal authority unqualified'):

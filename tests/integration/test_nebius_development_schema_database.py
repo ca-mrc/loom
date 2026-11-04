@@ -30,7 +30,9 @@ def installed(request, isolated_migration_postgres_url):
     mode = request.param
     url = make_url(isolated_migration_postgres_url).set(drivername='postgresql').render_as_string(hide_password=False)
     revision = '0175' if mode == 'shared' else '0176'
-    retain_pool_schema(url, revision)
+    # The fixture then runs the real upgrade to head. 0189 must add the drain
+    # columns; pre-creating them makes that migration fail as a duplicate.
+    retain_pool_schema(url, revision, include_current_columns=False)
     data, pool = uuid4(), uuid4()
     password = token_urlsafe(48)
     roles = ['loom_service'] if mode == 'manager' else ['loom_service', 'loom_control_plane', 'loom_gateway', 'loom_actuator']
