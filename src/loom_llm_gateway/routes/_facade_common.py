@@ -324,6 +324,8 @@ async def resolve_facade_connection(
 
 def alternate_chat_url(row: ProviderConnection, model: str) -> str | None:
     """Use the verified alternate only for models in the connection's scope."""
+    if row.alternate_route is None:
+        return None
     if row.allowed_models is not None and model not in row.allowed_models:
         return None
     routing = ProviderConnectionRouting.from_storage(row.provider_type, row.base_url, row.alternate_route)
