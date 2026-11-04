@@ -974,6 +974,12 @@ def test_regional_manifests_separate_native_roles_from_primary_processes(
     ) | {"loom-native-resource-observer"}
     usage_binding = next(doc for doc in bindings if doc["metadata"]["name"].endswith("-actuator-usage"))
     assert usage_binding["subjects"][0]["name"] == target["service_account_ids"]["actuator"]
+    observer_reader = next(doc for doc in bindings
+                           if doc["metadata"]["name"] == "loom-native-resource-observer-reader")
+    assert observer_reader["subjects"] == [
+        {"kind": "User", "apiGroup": "rbac.authorization.k8s.io", "name": target["service_account_ids"][role]}
+        for role in ("actuator", "collector")
+    ]
     assert all(
         doc["subjects"]
         == [
@@ -983,7 +989,7 @@ def test_regional_manifests_separate_native_roles_from_primary_processes(
                 "name": doc["subjects"][0]["name"],
             }
         ]
-        for doc in bindings if doc["subjects"][0]["kind"] != "ServiceAccount"
+        for doc in bindings if doc is not observer_reader and doc["subjects"][0]["kind"] != "ServiceAccount"
     )
     gateway_role = next(
         doc

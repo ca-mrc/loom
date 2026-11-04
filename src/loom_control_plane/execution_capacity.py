@@ -40,6 +40,7 @@ from loom_control_plane.task_image_io_capacity import NativeIOUnavailable, nativ
 from loom_execution_capacity_collector.contracts import (
     CapacityPlacement,
     NodeTemplateSample,
+    PoolResourceUsage,
     ResourceTotals,
 )
 
@@ -190,6 +191,7 @@ async def create_execution_capacity_observation(
     pending_reasons: dict[str, int],
     node_states: dict[str, int] | None = None,
     placement: dict[str, Any] | None = None,
+    resource_usage: dict[str, Any] | None = None,
 ) -> tuple[ExecutionCapacityObservation, bool]:
     target_id = _clean_text(target_id, name="target_id", max_length=120)
     source = _clean_text(source, name="source", max_length=120)
@@ -270,6 +272,9 @@ async def create_execution_capacity_observation(
         ) != len(parsed.nodes):
             raise ValueError("placement contains duplicate node identities")
         payload["placement"] = parsed.model_dump(mode="json")
+    if resource_usage is not None:
+        # Keep the admission placement contract readable after a binary rollback.
+        payload["resource_usage"] = PoolResourceUsage.model_validate(resource_usage).model_dump(mode="json")
     if not group.matches_observation_scope(payload):
         raise ValueError("capacity observation target scope does not match authoritative membership")
     digest = canonical_digest(payload)

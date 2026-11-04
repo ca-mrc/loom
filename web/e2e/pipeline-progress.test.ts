@@ -11,6 +11,16 @@ const progress = {
   images: { image_count: 100, waiting_trials: 1660, states: { queued: 40, running: 40, ready: 15, failed: 5 },
     stages: { queued: 40, retry_wait: 0, capacity_wait: 0, prepare: 0, build: 40, publish: 0, cleanup: 0, ready: 15, failed: 5, unknown: 0 } },
 };
+const batch = {
+  id: "pipeline-batch", name: "Pipeline batch", team_id: "team-eai", purpose: "trajectory_generation",
+  task_filter: {}, trial_config: {}, combinations: [], backend: "nebius", state: "running",
+  expected_trial_count: 1720, n_per_task: 1, resolved_task_ids: [],
+  fanout_errors: [], rerun_targets: [], rerun_batches: [],
+  trial_summary: { queued: 1690, running: 15, succeeded: 10, failed: 5 },
+  created_at: "2026-11-01T00:00:00Z", finished_at: null, created_by_token_prefix: "fixture",
+  source_provenance: [], total_prompt_tokens: 0, total_completion_tokens: 0, llm_calls_count: 0,
+  combination_summary: [], benchmark_summary: [], progress,
+};
 const trial = (id: string, stage = "image_preparation") => ({
   id, task_id: `task-${id}`, batch_id: "pipeline-batch", team_id: "team-eai",
   state: stage === "succeeded" ? "succeeded" : stage === "image_preparation" ? "queued" : "running",
@@ -35,13 +45,13 @@ function json(name: string, path: string, body: unknown, count = 1, delayMs = 0)
 
 // Built application + real router/query cache; local responses never submit work.
 test("pipeline keeps Trial counts separate from images and refreshes without resetting reading position @protocol", async ({ apiHarness, browserHarness, page }) => {
-  const summaryPath = "/api/v1/monitor/summary?view=trials&batch_id=pipeline-batch";
+  const batchPath = "/api/v1/batches/pipeline-batch";
   const listPath = "/api/v1/trials?batch_id=pipeline-batch&limit=50";
   const fixture = await apiHarness.install({ role: "user", overrides: [
-    json("scoped 1720-Trial summary", summaryPath, { ...monitorSummary(), progress }, 2),
+    json("scoped 1720-Trial batch", batchPath, batch, 2),
     json("bounded Trial page", listPath, { items: Array.from({ length: 50 }, (_, index) => trial(String(index))), next_cursor: "next-page" }, 2),
   ] });
-  await page.goto(`${browserHarness.baseURL}/monitor?view=trials&batch_id=pipeline-batch`);
+  await page.goto(`${browserHarness.baseURL}/batches/pipeline-batch`);
   await page.bringToFront();
   const tasks = page.getByRole("region", { name: "Task progress", exact: true });
   await expect(tasks.getByRole("link", { name: "Waiting for image 1660", exact: true })).toBeVisible();
@@ -59,11 +69,11 @@ test("pipeline keeps Trial counts separate from images and refreshes without res
     await Promise.all(content.getAnimations().map(animation => animation.finished));
   });
   const row = await rows.nth(10).elementHandle();
-  const filter = page.getByLabel("filter by state");
+  const filter = page.getByLabel("Filter trials by state", { exact: true });
   await filter.focus();
   await page.evaluate(() => { const content = document.getElementById("main-content"); if (content) content.scrollTop = 650; });
   const saved = await page.evaluate(() => document.getElementById("main-content")?.scrollTop ?? 0);
-  await expect.poll(() => fixture.ledger.filter(entry => entry.path === summaryPath).length, { timeout: 8_000 }).toBe(2);
+  await expect.poll(() => fixture.ledger.filter(entry => entry.path === batchPath).length, { timeout: 8_000 }).toBe(2);
   await expect.poll(() => fixture.ledger.filter(entry => entry.path === listPath).length).toBe(2);
   await expect(filter).toBeFocused();
   expect(await row?.evaluate(element => element.isConnected)).toBe(true);
@@ -78,22 +88,22 @@ test("pipeline keeps Trial counts separate from images and refreshes without res
 
 test("image jobs load on demand, paginate, and preserve shared-image Trial navigation @protocol", async ({ apiHarness, browserHarness, page }) => {
   const fixture = await apiHarness.install({ role: "user", overrides: [
-    json("pipeline summary", "/api/v1/monitor/summary?view=trials&batch_id=pipeline-batch", { ...monitorSummary(), progress }),
+    json("pipeline batch", "/api/v1/batches/pipeline-batch", batch),
     json("first Trial page", "/api/v1/trials?batch_id=pipeline-batch&limit=50", { items: [trial("one")], next_cursor: null }),
-    json("first build page", "/api/v1/monitor/images?view=trials&batch_id=pipeline-batch&stage=build&limit=50", { items: [image("shared-one")], next_cursor: "image-page-two" }),
-    json("next build page", "/api/v1/monitor/images?view=trials&batch_id=pipeline-batch&stage=build&cursor=image-page-two&limit=50", { items: [image("shared-two")], next_cursor: null }),
-    json("ready images", "/api/v1/monitor/images?view=trials&batch_id=pipeline-batch&stage=ready&limit=50", { items: [image("ready-one", "ready")], next_cursor: null }),
+    json("first build page", "/api/v1/monitor/images?batch_id=pipeline-batch&stage=build&limit=50", { items: [image("shared-one")], next_cursor: "image-page-two" }),
+    json("next build page", "/api/v1/monitor/images?batch_id=pipeline-batch&stage=build&cursor=image-page-two&limit=50", { items: [image("shared-two")], next_cursor: null }),
+    json("ready images", "/api/v1/monitor/images?batch_id=pipeline-batch&stage=ready&limit=50", { items: [image("ready-one", "ready")], next_cursor: null }),
   ] });
-  await page.goto(`${browserHarness.baseURL}/monitor?view=trials&batch_id=pipeline-batch`);
+  await page.goto(`${browserHarness.baseURL}/batches/pipeline-batch`);
   await expect(page.getByRole("button", { name: "Build container active 40", exact: true })).toBeVisible();
   expect(fixture.ledger.some(entry => entry.path.includes("/monitor/images"))).toBe(false);
   await page.getByRole("button", { name: "Build container active 40", exact: true }).click();
   const table = page.getByRole("table", { name: "Image jobs", exact: true });
   await expect(table.getByText("image-task-shared-one", { exact: true })).toBeVisible();
-  await expect(table.getByRole("link", { name: "17 trials", exact: true })).toHaveAttribute("href", `${browserHarness.routePrefix}/monitor?batch_id=pipeline-batch&view=trials&image_id=shared-one`);
+  await expect(table.getByRole("link", { name: "17 trials", exact: true })).toHaveAttribute("href", `${browserHarness.routePrefix}/batches/pipeline-batch?tab=trials&image_id=shared-one#batch-trials`);
   await expect(table.getByText("Unknown", { exact: true })).toHaveCount(2);
   await expect(table.getByText("Unavailable", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "next page", exact: true }).first().click();
+  await page.getByRole("region", { name: "Task progress", exact: true }).getByRole("button", { name: "next page", exact: true }).click();
   await expect(table.getByText("image-task-shared-two", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Ready 15", exact: true }).click();
   await expect(table.getByText("image-task-ready-one", { exact: true })).toBeVisible();

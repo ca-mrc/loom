@@ -1022,6 +1022,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/batches/{batch_id}/resource-usage/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Batch Resource Usage Summary
+         * @description Return Batch measurements without transferring execution records.
+         */
+        get: operations["get_batch_resource_usage_summary_api_v1_batches__batch_id__resource_usage_summary_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/batches/{batch_id}/trials/cancel": {
         parameters: {
             query?: never;
@@ -1354,6 +1374,23 @@ export interface paths {
         };
         /** Get Monitor Placement */
         get: operations["get_monitor_placement_api_v1_monitor_placement_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/monitor/resource-trends": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Monitor Resource Trends */
+        get: operations["get_monitor_resource_trends_api_v1_monitor_resource_trends_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3574,6 +3611,21 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** BatchResourceUsageSummary */
+        BatchResourceUsageSummary: {
+            /** Cpu Usage Usec */
+            cpu_usage_usec: number | null;
+            /** Largest Trial Disk Peak Bound Bytes */
+            largest_trial_disk_peak_bound_bytes: number | null;
+            /** Largest Trial Memory Peak Bound Bytes */
+            largest_trial_memory_peak_bound_bytes: number | null;
+            /** Last Observed At */
+            last_observed_at: string | null;
+            /** Sampled Trial Count */
+            sampled_trial_count: number;
+            /** Trial Count */
+            trial_count: number;
+        };
         /** BatchTrialsCancelRequest */
         BatchTrialsCancelRequest: {
             /**
@@ -4943,6 +4995,23 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** MonitorResourceTrends */
+        MonitorResourceTrends: {
+            /** Generated At */
+            generated_at: string;
+            metrics: components["schemas"]["MonitorTrendMetrics"];
+            /** Pools */
+            pools: components["schemas"]["MonitorTrendPool"][];
+            /** Step Seconds */
+            step_seconds: number;
+            /** Target Id */
+            target_id: string | null;
+            /**
+             * Window
+             * @enum {string}
+             */
+            window: "15m" | "1h" | "24h";
+        };
         /** MonitorSummary */
         MonitorSummary: {
             progress?: components["schemas"]["ProgressSummary"];
@@ -5241,6 +5310,52 @@ export interface components {
             submitted: number;
         } & {
             [key: string]: unknown;
+        };
+        /** MonitorTrendLatest */
+        MonitorTrendLatest: {
+            /** Total */
+            total: number;
+            /** Used */
+            used: number;
+        };
+        /** MonitorTrendMetric */
+        MonitorTrendMetric: {
+            /** Covered Nodes */
+            covered_nodes: number | null;
+            /** Last Sample At */
+            last_sample_at: string | null;
+            latest: components["schemas"]["MonitorTrendLatest"] | null;
+            /** Points */
+            points: components["schemas"]["MonitorTrendPoint"][];
+            /** Ready Nodes */
+            ready_nodes: number | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "live" | "stale" | "unavailable";
+        };
+        /** MonitorTrendMetrics */
+        MonitorTrendMetrics: {
+            cpu: components["schemas"]["MonitorTrendMetric"];
+            disk: components["schemas"]["MonitorTrendMetric"];
+            memory: components["schemas"]["MonitorTrendMetric"];
+        };
+        /** MonitorTrendPoint */
+        MonitorTrendPoint: {
+            /** Timestamp */
+            timestamp: string;
+            /** Value */
+            value: number | null;
+        };
+        /** MonitorTrendPool */
+        MonitorTrendPool: {
+            /** Pool Id */
+            pool_id: string;
+            /** Region */
+            region: string;
+            /** Target Id */
+            target_id: string;
         };
         /** MopBankCompatibilityV1 */
         MopBankCompatibilityV1: {
@@ -11575,6 +11690,39 @@ export interface operations {
             };
         };
     };
+    get_batch_resource_usage_summary_api_v1_batches__batch_id__resource_usage_summary_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                batch_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BatchResourceUsageSummary"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     cancel_batch_trials_api_v1_batches__batch_id__trials_cancel_post: {
         parameters: {
             query?: never;
@@ -12272,6 +12420,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MonitorPlacement"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_monitor_resource_trends_api_v1_monitor_resource_trends_get: {
+        parameters: {
+            query?: {
+                window?: "15m" | "1h" | "24h";
+                target_id?: string | null;
+            };
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MonitorResourceTrends"];
                 };
             };
             /** @description Validation Error */

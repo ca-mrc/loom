@@ -86,6 +86,10 @@ def observer_documents(config: dict[str, Any], image: str, *,
                                         "pod-security.kubernetes.io/enforce": "privileged"})
     account = obj("ServiceAccount", NAME, automountServiceAccountToken=True)
     node_role = namespace + "-nodes"
+    reader_binding = binding("RoleBinding", NAME + "-reader", NAME + "-reader", namespace, reader_subject)
+    reader_binding["subjects"].append(
+        {"kind": "ServiceAccount", "name": "loom-execution-capacity-collector", "namespace": execution}
+    )
     docs = [space, account,
         obj("ClusterRole", node_role, None, rules=[{"apiGroups": [""], "resources": ["nodes"], "verbs": ["get"]}]),
         binding("ClusterRoleBinding", node_role, node_role, None, subject),
@@ -95,7 +99,7 @@ def observer_documents(config: dict[str, Any], image: str, *,
                               {"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}]),
         binding("RoleBinding", NAME, NAME, namespace, subject),
         obj("Role", NAME + "-reader", rules=[{"apiGroups": [""], "resources": ["configmaps", "pods"], "verbs": ["get"]}]),
-        binding("RoleBinding", NAME + "-reader", NAME + "-reader", namespace, reader_subject),
+        reader_binding,
     ]
     env: list[dict[str, Any]] = [{"name": "LOOM_RESOURCE_OBSERVER_" + key, "value": value} for key, value in {
         "EXECUTION_NAMESPACE": execution, "NAMESPACE": namespace,
@@ -123,10 +127,14 @@ def observer_documents(config: dict[str, Any], image: str, *,
                 "resources": {"requests": {"cpu": "50m", "memory": "64Mi"}, "limits": {"cpu": "500m", "memory": "256Mi"}},
                 "volumeMounts": [{"name": "runtime", "mountPath": "/var/run/loom-node/containerd.sock", "readOnly": True},
                     {"name": "logs", "mountPath": "/var/log/pods", "readOnly": True},
+                    {"name": "cpu-stat", "mountPath": "/var/run/loom-node/cpu.stat", "readOnly": True},
+                    {"name": "meminfo", "mountPath": "/var/run/loom-node/meminfo", "readOnly": True},
                     {"name": "volumes", "mountPath": "/var/lib/kubelet/pods", "readOnly": True}],
             }],
             "volumes": [{"name": "runtime", "hostPath": {"path": "/run/containerd/containerd.sock", "type": "Socket"}},
                         {"name": "logs", "hostPath": {"path": "/var/log/pods", "type": "Directory"}},
+                        {"name": "cpu-stat", "hostPath": {"path": "/proc/stat", "type": "File"}},
+                        {"name": "meminfo", "hostPath": {"path": "/proc/meminfo", "type": "File"}},
                         {"name": "volumes", "hostPath": {"path": "/var/lib/kubelet/pods", "type": "Directory"}}],
         }},
     }))

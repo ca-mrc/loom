@@ -190,6 +190,7 @@ def read_resource_observation(
     max_age_seconds: float = 60,
     timeout_seconds: float = 10,
     now: datetime | None = None,
+    host_usage_only: bool = False,
 ) -> dict[str, Any]:
     """GET the exact Node, its ConfigMap and the bound producer Pod.
 
@@ -300,6 +301,12 @@ def read_resource_observation(
     ):
         _fail("identity")
     remaining()
+    if host_usage_only:
+        usage = snapshot.get("host_usage")
+        if not isinstance(usage, dict):
+            return {}
+        _fresh(usage.get("sampled_at"), current, max_age_seconds)
+        return usage
     summary = _validate_summary(
         snapshot.get("summary"),
         node_name=node_name,

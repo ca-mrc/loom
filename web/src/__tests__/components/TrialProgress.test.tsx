@@ -51,4 +51,37 @@ describe("pipeline progress", () => {
     expect(screen.getByRole("button", { name: "Publishing 0" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Running Unknown" })).toBeInTheDocument();
   });
+
+  it("keeps compact totals global and reveals zero statuses without dropping unknowns", () => {
+    const summary: components["schemas"]["ProgressSummary"] = {
+      trial_count: 21, stages: { running: 3, succeeded: 0 },
+      images: { image_count: 64, waiting_trials: 8, states: { ready: 12, failed: 2 }, stages: { build: 3, ready: 12, failed: 2 } },
+      output_states: { unavailable: 7 },
+    };
+    const overview = (showAllStatuses: boolean, data = summary) => (
+      <MemoryRouter initialEntries={["/monitor?q=nightly&state=running&agent_name=codex&cursor=old"]}>
+        <ProgressSummary compact showAllStatuses={showAllStatuses} progress={data} />
+      </MemoryRouter>
+    );
+    const { rerender } = render(overview(false));
+    expect(screen.getByText("64 unique images · 8 trials waiting")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Ready 12" })).toBeInTheDocument();
+    expect(screen.queryByText(/Image results:/)).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Verifying Unknown" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Cleanup pending Unknown" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Succeeded 0" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Publishing 0" })).not.toBeInTheDocument();
+    const href = screen.getByRole("link", { name: "Output unavailable 7" }).getAttribute("href")!;
+    const target = new URL(href, "https://example.test");
+    expect(Object.fromEntries(target.searchParams)).toEqual({ state: "output:unavailable", view: "trials" });
+
+    rerender(overview(true));
+    expect(screen.getByRole("link", { name: "Succeeded 0" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Submitting output 0" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Publishing 0" })).toBeInTheDocument();
+
+    rerender(overview(false, { ...summary, images: { ...summary.images, stages: undefined } }));
+    expect(screen.getByText("Image results: 12 ready · 2 failed.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Ready Unknown" })).toBeInTheDocument();
+  });
 });

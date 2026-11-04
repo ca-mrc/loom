@@ -27,6 +27,7 @@ export function TrialsView({
   stateFilter,
   batchId,
   batchSearch,
+  batchMonitorReturn,
   imageId,
   teamFilter,
   benchmarkFilter,
@@ -40,6 +41,7 @@ export function TrialsView({
   stateFilter: string;
   batchId?: string;
   batchSearch?: string;
+  batchMonitorReturn?: string;
   imageId?: string;
   teamFilter: string;
   benchmarkFilter: string;
@@ -52,6 +54,10 @@ export function TrialsView({
   const pagination = useUrlCursorPage();
   const page = pagination.state;
   const location = useLocation();
+  const returnUrl = location.pathname + location.search;
+  const returnState = batchMonitorReturn
+    ? { monitorReturn: batchMonitorReturn, batchReturn: returnUrl }
+    : { monitorReturn: returnUrl };
   const debouncedSearch = useDebouncedValue(search, 300);
 
   const polling = useAdaptivePolling({
@@ -179,7 +185,7 @@ export function TrialsView({
                       <td className="px-4 py-3">
                         <Link
                           to={`/trials/${t.id}`}
-                          state={{ monitorReturn: location.pathname + location.search }}
+                          state={returnState}
                           title="Open this trial's detail page, logs, and artifacts."
                           className="font-mono text-xs text-accent hover:text-accent-hover"
                         >
@@ -270,7 +276,7 @@ export function TrialsView({
                   </div>
                   <Link
                     to={`/trials/${group.firstTrialId}`}
-                    state={{ monitorReturn: location.pathname + location.search }}
+                    state={returnState}
                     className="text-sm font-medium text-accent hover:text-accent-hover"
                   >
                     Open {group.firstTrialId}

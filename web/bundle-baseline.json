@@ -4,6 +4,10 @@
     "gzipBytes": 81495
   },
   "routes": {
+    "src/components/DiagnosisCard.tsx": {
+      "bytes": 6337,
+      "gzipBytes": 2521
+    },
     "src/components/HelpDialog.tsx": {
       "bytes": 14890,
       "gzipBytes": 6461
@@ -76,6 +80,10 @@
       "bytes": 102266,
       "gzipBytes": 36934
     },
+    "src/pages/BatchTrials.tsx": {
+      "bytes": 21710,
+      "gzipBytes": 9069
+    },
     "src/pages/Benchmarks.tsx": {
       "bytes": 37845,
       "gzipBytes": 14009
@@ -107,6 +115,10 @@
     "src/pages/MonitorCapacityDetails.tsx": {
       "bytes": 49723,
       "gzipBytes": 16873
+    },
+    "src/pages/MonitorHealth.tsx": {
+      "bytes": 51374,
+      "gzipBytes": 18681
     },
     "src/pages/MonitorTrials.tsx": {
       "bytes": 50222,

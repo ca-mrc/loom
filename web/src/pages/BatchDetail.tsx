@@ -7,7 +7,7 @@ import { ProgressSummary } from "../components/ProgressSummary";
  * until its children, output transfer and execution cleanup settle.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { Link, useParams, useLocation } from "react-router-dom";
 
 import { api } from "../api";
@@ -20,7 +20,6 @@ import { Card } from "../components/Card";
 import { DestructiveActionDialog } from "../components/DestructiveActionDialog";
 import { Input } from "../components/Input";
 import { DebugEvidenceCard } from "../components/DebugEvidenceCard";
-import { DiagnosisCard } from "../components/DiagnosisCard";
 import { DiagnosticPanel } from "../components/DiagnosticPanel";
 import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
@@ -31,6 +30,7 @@ import { agentLabel } from "../lib/agentLabel";
 import { formatLocalDateTime } from "../lib/dateTime";
 import { humanizeTaskFilter } from "../lib/humanizeTaskFilter";
 import { humanizeTrialConfig } from "../lib/humanizeTrialConfig";
+import { lazyRoute } from "../lib/lazyRoute";
 import { modelLabel } from "../lib/modelLabel";
 import { networkPolicyGroupsLabel, networkPolicyLabel } from "../lib/networkPolicy";
 import { ownershipLabel } from "../lib/ownership";
@@ -44,6 +44,9 @@ import {
   usageCostStatus,
   usageEstimateConfidence,
 } from "../lib/usageCost";
+
+const BatchMonitoring = lazyRoute(() => import("./BatchTrials"));
+const DiagnosisCard = lazyRoute(async () => ({ default: (await import("../components/DiagnosisCard")).DiagnosisCard }));
 
 const ACTIVE_STATES = new Set(["submitted", "running", "cancelling"]);
 const TERMINAL_TRIAL_STATES = new Set(["succeeded", "failed", "cancelled"]);
@@ -322,6 +325,17 @@ export default function BatchDetail(): JSX.Element {
             </div>
           </div>
 
+        </Card.Body>
+      </Card>
+
+      <Suspense fallback={<LoadingState label="Loading batch resource usage and trials…" />}>
+        <BatchMonitoring batchId={c.id} monitorReturn={monitorReturn} active={needsRefresh(c)}
+          refreshInterval={polling.refetchInterval} />
+      </Suspense>
+
+      <Card>
+        <Card.Header title="Batch overview" />
+        <Card.Body className="stack-y-5">
           {c.combinations && c.combinations.length > 0 ? (
             <div className="flex flex-wrap gap-2">
               {c.combinations.map((combo, i) => {
@@ -417,7 +431,7 @@ export default function BatchDetail(): JSX.Element {
 
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4 lg:grid-cols-8">
             <StatCard
-              label="Owner"
+              label="Batch owner"
               value={ownershipLabel(c)}
             />
             <StatCard
@@ -683,13 +697,17 @@ export default function BatchDetail(): JSX.Element {
         </Card.Body>
       </Card>
 
-      <DiagnosisCard
-        diagnosis={diagnosis}
-        onRerunFailed={
-          rerunnableFailedCount > 0 ? () => rerunFailed.mutate() : undefined
-        }
-        rerunDisabled={rerunFailed.isPending}
-      />
+      {diagnosis ? (
+        <Suspense fallback={<LoadingState label="Loading diagnosis…" />}>
+          <DiagnosisCard
+            diagnosis={diagnosis}
+            onRerunFailed={
+              rerunnableFailedCount > 0 ? () => rerunFailed.mutate() : undefined
+            }
+            rerunDisabled={rerunFailed.isPending}
+          />
+        </Suspense>
+      ) : null}
       <DebugEvidenceCard evidence={debugEvidence} />
 
       {showBenchmarkSummary ? (
@@ -801,10 +819,10 @@ export default function BatchDetail(): JSX.Element {
               </div>
             </details>
             <Link
-              to={`/monitor?view=trials&batch_id=${c.id}`}
+              to="/monitor?view=capacity"
               className="inline-block text-sm font-medium text-accent hover:text-accent-hover"
             >
-              Follow live capacity, retries, and scale-to-zero →
+              View shared pool capacity →
             </Link>
           </Card.Body>
         </Card>
@@ -863,15 +881,6 @@ export default function BatchDetail(): JSX.Element {
             </div>
           </Card.Body>
         </details>
-        <div className="border-t border-slate-200 px-5 py-3">
-          <Link
-            to={`/monitor?view=trials&batch_id=${c.id}`}
-            className="text-sm font-medium text-accent hover:text-accent-hover"
-            title="Open the Monitor filtered to this batch's trials."
-          >
-            Open in Monitor →
-          </Link>
-        </div>
       </Card>
 
       <Card>

@@ -201,6 +201,64 @@ async def test_native_usage_owner_reads_keep_identity_and_aggregate_once(
             assert body["aggregate"]["pod_ephemeral_storage_sampled_max_sum_bytes"] == 50
             assert body["aggregate"]["telemetry_status"] == "partial"
 
+        second_id = uuid4()
+        now = datetime.now(UTC)
+        try:
+            async with native_usage["sessions"]() as session, session.begin():
+                first_trial = await session.get(Trial, native_usage["trial_id"])
+                assert first_trial is not None
+                session.add(
+                    Trial(
+                        id=second_id,
+                        team_id=first_trial.team_id,
+                        task_id=first_trial.task_id,
+                        batch_id=first_trial.batch_id,
+                        config={},
+                        requires_caps={},
+                        state="running",
+                        worker_id=native_usage["worker_id"],
+                        attempt_count=1,
+                    )
+                )
+                await session.flush()
+                report = TrialResourceUsageReport(
+                    trial_id=second_id,
+                    worker_id=native_usage["worker_id"],
+                    attempt_count=1,
+                    execution_key="f" * 64,
+                    container_role="agent",
+                    role_name="primary",
+                    backend="docker",
+                    source="docker_stats",
+                    observation_seq=1,
+                    first_observed_at=now,
+                    last_observed_at=now,
+                    completeness="partial",
+                    counters=ResourceCounters(cpu_usage_usec=0, memory_sampled_max_bytes=70),
+                )
+                session.add(TrialResourceUsage(**report_values(report, lifecycle_authority_id=None)))
+            summary_path = f"/api/v1/batches/{native_usage['batch_id']}/resource-usage/summary"
+            summary = await client.get(
+                summary_path, headers={"Authorization": f"Bearer {native_usage['team_token']}"}
+            )
+            denied = await client.get(
+                summary_path, headers={"Authorization": f"Bearer {native_usage['other_token']}"}
+            )
+            assert denied.status_code == 403
+            assert summary.status_code == 200
+            result = summary.json()
+            assert datetime.fromisoformat(result.pop("last_observed_at")) == now
+            assert result == {
+                "cpu_usage_usec": 40,
+                "largest_trial_memory_peak_bound_bytes": 70,
+                "largest_trial_disk_peak_bound_bytes": 50,
+                "sampled_trial_count": 2,
+                "trial_count": 2,
+            }
+        finally:
+            async with native_usage["sessions"]() as session, session.begin():
+                await session.execute(delete(Trial).where(Trial.id == second_id))
+
 
 async def test_native_usage_delivery_ledger_roundtrips_persisted_samples(
     native_usage: dict[str, Any],

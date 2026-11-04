@@ -37,7 +37,8 @@ def test_primary_observer_is_node_local_and_actor_reads_its_snapshots(platform_i
     assert security["allowPrivilegeEscalation"] is False and security["readOnlyRootFilesystem"] is True
     assert security["capabilities"] == {"drop": ["ALL"], "add": ["DAC_READ_SEARCH"]}
     assert {v["hostPath"]["path"] for v in pod["volumes"] if "hostPath" in v} == {
-        "/run/containerd/containerd.sock", "/var/log/pods", "/var/lib/kubelet/pods"}
+        "/run/containerd/containerd.sock", "/var/log/pods", "/var/lib/kubelet/pods",
+        "/proc/stat", "/proc/meminfo"}
     assert all(m["readOnly"] for m in container["volumeMounts"])
     env = {x["name"]: x.get("value") for x in container["env"]}
     assert env["LOOM_RESOURCE_OBSERVER_EXECUTION_NAMESPACE"] == config["execution_namespace"]
@@ -45,7 +46,15 @@ def test_primary_observer_is_node_local_and_actor_reads_its_snapshots(platform_i
     actor = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-execution-actuator")
     assert {x["name"]: x.get("value") for x in actor["spec"]["template"]["spec"]["containers"][0]["env"]}["LOOM_EXECUTION_ACTUATOR_RESOURCE_OBSERVATION_NAMESPACE"] == namespace
     bindings = [d for d in docs if d["kind"] == "RoleBinding" and d["metadata"].get("namespace") == namespace]
-    assert any(b["subjects"] == [{"kind": "ServiceAccount", "name": "loom-execution-actuator", "namespace": config["execution_namespace"]}] for b in bindings)
+    reader = next(b for b in bindings if b["metadata"]["name"] == NAME + "-reader")
+    assert reader["subjects"] == [
+        {"kind": "ServiceAccount", "name": name, "namespace": config["execution_namespace"]}
+        for name in ("loom-execution-actuator", "loom-execution-capacity-collector")
+    ]
+    read_role = next(d for d in docs if d["kind"] == "Role" and d["metadata"]["name"] == reader["roleRef"]["name"])
+    assert read_role["rules"] == [{"apiGroups": [""], "resources": ["configmaps", "pods"], "verbs": ["get"]}]
+    collector = next(d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "loom-execution-capacity-collector")
+    assert collector["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_RESOURCE_OBSERVATION_NAMESPACE"] == namespace
     policy = next(d for d in docs if d["kind"] == "NetworkPolicy" and d["metadata"].get("namespace") == namespace)
     assert policy["spec"]["ingress"] == []
     assert policy["spec"]["egress"] == [{"to": [{"ipBlock": {"cidr": "192.0.2.10/32"}}], "ports": [{"protocol": "TCP", "port": 443}]}]
@@ -64,7 +73,12 @@ def test_regional_observer_never_moves_to_primary_or_uses_primary_sa(regional_in
     assert observer["metadata"] == {"name": NAME, "namespace": namespace, "labels": {"app.kubernetes.io/name": NAME}}
     assert not [d for d in primary if d["metadata"].get("namespace") == namespace]
     reader = next(d for d in remote if d["kind"] == "RoleBinding" and d["metadata"].get("namespace") == namespace and d["metadata"]["name"].endswith("-reader"))
-    assert reader["subjects"] == [{"kind": "User", "apiGroup": "rbac.authorization.k8s.io", "name": target["service_account_ids"]["actuator"]}]
+    assert reader["subjects"] == [
+        {"kind": "User", "apiGroup": "rbac.authorization.k8s.io", "name": target["service_account_ids"][role]}
+        for role in ("actuator", "collector")
+    ]
+    collector = next(d for d in primary if d["kind"] == "ConfigMap" and d["metadata"]["name"] == target["target_id"] + "-collector")
+    assert collector["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_RESOURCE_OBSERVATION_NAMESPACE"] == namespace
     account = next(d for d in remote if d["kind"] == "ServiceAccount" and d["metadata"].get("namespace") == namespace)
     assert account["metadata"]["name"] == NAME
     producer = next(d for d in remote if d["kind"] == "RoleBinding" and d["metadata"].get("namespace") == namespace and d["metadata"]["name"] == NAME)

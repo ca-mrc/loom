@@ -261,7 +261,20 @@ async def test_service_read_surface_enforces_team_and_reports_legacy_absence(
             f"/api/v1/batches/{batch_id}/resource-usage",
             headers={"Authorization": f"Bearer {resource_seed['team_token']}"},
         )
+        summary = await client.get(
+            f"/api/v1/batches/{batch_id}/resource-usage/summary",
+            headers={"Authorization": f"Bearer {resource_seed['team_token']}"},
+        )
     await engine.dispose()
+    assert summary.status_code == 200
+    assert summary.json() == {
+        "cpu_usage_usec": None,
+        "largest_trial_memory_peak_bound_bytes": None,
+        "largest_trial_disk_peak_bound_bytes": None,
+        "sampled_trial_count": 0,
+        "trial_count": 1,
+        "last_observed_at": None,
+    }
     assert own.status_code == 200
     assert own.json()["items"] == []
     assert own.json()["aggregate"]["telemetry_status"] == "unavailable"

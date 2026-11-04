@@ -2,12 +2,11 @@ import { clearCursorParams } from "../hooks/useUrlCursorPage";
 import { queryKeys } from "../api/queryKeys";
 import { useQuery } from "@tanstack/react-query";
 import { Suspense, useEffect, useRef, useState } from "react";
-import { useLocation, useNavigationType, useSearchParams } from "react-router-dom";
+import { Link, Navigate, useLocation, useNavigationType, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth/useAuth";
 import { Input } from "../components/Input";
-import { SegmentedToggle } from "./MonitorControls";
-import { MonitorHealthSummary } from "./MonitorHealth";
+import MonitorResourceTrends from "./MonitorResourceTrends";
 import { BATCH_STATE_OPTIONS, stateOptionLabel, TRIAL_STATE_OPTIONS, type View } from "./monitorPresentation";
 
 import { lazyRoute } from "../lib/lazyRoute";
@@ -15,13 +14,27 @@ import LoadingState from "../components/LoadingState";
 
 const BatchesView = lazyRoute(async () => ({ default: (await import("./MonitorBatches")).BatchesView }));
 const TrialsView = lazyRoute(async () => ({ default: (await import("./MonitorTrials")).TrialsView }));
+const MonitorHealthSummary = lazyRoute(async () => ({ default: (await import("./MonitorHealth")).MonitorHealthSummary }));
 
 export default function Monitor(): JSX.Element {
+  const [params] = useSearchParams();
+  const location = useLocation();
+  const batchId = params.get("batch_id");
+  if (params.get("view") === "trials" && batchId) {
+    const next = new URLSearchParams(params);
+    next.delete("view");
+    next.delete("batch_id");
+    next.set("tab", "trials");
+    return <Navigate replace to={`/batches/${encodeURIComponent(batchId)}?${next}#batch-trials`} state={location.state} />;
+  }
+  return <MonitorView />;
+}
+
+function MonitorView(): JSX.Element {
   const [searchParams, setSearchParams] = useSearchParams();
   const auth = useAuth();
-  const capacity = ["capacity", "resources"].includes(searchParams.get("view") ?? "");
+  const expandCapacity = ["capacity", "resources"].includes(searchParams.get("view") ?? "");
   const view: View = searchParams.get("view") === "trials" ? "trials" : "batches";
-  const batchIdFilter = searchParams.get("batch_id") ?? undefined;
   const batchSearch = searchParams.get("batch_q") ?? undefined;
   const imageId = searchParams.get("image_id") ?? undefined;
   const search = searchParams.get("q") ?? "";
@@ -40,6 +53,11 @@ export default function Monitor(): JSX.Element {
       if (pendingQueries.current.length === 0) setSearchDraft(search);
     }
   }, [location.key, navigationType, search, searchParams]);
+  useEffect(() => {
+    if (location.hash === "#monitor-batches") {
+      document.getElementById("monitor-batches")?.scrollIntoView?.({ block: "start" });
+    }
+  }, [location.key, location.hash]);
   const stateFilter = searchParams.get("state") ?? "";
   const teamFilter = searchParams.get("team_id") ?? "";
   const benchmarkFilter = searchParams.get("benchmark_id") ?? "";
@@ -84,32 +102,25 @@ export default function Monitor(): JSX.Element {
     navigateParams(next);
   };
 
-  const setView = (v: View | "capacity"): void => {
-    const next = draftParams();
-    clearCursorParams(next);
-    next.set("view", v);
-    next.delete("state");
-    if (v === "batches") {
-      next.delete("batch_q");
-      next.delete("image_id");
-      next.delete("batch_id");
-    }
-    navigateParams(next);
-  };
-
   const stateOptions = view === "batches" ? BATCH_STATE_OPTIONS : TRIAL_STATE_OPTIONS;
 
   return (
-    <div className="stack-y-6">
-      <header className="flex flex-wrap items-end justify-between gap-4">
+    <div className="stack-y-5">
+      <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Monitor</h1>
-          <p className="mt-1 text-sm text-slate-500">Live-updating view of your batches and trials.</p>
+          <h1 className="text-2xl font-bold text-slate-900">{view === "batches" ? "Monitor" : "Trials"}</h1>
+          <p className="mt-1 text-sm text-slate-500">
+            {view === "batches" ? "Shared pool usage and batch activity." : "Trial results across accessible batches."}
+          </p>
         </div>
-        <SegmentedToggle value={capacity ? "capacity" : view} onChange={setView} />
+        {view === "trials" ? <Link to="/monitor" className="text-sm font-medium text-accent">Back to batches</Link> : null}
       </header>
 
-      <div className="flex flex-wrap items-center gap-3">
+      {view === "batches" ? <MonitorResourceTrends key={String(expandCapacity)} initiallyExpanded={expandCapacity} /> : null}
+      <section id={view === "batches" ? "monitor-batches" : undefined} className="stack-y-3"
+        aria-label={view === "batches" ? "Batch activity" : "Trial results"}>
+      {view === "batches" ? <h2 className="text-lg font-semibold text-slate-900">Batches</h2> : null}
+      <div className="flex flex-wrap items-center gap-2">
         <Input
           value={searchDraft}
           onChange={(e) => updateParam("q", e.target.value)}
@@ -161,7 +172,7 @@ export default function Monitor(): JSX.Element {
             </select>
           </label>
         ) : null}
-        <details className="w-full rounded-lg border border-slate-200 p-3">
+        <details className="rounded-lg border border-slate-200 px-3 py-2 open:w-full">
           <summary className="cursor-pointer text-sm font-medium">Advanced filters</summary>
           <div className="mt-3 flex flex-wrap gap-3">
         <Input
@@ -221,19 +232,6 @@ export default function Monitor(): JSX.Element {
             </button>
           ))}
         </div>
-        {view === "trials" && batchIdFilter ? (
-          <span className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700">
-            batch_id = <code className="font-mono">{batchIdFilter.slice(0, 8)}</code>
-            <button
-              type="button"
-              className="ml-2 text-slate-500 hover:text-slate-900"
-              title="Remove this batch_id filter and show trials from all batches."
-              onClick={() => updateParam("batch_id", "")}
-            >
-              clear
-            </button>
-          </span>
-        ) : null}
         {[["batch_q", batchSearch, "Batch search"], ["image_id", imageId, "Shared image"]].map(([key, value, label]) => value ? (
           <span key={key} className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700">
             {label}: {key === "image_id" ? value.slice(0, 8) : value}
@@ -242,8 +240,8 @@ export default function Monitor(): JSX.Element {
         ) : null)}
       </div>
 
-      <MonitorHealthSummary
-        compact={!capacity}
+      {view === "trials" ? <Suspense fallback={<LoadingState label="Loading Trial progress…" />}><MonitorHealthSummary
+        compact
         view={view}
         search={search}
         stateFilter={stateFilter}
@@ -254,13 +252,12 @@ export default function Monitor(): JSX.Element {
         modelNameFilter={modelNameFilter}
         providerConnectionFilter={providerConnectionFilter}
         providerModelFilter={providerModelFilter}
-        batchId={batchIdFilter}
         batchSearch={batchSearch}
         imageId={imageId}
-      />
+      /></Suspense> : null}
 
       <Suspense fallback={<LoadingState label="Loading monitor view…" />}>
-      {capacity ? null : view === "batches" ? (
+      {view === "batches" ? (
         <BatchesView
           search={search}
           stateFilter={stateFilter}
@@ -276,7 +273,6 @@ export default function Monitor(): JSX.Element {
         <TrialsView
           search={search}
           stateFilter={stateFilter}
-          batchId={batchIdFilter}
           batchSearch={batchSearch}
           imageId={imageId}
           teamFilter={teamFilter}
@@ -289,6 +285,7 @@ export default function Monitor(): JSX.Element {
         />
       )}
       </Suspense>
+      </section>
     </div>
   );
 }

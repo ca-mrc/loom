@@ -215,6 +215,70 @@ class CapacityTargetScopeV1(BaseModel):
         return self
 
 
+class ResourceUsageAmount(BaseModel):
+    """One measured quantity and its corresponding physical total."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    used: float = Field(ge=0, allow_inf_nan=False)
+    total: float = Field(gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _bounded_usage(self) -> ResourceUsageAmount:
+        if self.used > self.total:
+            raise ValueError("resource use exceeds its measured total")
+        return self
+
+
+class NodeHostUsage(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    sampled_at: AwareDatetime
+    cpu: ResourceUsageAmount | None = None
+    memory: ResourceUsageAmount | None = None
+    disk: ResourceUsageAmount | None = None
+
+    @field_validator("sampled_at", mode="before")
+    @classmethod
+    def _stored_time(cls, value: Any) -> Any:
+        return datetime.fromisoformat(value) if isinstance(value, str) else value
+
+
+class PoolResourceMeasurement(ResourceUsageAmount):
+    sampled_at: AwareDatetime
+    covered_nodes: int = Field(gt=0)
+    ready_nodes: int = Field(gt=0)
+
+    @field_validator("sampled_at", mode="before")
+    @classmethod
+    def _stored_time(cls, value: Any) -> Any:
+        return datetime.fromisoformat(value) if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def _bounded_coverage(self) -> PoolResourceMeasurement:
+        if self.covered_nodes > self.ready_nodes:
+            raise ValueError("resource samples exceed the ready node inventory")
+        return self
+
+
+class PoolResourceUsage(BaseModel):
+    """Optional capacity-owner measurements, independent of admission inputs."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    ready_nodes: int = Field(ge=0)
+    cpu: PoolResourceMeasurement | None = None
+    memory: PoolResourceMeasurement | None = None
+    disk: PoolResourceMeasurement | None = None
+
+    @model_validator(mode="after")
+    def _match_ready_inventory(self) -> PoolResourceUsage:
+        if any(sample is not None and sample.ready_nodes != self.ready_nodes
+               for sample in (self.cpu, self.memory, self.disk)):
+            raise ValueError("resource samples disagree on the ready node inventory")
+        return self
+
+
 class CapacityPlacement(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -342,6 +406,7 @@ class CapacityObservationV1(BaseModel):
     image_pull_backoff_jobs: int = Field(ge=0)
     pending_reasons: dict[str, int]
     placement: CapacityPlacement | None = None
+    resource_usage: PoolResourceUsage | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class CapacityObservationReceipt(BaseModel):

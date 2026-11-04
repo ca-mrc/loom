@@ -136,10 +136,18 @@ test("Batch run plan explains TaskSet purpose, task count and state-count naviga
   await expect(page.getByText("Unrecognized field: task_set_ids")).toHaveCount(0);
   await page.getByText("Trial counts by state", { exact: true }).click();
   await expect(page.getByRole("table", { name: "Trial states", exact: true })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Open in Monitor →" })).toHaveAttribute("href", `${browserHarness.routePrefix}/monitor?view=trials&batch_id=review-batch`);
+  await expect(page.getByRole("table", { name: "Trials", exact: true })).toBeVisible();
+  await expect(page.getByRole("searchbox", { name: "Search trials in this batch" })).toBeVisible();
   const violations = (await new AxeBuilder({ page }).analyze()).violations.filter((item) => item.impact === "critical" || item.impact === "serious" || item.id === "heading-order" || item.id === "target-size");
   expect(violations).toEqual([]);
   await page.screenshot({ path: testInfo.outputPath("batch-run-plan.png") });
+  const trialSearch = page.getByRole("searchbox", { name: "Search trials in this batch" });
+  await trialSearch.click();
+  await trialSearch.pressSequentially("review");
+  await expect(trialSearch).toHaveValue("review");
+  await expect(trialSearch).toBeFocused();
+  await expect(trialSearch).toBeInViewport();
+  await expect(page).toHaveURL(/\?tab=trials&q=review#batch-trials$/);
 });
 
 test("Batch trial badges match expanded counts when execution attempts differ", async ({ apiHarness, browserHarness, page }) => {

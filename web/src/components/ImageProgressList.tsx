@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { api } from "../api";
 import { queryKeys } from "../api/queryKeys";
+import { clearCursorParams } from "../hooks/useUrlCursorPage";
 import { imageStageLabels, phaseDuration } from "../lib/trialProgress";
 import ErrorState from "./ErrorState";
 import LoadingState from "./LoadingState";
@@ -13,6 +14,23 @@ export default function ImageProgressList({ scope, stage }: {
   scope: Record<string, string | undefined>; stage: string;
 }): JSX.Element {
   const [page, setPage] = useState(initialPage);
+  const location = useLocation();
+  const inBatch = scope.batch_id !== undefined && location.pathname === `/batches/${scope.batch_id}`;
+  const affectedTrialLink = (imageId: string): string => {
+    if (inBatch) {
+      const next = new URLSearchParams(location.search);
+      clearCursorParams(next);
+      next.set("tab", "trials");
+      next.set("image_id", imageId);
+      next.delete("state");
+      return `${location.pathname}?${next}#batch-trials`;
+    }
+    return `/monitor?${new URLSearchParams({
+      ...Object.fromEntries(Object.entries(scope).filter((entry): entry is [string, string] => entry[1] !== undefined && entry[0] !== "view" && entry[0] !== "q")),
+      view: "trials", image_id: imageId,
+      ...(scope.q ? { [scope.view === "batches" ? "batch_q" : "q"]: scope.q } : {}),
+    })}`;
+  };
   const params = { ...scope, stage, cursor: page.current ?? undefined, limit: "50" };
   const query = useQuery({
     queryKey: queryKeys["monitor-images"](params),
@@ -32,11 +50,7 @@ export default function ImageProgressList({ scope, stage }: {
               <td className="p-2"><p>{imageStageLabels[item.stage] ?? "Unknown"}</p>
                 {item.stage === "cleanup" && ["failed", "ready"].includes(item.state) ? <p>Image result: {item.state}</p> : null}
                 {item.wait_message ? <p className="mt-1">{item.wait_message}</p> : null}</td>
-              <td className="p-2"><Link className="underline" to={`/monitor?${new URLSearchParams({
-                ...Object.fromEntries(Object.entries(scope).filter((entry): entry is [string, string] => entry[1] !== undefined && entry[0] !== "view" && entry[0] !== "q")),
-                view: "trials", image_id: item.id,
-                ...(scope.q ? { [scope.view === "batches" ? "batch_q" : "q"]: scope.q } : {}),
-              })}`}>{item.affected_trials} trials</Link><p>{item.waiting_trials} waiting for image</p></td>
+              <td className="p-2"><Link className="underline" to={affectedTrialLink(item.id)} state={inBatch ? location.state : undefined}>{item.affected_trials} trials</Link><p>{item.waiting_trials} waiting for image</p></td>
               <td className="p-2 tabular-nums">{phaseDuration(item.stage_seconds)}</td>
               <td className="p-2">{item.region ?? "Unknown"}</td>
               <td className="p-2">{item.observation_missing ? "Unavailable" : item.observation_stale ? "Stale at last refresh" : "Current at last refresh"}

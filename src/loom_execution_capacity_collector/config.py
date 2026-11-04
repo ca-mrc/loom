@@ -66,6 +66,9 @@ class ExecutionCapacityCollectorSettings(NebiusCapacitySourceSettings):
     node_label_selector: str = Field(min_length=1, max_length=500)
     control_plane_url: str = Field(pattern=r"^https?://")
     control_plane_bearer_token_file: Path
+    resource_observation_namespace: str | None = Field(
+        default=None, pattern=r"^[a-z0-9][a-z0-9-]{0,49}-observations$",
+    )
     source: str = Field(default="nebius-kubernetes-capacity-collector", min_length=1, max_length=120)
     request_attempts: int = Field(default=3, ge=1, le=5)
 

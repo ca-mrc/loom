@@ -1,4 +1,4 @@
-import { useSearchParams } from "react-router-dom";
+import { useLocation, useSearchParams } from "react-router-dom";
 import { initialPage, nextPage, prevPage, type PageState } from "../components/paginationState";
 
 export interface CursorPageController {
@@ -18,6 +18,7 @@ export function clearCursorParams(params: URLSearchParams): void {
 /** Keep list position in the URL so reload, history and detail returns agree. */
 export function useUrlCursorPage(): CursorPageController {
   const [params, setParams] = useSearchParams();
+  const { state: navigationState } = useLocation();
   let stack: (string | null)[] = [];
   try {
     const parsed: unknown = JSON.parse(params.get("cursor_history") ?? "[]");
@@ -30,7 +31,7 @@ export function useUrlCursorPage(): CursorPageController {
     clearCursorParams(values);
     if (next.current) values.set("cursor", next.current);
     if (next.stack.length) values.set("cursor_history", JSON.stringify(next.stack));
-    setParams(values);
+    setParams(values, { state: navigationState });
   }
   return { state, cursor: state.current, next: (cursor) => update(nextPage(state, cursor)), prev: () => update(prevPage(state)), reset: () => update(initialPage) };
 }

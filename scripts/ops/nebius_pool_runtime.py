@@ -407,7 +407,7 @@ retained for the existing two-file initializer, but now holds observer authority
             raise ValueError
         supplied = {key.removeprefix(prefix).lower(): value for key, value in config_map["data"].items()}
         legacy = {"target_id", "pool_id", "namespace", "node_label_selector", "control_plane_url", "source",
-            "request_attempts", "build_concurrency_limit"}
+            "request_attempts", "build_concurrency_limit", "resource_observation_namespace"}
         cadence = set(CapacityCollectorModeSettings.model_fields) - {"collection_mode"}
         if ("collection_mode" in supplied or not set(supplied) <= set(PoolCapacityCollectorSettings.model_fields) | legacy | cadence
                 or {"management_url", "management_bearer_token_file"} & set(supplied)):

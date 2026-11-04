@@ -338,6 +338,46 @@ class MonitorPlacement(TypedDict):
     nodes: list[MonitorPlacementNodesItem]
 
 
+class MonitorTrendPool(TypedDict):
+    target_id: str
+    pool_id: str
+    region: str
+
+
+class MonitorTrendPoint(TypedDict):
+    timestamp: str
+    value: float | None
+
+
+class MonitorTrendLatest(TypedDict):
+    used: float
+    total: float
+
+
+class MonitorTrendMetric(TypedDict):
+    status: Literal["live", "stale", "unavailable"]
+    last_sample_at: str | None
+    points: list[MonitorTrendPoint]
+    latest: MonitorTrendLatest | None
+    covered_nodes: int | None
+    ready_nodes: int | None
+
+
+class MonitorTrendMetrics(TypedDict):
+    cpu: MonitorTrendMetric
+    memory: MonitorTrendMetric
+    disk: MonitorTrendMetric
+
+
+class MonitorResourceTrends(TypedDict):
+    pools: list[MonitorTrendPool]
+    target_id: str | None
+    window: Literal["15m", "1h", "24h"]
+    step_seconds: int
+    generated_at: str
+    metrics: MonitorTrendMetrics
+
+
 @with_config(ConfigDict(extra="allow"))
 class TrialList(TypedDict):
     items: list[Trial]
