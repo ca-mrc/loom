@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any
+from typing import Any, NoReturn
 
 from loom.db.schema import Trial
 from loom_service.delivery_export_native_verifier import resolve_native_verifier_artifacts
@@ -101,7 +101,7 @@ def resolve_committed_agent_artifacts(
     runtime = trial.result["runtime_result"]
     resolved: dict[str, bytes] = {}
 
-    def fail(message: str) -> None:
+    def fail(message: str) -> NoReturn:
         raise Tb2V2ExportError("invalid_native_artifact", {
             "message": message, "trial_id": str(trial.id),
         })
@@ -128,10 +128,9 @@ def resolve_committed_agent_artifacts(
         if row.get("share_status") not in (None, "shared") or row.get("blocked_reason"):
             fail("native file is share-blocked")
         size, digest = row.get("size_bytes"), row.get("sha256")
-        if (
-            isinstance(size, bool) or not isinstance(size, int) or size < 0
-            or size != output.get("size_bytes") or digest != output.get("sha256")
-        ):
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            fail("native index differs from committed runtime output")
+        if size != output.get("size_bytes") or digest != output.get("sha256"):
             fail("native index differs from committed runtime output")
         data = _fetch_bounded_verifier_artifact(
             client, bucket=artifacts_bucket, key=row["key"], indexed_size=size,
