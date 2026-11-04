@@ -426,20 +426,21 @@ def _upstream_error_code(resp: httpx.Response) -> str | None:
 
 async def preflight_model(
     provider_type: str, base_url: str, api_key: str, model_id: str,
-    *, _client_factory: object = None,
+    *, _client_factory: object = None, require_wire_response: bool = False,
 ) -> ModelPreflightResult:
     """Probe whether this connection/key can call one concrete model.
 
     This is deliberately single-model and bounded: no catalog-wide probing,
-    no streaming, one token max. Any 2xx counts as valid; provider-specific
-    response validation is intentionally out of scope because entitlement is
-    already proven when the upstream accepts the generation request.
+    no streaming, and a small token budget. Legacy entitlement probes accept
+    2xx. Route verification additionally checks the response dialect.
     """
     import httpx
 
     base, path, headers, body = _preflight_base_path_headers_body(
         provider_type, base_url, api_key, model_id,
     )
+    if require_wire_response:
+        body["max_tokens"] = 8
     if _client_factory is None:
         client_cm = httpx.AsyncClient(
             base_url=base,
@@ -491,6 +492,21 @@ async def preflight_model(
         )
 
     if 200 <= resp.status_code < 300:
+        if require_wire_response:
+            try:
+                response = resp.json()
+            except ValueError:
+                response = None
+            is_message = (
+                isinstance(response, dict) and response.get("type") == "message"
+                and isinstance(response.get("content"), list)
+            )
+            is_chat = isinstance(response, dict) and isinstance(response.get("choices"), list)
+            if not (is_message if provider_type == "anthropic" else is_chat):
+                return ModelPreflightResult(
+                    status="failed", http_status=resp.status_code,
+                    error_code="unexpected-wire-response", error_message=None,
+                )
         return ModelPreflightResult(
             status="valid",
             http_status=resp.status_code,

@@ -344,6 +344,7 @@ def test_orm_models_match_migration_schema(postgres_url: str) -> None:
         "rate_card_provider", "created_by", "deleted_at", "created_at",
         "updated_at", "responses_api_supported", "responses_api_probed_at",
         "responses_api_probe_error", "pricing_config", "max_in_flight",
+        "alternate_route",
     }
     actual_pc_cols = {c.name for c in ProviderConnection.__table__.columns}
     assert actual_pc_cols == expected_pc_cols, (

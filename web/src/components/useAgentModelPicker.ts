@@ -172,9 +172,15 @@ export function useAgentModelPicker({
   const connectionList = useMemo(
     () =>
       (providerConnections.data?.items ?? [])
-        .filter((c) => compatibilityAgent?.supported_connection_types
-          ? compatibilityAgent.supported_connection_types.includes(c.type)
-          : OPENAI_SHAPED_CONNECTION_TYPES.has(c.type))
+        .filter((c) => {
+          const supported = compatibilityAgent?.supported_connection_types;
+          if (supported ? supported.includes(c.type) : OPENAI_SHAPED_CONNECTION_TYPES.has(c.type)) {
+            return true;
+          }
+          return compatibilityAgent?.runtime_contract?.endpoint_dialect === "openai_chat" &&
+            c.alternate_route?.protocol === "openai_chat" &&
+            Object.values(c.alternate_route.verified_models).some(Boolean);
+        })
         .sort((a, b) => a.name.localeCompare(b.name)),
     [providerConnections.data, compatibilityAgent],
   );
@@ -202,9 +208,12 @@ export function useAgentModelPicker({
     return (models.data?.items ?? []).filter(
       (m) =>
         m.provider_connection_id === value.providerConnectionId &&
-        (allowed === null || allowed.has(m.provider)),
+        (allowed === null || allowed.has(m.provider)) &&
+        (selectedConnection?.alternate_route?.protocol !== "openai_chat" ||
+          compatibilityAgent?.name === "claude-code" ||
+          selectedConnection.alternate_route.verified_models[m.name] === true),
     );
-  }, [models.data, compatibilityAgent, value.providerConnectionId]);
+  }, [models.data, compatibilityAgent, selectedConnection, value.providerConnectionId]);
 
   const selectedCatalogModel = useMemo(() => {
     if (!value.modelProvider || !value.modelName) return undefined;

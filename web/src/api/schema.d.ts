@@ -2106,6 +2106,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/provider-connections/{connection_id}/routes/{protocol}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Configure Alternate Route */
+        put: operations["configure_alternate_route_api_v1_provider_connections__connection_id__routes__protocol__put"];
+        post?: never;
+        /** Delete Alternate Route */
+        delete: operations["delete_alternate_route_api_v1_provider_connections__connection_id__routes__protocol__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/provider-connections/{connection_id}/routes/{protocol}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Test Alternate Route */
+        post: operations["test_alternate_route_api_v1_provider_connections__connection_id__routes__protocol__test_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/provider-connections/{connection_id}/shares": {
         parameters: {
             query?: never;
@@ -3018,6 +3053,20 @@ export interface components {
              * @enum {string}
              */
             kind: "allowlist";
+        };
+        /** AlternateProviderRoute */
+        AlternateProviderRoute: {
+            /** Base Url */
+            base_url: string;
+            /**
+             * Protocol
+             * @enum {string}
+             */
+            protocol: "openai_chat" | "anthropic_messages";
+            /** Verified Models */
+            verified_models?: {
+                [key: string]: boolean;
+            };
         };
         /** ArtifactInventory */
         ArtifactInventory: {
@@ -6454,6 +6503,7 @@ export interface components {
         ProviderConnectionResponse: {
             /** Allowed Models */
             allowed_models: string[] | null;
+            alternate_route?: components["schemas"]["AlternateProviderRoute"] | null;
             /** Base Url */
             base_url: string;
             /** Catalog Id */
@@ -6670,6 +6720,30 @@ export interface components {
             missing: number;
             /** Refreshed */
             refreshed: number;
+        };
+        /** ProviderRouteResult */
+        ProviderRouteResult: {
+            /** Error Code */
+            error_code: string | null;
+            /** Http Status */
+            http_status: number | null;
+            /** Model */
+            model: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "valid" | "failed";
+        };
+        /** ProviderRouteTest */
+        ProviderRouteTest: {
+            /** Model */
+            model: string;
+        };
+        /** ProviderRouteUpdate */
+        ProviderRouteUpdate: {
+            /** Base Url */
+            base_url: string;
         };
         /** Public */
         Public: {
@@ -14002,6 +14076,119 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RequestPoolResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    configure_alternate_route_api_v1_provider_connections__connection_id__routes__protocol__put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-loom-admin-actor"?: string | null;
+                authorization?: string | null;
+            };
+            path: {
+                connection_id: string;
+                protocol: "openai_chat" | "anthropic_messages";
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProviderRouteUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderConnectionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_alternate_route_api_v1_provider_connections__connection_id__routes__protocol__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-loom-admin-actor"?: string | null;
+                authorization?: string | null;
+            };
+            path: {
+                connection_id: string;
+                protocol: "openai_chat" | "anthropic_messages";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderConnectionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    test_alternate_route_api_v1_provider_connections__connection_id__routes__protocol__test_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-loom-admin-actor"?: string | null;
+                authorization?: string | null;
+            };
+            path: {
+                connection_id: string;
+                protocol: "openai_chat" | "anthropic_messages";
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProviderRouteTest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderRouteResult"];
                 };
             };
             /** @description Validation Error */

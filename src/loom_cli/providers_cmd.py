@@ -92,6 +92,10 @@ def _print_connection_summary(item: dict[str, Any]) -> None:
     print(f"upstream_host: {item['upstream_host']}")
     print(f"resolved_ips:  {', '.join(item['resolved_egress_ips']) or '(none yet)'}")
     print(f"status:        {item['status']}")
+    if route := item.get("alternate_route"):
+        print(f"alternate:     {route['protocol']} {route['base_url']}")
+        for model, verified in sorted(route["verified_models"].items()):
+            print(f"  {model}: {'valid' if verified else 'failed'}")
     print(f"pricing:       {item.get('pricing_mode', 'usage_only')}")
     if item.get("catalog_id"):
         print(f"catalog:       {item['catalog_id']}")
@@ -651,6 +655,30 @@ def _test(args: argparse.Namespace) -> int:
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _route(args: argparse.Namespace) -> int:
+    def _body() -> int:
+        with authed_client(require_logged_in()) as client:
+            row = _resolve_by_name(client, args.name)
+            path = f"/api/v1/provider-connections/{row['id']}/routes/{args.protocol}"
+            headers, error = _optional_admin_actor_headers(args)
+            if error is not None:
+                return error
+            if args.base_url:
+                response = client.put(path, json={"base_url": args.base_url}, headers=headers)
+            elif args.test_model:
+                response = client.post(path + "/test", json={"model": args.test_model}, headers=headers)
+            else:
+                response = client.delete(path, headers=headers)
+        result = assert_2xx(response, action=f"manage provider route {args.protocol!r}")
+        if args.test_model:
+            print(json.dumps(result, indent=2))
+            return 0 if result["status"] == "valid" else 1
+        _print_connection_summary(result)
+        return 0
+
+    return _run_with_error_handling(_body)
+
+
 def _catalog_command(args: argparse.Namespace) -> int:
     def run() -> int:
         from pathlib import Path
@@ -744,6 +772,16 @@ def dispatch(argv: list[str]) -> int:
     pool_action.add_argument("--disable", action="store_true", help="Disable rotation; retain its configuration.")
     pool.add_argument("--admin-actor", default=None)
     pool.set_defaults(handler=_pool)
+
+    route = sub.add_parser("route", help="Configure, verify or remove an alternate wire route.")
+    route.add_argument("name", help="Provider connection display name.")
+    route.add_argument("protocol", choices=["openai_chat", "anthropic_messages"])
+    route_action = route.add_mutually_exclusive_group(required=True)
+    route_action.add_argument("--base-url", help="Alternate URL on the same origin as the primary route.")
+    route_action.add_argument("--test-model", metavar="MODEL", help="Verify the route with one minimal generation.")
+    route_action.add_argument("--remove", action="store_true")
+    route.add_argument("--admin-actor", default=None)
+    route.set_defaults(handler=_route)
 
     # --- create ---
     p_create = sub.add_parser(

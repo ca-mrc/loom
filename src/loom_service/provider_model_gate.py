@@ -20,6 +20,7 @@ async def reject_if_known_failed_provider_model(
     provider_connection_id: UUID | None,
     provider_model_id: str | None,
     context: str | None = None,
+    alternate_route_verified: bool = False,
 ) -> None:
     if provider_connection_id is None or not provider_model_id:
         return
@@ -42,6 +43,8 @@ async def reject_if_known_failed_provider_model(
                 "NAME --refresh` or choose a cached model"
             ),
         )
+    if alternate_route_verified:
+        return
     # Only a definitive rejection blocks (#948). A timed-out or otherwise
     # inconclusive probe is not evidence the model is unusable; the run
     # itself surfaces a real failure if there is one.

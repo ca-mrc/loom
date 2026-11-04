@@ -864,20 +864,31 @@ async def test_terminal_event_finishes_facade_without_waiting_for_http_eof(
         engine.dispose()
 
 
+@pytest.mark.parametrize("alternate", [False, True])
 async def test_hosted_model_authorization_works_with_one_database_connection(
-    facade_setup, postgres_url, monkeypatch,
+    facade_setup, postgres_url, monkeypatch, alternate,
 ):
     """Authorization must finish before dispatch without a nested pool checkout."""
     from dataclasses import replace
 
     from sqlalchemy import update
 
-    from loom.db.schema import Trial
+    from loom.db.schema import ProviderConnection, Trial
     from loom_llm_gateway.routes import facade_anthropic
 
     app, jwt, _, trial_id, conn_id, _ = facade_setup
     original_factory = app.state.session_factory
     async with original_factory() as session:
+        connection = await session.get(ProviderConnection, conn_id)
+        assert connection is not None
+        connection.base_url = "https://upstream.example/v1"
+        if alternate:
+            connection.provider_type = "openai-compatible"
+            connection.alternate_route = {
+                "protocol": "anthropic_messages",
+                "base_url": "https://upstream.example/native/v1",
+                "verified_models": {"claude-opus-4-7": True},
+            }
         await session.execute(update(Trial).where(Trial.id == trial_id).values(config={
             "agent_name": "claude-code", "claude_code_mode": "native",
             "agent_model": {"provider": "vendor", "name": "claude-opus-4-7"},
@@ -896,6 +907,9 @@ async def test_hosted_model_authorization_works_with_one_database_connection(
     async def dispatch(owner):
         assert engine.pool.checkedout() == 0
         assert owner.identity.provider == "vendor"
+        assert owner.native
+        expected_path = "/native/v1/messages" if alternate else "/v1/messages"
+        assert owner.url == "https://upstream.example" + expected_path
         return {"model": owner.identity.name}
 
     monkeypatch.setattr(facade_anthropic, "verify_facade_auth", hosted_auth)

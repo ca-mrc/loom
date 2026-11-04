@@ -77,7 +77,7 @@ async def test_authorized_shared_native_connection_accepts_claude_but_hides_fore
             shared = self.shared
             class Result:
                 def one_or_none(self):
-                    return (owner, None, "anthropic")
+                    return (owner, None, "anthropic", "https://example.com", None)
                 def scalar_one_or_none(self):
                     return connection if shared else None
             return Result()
@@ -105,3 +105,18 @@ def test_clone_rederives_mode_without_mutating_original_selection(combined):
     freeze_connection_modes(derived.trial_config, derived.combinations, connection_id=replacement, provider_type="custom")
     selected = derived.combinations[0] if combined else derived.trial_config
     assert selected["claude_code_mode"] == "chat" and original["claude_code_mode"] == "native"
+
+
+def test_verified_messages_route_preserves_frozen_chat_and_checks_model():
+    from loom.provider_connection_routes import AlternateProviderRoute, ProviderConnectionRouting
+
+    routes = ProviderConnectionRouting("openai-compatible", AlternateProviderRoute(
+        protocol="anthropic_messages", base_url="https://provider.example/v1",
+        verified_models={"code": True, "unverified": False},
+    ))
+    assert connection_runtime_config(_claude(), routes)["claude_code_mode"] == "native"
+    assert connection_runtime_config(_claude(claude_code_mode="chat"), routes)["claude_code_mode"] == "chat"
+    unverified = _claude(agent_model={"provider": "vendor", "name": "unverified"})
+    assert connection_runtime_config(unverified, routes)["claude_code_mode"] == "chat"
+    with pytest.raises(HTTPException, match="conflicts"):
+        connection_runtime_config({**unverified, "claude_code_mode": "native"}, routes)

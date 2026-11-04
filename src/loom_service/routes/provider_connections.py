@@ -43,6 +43,14 @@ from loom.db.schema import (
     Team,
     TeamQuota,
 )
+from loom.provider_connection_routes import (
+    ROUTE_PROVIDER_TYPES,
+    AlternateProviderRoute,
+    ProviderConnectionRouting,
+    ProviderWireRoute,
+    primary_protocol,
+    same_provider_origin,
+)
 from loom.provider_pricing import ModelPrice
 from loom.security.secret_store import (
     InvalidRefError,
@@ -130,6 +138,25 @@ class ProviderConnectionUpdate(BaseModel):
     max_in_flight: int | None = Field(default=None, ge=1, le=1000)
 
 
+class ProviderRouteUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    base_url: str = Field(min_length=1)
+
+
+class ProviderRouteTest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model: str = Field(min_length=1, max_length=512)
+
+
+class ProviderRouteResult(BaseModel):
+    model: str
+    status: Literal["valid", "failed"]
+    http_status: int | None
+    error_code: str | None
+
+
 class ProviderConnectionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -141,6 +168,7 @@ class ProviderConnectionResponse(BaseModel):
     upstream_host: str
     resolved_egress_ips: list[str]
     allowed_models: list[str] | None
+    alternate_route: AlternateProviderRoute | None = None
     status: str
     last_validated_at: datetime | None
     last_validation_error: str | None
@@ -331,6 +359,9 @@ def _row_to_response(row: ProviderConnection) -> ProviderConnectionResponse:
         # objects via SA; coerce to plain strings for the response.
         resolved_egress_ips=[str(ip) for ip in (row.resolved_egress_ips or [])],
         allowed_models=row.allowed_models,
+        alternate_route=ProviderConnectionRouting.from_storage(
+            row.provider_type, row.base_url, row.alternate_route,
+        ).alternate,
         status=row.status,
         last_validated_at=row.last_validated_at,
         last_validation_error=row.last_validation_error,
@@ -858,6 +889,8 @@ async def update_connection(
             raise HTTPException(
                 status_code=400, detail=f"base_url rejected: {e}",
             ) from e
+        if row.alternate_route and not same_provider_origin(row.base_url, payload.base_url):
+            raise HTTPException(400, "remove the alternate route before changing the connection origin")
         row.base_url = payload.base_url
         row.upstream_host = resolved.upstream_host
         row.resolved_egress_ips = resolved.resolved_ips
@@ -881,6 +914,13 @@ async def update_connection(
     if payload.allowed_models is not None:
         changed_fields.append("allowed_models")
         row.allowed_models = payload.allowed_models
+        if row.alternate_route:
+            route = AlternateProviderRoute.model_validate(row.alternate_route)
+            route.verified_models = {
+                model: valid for model, valid in route.verified_models.items()
+                if model in payload.allowed_models
+            }
+            row.alternate_route = route.model_dump()
 
     if "max_in_flight" in payload.model_fields_set:
         changed_fields.append("max_in_flight")
@@ -897,6 +937,8 @@ async def update_connection(
         await retire_provider_secret(session, ref=row.encrypted_api_key_ref, team_id=row.team_id)
         row.encrypted_api_key_ref = new_ref
         row.status = "pending"
+        if row.alternate_route:
+            row.alternate_route = {**row.alternate_route, "verified_models": {}}
 
     await session.flush()  # trigger touches updated_at
     await write_admin_audit_event(
@@ -916,6 +958,127 @@ async def update_connection(
     )
     await session.commit()
     return _row_to_response(row)
+
+
+@router.put(
+    "/provider-connections/{connection_id}/routes/{protocol}",
+    response_model=ProviderConnectionResponse,
+)
+async def configure_alternate_route(
+    request: Request,
+    connection_id: UUID,
+    protocol: ProviderWireRoute,
+    payload: ProviderRouteUpdate,
+    sc: SessionAndCtx,
+    x_loom_admin_actor: str | None = Header(default=None),
+) -> ProviderConnectionResponse:
+    session, ctx = sc
+    _require_provider_management(ctx)
+    row = await _get_active_connection(session, connection_id, ctx, for_update=True)
+    _require_provider_owner_or_admin(ctx, row)
+    primary = primary_protocol(row.provider_type)
+    if primary is None or protocol == primary:
+        raise HTTPException(400, "configure the other wire protocol; edit the primary URL on the connection")
+    try:
+        parts = urlsplit(payload.base_url)
+        if parts.query or parts.fragment or not same_provider_origin(row.base_url, payload.base_url):
+            raise HTTPException(400, "the alternate route must use the connection's origin without query or fragment")
+        resolve_and_validate(payload.base_url, allow_private=await _team_allows_private(session, row.team_id))
+    except (ValueError, InvalidBaseUrlError, SsrfRejectedError) as exc:
+        raise HTTPException(400, "invalid or disallowed alternate provider URL") from exc
+    existing = ProviderConnectionRouting.from_storage(row.provider_type, row.base_url, row.alternate_route)
+    if existing.alternate is None or existing.alternate.base_url != payload.base_url:
+        row.alternate_route = AlternateProviderRoute(protocol=protocol, base_url=payload.base_url).model_dump()
+        await write_admin_audit_event(
+            session, actor=_provider_audit_actor(ctx, x_loom_admin_actor),
+            action="provider_connection.route.configure", target_type="provider_connection",
+            target_id=str(row.id), request=request, metadata=_provider_audit_metadata(row, extra={"protocol": protocol}),
+        )
+    await session.commit()
+    return _row_to_response(row)
+
+
+@router.delete(
+    "/provider-connections/{connection_id}/routes/{protocol}",
+    response_model=ProviderConnectionResponse,
+)
+async def delete_alternate_route(
+    request: Request,
+    connection_id: UUID,
+    protocol: ProviderWireRoute,
+    sc: SessionAndCtx,
+    x_loom_admin_actor: str | None = Header(default=None),
+) -> ProviderConnectionResponse:
+    session, ctx = sc
+    _require_provider_management(ctx)
+    row = await _get_active_connection(session, connection_id, ctx, for_update=True)
+    _require_provider_owner_or_admin(ctx, row)
+    if not row.alternate_route or row.alternate_route["protocol"] != protocol:
+        raise HTTPException(404, "alternate provider route not found")
+    row.alternate_route = None
+    await write_admin_audit_event(
+        session, actor=_provider_audit_actor(ctx, x_loom_admin_actor),
+        action="provider_connection.route.delete", target_type="provider_connection",
+        target_id=str(row.id), request=request, metadata=_provider_audit_metadata(row, extra={"protocol": protocol}),
+    )
+    await session.commit()
+    return _row_to_response(row)
+
+
+@router.post(
+    "/provider-connections/{connection_id}/routes/{protocol}/test",
+    response_model=ProviderRouteResult,
+)
+async def test_alternate_route(
+    request: Request,
+    connection_id: UUID,
+    protocol: ProviderWireRoute,
+    payload: ProviderRouteTest,
+    sc: SessionAndCtx,
+    x_loom_admin_actor: str | None = Header(default=None),
+) -> ProviderRouteResult:
+    session, ctx = sc
+    _require_provider_management(ctx)
+    actor = _provider_audit_actor(ctx, x_loom_admin_actor)
+    row = await _get_active_connection(session, connection_id, ctx)
+    _require_provider_owner_or_admin(ctx, row)
+    route = ProviderConnectionRouting.from_storage(row.provider_type, row.base_url, row.alternate_route).alternate
+    if route is None or route.protocol != protocol:
+        raise HTTPException(404, "alternate provider route not found")
+    if row.allowed_models is not None and payload.model not in row.allowed_models:
+        raise HTTPException(400, "model is outside the connection allowlist")
+    try:
+        resolve_and_validate(route.base_url, allow_private=await _team_allows_private(session, row.team_id))
+    except (InvalidBaseUrlError, SsrfRejectedError) as exc:
+        raise HTTPException(400, "alternate provider URL rejected by egress policy") from exc
+    api_key = await _get_provider_api_key(session, row)
+    credential_ref = row.encrypted_api_key_ref
+    result = await preflight_model(
+        ROUTE_PROVIDER_TYPES[protocol], route.base_url, api_key, payload.model, require_wire_response=True,
+    )
+
+    # Do not attach a result from an old endpoint or credential to an edited route.
+    row = await _get_active_connection(session, connection_id, ctx, for_update=True)
+    current = ProviderConnectionRouting.from_storage(row.provider_type, row.base_url, row.alternate_route).alternate
+    if (current is None or current.protocol != protocol or current.base_url != route.base_url
+            or row.encrypted_api_key_ref != credential_ref
+            or (row.allowed_models is not None and payload.model not in row.allowed_models)):
+        raise HTTPException(409, "provider route changed during validation; test it again")
+    current.verified_models[payload.model] = result.status == "valid"
+    row.alternate_route = current.model_dump()
+    await write_admin_audit_event(
+        session, actor=actor, action="provider_connection.route.test",
+        target_type="provider_connection", target_id=str(row.id), request=request,
+        metadata=_provider_audit_metadata(row, extra={
+            "protocol": protocol, "model": payload.model,
+            "status": result.status, "http_status": result.http_status,
+        }),
+    )
+    await session.commit()
+    return ProviderRouteResult(
+        model=payload.model, status="valid" if result.status == "valid" else "failed",
+        http_status=result.http_status, error_code=result.error_code,
+    )
 
 
 @router.post(

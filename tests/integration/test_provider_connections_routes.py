@@ -2392,3 +2392,46 @@ def test_model_metadata_preserves_discovery_visibility_and_entitlement(app_setup
     assert absent.status_code == 404
     secret_url = c.patch(path, headers=_auth(tokens["team_a"]), json={**payload, "specification_url": "https://user:secret@example.com/spec"})
     assert secret_url.status_code == 422
+
+
+def test_alternate_route_shares_key_but_keeps_separate_validation(app_setup, monkeypatch):
+    from loom_service.provider_connections_service import ModelPreflightResult
+
+    app, tokens, _ = app_setup
+    client = _client(app)
+    owner = _auth(tokens["team_a"])
+    conn = client.post("/api/v1/provider-connections", headers=owner, json={
+        "name": "both-protocols", "type": "openai-compatible",
+        "base_url": "https://api.openai.com/chat/v1", "api_key": "test-shared-key",
+        "allowed_models": ["claude-haiku"],
+    }).json()
+    assert conn["alternate_route"] is None
+    base = f"/api/v1/provider-connections/{conn['id']}"
+    route = base + "/routes/anthropic_messages"
+    payload = {"base_url": "https://api.openai.com/messages/v1"}
+    assert client.put(route, headers=_auth(tokens["team_b"]), json=payload).status_code == 404
+    assert client.put(route, headers=owner, json={"base_url": "https://api.anthropic.com"}).status_code == 400
+    assert client.put(route, headers=owner, json=payload).status_code == 200
+    assert client.post(route + "/test", headers=owner, json={"model": "outside"}).status_code == 400
+
+    async def preflight(provider_type, base_url, api_key, model, *, require_wire_response):
+        assert (provider_type, base_url, api_key, model, require_wire_response) == (
+            "anthropic", payload["base_url"], "test-shared-key", "claude-haiku", True,
+        )
+        return ModelPreflightResult("valid", 200, None, None)
+
+    monkeypatch.setattr("loom_service.routes.provider_connections.preflight_model", preflight)
+    tested = client.post(route + "/test", headers=owner, json={"model": "claude-haiku"})
+    assert tested.status_code == 200, tested.text
+    assert tested.json()["status"] == "valid"
+    saved = client.get(base, headers=owner).json()
+    assert saved["status"] == "pending"
+    assert saved["type"] == "openai-compatible"
+    assert saved["alternate_route"]["verified_models"] == {"claude-haiku": True}
+    assert "test-shared-key" not in json.dumps(saved)
+    updated = client.patch(base, headers=owner, json={"api_key": "test-replacement-key"})
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["alternate_route"]["verified_models"] == {}
+    removed = client.delete(route, headers=owner)
+    assert removed.status_code == 200
+    assert removed.json()["alternate_route"] is None

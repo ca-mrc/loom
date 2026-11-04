@@ -64,6 +64,7 @@ from loom.models.networking import (
 from loom.models.task import TaskConfig
 from loom.models.types import ModelSpec
 from loom.pipeline.keys import canonical_digest
+from loom.provider_connection_routes import ProviderConnectionRouting
 from loom.request_params import sanitize_request_extras
 from loom.resource_usage_store import resource_usage_response
 from loom.security.redaction import redact_mapping, redact_text
@@ -138,7 +139,10 @@ from loom_service.multi_model import (
     validate_multi_model_for_batch,
 )
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
-from loom_service.provider_connection_lookup import validate_provider_connection
+from loom_service.provider_connection_lookup import (
+    effective_provider_type,
+    validate_provider_connection,
+)
 from loom_service.provider_model_gate import (
     is_codex,
     refresh_codex_model_preflight,
@@ -1175,21 +1179,21 @@ async def _create_batch_record(
     # work so known bad provider/model input returns a direct actionable error.
     provider_connection: ProviderConnection | None = None
     provider_connection_ids: set[UUID] = set()
-    provider_model_checks: list[tuple[UUID | None, str | None, str | None]] = []
+    provider_model_checks: list[tuple[UUID | None, str | None, str | None, int | None]] = []
     codex_models: set[tuple[UUID | None, str | None]] = set()
     if payload.combinations:
         for i, combo in enumerate(payload.combinations):
             conn_id, model_id = _effective_provider_fields(payload, combo)
             if conn_id is not None:
                 provider_connection_ids.add(conn_id)
-            provider_model_checks.append((conn_id, model_id, _combination_context(i, combo)))
+            provider_model_checks.append((conn_id, model_id, _combination_context(i, combo), i))
             if is_codex(combo.agent_name):
                 codex_models.add((conn_id, model_id))
     else:
         conn_id, model_id = _effective_provider_fields(payload, None)
         if conn_id is not None:
             provider_connection_ids.add(conn_id)
-        provider_model_checks.append((conn_id, model_id, None))
+        provider_model_checks.append((conn_id, model_id, None, None))
         if is_codex(trial_config.get("agent_name")):
             codex_models.add((conn_id, model_id))
 
@@ -1455,12 +1459,21 @@ async def _create_batch_record(
             provider_connection_id=conn_id,
             provider_model_id=model_id,
         )
-    for conn_id, model_id, context in provider_model_checks:
+    for conn_id, model_id, context, combo_index in provider_model_checks:
+        connection = provider_connections_by_id.get(conn_id) if conn_id is not None else None
+        alternate_verified = False
+        if connection is not None and connection.alternate_route is not None:
+            routing = ProviderConnectionRouting.from_storage(
+                connection.provider_type, connection.base_url, connection.alternate_route,
+            )
+            selection = trial_config if combo_index is None else {**trial_config, **resolved_combinations[combo_index]}
+            alternate_verified = effective_provider_type(selection, routing) != routing.primary_type
         await reject_if_known_failed_provider_model(
             s,
             provider_connection_id=conn_id,
             provider_model_id=model_id,
             context=context,
+            alternate_route_verified=alternate_verified,
         )
 
     if dry_run:

@@ -129,7 +129,23 @@ export const priceCatalogApi = {
  * types hosted agent submissions accept (#2054). */
 export const OPENAI_SHAPED_CONNECTION_TYPES: ReadonlySet<string> = new Set(["openai-compatible", "custom"]);
 
+export type ProviderWireRoute = "openai_chat" | "anthropic_messages";
+
+export interface AlternateProviderRoute {
+  protocol: ProviderWireRoute;
+  base_url: string;
+  verified_models: Record<string, boolean>;
+}
+
+export interface ProviderRouteResult {
+  model: string;
+  status: "valid" | "failed";
+  http_status: number | null;
+  error_code: string | null;
+}
+
 export interface ProviderConnectionEntry extends ProviderPricing {
+  alternate_route?: AlternateProviderRoute | null;
   id: string;
   name: string;
   type: string;
@@ -220,6 +236,18 @@ export const providersApi = {
     ),
   getProviderConnection: (id: string) =>
     apiFetch<ProviderConnectionDetail>(`/api/v1/provider-connections/${id}`),
+  setProviderRoute: (id: string, protocol: ProviderWireRoute, baseUrl: string) =>
+    apiFetch<ProviderConnectionDetail>(`/api/v1/provider-connections/${id}/routes/${protocol}`, {
+      method: "PUT",
+      body: JSON.stringify({ base_url: baseUrl }),
+    }),
+  deleteProviderRoute: (id: string, protocol: ProviderWireRoute) =>
+    apiFetch<ProviderConnectionDetail>(`/api/v1/provider-connections/${id}/routes/${protocol}`, { method: "DELETE" }),
+  testProviderRoute: (id: string, protocol: ProviderWireRoute, model: string) =>
+    apiFetch<ProviderRouteResult>(`/api/v1/provider-connections/${id}/routes/${protocol}/test`, {
+      method: "POST",
+      body: JSON.stringify({ model }),
+    }),
   createProviderConnection: (payload: ProviderConnectionCreateBody) =>
     apiFetch<ProviderConnectionDetail>("/api/v1/provider-connections", {
       method: "POST",
