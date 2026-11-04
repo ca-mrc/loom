@@ -94,9 +94,13 @@ def _candidate_rows(exclude_lease_id: UUID | None = None) -> Select[Any]:
     ).join(Task, Task.id == Trial.task_id).join(Batch, Batch.id == Trial.batch_id)
         .join(TeamQuota, TeamQuota.team_id == Trial.team_id).where(
             Trial.state == "queued", Trial.cancellation_requested_at.is_(None),
-            Trial.attempt_count < TeamQuota.max_attempts_ceiling, Trial.family_key.is_(None),
+            Trial.attempt_count - Trial.admission_pause_releases < TeamQuota.max_attempts_ceiling,
+            Trial.family_key.is_(None),
             Batch.backend == "nebius",
             Batch.state.in_(("submitted", "running")),
+            # A paused batch's wait hint must not hold its place ahead of
+            # another batch in capacity order.
+            Batch.admission_paused_at.is_(None),
             ~exists(select(ServiceExecutionLease.id).where(
                 ServiceExecutionLease.trial_id == Trial.id,
                 ServiceExecutionLease.execution_role == "attempt",
@@ -278,6 +282,7 @@ async def wake_ready_rate_heads(
         Trial.scheduling_observation["reason"].astext == "execution_capacity_create_rate_exceeded",
         waiting_target.is_not(None),
         Batch.backend == "nebius", Batch.state.in_(("submitted", "running")),
+        Batch.admission_paused_at.is_(None),
     ).distinct())).all())
     if not future_targets:
         return 0

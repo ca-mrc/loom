@@ -429,6 +429,7 @@ class PoolExecutionOutbox:
         lease = await session.get(ServiceExecutionLease, row.attached_lease_id, with_for_update=True)
         now = await _clock(session)
         if (task is None or batch is None or target is None or lease is None
+                or (request.key.workload_kind == "trial" and batch.admission_paused_at is not None)
                 or lease.trial_id != trial.id or lease.attempt != trial.attempt_count
                 or lease.desired_state != "create" or lease.generation != request.execution.lease_generation
                 or lease.resource_generation != request.key.generation or lease.revoked_at is not None
@@ -615,9 +616,17 @@ class PoolExecutionOutbox:
             raise PoolHandoffError
         now = await _clock(session)
         if lease.desired_state == "create":
+            retry = trial.state in {"claimed", "running"} and trial.cancellation_requested_at is None
             await enqueue_execution_transition(session, lease_id=lease.id, expected_generation=lease.generation,
-                desired_state=("retry" if trial.state in {"claimed", "running"}
-                    and trial.cancellation_requested_at is None else "cancel"), now=now)
+                desired_state="retry" if retry else "cancel", now=now)
+            paused = trial.batch_id is not None and await session.scalar(
+                select(Batch.admission_paused_at).where(Batch.id == trial.batch_id)) is not None
+            if retry and lease.execution_role == "attempt" and paused:
+                # Same refund as the local admission-pause drain: no pod ever
+                # existed, and lease attempt numbers cannot be reused.
+                lease.error_class, lease.error_code = "transient", "admission_paused"
+                trial.admission_pause_releases += 1
+                trial.scheduling_observation = {"reason": "admission_paused", "observed_at": now.isoformat()}
         if lease.desired_state not in {"cancel", "retry", "timeout", "delete_pending"} or lease.revoked_at is None:
             raise PoolHandoffError
         # This path has the manager's exact cancelled_unstarted evidence, not

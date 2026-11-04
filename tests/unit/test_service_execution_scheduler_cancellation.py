@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import psycopg.waiting as waiting
 import pytest
 
+from loom_control_plane import batch_admission
 from loom_control_plane import service_execution_scheduler as scheduler
 
 
@@ -90,7 +91,11 @@ async def test_scheduler_stops_when_readiness_consumes_cancellation(
             return SimpleNamespace(target_id="local-target", selected_pool_id="nebius-cpu"), False
         return None, continue_scan
 
+    async def drain_paused(*args, **kwargs):
+        operations.append("drain_paused_admission")
+
     monkeypatch.setattr(waiting, "wait_for", cancel_on_completion)
+    monkeypatch.setattr(batch_admission, "drain_paused_admission", drain_paused)
     monkeypatch.setattr(scheduler, "reserve_next_verifier_executions", reserve_verifiers)
     monkeypatch.setattr(scheduler, "_reserve_service_execution_candidate", reserve_local)
     task = asyncio.create_task(scheduler.run_service_execution_scheduler_loop(

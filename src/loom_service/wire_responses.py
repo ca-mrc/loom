@@ -113,6 +113,17 @@ class PostBatchesIdTrialsCancelResponse(TypedDict):
 
 
 @with_config(ConfigDict(extra="allow"))
+class PostAdminBatchesIdAdmissionResponse(TypedDict):
+    batch_id: str
+    state: str
+    admission_paused_at: str | None
+    admission_paused_reason: str | None
+    changed: bool
+    held_count: int
+    pending_release_count: int
+
+
+@with_config(ConfigDict(extra="allow"))
 class PostBatchesIdRerunFailedResponse(TypedDict):
     batch_id: str
     rerun_of_batch_id: str
@@ -812,6 +823,8 @@ class Batch(TypedDict):
     backend: str
     combinations: list[Combination]
     state: str
+    admission_paused_at: NotRequired[str | None]
+    admission_paused_reason: NotRequired[str | None]
     result_status: str | None
     failure_reason: str | None
     failure_message: str | None
@@ -858,6 +871,7 @@ class Batch(TypedDict):
 
 @with_config(ConfigDict(extra="allow"))
 class BatchDetail(Batch):
+    admission_held_count: NotRequired[int]
     network_policy: NotRequired[BatchDetailNetworkPolicyEvidence]
     execution_selection: NotRequired[BatchExecutionSelection]
     task_resource_requests: NotRequired[dict[str, TaskResourceRequests]]

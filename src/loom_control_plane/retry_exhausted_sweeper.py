@@ -2,8 +2,9 @@
 exhausted their retry budget (spec §2.8).
 
 A trial's retry budget is exhausted when
-`attempt_count >= team_quotas.max_attempts_ceiling` — the admin's per-team
-ceiling. The claim SQL already filters these out (workers will never receive them), but
+`attempt_count - admission_pause_releases >= team_quotas.max_attempts_ceiling`
+— the admin's per-team ceiling, excluding attempts an admission pause released
+before their pod was scheduled. The claim SQL already filters these out (workers will never receive them), but
 nothing was transitioning them to a terminal state — they sat in `queued`
 forever, keeping their parent batch in `running` forever.
 
@@ -45,7 +46,7 @@ UPDATE trials
          JOIN team_quotas q ON q.team_id = t.team_id
         WHERE t.state        = 'queued'
           AND t.cancellation_requested_at IS NULL
-          AND t.attempt_count >= q.max_attempts_ceiling
+          AND t.attempt_count - t.admission_pause_releases >= q.max_attempts_ceiling
         LIMIT 100
    )
  RETURNING id;

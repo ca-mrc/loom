@@ -513,6 +513,13 @@ completes, then becomes `cancelled`. `loom eval batch cancel-trials <batch-id>
 <trial-id>...` cancels only the named trials. Succeeded and failed trials are
 skipped, and the batch stays running.
 
+A platform administrator can also pause new trial starts for a batch with
+`loom admin batches pause-admission <batch-id>`. The batch stays `running`.
+Trials waiting to start show "An administrator paused new trial starts for this
+batch." Trials that already started finish normally, and a pause never uses up
+a trial's retries. `loom admin batches resume-admission <batch-id>` lets the
+held trials start again. See the operator runbook for details.
+
 Each archive contains:
 
 - `manifest.json` with source batch ids, selection rule, trial counts, object

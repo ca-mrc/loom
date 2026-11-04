@@ -189,6 +189,7 @@ def _time(value: object) -> datetime | None:
 def wait_message(reason: object) -> str | None:
     """Only known codes become public text; never forward arbitrary diagnostics."""
     messages = {
+        "admission_paused": "An administrator paused new trial starts for this batch.",
         "task_image_preparation_pending": "Waiting for the task image to become ready.",
         "execution_capacity_observation_stale": "Waiting for a fresh capacity observation.",
         "execution_capacity_observation_missing": "Waiting for a capacity observation.",

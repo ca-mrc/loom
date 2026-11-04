@@ -131,11 +131,12 @@ SELECT t.id,
   JOIN team_quotas q ON q.team_id = t.team_id
  WHERE t.state = 'queued'
    AND t.cancellation_requested_at IS NULL
-   AND t.attempt_count < q.max_attempts_ceiling
+   AND t.attempt_count - t.admission_pause_releases < q.max_attempts_ceiling
    AND (t.next_attempt_at IS NULL OR t.next_attempt_at <= :now)
    AND t.family_key IS NULL
    AND b.backend = 'nebius'
    AND b.state IN ('submitted', 'running')
+   AND b.admission_paused_at IS NULL
    AND t.requires_caps->>'worker_pool' = :pool_id
    AND (
          t.execution_route_pool_name IS NULL
@@ -958,8 +959,25 @@ async def run_service_execution_scheduler_loop(
         if woken:
             _LOG.info("service_execution_rate_heads_woken", extra={"heads": woken, "pool_id": pool_id})
 
+    async def drain_paused_batches() -> None:
+        from loom_control_plane.batch_admission import drain_paused_admission
+
+        # The pause route commits only the flag; the reservation fence already
+        # holds new attempts. This releases leases reserved before the pause,
+        # and re-running every tick converges after a crash or a lost race.
+        try:
+            await drain_paused_admission(session_factory)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # A failed release must not stop admission for every other batch.
+            _LOG.warning("batch_admission_drain_error: %s", exc, exc_info=True)
+
     while not cancellation_requested():
         try:
+            await drain_paused_batches()
+            if cancellation_requested():
+                return
             if global_selector is not None:
                 # A selection is not a lease. Empty/failed global selection never
                 # falls through to the environment-local capacity writer.

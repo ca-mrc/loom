@@ -12,11 +12,13 @@ import { Link, useParams, useLocation } from "react-router-dom";
 
 import { api } from "../api";
 import type { components } from "../api/schema";
+import { useAuth } from "../auth/useAuth";
 import { BatchDeliveryExport } from "../components/BatchDeliveryExport";
 import { ExecutionSelectionSection } from "../components/ExecutionSelectionSection";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import { DestructiveActionDialog } from "../components/DestructiveActionDialog";
+import { Input } from "../components/Input";
 import { DebugEvidenceCard } from "../components/DebugEvidenceCard";
 import { DiagnosisCard } from "../components/DiagnosisCard";
 import { DiagnosticPanel } from "../components/DiagnosticPanel";
@@ -130,8 +132,11 @@ export default function BatchDetail(): JSX.Element {
   const monitorReturn = location.state?.monitorReturn || "/monitor?view=batches";
   const { batchId } = useParams<{ batchId: string }>();
   const queryClient = useQueryClient();
+  const { isAdmin } = useAuth();
   const [cancelOpen, setCancelOpen] = useState(false);
   const [cancelMode, setCancelMode] = useState<"full" | "drain">("full");
+  const [admissionOpen, setAdmissionOpen] = useState(false);
+  const [admissionReason, setAdmissionReason] = useState("");
 
   const polling = useAdaptivePolling({
     baseIntervalMs: 5_000,
@@ -182,6 +187,24 @@ export default function BatchDetail(): JSX.Element {
   const handleCancel = async (): Promise<void> => {
     await cancel.mutateAsync(cancelMode);
     setCancelOpen(false);
+  };
+
+  const admission = useMutation({
+    mutationFn: (pause: boolean) =>
+      pause
+        ? api.pauseBatchAdmission(batchId!, admissionReason)
+        : api.resumeBatchAdmission(batchId!),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys["batch"](batchId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys["batches"]() });
+      queryClient.invalidateQueries({ queryKey: queryKeys["monitor-summary"]() });
+    },
+  });
+
+  const handleAdmission = async (): Promise<void> => {
+    await admission.mutateAsync(!query.data?.admission_paused_at);
+    setAdmissionOpen(false);
+    setAdmissionReason("");
   };
 
   const rerunFailed = useMutation({
@@ -478,6 +501,40 @@ export default function BatchDetail(): JSX.Element {
                 <ErrorState error={diagnosticsQuery.error} />
               ) : null}
             </div>
+          ) : null}
+
+          {c.admission_paused_at && ACTIVE_STATES.has(c.state) ? (
+            <div
+              role="status"
+              className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900"
+            >
+              <div className="font-semibold">New trial starts are paused</div>
+              <div className="mt-1 text-xs">
+                Paused {formatLocalDateTime(c.admission_paused_at)}
+                {typeof c.admission_held_count === "number"
+                  ? ` · ${c.admission_held_count} waiting to start`
+                  : ""}
+                . Trials that already started keep running, verifying and archiving.
+              </div>
+              {c.admission_paused_reason ? (
+                <div className="mt-1 text-xs">Reason: {c.admission_paused_reason}</div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {isAdmin && (c.admission_paused_at || (c.state !== "cancelling" && ACTIVE_STATES.has(c.state))) ? (
+            <Button
+              variant="secondary"
+              onClick={() => {
+                admission.reset();
+                setAdmissionOpen(true);
+              }}
+              title={c.admission_paused_at
+                ? "Let held trials compete for admission again."
+                : "Hold trials waiting to start. Started trials continue."}
+            >
+              {c.admission_paused_at ? "Resume trial starts" : "Pause trial starts"}
+            </Button>
           ) : null}
 
           {ACTIVE_STATES.has(c.state) ? (
@@ -921,6 +978,39 @@ export default function BatchDetail(): JSX.Element {
         error={cancel.error}
         onConfirm={handleCancel}
       />
+      <DestructiveActionDialog
+        open={admissionOpen}
+        onClose={() => {
+          admission.reset();
+          setAdmissionOpen(false);
+        }}
+        title={c.admission_paused_at ? "Resume trial starts" : "Pause trial starts"}
+        target={`${c.name} (${c.id})`}
+        consequence={c.admission_paused_at
+          ? "Held trials compete for execution capacity again, in their original order."
+          : "Trials waiting to start stay queued, and reserved trials without a pod are released without using a retry. Started trials keep running, verifying and archiving. Cancellation still works."}
+        confirmLabel={c.admission_paused_at ? "Resume trial starts" : "Pause trial starts"}
+        pendingLabel={c.admission_paused_at ? "Resuming…" : "Pausing…"}
+        confirmation={{ type: "simple" }}
+        pending={admission.isPending}
+        error={admission.error}
+        onConfirm={handleAdmission}
+      >
+        {!c.admission_paused_at ? (
+          <div>
+            <label htmlFor="admission-pause-reason" className="block text-sm font-medium text-slate-700">
+              Reason (optional)
+            </label>
+            <Input
+              id="admission-pause-reason"
+              value={admissionReason}
+              maxLength={500}
+              onChange={(event) => setAdmissionReason(event.target.value)}
+              disabled={admission.isPending}
+            />
+          </div>
+        ) : null}
+      </DestructiveActionDialog>
     </div>
   );
 }

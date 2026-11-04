@@ -38,6 +38,27 @@ def test_cancelling_batch_admits_only_a_retained_pending_verifier() -> None:
     )
 
 
+def test_admission_pause_holds_attempts_and_keeps_verifiers() -> None:
+    for state in ("submitted", "running"):
+        assert not reservation_allowed(
+            state, "attempt", retained=False, cancellation_requested=False,
+            handoff_pending=False, admission_paused=True,
+        )
+        assert reservation_allowed(
+            state, "verifier", retained=False, cancellation_requested=False,
+            handoff_pending=False, admission_paused=True,
+        )
+    # Cancellation rules take precedence over a pause.
+    assert reservation_allowed(
+        "cancelling", "verifier", retained=True, cancellation_requested=False,
+        handoff_pending=True, admission_paused=True,
+    )
+    assert not reservation_allowed(
+        "cancelled", "attempt", retained=False, cancellation_requested=False,
+        handoff_pending=False, admission_paused=True,
+    )
+
+
 def test_cancelled_batch_admits_nothing() -> None:
     assert not reservation_allowed(
         "cancelled", "verifier", retained=True, cancellation_requested=False, handoff_pending=True,
