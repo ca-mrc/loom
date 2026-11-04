@@ -24,6 +24,7 @@ from loom_control_plane.terminal_archive_recovery import (
     capture_binding,
     recover,
 )
+from tests.integration.conftest import allow_current_cancellation_columns
 from tests.integration.test_deferred_verifier_archive import _seed_deferred_archive
 from tests.integration.test_service_execution_spool_materialization import (
     _config,
@@ -54,6 +55,11 @@ async def test_qualified_archive_recovery_on_installed_0175(
             await bind_existing_trial_lifecycle_authority(session, trial_id=trial_id, expected_team_id=parent.team_id)
         # The published repair must archive without installing migrations first.
         await __import__("asyncio").to_thread(command.downgrade, _config(isolated_migration_postgres_url), "0175")
+        # Current models select the drain columns. This recovery stays on 0175,
+        # so add the nullable columns without moving the Alembic revision.
+        await __import__("asyncio").to_thread(
+            allow_current_cancellation_columns, isolated_migration_postgres_url
+        )
         sessions = archive_sessions(engine, legacy_baseline=True)
         async with sessions() as session:
             # Exercise the actual historical SELECT; the 0176-only baseline

@@ -372,6 +372,7 @@ async def test_overview_summarizes_signed_in_team_readiness(
     assert body["run_activity"]["batches"] == {
         "submitted": 1,
         "running": 1,
+        "cancelling": 0,
         "finished": 0,
         "cancelled": 0,
     }
@@ -438,6 +439,7 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
     assert body["state_counts"]["batches"] == {
         "submitted": 1,
         "running": 1,
+        "cancelling": 0,
         "finished": 0,
         "cancelled": 0,
     }
@@ -608,7 +610,7 @@ async def test_monitor_summary_batch_filter_does_not_count_other_batches(
         })
     assert response.status_code == 200, response.text
     assert response.json()["state_counts"]["batches"] == {
-        "submitted": 0, "running": 1, "finished": 0, "cancelled": 0,
+        "submitted": 0, "running": 1, "cancelling": 0, "finished": 0, "cancelled": 0,
     }
 
 
@@ -637,6 +639,7 @@ async def test_monitor_summary_search_scopes_batch_identity_counts(
     assert body["state_counts"]["batches"] == {
         "submitted": 0,
         "running": 1,
+        "cancelling": 0,
         "finished": 0,
         "cancelled": 0,
     }

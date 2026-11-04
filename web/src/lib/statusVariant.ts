@@ -42,6 +42,7 @@ export function batchStateVariant(state: string): StatusVariant {
     case "finished":
       return "success";
     case "running":
+    case "cancelling":
       return "running";
     case "submitted":
       return "queued";

@@ -744,6 +744,7 @@ async def cancel_trial(
         admin_context=ctx if caller_is_admin else None,
         reason=payload.reason if payload else None,
         request=request,
+        preserve_retained=bool(payload and payload.retains_verifying),
     )
 
     if row is None:
@@ -751,9 +752,12 @@ async def cancel_trial(
             status_code=409,
             detail="trial is in a terminal state (succeeded/failed/cancelled)",
         )
-    response_state = (
-        "cancellation-requested" if row["state"] in {"claimed", "running"} else "cancelled"
-    )
+    if row.get("outcome") == "retained":
+        response_state = "retained"
+    else:
+        response_state = (
+            "cancellation-requested" if row["state"] in {"claimed", "running"} else "cancelled"
+        )
     return {"trial_id": str(row["id"]), "state": response_state}
 
 

@@ -66,6 +66,7 @@ from loom_control_plane.service_execution_output import (
     ServiceExecutionOutputRouteService,
     ServiceExecutionPeerV1,
 )
+from tests.integration.conftest import allow_current_cancellation_columns
 from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 from tests.integration.test_migration_service_execution_materialization import _config
 from tests.integration.test_service_execution_leases import (
@@ -685,6 +686,11 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                 }
             if archival_history_upgrade:
                 await asyncio.to_thread(command.downgrade, _config(isolated_migration_postgres_url), "0157")
+                # Current models select the drain columns. The later upgrade to
+                # head adds them only when this historical schema does not.
+                await asyncio.to_thread(
+                    allow_current_cancellation_columns, isolated_migration_postgres_url
+                )
                 sessions = async_sessionmaker(
                     engine, class_=_HistoricalSnapshotSession, expire_on_commit=False,
                 )
@@ -1139,6 +1145,9 @@ async def _qualify_pending_oracle_recovery(sessions, materializer, lease, canoni
         # The failed Job's request belongs to the historical schema, not the
         # later repair candidate. Exercise upgrade without rewriting that audit.
         await asyncio.to_thread(command.downgrade, _config(database_url), '0174')
+        # Current models select the drain columns. The later upgrade to head
+        # adds them only when this historical schema does not.
+        await asyncio.to_thread(allow_current_cancellation_columns, database_url)
     stale = await old.claim_one(lease_id=lease.id)
     assert stale is not None
     old_result = await old._load_and_materialize(stale)

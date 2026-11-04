@@ -6,8 +6,9 @@ On each tick it:
 
 1. `SELECT FOR UPDATE SKIP LOCKED` rows from `batches` where
    `state IN ('submitted', 'running')`, plus cancelled batches with
-   undelivered child cancellations. SKIP LOCKED keeps concurrent
-   materialization transactions from processing the same rows.
+   undelivered child cancellations and every `cancelling` drain.
+   SKIP LOCKED keeps concurrent materialization transactions from
+   processing the same rows.
 2. For each batch, resolves the `task_filter` into the live task
    list, subtracts task_ids already submitted under this batch,
    and POSTs the remainder to Control Plane. Each submission carries
@@ -36,6 +37,7 @@ import httpx
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from loom.batch_cancellation import finish_batch_drain
 from loom.db.schema import (
     Batch,
     BatchFamilyState,
@@ -72,6 +74,7 @@ class _SubmitResult:
 class _BatchCancellation:
     batch_id: UUID
     trial_ids: tuple[UUID, ...]
+    mode: str = "full"
 
 
 @dataclass(frozen=True)
@@ -107,12 +110,14 @@ def next_batch_state(
 
     Outputs the new state. Rules:
     - cancelled is absorbing.
+    - cancelling stays cancelling until the drain helper observes no
+      retained verifier, archive, or other in-flight work.
     - all expected trials terminal + 0 in flight → finished.
     - any trial submitted (in-flight or terminal) → running.
     - otherwise stay in current.
     """
-    if current == "cancelled":
-        return "cancelled"
+    if current in {"cancelled", "cancelling"}:
+        return current
     terminal_count = sum(counts.get(k, 0) for k in _TERMINAL)
     in_flight = sum(counts.get(k, 0) for k in _IN_FLIGHT)
     if expected > 0 and terminal_count >= expected and in_flight == 0:
@@ -726,14 +731,16 @@ async def _advance_batch_state(
 async def _pending_batch_cancellation(
     session: AsyncSession, batch: Batch,
 ) -> _BatchCancellation:
-    trial_ids = tuple((await session.scalars(
-        select(Trial.id).where(
-            Trial.batch_id == batch.id,
-            Trial.state.in_(list(_IN_FLIGHT)),
-            Trial.cancellation_requested_at.is_(None),
-        ),
-    )).all())
-    return _BatchCancellation(batch_id=batch.id, trial_ids=trial_ids)
+    filters = [
+        Trial.batch_id == batch.id,
+        Trial.state.in_(list(_IN_FLIGHT)),
+        Trial.cancellation_requested_at.is_(None),
+    ]
+    mode = "drain" if batch.state == "cancelling" or batch.cancellation_mode == "drain" else "full"
+    if mode == "drain":
+        filters.append(Trial.cancellation_retained_at.is_(None))
+    trial_ids = tuple((await session.scalars(select(Trial.id).where(*filters))).all())
+    return _BatchCancellation(batch_id=batch.id, trial_ids=trial_ids, mode=mode)
 
 
 async def _cancel_batch_for_hard_budget(
@@ -782,9 +789,13 @@ async def _cancel_batch_for_hard_budget(
             state="cancelled",
             result_status="cancelled",
             finished_at=datetime.now(UTC),
+            cancellation_requested_at=datetime.now(UTC),
+            cancellation_mode="full",
             budget_diagnostics=[*diagnostics, diagnostic],
         ),
     )
+    batch.state = "cancelled"
+    batch.cancellation_mode = "full"
     logger.warning(
         "batch %s cancelled after hard budget exceeded: cost=%s budget=%s",
         batch.id,
@@ -803,7 +814,11 @@ async def _request_batch_cancellation(
     headers = {"Authorization": authorization} if authorization else {}
     for trial_id in cancellation.trial_ids:
         try:
-            response = await http_client.post(f"/trials/{trial_id}/cancel", headers=headers)
+            response = await http_client.post(
+                f"/trials/{trial_id}/cancel",
+                headers=headers,
+                json={"mode": cancellation.mode},
+            )
         except httpx.HTTPError:
             logger.warning("batch %s trial %s cancellation unavailable; will retry",
                            cancellation.batch_id, trial_id)
@@ -858,12 +873,14 @@ async def run_once(
     # effective provider route for that task/combination/sample.
     work: list[tuple[UUID, list[PendingUnit]]] = []
     cancellations: list[_BatchCancellation] = []
+    drain_ids: list[UUID] = []
     fanout_errors_by_batch: dict[UUID, list[dict[str, Any]]] = {}
     async with session_factory() as s:
         batches_to_process = (await s.execute(
             select(Batch)
             .where(or_(
                 Batch.state.in_(["submitted", "running"]),
+                Batch.state == "cancelling",
                 and_(
                     Batch.state == "cancelled",
                     select(Trial.id).where(
@@ -876,6 +893,10 @@ async def run_once(
             .with_for_update(skip_locked=True),
         )).scalars().all()
         for b in batches_to_process:
+            if b.state == "cancelling":
+                cancellations.append(await _pending_batch_cancellation(s, b))
+                drain_ids.append(b.id)
+                continue
             if b.state == "cancelled":
                 cancellations.append(await _pending_batch_cancellation(s, b))
                 continue
@@ -1170,13 +1191,16 @@ async def run_once(
 
     # Phase 3: advance state for the batches we processed.
     async with session_factory() as s:
-        for batch_id, _ in work:
+        for batch_id in [batch_id for batch_id, _ in work] + drain_ids:
             row = (await s.execute(
                 select(Batch).where(Batch.id == batch_id).with_for_update(),
             )).scalar_one_or_none()
             if row is None:
                 continue
-            await _advance_batch_state(s, row)
+            if row.state == "cancelling":
+                await finish_batch_drain(s, row)
+            else:
+                await _advance_batch_state(s, row)
         await s.commit()
 
 

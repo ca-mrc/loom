@@ -220,6 +220,9 @@ def test_conversion_preserves_history_and_reaches_dev(
                 # 0172 preserves unknown historical origin; migration must not
                 # promote old work into any environment's scheduling priority.
                 row["pool_origin"] = None
+                # 0189 adds the drain retention marker. Historical trials stay
+                # unmarked and must not be treated as retained.
+                row["cancellation_retained_at"] = None
             for row in before["llm_calls"]:
                 # 0176 adds baseline attribution; historical calls retain their
                 # original subject and must not acquire a baseline session.

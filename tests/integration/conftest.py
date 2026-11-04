@@ -690,13 +690,44 @@ def isolated_migration_postgres_url(migration_template_postgres_url: str) -> Ite
     )
 
 
-def retain_pool_schema(postgres_url: str, revision: str = "0176") -> None:
+def allow_current_cancellation_columns(postgres_url: str) -> None:
+    """Add nullable drain columns without moving the pinned Alembic revision.
+
+    Historical tests that stay below 0189 and then use the current trial or
+    batch models need these columns. Callers that upgrade through 0189 must
+    not call this, or that migration fails on a duplicate column.
+    """
+    url = make_url(postgres_url).set(drivername="postgresql+psycopg").render_as_string(hide_password=False)
+    engine = create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text(
+                "ALTER TABLE trials ADD COLUMN IF NOT EXISTS cancellation_retained_at TIMESTAMPTZ"
+            ))
+            connection.execute(text(
+                "ALTER TABLE batches ADD COLUMN IF NOT EXISTS cancellation_requested_at TIMESTAMPTZ"
+            ))
+            connection.execute(text(
+                "ALTER TABLE batches ADD COLUMN IF NOT EXISTS cancellation_mode TEXT"
+            ))
+    finally:
+        engine.dispose()
+
+
+def retain_pool_schema(
+    postgres_url: str,
+    revision: str = "0176",
+    *,
+    include_current_columns: bool = True,
+) -> None:
     """Prepare an owned test database for an explicitly audited pool revision.
 
     Run the real downgrade rather than relabeling a current-head database. This
     must only be used by historical pool tests on their isolated databases.
+    Callers that then run the real Alembic upgrade must pass
+    ``include_current_columns=False`` so 0189 can add the drain columns itself.
     """
-    if revision not in {"0175", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187", "0188"}:
+    if revision not in {"0175", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187", "0188", "0189"}:
         raise ValueError("unsupported retained pool test revision")
     repo_root = Path(__file__).resolve().parents[2]
     cfg = AlembicConfig(str(repo_root / "database" / "migrations" / "alembic.ini"))
@@ -704,6 +735,11 @@ def retain_pool_schema(postgres_url: str, revision: str = "0176") -> None:
     url = make_url(postgres_url).set(drivername="postgresql+psycopg").render_as_string(hide_password=False)
     cfg.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
     command.downgrade(cfg, revision)
+    # Current models name the drain columns on every trial and batch write.
+    # Historical pool revisions do not have them; they are nullable and unused
+    # by those tests, so add them without changing the pinned Alembic version.
+    if include_current_columns and revision != "0189":
+        allow_current_cancellation_columns(url)
 
 
 @pytest.fixture

@@ -3617,6 +3617,8 @@ class Batch(Base):
     The runner fans out a batch's `task_filter` into N trial
     submissions and back-links each via `trials.batch_id`. State
     transitions: submitted → running → finished | cancelled.
+    A drain cancellation enters cancelling and becomes cancelled only after
+    retained verification and output archiving finish.
 
     Renamed from `Campaign` (and table `campaigns`) in migration 0011
     so the SPA, docs, and code all share Harbor's vocabulary
@@ -3637,6 +3639,10 @@ class Batch(Base):
         CheckConstraint(
             "purpose IN ('evaluation', 'trajectory_generation')",
             name="batches_purpose_check",
+        ),
+        CheckConstraint(
+            "cancellation_mode IS NULL OR cancellation_mode IN ('full', 'drain')",
+            name="batches_cancellation_mode_chk",
         ),
     )
     id: Mapped[UUID] = mapped_column(
@@ -3677,6 +3683,14 @@ class Batch(Base):
         TIMESTAMP(timezone=True),
         nullable=True,
     )
+    # Set when an operator or hard-budget stop is accepted. ``cancelling``
+    # stays non-terminal until retained children finish; recovery reads this
+    # timestamp and ``cancellation_mode`` rather than the HTTP fanout result.
+    cancellation_requested_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    cancellation_mode: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by_token_prefix: Mapped[str] = mapped_column(Text, nullable=False)
     submitted_by_user_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
@@ -3981,6 +3995,12 @@ class Trial(Base):
         TIMESTAMP(timezone=True), nullable=True
     )
     cancellation_observed_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    # Set when a drain cancellation keeps this trial verifying or archiving.
+    # A later sweep must not cancel it. Cleared if its attempt is retried
+    # back to queued.
+    cancellation_retained_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True
     )
     worker_id: Mapped[UUID | None] = mapped_column(

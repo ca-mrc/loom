@@ -979,6 +979,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/batches/{batch_id}/trials/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Batch Trials */
+        post: operations["cancel_batch_trials_api_v1_batches__batch_id__trials_cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/benchmarks": {
         parameters: {
             query?: never;
@@ -3455,6 +3472,18 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** BatchTrialsCancelRequest */
+        BatchTrialsCancelRequest: {
+            /**
+             * Preserve Verifying
+             * @default false
+             */
+            preserve_verifying: boolean;
+            /** Reason */
+            reason?: string | null;
+            /** Trial Ids */
+            trial_ids: string[];
+        };
         /** BehaviorAssetsRuntimeRootV1 */
         BehaviorAssetsRuntimeRootV1: {
             /**
@@ -3645,6 +3674,17 @@ export interface components {
         };
         /** CancellationRequest */
         CancellationRequest: {
+            /**
+             * Mode
+             * @default full
+             * @enum {string}
+             */
+            mode: "full" | "drain";
+            /**
+             * Preserve Verifying
+             * @default false
+             */
+            preserve_verifying: boolean;
             /** Reason */
             reason?: string | null;
         };
@@ -6175,6 +6215,12 @@ export interface components {
         PostBatchesIdCancelResponse: {
             /** Batch Id */
             batch_id: string;
+            /** Cancelled Count */
+            cancelled_count?: number;
+            /** Mode */
+            mode?: string;
+            /** Retained Count */
+            retained_count?: number;
             /** State */
             state: string;
         } & {
@@ -6197,6 +6243,20 @@ export interface components {
             state: string;
         } & {
             [key: string]: unknown;
+        };
+        /** PostBatchesIdTrialsCancelResponse */
+        PostBatchesIdTrialsCancelResponse: {
+            /** Batch Id */
+            batch_id: string;
+            /** Results */
+            results: components["schemas"]["PostBatchesIdTrialsCancelResult"][];
+        };
+        /** PostBatchesIdTrialsCancelResult */
+        PostBatchesIdTrialsCancelResult: {
+            /** Outcome */
+            outcome: string;
+            /** Trial Id */
+            trial_id: string;
         };
         /** PostBatchesResponse */
         PostBatchesResponse: {
@@ -11275,6 +11335,43 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_batch_trials_api_v1_batches__batch_id__trials_cancel_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                batch_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BatchTrialsCancelRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PostBatchesIdTrialsCancelResponse"];
                 };
             };
             /** @description Validation Error */

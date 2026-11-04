@@ -17,6 +17,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from loom.batch_cancellation import parent_accepts_reservation, revocation_desired_state
 from loom.db.schema import (
     Artifact,
     ArtifactUploadFile,
@@ -1088,7 +1089,7 @@ async def reserve_trial_execution(
         parent_state = await session.scalar(
             select(Batch.state).where(Batch.id == trial.batch_id).with_for_update(key_share=True),
         )
-        if parent_state not in {"submitted", "running"}:
+        if not parent_accepts_reservation(parent_state, trial, execution_role):
             raise ServiceExecutionParentTerminalError("batch no longer accepts execution")
     return lease
 
@@ -1185,6 +1186,9 @@ async def enqueue_execution_transition(
                 retry_trial.claimed_at = None
                 retry_trial.pre_start_heartbeat_at = None
                 retry_trial.started_at = None
+                # The requeued attempt is ordinary queued work again. A drain
+                # sweeper must cancel it instead of leaving it queued forever.
+                retry_trial.cancellation_retained_at = None
     sequence = (
         await session.execute(
             select(func.coalesce(func.max(ServiceExecutionCommand.sequence), 0)).where(
@@ -1303,15 +1307,10 @@ async def request_trial_execution_cancellation(
         await _cancel_awaiting_verifier(session, trial_id=trial_id, now=now or datetime.now(UTC))
         await _acknowledge_native_cancellation(session, trial_id=trial_id)
         return None
-    if lease.desired_state in {"create", "start"}:
-        desired_state = "cancel"
-    elif lease.desired_state == "finalize":
-        # The committed result remains authoritative. The deletion observation
-        # must finalize it before the execution record becomes immutable.
-        desired_state = "delete_pending"
-    else:
-        # Revocation/deletion is already durable. Repeated cancellation is
-        # idempotent at the provider-resource boundary.
+    desired_state = revocation_desired_state(lease.desired_state, lease.output_commit_state)
+    if desired_state is None:
+        # Revocation is already durable, or the output upload has not committed.
+        # The commit path requests deletion again once the output is durable.
         return None
     return await enqueue_execution_transition(
         session,
