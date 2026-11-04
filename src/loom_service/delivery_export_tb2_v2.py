@@ -25,7 +25,10 @@ from loom.models.trajectory import (
     Terminus2TurnEvent,
     TrajectoryEvent,
 )
-from loom.terminal_result_semantics import is_scored_agent_timeout
+from loom.terminal_result_semantics import (
+    is_scored_agent_timeout,
+    is_ungraded_agent_trajectory,
+)
 
 MAX_JSONL_BYTES = 50 * 1024 * 1024
 MAX_JSONL_LINES = 100_000
@@ -276,8 +279,11 @@ def validate_v2_eligibility(
 
 def validate_v2_joins(
     events: list[TrajectoryEvent], *, committed_native_trajectory: bool = False,
+    allow_final_unobserved_turn: bool = False,
 ) -> list[str]:
-    errors = Terminus2TrajectoryMapper.validate_turn_joins(events)
+    errors = Terminus2TrajectoryMapper.validate_turn_joins(
+        events, allow_final_unobserved_turn=allow_final_unobserved_turn,
+    )
     turn_events = [
         event
         for event in events
@@ -916,6 +922,32 @@ def _validate_verifier_meta(
     return parsed
 
 
+def _ungraded_verifier_artifacts(
+    trial: Trial, *, indexed: list[dict[str, Any]], client: Any, artifacts_bucket: str,
+) -> list[VerifierDeliveryArtifact]:
+    """Copy a committed verifier bundle, and allow these trials to have none."""
+    from loom_service.delivery_export_native_verifier import (
+        _committed_separate_handoff,
+        resolve_native_verifier_artifacts,
+    )
+
+    runtime = trial.result.get("runtime_result") if isinstance(trial.result, dict) else None
+    phases = runtime.get("phases") if isinstance(runtime, dict) else None
+    has_verifier_phase = isinstance(phases, list) and any(
+        isinstance(phase, dict) and phase.get("role") == "verifier" for phase in phases
+    )
+    if _committed_separate_handoff(trial) is None and not has_verifier_phase:
+        return []
+    try:
+        return resolve_native_verifier_artifacts(
+            trial, indexed=indexed, client=client, artifacts_bucket=artifacts_bucket,
+        )
+    except Tb2V2ExportError as exc:
+        if exc.code == "missing_verifier_artifact":
+            return []
+        raise
+
+
 def resolve_verifier_artifacts(
     trial: Trial,
     *,
@@ -932,6 +964,14 @@ def resolve_verifier_artifacts(
     Committed ``separate_execution`` reads the child under ``verifier-execution/``.
     """
     indexed = _index_artifacts(trial)
+    ungraded = is_ungraded_agent_trajectory(
+        state=str(trial.state), result=trial.result,
+        failure_reason=trial.failure_reason, config=trial.config,
+    )
+    if ungraded:
+        return _ungraded_verifier_artifacts(
+            trial, indexed=indexed, client=client, artifacts_bucket=artifacts_bucket,
+        )
     if any("relative_path" in item for item in indexed) and not _trial_skipped_verifier(trial):
         from loom_service.delivery_export_native_verifier import resolve_native_verifier_artifacts
 
@@ -1188,9 +1228,16 @@ def build_per_trial_v2_bundle(
     batch: Batch | None = None,
 ) -> Tb2V2TrialBundle:
     validate_v2_eligibility(events, trial, batch=batch)
+    ungraded = is_ungraded_agent_trajectory(
+        state=str(trial.state), result=trial.result,
+        failure_reason=trial.failure_reason, config=trial.config,
+    )
+    missing_pane = not any(
+        isinstance(event, Terminus2ArtifactRefEvent) and event.artifact_kind == "terminus_2.pane"
+        for event in events
+    )
     committed_native = None
-    if not any(isinstance(event, Terminus2ArtifactRefEvent)
-               and event.artifact_kind == "terminus_2.pane" for event in events) and is_scored_agent_timeout(
+    if missing_pane and is_scored_agent_timeout(
         state=str(trial.state), result=trial.result, failure_reason=trial.failure_reason,
     ):
         from loom_service.delivery_export_timeout_native import resolve_timeout_native_artifacts
@@ -1202,8 +1249,17 @@ def build_per_trial_v2_bundle(
         ) | resolve_timeout_native_artifacts(
             trial, client=client, artifacts_bucket=artifacts_bucket,
         )
+    elif missing_pane and ungraded:
+        from loom_service.delivery_export_timeout_native import resolve_committed_agent_artifacts
+
+        committed_native = resolve_native_artifacts(
+            trial, events, client=client, artifacts_bucket=artifacts_bucket,
+        ) | resolve_committed_agent_artifacts(
+            trial, client=client, artifacts_bucket=artifacts_bucket,
+        )
     join_errors = validate_v2_joins(
         events, committed_native_trajectory=committed_native is not None,
+        allow_final_unobserved_turn=ungraded and trial.failure_reason == "timed_out",
     )
     if join_errors:
         raise Tb2V2ExportError(
@@ -1240,6 +1296,11 @@ def build_per_trial_v2_bundle(
     )
     if committed_native is not None:
         export_provenance["native_artifact_authority"] = "committed_runtime_output"
+    if ungraded:
+        export_provenance["outcome"] = (
+            "agent_budget_timeout" if trial.failure_reason == "timed_out"
+            else "verification_indeterminate"
+        )
     native_artifacts = committed_native if committed_native is not None else resolve_native_artifacts(
         trial,
         events,

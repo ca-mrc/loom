@@ -256,7 +256,9 @@ class Terminus2TrajectoryMapper:
         return trajectory
 
     @staticmethod
-    def validate_turn_joins(events: Iterable[TrajectoryEvent]) -> list[str]:
+    def validate_turn_joins(
+        events: Iterable[TrajectoryEvent], *, allow_final_unobserved_turn: bool = False,
+    ) -> list[str]:
         """Return validation errors for #745/#746 join invariants."""
         errors: list[str] = []
         turns: list[Terminus2TurnEvent] = []
@@ -271,6 +273,7 @@ class Terminus2TrajectoryMapper:
             elif event.kind == EventKind.TERMINUS2_TERMINAL_OBSERVATION:
                 obs_turns.add(event.turn_id)
 
+        final_turn_id = turns[-1].turn_id if allow_final_unobserved_turn and turns else None
         for turn in turns:
             if turn.parse_state != "ok":
                 continue
@@ -279,7 +282,7 @@ class Terminus2TrajectoryMapper:
                     f"turn {turn.turn_id}: missing LLMCallEvent for "
                     f"gateway_request_id={turn.gateway_request_id}",
                 )
-            if turn.turn_id not in obs_turns:
+            if turn.turn_id not in obs_turns and turn.turn_id != final_turn_id:
                 errors.append(
                     f"turn {turn.turn_id}: missing terminus2_terminal_observation",
                 )

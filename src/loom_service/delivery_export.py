@@ -35,6 +35,7 @@ from loom.terminal_result_semantics import (
     explicit_skip_verifier,
     has_numeric_reward,
     is_scored_agent_timeout,
+    is_ungraded_agent_trajectory,
     terminal_result_conflicts,
 )
 from loom.trajectory.object_identity import (
@@ -559,10 +560,16 @@ def _select_trials(
 
 
 def _is_delivery_eligible(trial: Trial) -> bool:
-    return str(trial.state) == "succeeded" or is_scored_agent_timeout(
-        state=str(trial.state),
+    state = str(trial.state)
+    return state == "succeeded" or is_scored_agent_timeout(
+        state=state,
         result=trial.result,
         failure_reason=trial.failure_reason,
+    ) or is_ungraded_agent_trajectory(
+        state=state,
+        result=trial.result,
+        failure_reason=trial.failure_reason,
+        config=trial.config,
     )
 
 
