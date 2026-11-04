@@ -7,8 +7,9 @@ Routes:
 - GET  /api/v1/batches/{id}     — detail + trial roll-up (state summary,
                                   aggregate reward from Trial.result JSONB,
                                   and token totals from llm_calls)
-- POST /api/v1/batches/{id}/cancel — terminate the batch + cascade-cancel
-                                  its still-active trials
+- POST /api/v1/batches/{id}/cancel — full cancel, or a drain that keeps
+                                  verifying and archiving trials
+- POST /api/v1/batches/{id}/trials/cancel — cancel an explicit trial subset
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from sqlalchemy import and_, func, literal_column, or_, select, update
 
 from loom.auth import AuthContext
+from loom.batch_cancellation import finish_batch_drain
 from loom.data_lifecycle_registry import ensure_batch_lifecycle_authority
 from loom.db.schema import (
     Batch,
@@ -51,7 +53,7 @@ from loom.execution_diagnosis_store import execution_failure_groups
 from loom.execution_selection import execution_selection_readback, reported_verification
 from loom.hosted_harness import harnesses_supporting, hosted_harness
 from loom.models.batch import Combination
-from loom.models.cancellation import CancellationRequest
+from loom.models.cancellation import BatchTrialsCancelRequest, CancellationRequest
 from loom.models.harbor_config import apply_harbor_config_dict
 from loom.models.networking import (
     NetworkPolicy,
@@ -62,6 +64,7 @@ from loom.models.networking import (
 from loom.models.task import TaskConfig
 from loom.models.types import ModelSpec
 from loom.pipeline.keys import canonical_digest
+from loom.provider_connection_routes import ProviderConnectionRouting
 from loom.request_params import sanitize_request_extras
 from loom.resource_usage_store import resource_usage_response
 from loom.security.redaction import redact_mapping, redact_text
@@ -136,7 +139,10 @@ from loom_service.multi_model import (
     validate_multi_model_for_batch,
 )
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
-from loom_service.provider_connection_lookup import validate_provider_connection
+from loom_service.provider_connection_lookup import (
+    effective_provider_type,
+    validate_provider_connection,
+)
 from loom_service.provider_model_gate import (
     is_codex,
     refresh_codex_model_preflight,
@@ -1173,21 +1179,21 @@ async def _create_batch_record(
     # work so known bad provider/model input returns a direct actionable error.
     provider_connection: ProviderConnection | None = None
     provider_connection_ids: set[UUID] = set()
-    provider_model_checks: list[tuple[UUID | None, str | None, str | None]] = []
+    provider_model_checks: list[tuple[UUID | None, str | None, str | None, int | None]] = []
     codex_models: set[tuple[UUID | None, str | None]] = set()
     if payload.combinations:
         for i, combo in enumerate(payload.combinations):
             conn_id, model_id = _effective_provider_fields(payload, combo)
             if conn_id is not None:
                 provider_connection_ids.add(conn_id)
-            provider_model_checks.append((conn_id, model_id, _combination_context(i, combo)))
+            provider_model_checks.append((conn_id, model_id, _combination_context(i, combo), i))
             if is_codex(combo.agent_name):
                 codex_models.add((conn_id, model_id))
     else:
         conn_id, model_id = _effective_provider_fields(payload, None)
         if conn_id is not None:
             provider_connection_ids.add(conn_id)
-        provider_model_checks.append((conn_id, model_id, None))
+        provider_model_checks.append((conn_id, model_id, None, None))
         if is_codex(trial_config.get("agent_name")):
             codex_models.add((conn_id, model_id))
 
@@ -1453,12 +1459,21 @@ async def _create_batch_record(
             provider_connection_id=conn_id,
             provider_model_id=model_id,
         )
-    for conn_id, model_id, context in provider_model_checks:
+    for conn_id, model_id, context, combo_index in provider_model_checks:
+        connection = provider_connections_by_id.get(conn_id) if conn_id is not None else None
+        alternate_verified = False
+        if connection is not None and connection.alternate_route is not None:
+            routing = ProviderConnectionRouting.from_storage(
+                connection.provider_type, connection.base_url, connection.alternate_route,
+            )
+            selection = trial_config if combo_index is None else {**trial_config, **resolved_combinations[combo_index]}
+            alternate_verified = effective_provider_type(selection, routing) != routing.primary_type
         await reject_if_known_failed_provider_model(
             s,
             provider_connection_id=conn_id,
             provider_model_id=model_id,
             context=context,
+            alternate_route_verified=alternate_verified,
         )
 
     if dry_run:
@@ -2569,18 +2584,29 @@ async def get_batch(
     effective_trials = _effective_trials(original_trials, rerun_trials)
     effective_summary = _summary_from_trials(effective_trials)
     effective_reward = _rollup_from_trials(effective_trials)
-    effective_usage = await _usage_totals_for_trials(s, effective_trials)
-    effective_combination_summary = await combination_summary_for_batch(
-        s,
-        combinations=b.combinations,
-        trials=effective_trials,
-        expected_trial_count=b.expected_trial_count,
-        required_worker_pool_count=len(b.required_worker_pools or []),
-        fanout_errors=b.fanout_errors,
+    # Without reruns the effective set is the original Trials in the same
+    # order, so reuse their aggregates instead of re-reading every call (#2771).
+    # Duplicate Trial keys collapse in `_effective_trials`, hence the length check.
+    same_trials = not rerun_trials and len(effective_trials) == len(original_trials)
+    effective_usage = (
+        usage if same_trials else await _usage_totals_for_trials(s, effective_trials)
     )
-    effective_llm_call_counts = await _llm_call_counts_for_trials(
-        s,
-        effective_trials,
+    effective_combination_summary = (
+        combination_summary
+        if same_trials
+        else await combination_summary_for_batch(
+            s,
+            combinations=b.combinations,
+            trials=effective_trials,
+            expected_trial_count=b.expected_trial_count,
+            required_worker_pool_count=len(b.required_worker_pools or []),
+            fanout_errors=b.fanout_errors,
+        )
+    )
+    effective_llm_call_counts = (
+        llm_call_counts
+        if same_trials
+        else await _llm_call_counts_for_trials(s, effective_trials)
     )
     effective_llm_evidence = summarize_llm_evidence_for_trials(
         effective_trials,
@@ -3193,6 +3219,43 @@ async def rerun_failed_batch(
     }
 
 
+_ACTIVE_CANCEL_STATES = ("queued", "protected-pending", "claimed", "running")
+
+
+def _cancellation_body(payload: CancellationRequest | None, *, mode: str) -> dict[str, Any]:
+    body = payload.model_dump() if payload else {}
+    body["mode"] = mode
+    body["preserve_verifying"] = mode == "drain"
+    return body
+
+
+async def _fan_out_trial_cancels(
+    request: Request,
+    trial_ids: Sequence[UUID],
+    *,
+    authorization: str | None,
+    body: dict[str, Any],
+) -> tuple[int, int] | Any:
+    cancelled = 0
+    retained = 0
+    for trial_id in trial_ids:
+        response = await forward(
+            request.app.state.http_client,
+            method="POST",
+            path=f"/trials/{trial_id}/cancel",
+            authorization=authorization,
+            cancellation_request=request,
+            json_body=body,
+        )
+        if response.status_code not in {200, 409}:
+            return propagate(response)
+        if response.status_code == 200 and response.json().get("state") == "retained":
+            retained += 1
+        elif response.status_code == 200:
+            cancelled += 1
+    return cancelled, retained
+
+
 @router.post("/batches/{batch_id}/cancel", response_model=wire.PostBatchesIdCancelResponse, response_model_exclude_unset=True)
 async def cancel_batch(
     request: Request,
@@ -3214,48 +3277,159 @@ async def cancel_batch(
             detail="batch not found",
         )
     require_team_or_admin(ctx, b.team_id)
+    mode = payload.mode if payload else "full"
+    if mode == "drain" and b.state == "finished":
+        raise HTTPException(status_code=409, detail="batch is finished")
+    if mode == "drain" and b.state == "cancelled":
+        return {"batch_id": str(batch_id), "state": "cancelled", "mode": "drain"}
     actor = None
     if is_admin(ctx):
         actor = await actor_from_context(s, ctx, request.headers.get("X-Loom-Admin-Actor"))
     now = datetime.now(UTC)
+    active_states = list(_ACTIVE_CANCEL_STATES)
+    if mode == "drain":
+        active_states.append("materializing")
     active_trial_ids = (
         await s.execute(
             select(Trial.id).where(
                 Trial.batch_id == batch_id,
-                Trial.state.in_(["queued", "protected-pending", "claimed", "running"]),
+                Trial.state.in_(active_states),
             )
         )
     ).scalars().all()
     # Fence fanout before HTTP. CP child admission holds this same parent lock,
     # so every previously admitted child is in the snapshot above. The runner
-    # retries active children of cancelled batches after partial delivery failure.
-    await s.execute(
-        update(Batch).where(Batch.id == batch_id).values(
-            state="cancelled", result_status="cancelled", finished_at=b.finished_at or now,
-        ),
-    )
+    # retries active children of cancelled and cancelling batches after partial
+    # delivery failure.
+    values: dict[str, Any] = {
+        "cancellation_mode": mode,
+        "cancellation_requested_at": b.cancellation_requested_at or now,
+    }
+    if mode == "drain":
+        values["state"] = "cancelling"
+    else:
+        values.update(
+            state="cancelled",
+            result_status="cancelled",
+            finished_at=b.finished_at or now,
+        )
+        if b.state == "cancelling":
+            await s.execute(
+                update(Trial)
+                .where(
+                    Trial.batch_id == batch_id,
+                    Trial.state.in_(_ACTIVE_CANCEL_STATES),
+                )
+                .values(cancellation_retained_at=None)
+            )
+    await s.execute(update(Batch).where(Batch.id == batch_id).values(**values))
     if actor is not None:
         await write_admin_audit_event(
             s, actor=actor, action="batch.cancel", target_type="batch",
             target_id=str(batch_id), request=request,
-            metadata={"reason": redact_text(payload.reason) if payload and payload.reason else None,
-                      "team_id": str(b.team_id)},
+            metadata={
+                "reason": redact_text(payload.reason) if payload and payload.reason else None,
+                "team_id": str(b.team_id),
+                "mode": mode,
+            },
         )
     # Also releases session-auth locks before CP independently revalidates them.
     await s.commit()
     # The Control Plane owns the trial cancellation transition for every
     # backend. In protected staging this is also the only path that can move a
     # live claim to cancel-pending without releasing its concurrency lease.
-    for trial_id in active_trial_ids:
+    # Drain classification happens there, under the trial lock, so a trial that
+    # reaches verifying after this snapshot is retained.
+    fanout = await _fan_out_trial_cancels(
+        request,
+        list(active_trial_ids),
+        authorization=authorization,
+        body=_cancellation_body(payload, mode=mode),
+    )
+    if not isinstance(fanout, tuple):
+        return fanout
+    cancelled_count, retained_count = fanout
+    final_state = "cancelled" if mode == "full" else "cancelling"
+    if mode == "drain":
+        locked = (
+            await s.execute(select(Batch).where(Batch.id == batch_id).with_for_update())
+        ).scalar_one()
+        if await finish_batch_drain(s, locked):
+            final_state = "cancelled"
+        await s.commit()
+    body: dict[str, Any] = {"batch_id": str(batch_id), "state": final_state}
+    if mode == "drain":
+        body.update(
+            mode="drain",
+            cancelled_count=cancelled_count,
+            retained_count=retained_count,
+        )
+    return body
+
+
+@router.post(
+    "/batches/{batch_id}/trials/cancel",
+    response_model=wire.PostBatchesIdTrialsCancelResponse,
+    response_model_exclude_unset=True,
+)
+async def cancel_batch_trials(
+    request: Request,
+    sc: SessionAndCtx,
+    batch_id: UUID,
+    payload: BatchTrialsCancelRequest,
+    authorization: Annotated[str | None, Header()] = None,
+) -> Any:
+    s, ctx = sc
+    require_scope(ctx, "submit")
+    batch = (
+        await s.execute(select(Batch).where(Batch.id == batch_id))
+    ).scalar_one_or_none()
+    if batch is None:
+        raise HTTPException(status_code=404, detail="batch not found")
+    require_team_or_admin(ctx, batch.team_id)
+    rows = (
+        await s.execute(
+            select(Trial.id, Trial.state).where(
+                Trial.batch_id == batch_id,
+                Trial.id.in_(payload.trial_ids),
+            )
+        )
+    ).all()
+    found = {row.id: row.state for row in rows}
+    missing = [trial_id for trial_id in payload.trial_ids if trial_id not in found]
+    if missing:
+        raise HTTPException(status_code=422, detail="trial is not in this batch")
+    await s.commit()
+    results: list[dict[str, str]] = []
+    child_body = {
+        "reason": payload.reason,
+        "mode": "full",
+        "preserve_verifying": payload.preserve_verifying,
+    }
+    for trial_id in payload.trial_ids:
+        state = found[trial_id]
+        if state in {"succeeded", "failed", "cancelled"}:
+            results.append({"trial_id": str(trial_id), "outcome": "skipped_terminal"})
+            continue
         response = await forward(
             request.app.state.http_client,
             method="POST",
             path=f"/trials/{trial_id}/cancel",
             authorization=authorization,
             cancellation_request=request,
-            json_body=payload.model_dump() if payload else None,
+            json_body=child_body,
         )
-        if response.status_code not in {200, 409}:
+        if response.status_code == 409:
+            results.append({"trial_id": str(trial_id), "outcome": "skipped_terminal"})
+            continue
+        if response.status_code != 200:
             return propagate(response)
-
-    return {"batch_id": str(batch_id), "state": "cancelled"}
+        child_state = response.json().get("state")
+        if child_state == "retained":
+            outcome = "retained"
+        elif child_state == "cancellation-requested":
+            outcome = "cancellation_requested"
+        else:
+            outcome = "cancelled"
+        results.append({"trial_id": str(trial_id), "outcome": outcome})
+    return {"batch_id": str(batch_id), "results": results}

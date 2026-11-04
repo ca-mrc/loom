@@ -9,6 +9,29 @@ from sqlalchemy.exc import DBAPIError
 from tests.integration.test_nebius_pool_schema import registered
 
 
+def _allow_current_cancellation_columns(url: str) -> None:
+    """Let the current models insert on a database pinned at 0186.
+
+    These tests stay at 0186 so the warm-fit column is absent. The drain
+    columns are nullable and unused on that path.
+    """
+
+    engine = create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text(
+                "ALTER TABLE trials ADD COLUMN IF NOT EXISTS cancellation_retained_at TIMESTAMPTZ"
+            ))
+            connection.execute(text(
+                "ALTER TABLE batches ADD COLUMN IF NOT EXISTS cancellation_requested_at TIMESTAMPTZ"
+            ))
+            connection.execute(text(
+                "ALTER TABLE batches ADD COLUMN IF NOT EXISTS cancellation_mode TEXT"
+            ))
+    finally:
+        engine.dispose()
+
+
 @pytest.mark.parametrize(('direction', 'table', 'lock_mode'), [
     ('downgrade', 'trials', 'ACCESS SHARE'),
     ('downgrade', 'nebius_application_build_attempts', 'ACCESS SHARE'),
@@ -97,6 +120,7 @@ def test_current_cold_reader_and_namespace_refresh_work_on_actual_0186_schema(is
     config = Config("database/migrations/alembic.ini")
     config.set_main_option("sqlalchemy.url", isolated_migration_postgres_url.replace("%", "%%"))
     command.downgrade(config, "0186")
+    _allow_current_cancellation_columns(isolated_migration_postgres_url)
 
     async def legacy_path():
         engine = create_async_engine(isolated_migration_postgres_url)
@@ -144,6 +168,7 @@ def test_current_global_default_path_uses_actual_0186_manager_without_new_state(
     config = Config("database/migrations/alembic.ini")
     config.set_main_option("sqlalchemy.url", isolated_migration_postgres_url.replace("%", "%%"))
     command.downgrade(config, "0186")
+    _allow_current_cancellation_columns(isolated_migration_postgres_url)
 
     async def legacy_global_path():
         engine = create_async_engine(isolated_migration_postgres_url)

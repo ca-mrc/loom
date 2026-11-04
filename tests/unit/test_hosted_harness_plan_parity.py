@@ -4,8 +4,10 @@ The fixture started from canonical plans compiled by the pre-#2295 code.
 #2289 intentionally adds the effective policy to command identity, plan, and
 phase environment while preserving every existing topology field.
 #2697 adds one optional native archive for Harbor summary child trajectories;
-the existing topology and all other declarations remain unchanged. Regenerate
-it only for an intentional, documented plan change:
+the existing topology and all other declarations remain unchanged.
+#2768 adds two optional, failure-only verifier diagnostic outputs to sandbox
+plans; command identity, topology and all prior declarations are unchanged.
+Regenerate it only for an intentional, documented plan change:
 
     uv run python -m tests.unit.test_hosted_harness_plan_parity > \
         tests/unit/fixtures/hosted_harness_plans.json

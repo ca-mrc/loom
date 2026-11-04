@@ -203,7 +203,7 @@ def admitted_service_execution_models(config: object) -> tuple[tuple[str, str], 
 
 
 async def authorize_trial_model(
-    request: Request, ctx: AuthContext, *, provider: str, model: str
+    request: Request, ctx: AuthContext, *, provider: str | None, model: str
 ) -> None:
     """A native service-execution call may name only its Trial's admitted models.
 
@@ -221,39 +221,38 @@ async def authorize_trial_model(
         config = (
             await session.execute(select(Trial.config).where(Trial.id == ctx.trial_id))
         ).scalar_one_or_none()
-    if (provider, model) not in admitted_service_execution_models(config):
+    allowed = admitted_service_execution_models(config)
+    if not any(name == model and (provider is None or namespace == provider) for namespace, name in allowed):
         raise HTTPException(status_code=403, detail="service execution model forbidden")
 
 
-async def authorize_anthropic_trial_model(
+async def authorize_anthropic_trial_route(
     session: AsyncSession, ctx: AuthContext, *, model: str, connection_type: str,
-) -> ModelSpec:
-    """Keep the selected model namespace independent of the Messages wire API.
-
-    Claude's mode is frozen at admission from its authorized connection. Neither
-    a request field nor the upstream response can supply the canonical identity.
-    Other runtimes retain the existing provider/name authorization rule.
-    Reuse the caller's transaction so authorization never waits for a second
-    pool checkout while connection resolution holds the first.
-    """
+    alternate_type: str | None = None,
+) -> tuple[ModelSpec, bool]:
+    """Use the frozen Claude mode and the currently authorized routes."""
     native = connection_type == "anthropic"
     fallback = ModelSpec(provider="anthropic" if native else "openai", name=model)
     if ctx.service_execution_lease_id is None or ctx.trial_id is None:
-        return fallback
+        return fallback, native
     config = (await session.execute(select(Trial.config).where(Trial.id == ctx.trial_id))).scalar_one_or_none()
     if isinstance(config, dict) and config.get("agent_name") == "claude-code":
         selected = config.get("agent_model")
+        mode = config.get("claude_code_mode")
+        modes = {"native" if native else "chat"}
+        if alternate_type is not None:
+            modes.add("native" if alternate_type == "anthropic" else "chat")
         if (isinstance(selected, dict) and selected.get("name") == model
-                and selected.get("provider") and config.get("claude_code_mode") == ("native" if native else "chat")):
-            return ModelSpec.model_validate(selected)
+                and selected.get("provider") and isinstance(mode, str) and mode in modes):
+            return ModelSpec.model_validate(selected), mode == "native"
     elif (fallback.provider, model) in admitted_service_execution_models(config):
-        return fallback
+        return fallback, native
     raise HTTPException(status_code=403, detail="service execution model or Claude connection mode forbidden")
 
 
 __all__ = [
     "admitted_service_execution_models",
-    "authorize_anthropic_trial_model",
+    "authorize_anthropic_trial_route",
     "authorize_execution_attempt_dispatch",
     "authorize_trial_execution_dispatch",
     "authorize_trial_model",

@@ -34,10 +34,15 @@ bearer tokens, signed URLs, object-store keys, or provider API keys.
 ## Administrator Trial and Batch cancellation
 
 `POST /api/v1/trials/{id}/cancel` and `POST /api/v1/batches/{id}/cancel`
-accept an optional JSON body `{"reason": "operator explanation"}` (at most
-1024 characters). Bodyless cancellation remains supported; its audit reason is
-null. Include a reason for operational interventions and `X-Request-ID` when
-correlating the Batch request with its Trial cancellations.
+accept an optional JSON body `{"reason": "operator explanation", "mode": "full"}`
+(reason at most 1024 characters). `mode` is `full` or `drain`. Bodyless
+cancellation remains `full`. `drain` moves the batch to `cancelling`, cancels
+trials that are not verifying or archiving, and becomes `cancelled` only after
+the retained trials finish. `POST /api/v1/batches/{id}/trials/cancel` cancels
+an explicit `trial_ids` list without changing the parent batch state; terminal
+trials are reported as `skipped_terminal`. Include a reason for operational
+interventions and `X-Request-ID` when correlating the Batch request with its
+Trial cancellations.
 
 A platform administrator needs no represented team context. Personal credentials
 record `user:<username>` from the authenticated account; a supplied

@@ -3,6 +3,7 @@ export const STATUS_HELP_TEXT: Record<string, string> = {
   admin: "Admin token with development administration privileges.",
   all_failed: "No trials succeeded; trials failed or were cancelled.",
   cancelled: "Stopped before normal completion and will not run further.",
+  cancelling: "Stopping new work. Trials that are verifying or archiving output continue until they finish.",
   claimed: "A worker has reserved this item and should start it shortly.",
   failed: "Finished with an error; open the detail view for logs and failure reason.",
   failed_terminal:

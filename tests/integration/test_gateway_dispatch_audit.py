@@ -14,12 +14,12 @@ from uuid import uuid4
 import httpx
 import pytest
 from fastapi import Request
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.auth import AuthContext
-from loom.db.schema import GatewayDispatchReceipt, LlmCall, Team
+from loom.db.schema import GatewayDispatchReceipt, LlmCall, ProviderConnection, Team
 from loom_llm_gateway import dispatch_audit
 from loom_llm_gateway.attempt_deadline import AttemptDeadlineReachedError, GatewayAttemptDeadline
 from loom_llm_gateway.dispatch_audit import (
@@ -65,6 +65,7 @@ async def audit_setup(postgres_url: str) -> AsyncIterator[tuple[DispatchAudit, R
         await conn.run_sync(
             lambda connection: delete_gateway_trial(connection, trial_id=trial_id, task_id=task_id)
         )
+        await conn.execute(delete(ProviderConnection).where(ProviderConnection.team_id == team_id))
         await conn.execute(delete(Team).where(Team.id == team_id))
     await engine.dispose()
 
@@ -547,11 +548,223 @@ async def test_commit_acknowledgement_unknown_never_dispatches(
     audit.state.session_factory = original_factory
     rows = await _rows(audit)
     assert len(rows) == 1
-    assert rows[0].provider_outcome == "admitted"
+    assert rows[0].provider_outcome == ("admitted" if cancelled else "not_dispatched")
     assert rows[0].gateway_outcome == "pending"
     assert "private-driver-detail" not in caplog.text
     if cancelled:
         assert str(rows[0].id) in caplog.text
+
+
+@pytest.mark.parametrize("committed", [True, False])
+async def test_admission_commit_timeout_closes_only_committed_receipt_without_io(
+    audit_setup: tuple, committed: bool,
+) -> None:
+    audit, request = audit_setup
+    original_factory = audit.state.session_factory
+    assert original_factory is not None
+    connection_id = uuid4()
+    async with original_factory() as session:
+        session.add(ProviderConnection(
+            id=connection_id, team_id=audit.ctx.team_id,
+            provider_type="openai-compatible", display_name="commit-timeout-capacity",
+            base_url="https://provider.example.test/v1", upstream_host="provider.example.test",
+            encrypted_api_key_ref=f"loom://unused/{uuid4()}", created_by="test",
+            max_in_flight=1,
+        ))
+        await session.commit()
+    audit.provider_connection_id = connection_id
+    first_session = True
+    commit_reached = asyncio.Event()
+
+    @asynccontextmanager
+    async def lost_commit_acknowledgement():
+        nonlocal first_session
+        async with original_factory() as session:
+            if first_session:
+                first_session = False
+                original_commit = session.commit
+
+                async def commit():
+                    if committed:
+                        # Real PostgreSQL commits before its acknowledgement
+                        # is lost; cancellation must not imply a rollback.
+                        await original_commit()
+                    commit_reached.set()
+                    await asyncio.Event().wait()
+
+                session.commit = commit
+            yield session
+
+    audit.state.session_factory = lost_commit_acknowledgement
+    messages = []
+
+    async def forbidden():
+        pytest.fail("uncertain admission acknowledgement must never dispatch")
+
+    async def app(scope, receive, send):
+        with pytest.raises(DispatchAuditUnavailableError):
+            await audit.send(forbidden, deadline=None)
+        await send({"type": "http.response.start", "status": 503, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def noop(*args):
+        pass
+
+    async def capture(message):
+        messages.append(message)
+
+    try:
+        # Exercise the actual one-second admission budget, not a provider or
+        # signed-attempt deadline. The observer owns the actual HTTP503 fact.
+        assert dispatch_audit._AUDIT_TIMEOUT_SECONDS == 1.0
+        await DispatchAuditMiddleware(app)(request.scope, noop, capture)
+    finally:
+        audit.state.session_factory = original_factory
+    assert commit_reached.is_set()
+    assert messages[0]["status"] == 503
+    rows = await _rows(audit)
+    failed_request_ids = list(audit.state.receipt_ids)
+    next_request = Request({"type": "http", "app": request.app})
+    next_audit = audit_for_request(
+        next_request, audit.ctx, "openai", provider_connection_id=connection_id,
+    )
+    next_audit.state.connection_queue_max_wait_sec = 0
+    sent = 0
+
+    async def next_operation():
+        nonlocal sent
+        sent += 1
+        return httpx.Response(200)
+
+    # A ghost admitted row would consume the only physical slot until the
+    # signed attempt deadline. Gateway HTTP503 alone must not leave it open.
+    await next_audit.send(next_operation, deadline=_deadline(3))
+    assert sent == 1
+    assert (await _rows(next_audit))[0].provider_outcome == "response_received"
+    if not committed:
+        assert rows == []
+        return
+    assert len(rows) == 1
+    row = rows[0]
+    assert failed_request_ids == [row.id]
+    assert row.provider_outcome == "not_dispatched"
+    assert row.provider_http_status is None
+    assert row.provider_observed_at is not None
+    assert row.gateway_outcome == "completed"
+    assert row.gateway_http_status == 503
+    assert row.gateway_observed_at is not None
+    # Repeating the bounded closeout cannot change its original observation.
+    observed_at = row.provider_observed_at
+    await audit._finish(row.id, "not_dispatched")
+    assert (await _rows(audit))[0].provider_observed_at == observed_at
+
+
+async def test_failed_admission_closeout_preserves_observed_provider_fact(audit_setup: tuple) -> None:
+    audit, request = audit_setup
+    original_factory = audit.state.session_factory
+    assert original_factory is not None
+    first_session = True
+    observed_at = datetime.now(UTC)
+
+    @asynccontextmanager
+    async def commit_unknown():
+        nonlocal first_session
+        async with original_factory() as session:
+            if first_session:
+                first_session = False
+                original_commit = session.commit
+
+                async def commit():
+                    await original_commit()
+                    async with original_factory() as observer:
+                        await observer.execute(
+                            update(GatewayDispatchReceipt)
+                            .where(GatewayDispatchReceipt.request_id == audit.state.request_id)
+                            .values(provider_outcome="response_received", provider_http_status=200,
+                                    provider_observed_at=observed_at)
+                        )
+                        await observer.commit()
+                    raise RuntimeError("private-commit-acknowledgement-error")
+
+                session.commit = commit
+            yield session
+
+    audit.state.session_factory = commit_unknown
+
+    async def forbidden():
+        pytest.fail("an uncertain admission cannot authorize provider IO")
+
+    async def app(scope, receive, send):
+        with pytest.raises(DispatchAuditUnavailableError):
+            await audit.send(forbidden, deadline=None)
+        await send({"type": "http.response.start", "status": 503, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def noop(*args):
+        pass
+
+    try:
+        await DispatchAuditMiddleware(app)(request.scope, noop, noop)
+    finally:
+        audit.state.session_factory = original_factory
+    row = (await _rows(audit))[0]
+    assert row.provider_outcome == "response_received"
+    assert row.provider_http_status == 200
+    assert row.provider_observed_at == observed_at
+    assert row.gateway_outcome == "completed"
+    assert row.gateway_http_status == 503
+
+
+async def test_failed_admission_closeout_unavailable_keeps_unknown_and_logs(
+    audit_setup: tuple, caplog: pytest.LogCaptureFixture,
+) -> None:
+    audit, request = audit_setup
+    original_factory = audit.state.session_factory
+    assert original_factory is not None
+    first_session = True
+
+    @asynccontextmanager
+    async def database_fails_after_commit():
+        nonlocal first_session
+        if not first_session:
+            raise RuntimeError("private-closeout-driver-error")
+        first_session = False
+        async with original_factory() as session:
+            original_commit = session.commit
+
+            async def commit():
+                await original_commit()
+                raise TimeoutError("private-commit-driver-error")
+
+            session.commit = commit
+            yield session
+
+    audit.state.session_factory = database_fails_after_commit
+
+    async def forbidden():
+        pytest.fail("closeout failure must not authorize provider IO")
+
+    async def app(scope, receive, send):
+        with pytest.raises(DispatchAuditUnavailableError):
+            await audit.send(forbidden, deadline=None)
+        await send({"type": "http.response.start", "status": 503, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def noop(*args):
+        pass
+
+    try:
+        await DispatchAuditMiddleware(app)(request.scope, noop, noop)
+    finally:
+        audit.state.session_factory = original_factory
+    row = (await _rows(audit))[0]
+    assert row.provider_outcome == "admitted"
+    assert row.gateway_outcome == "pending"
+    assert row.provider_observed_at is None and row.gateway_observed_at is None
+    assert "observation=provider phase=session error_category=other" in caplog.text
+    assert "observation=gateway phase=session error_category=other" in caplog.text
+    assert "private-closeout-driver-error" not in caplog.text
+    assert "private-commit-driver-error" not in caplog.text
 
 
 async def test_database_enforces_request_dispatch_uniqueness(audit_setup: tuple) -> None:

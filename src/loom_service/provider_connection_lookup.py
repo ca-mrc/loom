@@ -27,6 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import ProviderConnection, ProviderConnectionShare
+from loom.provider_connection_routes import ProviderConnectionRouting
 from loom_service.agent_catalog import get_agent
 
 # Provider types the gateway routes with the OpenAI wire protocol (see
@@ -34,9 +35,33 @@ from loom_service.agent_catalog import get_agent
 OPENAI_SHAPED_PROVIDER_TYPES = frozenset({"openai-compatible", "custom"})
 
 
-def connection_runtime_config(config: dict[str, Any], provider_type: str) -> dict[str, Any]:
+def effective_provider_type(
+    config: dict[str, Any], routing: str | ProviderConnectionRouting,
+) -> str:
+    if isinstance(routing, str):
+        return routing
+    selected = config.get("agent_model")
+    model = selected.get("name") if isinstance(selected, dict) else None
+    agent_name = config.get("agent_name")
+    mode = config.get("claude_code_mode")
+    if agent_name == "claude-code":
+        if mode != "chat" and routing.verified_alternate("anthropic_messages", model):
+            return "anthropic"
+        if mode == "chat" and routing.verified_alternate("openai_chat", model):
+            return "openai-compatible"
+    elif routing.verified_alternate("openai_chat", model):
+        agent = get_agent(agent_name) if isinstance(agent_name, str) else None
+        if agent and agent.runtime_contract.endpoint_dialect == "openai_chat":
+            return "openai-compatible"
+    return routing.primary_type
+
+
+def connection_runtime_config(
+    config: dict[str, Any], provider_type: str | ProviderConnectionRouting,
+) -> dict[str, Any]:
     """Derive the runtime protocol from a connection already authorized to the team."""
     agent = get_agent(config.get("agent_name", ""))
+    provider_type = effective_provider_type(config, provider_type)
     supported = agent.supported_connection_types if agent else OPENAI_SHAPED_PROVIDER_TYPES
     if provider_type not in supported:
         raise HTTPException(status_code=400, detail=(
@@ -64,7 +89,7 @@ async def validate_provider_connection(
     team_id: UUID,
     agent_submission: bool = False,
     submission_configs: list[dict[str, Any]] | None = None,
-) -> str:
+) -> str | ProviderConnectionRouting:
     """Raise HTTPException if the connection is missing, soft-deleted,
     or owned by a different team. With `agent_submission`, also reject
     connections incompatible with the selected agents. Returns the authorized
@@ -74,6 +99,8 @@ async def validate_provider_connection(
             ProviderConnection.team_id,
             ProviderConnection.deleted_at,
             ProviderConnection.provider_type,
+            ProviderConnection.base_url,
+            ProviderConnection.alternate_route,
         ).where(ProviderConnection.id == provider_connection_id),
     )).one_or_none()
     if row is None:
@@ -84,7 +111,7 @@ async def validate_provider_connection(
                 f"Run `loom providers list` to see what's available."
             ),
         )
-    found_team_id, deleted_at, provider_type = row
+    found_team_id, deleted_at, provider_type, base_url, alternate = row
     if deleted_at is not None:
         raise HTTPException(
             status_code=400,
@@ -105,9 +132,11 @@ async def validate_provider_connection(
             raise HTTPException(
                 status_code=404, detail="provider_connection not found",
             )
+    routing = ProviderConnectionRouting.from_storage(provider_type, base_url, alternate)
+    authorized_routing = routing if routing.alternate else str(provider_type)
     if agent_submission:
         for config in submission_configs or [{}]:
-            connection_runtime_config(config, provider_type)
+            connection_runtime_config(config, authorized_routing)
 
     # Pool selection keeps the existing logical connection id, while every
     # physical member must satisfy the new submission's agent/model contract.
@@ -117,4 +146,4 @@ async def validate_provider_connection(
         session, provider_connection_id, team_id=team_id,
         submission_configs=submission_configs,
     )
-    return str(provider_type)
+    return authorized_routing

@@ -71,6 +71,7 @@ from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.request_pool import PoolMemberSwitchedError, prepare_request_pool
 from loom_llm_gateway.retry import RetryBudgetExceededError, send_with_retry
 from loom_llm_gateway.routes._facade_common import (
+    alternate_chat_url,
     build_raw_provider_log,
     compute_facade_cost_estimate,
     decrypt_facade_api_key,
@@ -138,7 +139,6 @@ async def openai_chat_facade(
 
     if not isinstance(payload.get("model"), str) or not payload["model"]:
         raise HTTPException(status_code=400, detail="`model` is required")
-    await authorize_trial_model(request, ctx, provider="openai", model=payload["model"])
 
     client_requested_stream = bool(payload.get("stream"))
     upstream_payload = dict(payload)
@@ -146,6 +146,27 @@ async def openai_chat_facade(
         upstream_payload["stream"] = False
         upstream_payload.pop("stream_options", None)
     upstream_payload, loom_extras = extract_and_strip_loom_fields(upstream_payload)
+
+    # Resolve team visibility and the requested wire route before dispatch.
+    async with request.app.state.session_factory() as session:
+        row = await resolve_facade_connection(
+            session,
+            connection_id,
+            ctx.team_id,
+            supported_types=_OPENAI_SHAPED_TYPES,
+            dialect_label="/openai/v1/chat/completions",
+            allow_request_pool=True,
+            alternate_chat_model=payload["model"],
+        )
+        # Pool members decrypt their own credential inside atomic admission.
+        api_key = ""
+
+    alternate_url = alternate_chat_url(row, payload["model"])
+    # A verified alternate has a different wire protocol from the model's
+    # catalog namespace. The bound trial still has to admit the exact name.
+    await authorize_trial_model(
+        request, ctx, provider=None if alternate_url else "openai", model=payload["model"],
+    )
 
     async with request.app.state.session_factory() as session:
         correlation = await persist_correlated_intent(
@@ -157,26 +178,13 @@ async def openai_chat_facade(
             requested_model=payload["model"],
         )
 
-    # Resolve + decrypt. Both happen inside one session so the
-    # SecretStore.get sees the same transaction the lookup did.
-    async with request.app.state.session_factory() as session:
-        row = await resolve_facade_connection(
-            session,
-            connection_id,
-            ctx.team_id,
-            supported_types=_OPENAI_SHAPED_TYPES,
-            dialect_label="/openai/v1/chat/completions",
-            allow_request_pool=True,
-        )
-        # Pool members decrypt their own credential inside atomic admission.
-        api_key = ""
-
     pool_audit = await prepare_request_pool(request, ctx, connection_id, payload)
     if pool_audit is None:
         async with request.app.state.session_factory() as session:
             api_key = await decrypt_facade_api_key(session, row)
 
-    upstream_url = f"{row.base_url.rstrip('/')}/chat/completions"
+    base_url = alternate_url or row.base_url
+    upstream_url = f"{base_url.rstrip('/')}/chat/completions"
     upstream_headers = {
         "Authorization": f"Bearer {api_key}",
         "content-type": "application/json",

@@ -14,7 +14,8 @@ from starlette.responses import StreamingResponse
 
 from loom.anthropic_chat_compat import AnthropicCompatibilityError, anthropic_to_chat
 from loom.anthropic_protocol import anthropic_api_base_url
-from loom_llm_gateway.execution_attempt_dispatch import authorize_anthropic_trial_model
+from loom.provider_connection_routes import ROUTE_PROVIDER_TYPES, ProviderConnectionRouting
+from loom_llm_gateway.execution_attempt_dispatch import authorize_anthropic_trial_route
 from loom_llm_gateway.routes._facade_common import (
     decrypt_facade_api_key,
     resolve_facade_connection,
@@ -50,14 +51,20 @@ async def anthropic_messages_facade(
             supported_types=frozenset({"anthropic", "openai-compatible", "custom"}),
             dialect_label="/anthropic/v1/messages",
         )
-        identity = await authorize_anthropic_trial_model(
+        routing = ProviderConnectionRouting.from_storage(row.provider_type, row.base_url, row.alternate_route)
+        alternate = routing.alternate
+        if alternate and (not alternate.supports_model(payload["model"])
+                          or (row.allowed_models is not None and payload["model"] not in row.allowed_models)):
+            alternate = None
+        identity, native = await authorize_anthropic_trial_route(
             session, ctx, model=payload["model"], connection_type=row.provider_type,
+            alternate_type=ROUTE_PROVIDER_TYPES[alternate.protocol] if alternate else None,
         )
-        native = row.provider_type == "anthropic"
+        base_url = alternate.base_url if alternate and native != (row.provider_type == "anthropic") else row.base_url
         try:
             upstream_payload = payload if native else anthropic_to_chat(payload)
-            url = (anthropic_api_base_url(row.base_url) + "/messages" if native
-                   else row.base_url.rstrip("/") + "/chat/completions")
+            url = (anthropic_api_base_url(base_url) + "/messages" if native
+                   else base_url.rstrip("/") + "/chat/completions")
         except (AnthropicCompatibilityError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         api_key = await decrypt_facade_api_key(session, row)

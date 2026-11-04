@@ -1129,3 +1129,83 @@ async def test_harbor_delivers_only_oracle_reference_tree_at_absolute_solution(t
     monkeypatch.setattr(module, "_execution_identity", identity)
     monkeypatch.setattr(module, "run_oracle" if agent_name == "oracle" else "run_terminus2", execute)
     await module.run_agent(tmp_path, task, trial)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capture_fails", [False, True])
+async def test_failed_verifier_keeps_reports_before_sandbox_teardown(tmp_path, monkeypatch, capture_fails):
+    import tarfile
+
+    from loom import service_execution_sandbox_task as module
+
+    task, trial, _ = _inputs()
+    trial = trial.model_copy(update={"verifier_env_mode": "shared"})
+
+    class DiagnosticSandbox(Sandbox):
+        async def export_diagnostic_archive(self, src, dst, *, max_bytes):
+            assert self.quiesced and self.state == "running"
+            if capture_fails:
+                raise DriverError("private capture error must remain secondary")
+            await self.export_workspace_archive(src, dst)
+            assert dst.stat().st_size <= max_bytes
+
+        async def stop(self, **kwargs):
+            self.filesystem.clear()
+            await super().stop(**kwargs)
+
+    driver = DiagnosticSandbox()
+    monkeypatch.setattr(module, "sandbox_driver", lambda *_: driver)
+
+    async def noop(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(module, "materialize_workspace", noop)
+
+    def verify(cmd, user, cwd, env):
+        driver.filesystem[PurePosixPath("/logs/verifier/terminalgen-native-completion.json")] = b'{"state":"error","raw_exit":70}'
+        driver.filesystem[PurePosixPath("/logs/verifier/terminalgen-probe-01.stderr")] = b"underlying verifier failure"
+        return ExecResult(return_code=1, stdout=b"", stderr=b"reward is missing", duration_sec=0)
+
+    driver.exec_handler = verify
+    with pytest.raises(module.ServiceExecutionTaskError, match="exit_code=1"):
+        await run_verifier(tmp_path, task, trial)
+    assert driver.state == "stopped" and not driver.filesystem
+    report = json.loads((tmp_path / ".loom/verifier/diagnostics.json").read_text())
+    if capture_fails:
+        assert report["status"] == "unavailable"
+        assert not (tmp_path / ".loom/verifier/diagnostics.tar").exists()
+        return
+    with tarfile.open(tmp_path / ".loom/verifier/diagnostics.tar") as archive:
+        assert archive.extractfile("terminalgen-native-completion.json").read() == b'{"state":"error","raw_exit":70}'
+        assert archive.extractfile("terminalgen-probe-01.stderr").read() == b"underlying verifier failure"
+    report = json.loads((tmp_path / ".loom/verifier/diagnostics.json").read_text())
+    assert report["status"] == "captured" and report["files_retained"] == 2
+
+
+@pytest.mark.asyncio
+async def test_valid_zero_verifier_has_no_diagnostic_capture_work(tmp_path, monkeypatch):
+    from loom import service_execution_sandbox_task as module
+
+    task, trial, _ = _inputs()
+    trial = trial.model_copy(update={"verifier_env_mode": "shared"})
+
+    class DiagnosticSandbox(Sandbox):
+        async def export_diagnostic_archive(self, *args, **kwargs):
+            raise AssertionError("successful zero score must not collect failure diagnostics")
+
+    driver = DiagnosticSandbox()
+    monkeypatch.setattr(module, "sandbox_driver", lambda *_: driver)
+
+    async def noop(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(module, "materialize_workspace", noop)
+
+    def verify(cmd, user, cwd, env):
+        driver.filesystem[PurePosixPath(env["LOOM_VERIFIER_OUTPUT"])] = b'{"rewards":{"reward":0}}'
+        return ExecResult(return_code=0, stdout=b"", stderr=b"", duration_sec=0)
+
+    driver.exec_handler = verify
+    await run_verifier(tmp_path, task, trial)
+    assert driver.state == "stopped"
+    assert not (tmp_path / ".loom/verifier/diagnostics.json").exists()

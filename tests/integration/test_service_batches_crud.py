@@ -4578,6 +4578,87 @@ async def test_batch_detail_default_does_not_materialize_llm_call_rows(
     assert body["no_call_reason_counts"] == {"terminal_model_backed_no_call": 1}
 
 
+async def test_batch_detail_without_reruns_reads_call_aggregates_once(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Effective rollups equal the originals without reruns, so they are not re-read (#2771)."""
+    from loom_service.routes import batches as batch_routes
+
+    app, raw, team_id = camp_setup
+    batch_id, trial_id = uuid4(), uuid4()
+    now = datetime.now(UTC)
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id, team_id=team_id, name="no-rerun-detail",
+                task_filter={"task_ids": ["local/mit-0"], "subset_kind": "explicit"},
+                trial_config={}, state="finished", created_by_token_prefix="abcdef12",
+                expected_trial_count=1, result_status="succeeded", finished_at=now,
+            )
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=trial_id, batch_id=batch_id, team_id=team_id, task_id="local/mit-0",
+                state="succeeded", config={}, requires_caps={}, submitted_at=now,
+                started_at=now, finished_at=now, result={"aggregate_reward": 1.0},
+            )
+        )
+        conn.execute(
+            insert(LlmCall),
+            [
+                {
+                    "id": uuid4(), "team_id": team_id, "trial_id": trial_id,
+                    "step_id": "main", "model": "openai/gpt-test", "dialect": "openai",
+                    "input_tokens": tokens, "output_tokens": 2, "provider_extras": {},
+                    "cost_usd": Decimal("0.010000"), "rate_card_hash": "old-rate-card",
+                }
+                for tokens in (5, 7)
+            ],
+        )
+    sync_engine.dispose()
+
+    calls: dict[str, int] = {}
+
+    def counted(name: str) -> None:
+        original = getattr(batch_routes, name)
+
+        async def wrapper(*args: object, **kwargs: object) -> object:
+            calls[name] = calls.get(name, 0) + 1
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(batch_routes, name, wrapper)
+
+    for name in (
+        "_usage_totals_for_trials",
+        "_llm_call_counts_for_trials",
+        "combination_summary_for_batch",
+    ):
+        counted(name)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.get(
+            f"/api/v1/batches/{batch_id}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert calls == {
+        "_usage_totals_for_trials": 1,
+        "_llm_call_counts_for_trials": 1,
+        "combination_summary_for_batch": 1,
+    }
+    assert body["llm_calls_count"] == body["effective_llm_calls_count"] == 2
+    assert body["total_prompt_tokens"] == body["effective_total_prompt_tokens"] == 12
+    assert body["estimated_cost_usd"] == pytest.approx(body["effective_estimated_cost_usd"])
+    assert body["combination_summary"] == body["effective_combination_summary"]
+    assert body["no_call_trial_count"] == body["effective_no_call_trial_count"]
+
+
 async def test_batch_detail_default_does_not_select_trajectory_index(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,

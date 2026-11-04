@@ -110,7 +110,8 @@ async def test_native_phase_deadline_is_signed_clamped_and_cancels_provider_tcp(
         # signature, live DB authorization, deadline, retry and HTTP send are real.
         monkeypatch.setattr(facade_openai, "resolve_provider_connection_id", lambda *_: uuid4())
         monkeypatch.setattr(facade_openai, "resolve_facade_connection", AsyncMock(return_value=
-                            SimpleNamespace(base_url=f"http://127.0.0.1:{port}", provider_type="openai-compatible")))
+                            SimpleNamespace(base_url=f"http://127.0.0.1:{port}", provider_type="openai-compatible",
+                                            alternate_route=None)))
         monkeypatch.setattr(facade_openai, "decrypt_facade_api_key", AsyncMock(return_value="fixture"))
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gateway") as client:
             # Start the signed cutoff after fixture construction. Give real DB

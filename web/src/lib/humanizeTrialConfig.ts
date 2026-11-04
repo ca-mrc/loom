@@ -16,11 +16,17 @@ const KNOWN_TRIAL_CONFIG_KEYS = new Set([
   "delete_env",
   "env_build_timeout_multiplier",
   "extra_mcp_servers",
+  "claude_code_mode",
   "extra_skills",
+  "family_run",
   "force_build",
+  "harbor_config",
+  "isolation",
+  "mainland_proxy",
   "override_agent_timeout_sec",
   "override_env_build_timeout_sec",
   "override_verifier_timeout_sec",
+  "request_params",
   "retry",
   "schema_version",
   "skip_verifier",
@@ -54,6 +60,16 @@ export function humanizeTrialConfig(
   if (typeof c.verifier_env_mode === "string" && c.verifier_env_mode) {
     items.push(`Verifier environment: ${c.verifier_env_mode}`);
   }
+  if (typeof c.claude_code_mode === "string" && c.claude_code_mode) {
+    items.push(`Claude Code mode: ${c.claude_code_mode}`);
+  }
+  if (typeof c.isolation === "string" && c.isolation) {
+    items.push(`Isolation: ${c.isolation}`);
+  }
+  if (c.mainland_proxy === true) items.push("Mainland proxy: on");
+  if (c.family_run && typeof c.family_run === "object") items.push("Family run: configured");
+  addRecord(items, "Harbor", c.harbor_config);
+  addRecord(items, "Request params", c.request_params);
 
   addSeconds(items, "Agent timeout", c.override_agent_timeout_sec);
   addSeconds(items, "Verifier timeout", c.override_verifier_timeout_sec);
@@ -137,6 +153,14 @@ function addMultiplier(items: string[], label: string, value: unknown): void {
   if (typeof value === "number" && value !== 1) {
     items.push(`${label}: ${value}x`);
   }
+}
+
+function addRecord(items: string[], label: string, value: unknown): void {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const parts = Object.entries(value as Record<string, unknown>)
+    .filter(([, item]) => item !== null && item !== undefined)
+    .map(([key, item]) => `${prettyCode(key)} ${Array.isArray(item) ? item.map(String).join("/") : String(item)}`);
+  if (parts.length > 0) items.push(`${label}: ${parts.join(", ")}`);
 }
 
 function addCount(items: string[], label: string, value: unknown): void {

@@ -84,6 +84,7 @@ _MIN_SANDBOX_EXEC_LIMIT_SECONDS = 900
 _VERIFIER_OWNED_OUTPUTS = frozenset({
     "diagnostics/verifier-exception.json", "verifier/output.json", "artifacts/verifier/ctrf.json",
     "diagnostics/workspace-handoff.json",
+    "diagnostics/verifier-files.tar", "diagnostics/verifier-files.json",
 })
 
 
@@ -307,6 +308,8 @@ def _output_declarations(request: TaskSandboxPlanRequest, topology: _Topology) -
             )
         ),
         ("verifier/ctrf.json", "artifacts/verifier/ctrf.json", "task_artifact", False),
+        ("verifier/diagnostics.tar", "diagnostics/verifier-files.tar", "diagnostic", False),
+        ("verifier/diagnostics.json", "diagnostics/verifier-files.json", "diagnostic", False),
     ):
         outputs.append(RuntimeOutputDeclarationV1(
             source_path=f".loom/{source}", relative_path=target, kind=kind, required=required,

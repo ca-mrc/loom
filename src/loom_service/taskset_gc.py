@@ -662,7 +662,7 @@ def _taskset_has_work_or_history(*, active_only: bool) -> Any:
     )
     if active_only:
         trial_ref = trial_ref.where(Trial.state.not_in(("succeeded", "failed", "cancelled")))
-        batch_ref = batch_ref.where(Batch.state.not_in(("finished", "cancelled")))
+        batch_ref = batch_ref.where(Batch.state.not_in(("finished", "cancelled", "cancelling")))
     return or_(exists(trial_ref.correlate(TaskSet)), exists(batch_ref.correlate(TaskSet)))
 
 

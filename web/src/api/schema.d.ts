@@ -979,6 +979,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/batches/{batch_id}/trials/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Batch Trials */
+        post: operations["cancel_batch_trials_api_v1_batches__batch_id__trials_cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/benchmarks": {
         parameters: {
             query?: never;
@@ -2089,6 +2106,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/provider-connections/{connection_id}/routes/{protocol}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Configure Alternate Route */
+        put: operations["configure_alternate_route_api_v1_provider_connections__connection_id__routes__protocol__put"];
+        post?: never;
+        /** Delete Alternate Route */
+        delete: operations["delete_alternate_route_api_v1_provider_connections__connection_id__routes__protocol__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/provider-connections/{connection_id}/routes/{protocol}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Test Alternate Route */
+        post: operations["test_alternate_route_api_v1_provider_connections__connection_id__routes__protocol__test_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/provider-connections/{connection_id}/shares": {
         parameters: {
             query?: never;
@@ -3002,6 +3054,20 @@ export interface components {
              */
             kind: "allowlist";
         };
+        /** AlternateProviderRoute */
+        AlternateProviderRoute: {
+            /** Base Url */
+            base_url: string;
+            /**
+             * Protocol
+             * @enum {string}
+             */
+            protocol: "openai_chat" | "anthropic_messages";
+            /** Verified Models */
+            verified_models?: {
+                [key: string]: boolean;
+            };
+        };
         /** ArtifactInventory */
         ArtifactInventory: {
             /** Logs Diagnostics */
@@ -3455,6 +3521,18 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** BatchTrialsCancelRequest */
+        BatchTrialsCancelRequest: {
+            /**
+             * Preserve Verifying
+             * @default false
+             */
+            preserve_verifying: boolean;
+            /** Reason */
+            reason?: string | null;
+            /** Trial Ids */
+            trial_ids: string[];
+        };
         /** BehaviorAssetsRuntimeRootV1 */
         BehaviorAssetsRuntimeRootV1: {
             /**
@@ -3645,6 +3723,17 @@ export interface components {
         };
         /** CancellationRequest */
         CancellationRequest: {
+            /**
+             * Mode
+             * @default full
+             * @enum {string}
+             */
+            mode: "full" | "drain";
+            /**
+             * Preserve Verifying
+             * @default false
+             */
+            preserve_verifying: boolean;
             /** Reason */
             reason?: string | null;
         };
@@ -6175,6 +6264,12 @@ export interface components {
         PostBatchesIdCancelResponse: {
             /** Batch Id */
             batch_id: string;
+            /** Cancelled Count */
+            cancelled_count?: number;
+            /** Mode */
+            mode?: string;
+            /** Retained Count */
+            retained_count?: number;
             /** State */
             state: string;
         } & {
@@ -6197,6 +6292,20 @@ export interface components {
             state: string;
         } & {
             [key: string]: unknown;
+        };
+        /** PostBatchesIdTrialsCancelResponse */
+        PostBatchesIdTrialsCancelResponse: {
+            /** Batch Id */
+            batch_id: string;
+            /** Results */
+            results: components["schemas"]["PostBatchesIdTrialsCancelResult"][];
+        };
+        /** PostBatchesIdTrialsCancelResult */
+        PostBatchesIdTrialsCancelResult: {
+            /** Outcome */
+            outcome: string;
+            /** Trial Id */
+            trial_id: string;
         };
         /** PostBatchesResponse */
         PostBatchesResponse: {
@@ -6394,6 +6503,7 @@ export interface components {
         ProviderConnectionResponse: {
             /** Allowed Models */
             allowed_models: string[] | null;
+            alternate_route?: components["schemas"]["AlternateProviderRoute"] | null;
             /** Base Url */
             base_url: string;
             /** Catalog Id */
@@ -6610,6 +6720,30 @@ export interface components {
             missing: number;
             /** Refreshed */
             refreshed: number;
+        };
+        /** ProviderRouteResult */
+        ProviderRouteResult: {
+            /** Error Code */
+            error_code: string | null;
+            /** Http Status */
+            http_status: number | null;
+            /** Model */
+            model: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "valid" | "failed";
+        };
+        /** ProviderRouteTest */
+        ProviderRouteTest: {
+            /** Model */
+            model: string;
+        };
+        /** ProviderRouteUpdate */
+        ProviderRouteUpdate: {
+            /** Base Url */
+            base_url: string;
         };
         /** Public */
         Public: {
@@ -11288,6 +11422,43 @@ export interface operations {
             };
         };
     };
+    cancel_batch_trials_api_v1_batches__batch_id__trials_cancel_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                batch_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BatchTrialsCancelRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PostBatchesIdTrialsCancelResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_benchmarks_api_v1_benchmarks_get: {
         parameters: {
             query?: {
@@ -13905,6 +14076,119 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RequestPoolResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    configure_alternate_route_api_v1_provider_connections__connection_id__routes__protocol__put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-loom-admin-actor"?: string | null;
+                authorization?: string | null;
+            };
+            path: {
+                connection_id: string;
+                protocol: "openai_chat" | "anthropic_messages";
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProviderRouteUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderConnectionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_alternate_route_api_v1_provider_connections__connection_id__routes__protocol__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-loom-admin-actor"?: string | null;
+                authorization?: string | null;
+            };
+            path: {
+                connection_id: string;
+                protocol: "openai_chat" | "anthropic_messages";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderConnectionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    test_alternate_route_api_v1_provider_connections__connection_id__routes__protocol__test_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-loom-admin-actor"?: string | null;
+                authorization?: string | null;
+            };
+            path: {
+                connection_id: string;
+                protocol: "openai_chat" | "anthropic_messages";
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProviderRouteTest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderRouteResult"];
                 };
             };
             /** @description Validation Error */

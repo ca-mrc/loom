@@ -158,15 +158,7 @@ class PoolDispatchAudit(DispatchAudit):
         self._keys: list[str] = []
 
     async def _prepare_dispatch(self, session: AsyncSession, values: dict[str, Any]) -> None:
-        pool = await session.scalar(
-            select(ProviderRequestPool)
-            .where(
-                ProviderRequestPool.connection_id == self.pool_id,
-            )
-            .with_for_update()
-        )
-        if pool is None or not pool.enabled:
-            raise HTTPException(409, "request pool changed; retry the request")
+        pool, binding = await self._lock_pool_binding(session)
         await authorize_trial_execution_dispatch(session, self.ctx)
         assert self.ctx.team_id is not None
         await resolve_facade_connection(
@@ -193,10 +185,6 @@ class PoolDispatchAudit(DispatchAudit):
         )
         now = datetime.now(UTC)
         suppressed = await self._suppressed_members(session, members, now)
-        assert self.ctx.trial_id is not None
-        binding = await session.get(
-            ProviderRequestPoolBinding, (self.pool_id, self.ctx.trial_id)
-        )
         selected = await self._select_member(
             session, pool, members, binding, now, suppressed, required,
         )
@@ -218,6 +206,41 @@ class PoolDispatchAudit(DispatchAudit):
             pool_connection_id=self.pool_id,
             failover_reason=self.failover_reason,
         )
+
+    async def _lock_pool_binding(
+        self, session: AsyncSession,
+    ) -> tuple[ProviderRequestPool, ProviderRequestPoolBinding | None]:
+        """Serialize a sticky Trial without serializing unrelated pool readers.
+
+        The caller owns a fresh admission transaction: no policy or receipt
+        writes precede this method. The unlocked scalar is only a lock-mode
+        hint. Recheck the binding under pool then binding locks; configuration,
+        timeout switching and first-assignment cursor updates remain exclusive
+        pool writers until the same durable-admission commit.
+        """
+        assert self.ctx.trial_id is not None
+        binding_query = select(ProviderRequestPoolBinding).where(
+            ProviderRequestPoolBinding.pool_connection_id == self.pool_id,
+            ProviderRequestPoolBinding.trial_id == self.ctx.trial_id,
+        )
+        shared = await session.scalar(select(ProviderRequestPoolBinding.trial_id).where(
+            ProviderRequestPoolBinding.pool_connection_id == self.pool_id,
+            ProviderRequestPoolBinding.trial_id == self.ctx.trial_id,
+        )) is not None
+        while True:
+            pool = await session.scalar(select(ProviderRequestPool).where(
+                ProviderRequestPool.connection_id == self.pool_id,
+            ).with_for_update(read=shared))
+            if pool is None or not pool.enabled:
+                raise HTTPException(409, "request pool changed; retry the request")
+            binding = await session.scalar(binding_query.with_for_update())
+            if not shared or binding is not None:
+                return pool, binding
+            # A binding can disappear after the hint. Never upgrade SHARE to
+            # UPDATE: concurrent upgrades deadlock. Release the entire untouched
+            # transaction, reload exclusively, then run every live policy check.
+            await session.rollback()
+            shared = False
 
     async def _suppressed_members(
         self,
@@ -502,7 +525,22 @@ class PoolDispatchAudit(DispatchAudit):
             # Gateway policy expiry is not a member health observation and
             # must not suppress a provider or rotate the sticky binding.
             raise
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as exc:
+            phase = next((name for kind, name in (
+                (httpx.ConnectTimeout, "connect"), (httpx.ReadTimeout, "read"),
+                (httpx.WriteTimeout, "write"), (httpx.PoolTimeout, "pool"),
+            ) if isinstance(exc, kind)), "unknown")
+            # Wrapping the exception deliberately discards request objects and
+            # vendor text. Retain only the fixed transport phase and existing
+            # opaque joins so an operator can distinguish network phases from
+            # a provider HTTP504 without exposing credentials or endpoints.
+            logger.warning(
+                "request_pool_upstream_timeout request_id=%s receipt_id=%s "
+                "pool_connection_id=%s provider_connection_id=%s phase=%s",
+                self.state.request_id,
+                self.state.receipt_ids[-1] if self.state.receipt_ids else None,
+                self.pool_id, self.row.id if self.row is not None else None, phase,
+            )
             await self._switch_after_timeout("upstream_timeout")
             raise PoolMemberSwitchedError("upstream_timeout") from None
         if response.status_code == 504:

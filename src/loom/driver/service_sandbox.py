@@ -428,10 +428,18 @@ class ServiceSandboxDriver:
 
     async def _download_file(
         self, src: PurePosixPath, dst: Path, *, workspace_archive: bool = False,
+        max_bytes: int | None = None,
     ) -> None:
         client = self._running_client()
         limit = self._max_workspace_archive if workspace_archive else self._max_transfer
         endpoint = "/workspace-archive" if workspace_archive else "/file"
+        if max_bytes is not None:
+            if not 0 < max_bytes <= limit:
+                raise DriverError("download budget invalid")
+            limit = max_bytes
+        params = {"path": str(src)}
+        if max_bytes is not None:
+            params["max_bytes"] = str(limit)
         # Download to a private temporary file and atomically publish only a
         # complete, bounded transfer. Existing output survives failed reads.
         if dst.is_symlink() or any(p.is_symlink() for p in dst.parents):
@@ -443,7 +451,7 @@ class ServiceSandboxDriver:
         temporary: Path | None = None
         try:
             async with client.stream(
-                "GET", endpoint, params={"path": str(src)}, timeout=120
+                "GET", endpoint, params=params, timeout=120
             ) as response:
                 response.raise_for_status()
                 raw_size = response.headers.get("Content-Length", "")
@@ -591,6 +599,40 @@ class ServiceSandboxDriver:
             await self._download_file(remote, dst, workspace_archive=True)
         finally:
             await self.exec(f"rm -f {archive}")
+
+    async def export_diagnostic_archive(
+        self, src: PurePosixPath, dst: Path, *, max_bytes: int,
+    ) -> None:
+        """Use the existing archive/file boundary with a smaller failure-only cap.
+
+        Callers quiesce task processes first. Root ancestry must not traverse a
+        symlink; nested links are archived literally and filtered by the trusted
+        controller. The shell file limit also bounds temporary sandbox disk use.
+        """
+        if src != PurePosixPath("/logs/verifier") or not 1024 <= max_bytes <= 8 * 1024 * 1024:
+            raise DriverError("diagnostic archive scope or budget invalid")
+        source = shlex.quote(str(src))
+        checks = " && ".join(
+            f"test ! -L {shlex.quote(str(path))}" for path in (*reversed(src.parents), src)
+        )
+        probe = await self.exec(checks + f" && test -d {source}", timeout_sec=2)
+        if probe.return_code or probe.truncated:
+            raise DriverError("diagnostic directory unavailable")
+        remote = PurePosixPath(f"/tmp/loom-workspace-{uuid4().hex}.tar")
+        archive = shlex.quote(str(remote))
+        try:
+            # POSIX shells use 512- or 1024-byte ulimit blocks. This is bounded
+            # by max_bytes on either implementation; a lower cap is explicit
+            # unavailable evidence, never a successful truncated report.
+            result = await self.exec(
+                f"(ulimit -f {max_bytes // 1024}; tar -C {source} -cf {archive} .)",
+                timeout_sec=2,
+            )
+            if result.return_code or result.truncated or result.stderr:
+                raise DriverError("diagnostic archive unavailable")
+            await self._download_file(remote, dst, workspace_archive=True, max_bytes=max_bytes)
+        finally:
+            await self.exec(f"rm -f -- {archive}", timeout_sec=2)
 
     async def import_workspace_archive(
         self, src: Path, dst: PurePosixPath, *, policy: WorkspaceStagingPolicy | None = None,

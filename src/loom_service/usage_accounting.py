@@ -975,19 +975,34 @@ async def _frozen_price_bases(
     A provider-price hash is the digest of its basis, so any one call with
     the hash carries the same basis. Only the basis key is extracted, never
     the full raw-log JSON, and the lookup stays inside the Trials' calls (#2687).
+
+    `provider_extras` never appears in a filter (#2771). Postgres orders a
+    scan's conditions by estimated cost, so `trial_id IN (...) AND
+    provider_extras ? key` tested the cheap-looking key first and detoasted the
+    raw log of every call sharing the hash in any Batch: about 2.3s on a
+    13k-call Batch. Here the inner scan filters only on Trial and hash, and
+    extracts the basis in its select list. OFFSET 0 keeps the outer non-null
+    test from being pushed into that scan, so only the Trials' own calls are
+    read, and only until one carries a basis.
     """
     if not hashes or not trial_ids:
         return {}
     wanted = values(column("rate_card_hash", Text), name="wanted_hashes").data(
         [(digest,) for digest in hashes],
     )
-    call = (
+    trial_calls = (
         select(LlmCall.provider_extras[_PRICE_BASIS_KEY].label("basis"))
         .where(
             LlmCall.trial_id.in_(list(trial_ids)),
             LlmCall.rate_card_hash == wanted.c.rate_card_hash,
-            LlmCall.provider_extras.has_key(_PRICE_BASIS_KEY),
         )
+        .offset(0)
+        .correlate(wanted)
+        .lateral("trial_call")
+    )
+    call = (
+        select(trial_calls.c.basis)
+        .where(trial_calls.c.basis.is_not(None))
         .limit(1)
         .lateral("priced_call")
     )

@@ -1,5 +1,5 @@
 import { lazyRoute } from "../lib/lazyRoute";
-import type { ProviderPricing } from "../api/providers";
+import type { AlternateProviderRoute, ProviderPricing } from "../api/providers";
 import { HelpButton } from "../components/HelpButton";
 import { queryKeys } from "../api/queryKeys";
 /**
@@ -16,6 +16,7 @@ import {
 } from "react-router-dom";
 
 import { api } from "../api";
+import ProviderRoutesCard from "../components/providers/ProviderRoutesCard";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import LoadingState from "../components/LoadingState";
@@ -106,6 +107,7 @@ export default function ProviderDetail(): JSX.Element {
     name: string;
     type: string;
     base_url: string;
+    alternate_route?: AlternateProviderRoute | null;
     status?: string;
     allowed_models?: string[] | null;
     created_at?: string;
@@ -318,6 +320,7 @@ function SettingsTab({
     name: string;
     type: string;
     base_url: string;
+    alternate_route?: AlternateProviderRoute | null;
     allowed_models?: string[] | null;
   };
   id: string;
@@ -361,6 +364,7 @@ function SettingsTab({
 
   return (
     <div className="stack-y-6">
+      <ProviderRoutesCard id={id} type={conn.type} baseUrl={conn.base_url} route={conn.alternate_route} />
       <Card>
         <Card.Body className="stack-y-4">
           <h2 className="text-lg font-semibold">Edit</h2>

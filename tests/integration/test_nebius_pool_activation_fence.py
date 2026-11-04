@@ -336,10 +336,11 @@ async def test_normal_owner_lifecycle_uses_exact_schema_and_independent_policy(
     )
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+    from loom.db.schema_startup import service_schema_head
     from tests.integration.test_nebius_pool_startup_database import observe as observe_authority
 
     url = isolated_migration_postgres_url
-    if revision != '0188':
+    if revision != service_schema_head():
         config = Config('database/migrations/alembic.ini')
         config.set_main_option('sqlalchemy.url', url.replace('%', '%%'))
         await asyncio.to_thread(command.downgrade, config, revision)

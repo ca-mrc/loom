@@ -594,7 +594,7 @@ def test_refresh_schema_readback_rejects_replacement_or_unqualified_result(manag
         api.management_schema_revision(('0174',))
 
 
-@pytest.mark.parametrize('revision', ['0178', '0186', '0187', '0188'])
+@pytest.mark.parametrize('revision', ['0178', '0186', '0187', '0188', '0189', '0190'])
 def test_schema_successor_target_pins_read_and_recovery_queries(management_history, monkeypatch, revision):
     from scripts.ops.nebius_pool_origin_history import KubectlPoolHistoryAPI
 

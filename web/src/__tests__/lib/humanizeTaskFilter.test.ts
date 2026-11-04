@@ -44,6 +44,17 @@ describe("humanizeTaskFilter", () => {
   });
 });
 
+it("accepts the singular task set id and lists pinned tasks", () => {
+  const summary = humanizeTaskFilter({
+    task_set_id: "ts/team/terminal-bench-2-1",
+    task_ids: ["a", "b", "c", "d"],
+  });
+  expect(summary.primary).toContain("1 task set");
+  expect(summary.details).toContain("Task set: ts/team/terminal-bench-2-1");
+  expect(summary.details).toContain("Pinned tasks: 4");
+  expect(summary.diagnostics).toEqual([]);
+});
+
 it("describes persisted TaskSet-backed plans without unknown-field warnings", () => {
   const summary = humanizeTaskFilter({ task_set_ids: ["set-one"], subset_kind: "all" }, { matchedTaskCount: 3 });
   expect(summary.primary).toContain("1 task set");

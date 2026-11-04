@@ -97,6 +97,19 @@ class GetBackendsResponse(TypedDict):
 class PostBatchesIdCancelResponse(TypedDict):
     batch_id: str
     state: str
+    mode: NotRequired[str]
+    cancelled_count: NotRequired[int]
+    retained_count: NotRequired[int]
+
+
+class PostBatchesIdTrialsCancelResult(TypedDict):
+    trial_id: str
+    outcome: str
+
+
+class PostBatchesIdTrialsCancelResponse(TypedDict):
+    batch_id: str
+    results: list[PostBatchesIdTrialsCancelResult]
 
 
 @with_config(ConfigDict(extra="allow"))

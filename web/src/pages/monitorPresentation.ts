@@ -5,7 +5,7 @@ import { type SubmittedByUser } from "../lib/ownership";
 
 export type View = "batches" | "trials";
 
-export const BATCH_STATE_OPTIONS = ["submitted", "running", "finished", "cancelled"];
+export const BATCH_STATE_OPTIONS = ["submitted", "running", "cancelling", "finished", "cancelled"];
 
 export const TRIAL_STATE_OPTIONS = [
   "stage:image_preparation",
@@ -48,6 +48,7 @@ export const STATE_OPTION_LABELS: Record<string, string> = {
   "cleanup:in_progress": "Releasing resources",
   "cleanup:blocked": "Resource cleanup blocked",
   cancelled: "Cancelled - stopped",
+  cancelling: "Cancelling - verifying and archiving trials continue",
   claimed: "Claimed - worker reserved it",
   failed: "Failed - needs diagnosis",
   finished: "Finished - all trials terminal",

@@ -44,6 +44,8 @@ from tests.integration.gateway_db import (
     delete_teams_and_quotas,
     insert_gateway_trial,
 )
+from tests.unit.test_anthropic_chat_stream import _wire
+from tests.unit.test_claude_gateway_lifecycle import _native_wire, _TerminalThenTimeout
 
 _TEST_MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
 
@@ -831,20 +833,62 @@ async def test_incomplete_native_stream_retains_observed_usage_as_failed(facade_
     assert ledger["provider_extras"]["_loom_usage_status"] == "partial"
 
 
+@pytest.mark.parametrize("native,input_tokens,output_tokens,cost", [(True, 12, 4, 0.000096), (False, 100, 20, 0.0006)])
+async def test_terminal_event_finishes_facade_without_waiting_for_http_eof(
+    facade_setup, postgres_url, native, input_tokens, output_tokens, cost,
+):
+    app, jwt, _, trial_id, conn_id, captures = facade_setup
+    engine = create_engine(postgres_url)
+    try:
+        if not native:
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE provider_connections SET provider_type='openai-compatible' WHERE id=:id"), {"id": conn_id})
+        stream = _TerminalThenTimeout(_native_wire() if native else _wire())
+        captures["response"] = httpx.Response(200, stream=stream, headers={"content-type": "text/event-stream"})
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gw") as client:
+            response = await client.post("/anthropic/v1/messages", headers={
+                "x-api-key": jwt, "x-loom-provider-connection-id": str(conn_id),
+            }, json={**_messages_body(), "stream": True})
+        assert response.status_code == 200
+        assert response.text.count("event: message_stop") == 1
+        assert "event: error" not in response.text
+        with engine.connect() as conn:
+            rows = list(conn.execute(text("SELECT * FROM llm_calls WHERE trial_id=:id"), {"id": trial_id}))
+        assert stream.closed and len(rows) == 1
+        ledger = dict(rows[0]._mapping)
+        assert ledger["input_tokens"] == input_tokens and ledger["output_tokens"] == output_tokens
+        assert float(ledger["cost_usd"]) == pytest.approx(cost)
+        assert "_loom_call_status" not in ledger["provider_extras"]
+        assert "_loom_usage_status" not in ledger["provider_extras"]
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("alternate", [False, True])
 async def test_hosted_model_authorization_works_with_one_database_connection(
-    facade_setup, postgres_url, monkeypatch,
+    facade_setup, postgres_url, monkeypatch, alternate,
 ):
     """Authorization must finish before dispatch without a nested pool checkout."""
     from dataclasses import replace
 
     from sqlalchemy import update
 
-    from loom.db.schema import Trial
+    from loom.db.schema import ProviderConnection, Trial
     from loom_llm_gateway.routes import facade_anthropic
 
     app, jwt, _, trial_id, conn_id, _ = facade_setup
     original_factory = app.state.session_factory
     async with original_factory() as session:
+        connection = await session.get(ProviderConnection, conn_id)
+        assert connection is not None
+        connection.base_url = "https://upstream.example/v1"
+        if alternate:
+            connection.provider_type = "openai-compatible"
+            connection.alternate_route = {
+                "protocol": "anthropic_messages",
+                "base_url": "https://upstream.example/native/v1",
+                "verified_models": {"claude-opus-4-7": True},
+            }
         await session.execute(update(Trial).where(Trial.id == trial_id).values(config={
             "agent_name": "claude-code", "claude_code_mode": "native",
             "agent_model": {"provider": "vendor", "name": "claude-opus-4-7"},
@@ -863,6 +907,9 @@ async def test_hosted_model_authorization_works_with_one_database_connection(
     async def dispatch(owner):
         assert engine.pool.checkedout() == 0
         assert owner.identity.provider == "vendor"
+        assert owner.native
+        expected_path = "/native/v1/messages" if alternate else "/v1/messages"
+        assert owner.url == "https://upstream.example" + expected_path
         return {"model": owner.identity.name}
 
     monkeypatch.setattr(facade_anthropic, "verify_facade_auth", hosted_auth)

@@ -972,3 +972,20 @@ def test_redact_secret_helper_multiple_secrets() -> None:
     assert "sk-AAA" not in out
     assert "sk-BBB" not in out
     assert out == "key=[REDACTED] url=[REDACTED]"
+
+
+@pytest.mark.parametrize(("reply", "status"), [
+    ({"type": "message", "content": [{"type": "text", "text": "OK"}]}, "valid"),
+    ({"choices": [{"message": {"content": "OK"}}]}, "failed"),
+])
+async def test_route_verification_requires_the_expected_protocol(reply, status):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/prefix/v1/messages"
+        assert request.headers["x-api-key"] == "test-key"
+        return httpx.Response(200, json=reply)
+
+    result = await preflight_model(
+        "anthropic", "https://api.anthropic.com/prefix", "test-key", "claude-haiku",
+        require_wire_response=True, _client_factory=_client_factory(httpx.MockTransport(handler)),
+    )
+    assert result.status == status

@@ -410,6 +410,7 @@ source_paths = [
   "database/migrations/**",
   "src/loom/__init__.py",
   "src/loom/agent_runtime.py",
+  "src/loom/batch_cancellation.py",
   "src/loom/application_image_build.py",
   "src/loom/application_session.py",
   "src/loom/application_source.py",

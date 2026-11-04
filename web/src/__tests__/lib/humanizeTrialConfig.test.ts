@@ -30,6 +30,19 @@ describe("humanizeTrialConfig", () => {
     expect(out.items).toContain("Submit priority: 300");
   });
 
+  it("labels Harbor settings and request params", () => {
+    const out = humanizeTrialConfig({
+      harbor_config: { max_turns: 128, enable_summarize: false, agent_timeout_sec: 7200 },
+      request_params: { temperature: 1, top_p: 0.9 },
+      isolation: "guest",
+    });
+
+    expect(out.items).toContain("Harbor: max turns 128, enable summarize false, agent timeout sec 7200");
+    expect(out.items).toContain("Request params: temperature 1, top p 0.9");
+    expect(out.items).toContain("Isolation: guest");
+    expect(out.diagnostics).toEqual([]);
+  });
+
   it("keeps unknown keys as diagnostics", () => {
     const out = humanizeTrialConfig({ custom_knob: "operator-only" });
 

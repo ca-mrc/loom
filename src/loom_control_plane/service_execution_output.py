@@ -55,6 +55,7 @@ from loom_control_plane.service_execution import (
     VerifierHandoffUnavailableError,
     committed_handoff_files,
     record_committed_runtime_result,
+    request_trial_execution_cancellation,
 )
 from loom_control_plane.service_execution_locks import lock_execution_trial
 from loom_control_plane.service_execution_task_snapshot import (
@@ -484,18 +485,60 @@ async def authorize_service_execution_peer(
         )
     ):
         raise ServiceExecutionBrokerError("execution_output_window_closed")
-    if purpose in {"token", "input"} and (
+    if purpose in {"token", "input"} and not _token_authority_available(
+        lease, target, now=current_time,
+    ):
+        raise ServiceExecutionBrokerError("execution_target_unavailable")
+    return lease
+
+
+def live_sandbox_retains_model_authority(
+    *,
+    pod_uid: str | None,
+    deleted_at: datetime | None,
+    revoked_at: datetime | None,
+    observed_state: str,
+) -> bool:
+    """A sandbox that is already running keeps model authority through a missed health publish.
+
+    New admission, including a separate verifier, still requires a fresh target
+    health report. That check lives in the scheduler's ready-target list.
+    """
+    return (
+        pod_uid is not None
+        and deleted_at is None
+        and revoked_at is None
+        and observed_state in {"running", "finalizing"}
+    )
+
+
+def _token_authority_available(
+    lease: ServiceExecutionLease,
+    target: ServiceExecutionTarget | None,
+    *,
+    now: datetime,
+) -> bool:
+    if (
         target is None
         or target.desired_state != "active"
         or target.observed_state != "ready"
         or target.health_status != "healthy"
-        or target.health_observed_at is None
+    ):
+        return False
+    stale = (
+        target.health_observed_at is None
         or target.health_observed_at
         + timedelta(seconds=int(target.spec_json["health_stale_after_seconds"]))
-        <= current_time
-    ):
-        raise ServiceExecutionBrokerError("execution_target_unavailable")
-    return lease
+        <= now
+    )
+    if not stale:
+        return True
+    return live_sandbox_retains_model_authority(
+        pod_uid=lease.pod_uid,
+        deleted_at=lease.deleted_at,
+        revoked_at=lease.revoked_at,
+        observed_state=lease.observed_state,
+    )
 
 
 async def mint_service_execution_peer_token(
@@ -932,6 +975,10 @@ class ServiceExecutionOutputRouteService:
                 runtime_result=runtime_result,
                 observed_at=current.output_committed_at,
             )
+            if trial.cancellation_requested_at is not None:
+                await request_trial_execution_cancellation(
+                    session, trial_id=trial.id, now=current.output_committed_at,
+                )
             await session.commit()
         return {
             **result.model_dump(mode="json"),

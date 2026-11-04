@@ -34,7 +34,7 @@ from loom_service.worker_backends import (
 
 router = APIRouter()
 
-_BATCH_STATES = ("submitted", "running", "finished", "cancelled")
+_BATCH_STATES = ("submitted", "running", "cancelling", "finished", "cancelled")
 _TRIAL_STATES = (
     "queued",
     "protected-pending",

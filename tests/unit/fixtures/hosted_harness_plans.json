@@ -437,6 +437,18 @@
         "relative_path": "artifacts/verifier/ctrf.json",
         "required": false,
         "source_path": ".loom/verifier/ctrf.json"
+      },
+      {
+        "kind": "diagnostic",
+        "relative_path": "diagnostics/verifier-files.tar",
+        "required": false,
+        "source_path": ".loom/verifier/diagnostics.tar"
+      },
+      {
+        "kind": "diagnostic",
+        "relative_path": "diagnostics/verifier-files.json",
+        "required": false,
+        "source_path": ".loom/verifier/diagnostics.json"
       }
     ],
     "resource_requests": null,
@@ -715,6 +727,18 @@
         "relative_path": "artifacts/verifier/ctrf.json",
         "required": false,
         "source_path": ".loom/verifier/ctrf.json"
+      },
+      {
+        "kind": "diagnostic",
+        "relative_path": "diagnostics/verifier-files.tar",
+        "required": false,
+        "source_path": ".loom/verifier/diagnostics.tar"
+      },
+      {
+        "kind": "diagnostic",
+        "relative_path": "diagnostics/verifier-files.json",
+        "required": false,
+        "source_path": ".loom/verifier/diagnostics.json"
       }
     ],
     "resource_requests": null,
@@ -891,6 +915,18 @@
         "relative_path": "artifacts/verifier/ctrf.json",
         "required": false,
         "source_path": ".loom/verifier/ctrf.json"
+      },
+      {
+        "kind": "diagnostic",
+        "relative_path": "diagnostics/verifier-files.tar",
+        "required": false,
+        "source_path": ".loom/verifier/diagnostics.tar"
+      },
+      {
+        "kind": "diagnostic",
+        "relative_path": "diagnostics/verifier-files.json",
+        "required": false,
+        "source_path": ".loom/verifier/diagnostics.json"
       }
     ],
     "resource_requests": null,
@@ -1113,6 +1149,18 @@
         "relative_path": "artifacts/verifier/ctrf.json",
         "required": false,
         "source_path": ".loom/verifier/ctrf.json"
+      },
+      {
+        "kind": "diagnostic",
+        "relative_path": "diagnostics/verifier-files.tar",
+        "required": false,
+        "source_path": ".loom/verifier/diagnostics.tar"
+      },
+      {
+        "kind": "diagnostic",
+        "relative_path": "diagnostics/verifier-files.json",
+        "required": false,
+        "source_path": ".loom/verifier/diagnostics.json"
       }
     ],
     "resource_requests": null,
@@ -1409,6 +1457,18 @@
         "relative_path": "artifacts/verifier/ctrf.json",
         "required": false,
         "source_path": ".loom/verifier/ctrf.json"
+      },
+      {
+        "kind": "diagnostic",
+        "relative_path": "diagnostics/verifier-files.tar",
+        "required": false,
+        "source_path": ".loom/verifier/diagnostics.tar"
+      },
+      {
+        "kind": "diagnostic",
+        "relative_path": "diagnostics/verifier-files.json",
+        "required": false,
+        "source_path": ".loom/verifier/diagnostics.json"
       }
     ],
     "resource_requests": null,
@@ -1603,6 +1663,18 @@
         "relative_path": "artifacts/verifier/ctrf.json",
         "required": false,
         "source_path": ".loom/verifier/ctrf.json"
+      },
+      {
+        "kind": "diagnostic",
+        "relative_path": "diagnostics/verifier-files.tar",
+        "required": false,
+        "source_path": ".loom/verifier/diagnostics.tar"
+      },
+      {
+        "kind": "diagnostic",
+        "relative_path": "diagnostics/verifier-files.json",
+        "required": false,
+        "source_path": ".loom/verifier/diagnostics.json"
       }
     ],
     "resource_requests": null,

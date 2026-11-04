@@ -39,6 +39,7 @@ _ACTIVE_STATES = {
     "running",
     "materializing",
     "submitted",
+    "cancelling",
 }
 
 _TRIAL_FAILURE_META: dict[str, tuple[str, str, list[str]]] = {

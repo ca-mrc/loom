@@ -26,7 +26,7 @@ from loom_control_plane.terminal_cleanup_recovery import (
 from loom_execution_actuator.contracts import KubernetesJobObservation, NormalizedJobState
 from loom_execution_actuator.controller import ExecutionActuator
 from loom_execution_actuator.renderer import ExecutionTargetRuntime
-from tests.integration.conftest import retain_pool_schema
+from tests.integration.conftest import allow_current_cancellation_columns, retain_pool_schema
 from tests.integration.test_delete_pending_reconciliation import _retained_projection
 from tests.integration.test_service_execution_leases import (
     _cleanup_service_execution_test_rows,  # noqa: F401
@@ -429,6 +429,11 @@ async def test_complete_cleanup_worker_on_real_installed_0175(
                     "WHERE table_name='llm_calls' AND column_name='baseline_session_id')"
                 )
             )
+        # Current models select the drain columns. This recovery stays on 0175,
+        # so add the nullable columns without moving the Alembic revision.
+        await asyncio.to_thread(
+            allow_current_cancellation_columns, isolated_migration_postgres_url
+        )
         async with sessions() as session:
             binding = await capture_cleanup_binding(session, team_id=team_id, lease_id=lease_id)
             request = TerminalCleanupRecoveryRequest(
