@@ -12,7 +12,6 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.data_lifecycle_registry import bind_existing_trial_lifecycle_authority
-from tests.integration.conftest import allow_current_cancellation_columns
 from loom.db.schema import Artifact, LlmCall, ServiceExecutionLease, Trial
 from loom.pipeline.keys import digest_bytes
 from loom_control_plane.config import ControlPlaneSettings
@@ -25,6 +24,7 @@ from loom_control_plane.terminal_archive_recovery import (
     capture_binding,
     recover,
 )
+from tests.integration.conftest import allow_current_cancellation_columns
 from tests.integration.test_deferred_verifier_archive import _seed_deferred_archive
 from tests.integration.test_service_execution_spool_materialization import (
     _config,
