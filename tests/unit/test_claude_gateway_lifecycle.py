@@ -17,6 +17,38 @@ from loom.models.types import ModelSpec
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.routes import anthropic_dispatch
 from loom_llm_gateway.routes.anthropic_dispatch import MessagesDispatch
+from tests.unit.test_anthropic_chat_stream import _wire
+
+
+def _native_wire():
+    return (
+        b'event: message_start\ndata: {"type":"message_start","message":{"id":"m","type":"message",'
+        b'"role":"assistant","model":"alias","content":[],"stop_reason":null,"stop_sequence":null,'
+        b'"usage":{"input_tokens":12,"output_tokens":0}}}\n\n'
+        b'event: content_block_start\ndata: {"type":"content_block_start","index":0,'
+        b'"content_block":{"type":"text","text":""}}\n\n'
+        b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,'
+        b'"delta":{"type":"text_delta","text":"ok"}}\n\n'
+        b'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n'
+        b'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn",'
+        b'"stop_sequence":null},"usage":{"output_tokens":4}}\n\n'
+        b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+    )
+
+
+class _TerminalThenTimeout(httpx.AsyncByteStream):
+    """A provider can finish its message without closing the HTTP stream."""
+
+    def __init__(self, wire):
+        self.wire = wire
+        self.closed = False
+
+    async def __aiter__(self):
+        yield self.wire
+        raise httpx.ReadTimeout("provider left HTTP stream open after its terminal event")
+
+    async def aclose(self):
+        self.closed = True
 
 
 class _SlowNativeStream(httpx.AsyncByteStream):
@@ -35,7 +67,7 @@ class _SlowNativeStream(httpx.AsyncByteStream):
 
 
 @asynccontextmanager
-async def _dispatch(monkeypatch, stream):
+async def _dispatch(monkeypatch, stream, *, native=True):
     records = []
 
     async def record(session, **kwargs):
@@ -58,9 +90,26 @@ async def _dispatch(monkeypatch, stream):
         200, stream=stream, headers={"content-type": "text/event-stream"},
     ))) as client:
         owner = MessagesDispatch(request, ctx, row, ModelSpec(provider="vendor", name="m"),
-            {"model": "m", "stream": True}, {"model": "m", "stream": True}, True, "secret",
+            {"model": "m", "stream": True}, {"model": "m", "stream": True}, native, "secret",
             "https://provider.example/v1/messages", {"x-api-key": "secret"}, client)
         yield owner, records
+
+
+@pytest.mark.parametrize("native", [True, False])
+async def test_terminal_delivery_already_closes_and_accounts_before_client_disconnect(monkeypatch, native):
+    stream = _TerminalThenTimeout(_native_wire() if native else _wire())
+    async with _dispatch(monkeypatch, stream, native=native) as (owner, records):
+        response = await owner.stream()
+        iterator = response.body_iterator
+        try:
+            assert b"event: message_stop" in await anext(iterator)
+            # The client may stop reading immediately after message_stop.
+            assert stream.closed and len(records) == 1
+        finally:
+            await iterator.aclose()
+            await owner.close_stream()
+    assert len(records) == 1
+    assert "_loom_call_status" not in records[0]["usage"].provider_extras
 
 
 async def test_cancelled_stream_closes_upstream_and_records_observed_usage_once(monkeypatch):

@@ -44,6 +44,8 @@ from tests.integration.gateway_db import (
     delete_teams_and_quotas,
     insert_gateway_trial,
 )
+from tests.unit.test_anthropic_chat_stream import _wire
+from tests.unit.test_claude_gateway_lifecycle import _TerminalThenTimeout, _native_wire
 
 _TEST_MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
 
@@ -829,6 +831,37 @@ async def test_incomplete_native_stream_retains_observed_usage_as_failed(facade_
     assert ledger["input_tokens"] == 12
     assert ledger["provider_extras"]["_loom_call_status"] == "failed"
     assert ledger["provider_extras"]["_loom_usage_status"] == "partial"
+
+
+@pytest.mark.parametrize("native,input_tokens,output_tokens,cost", [(True, 12, 4, 0.000096), (False, 100, 20, 0.0006)])
+async def test_terminal_event_finishes_facade_without_waiting_for_http_eof(
+    facade_setup, postgres_url, native, input_tokens, output_tokens, cost,
+):
+    app, jwt, _, trial_id, conn_id, captures = facade_setup
+    engine = create_engine(postgres_url)
+    try:
+        if not native:
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE provider_connections SET provider_type='openai-compatible' WHERE id=:id"), {"id": conn_id})
+        stream = _TerminalThenTimeout(_native_wire() if native else _wire())
+        captures["response"] = httpx.Response(200, stream=stream, headers={"content-type": "text/event-stream"})
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gw") as client:
+            response = await client.post("/anthropic/v1/messages", headers={
+                "x-api-key": jwt, "x-loom-provider-connection-id": str(conn_id),
+            }, json={**_messages_body(), "stream": True})
+        assert response.status_code == 200
+        assert response.text.count("event: message_stop") == 1
+        assert "event: error" not in response.text
+        with engine.connect() as conn:
+            rows = list(conn.execute(text("SELECT * FROM llm_calls WHERE trial_id=:id"), {"id": trial_id}))
+        assert stream.closed and len(rows) == 1
+        ledger = dict(rows[0]._mapping)
+        assert ledger["input_tokens"] == input_tokens and ledger["output_tokens"] == output_tokens
+        assert float(ledger["cost_usd"]) == pytest.approx(cost)
+        assert "_loom_call_status" not in ledger["provider_extras"]
+        assert "_loom_usage_status" not in ledger["provider_extras"]
+    finally:
+        engine.dispose()
 
 
 async def test_hosted_model_authorization_works_with_one_database_connection(
