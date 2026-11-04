@@ -435,6 +435,35 @@ describe("BatchDetail run plan", () => {
     ).toHaveAttribute("href", `/monitor?view=trials&batch_id=${BATCH_ID}`);
   });
 
+  it("shows Monitor stages while the stored trial state stays running", async () => {
+    mockBatch({
+      ...BATCH_BODY,
+      trial_summary: { queued: 245, running: 107, succeeded: 63, failed: 60 },
+      progress: {
+        trial_count: 475,
+        native_active_trials: 107,
+        stages: {
+          execution_wait: 245, running: 6, verifying: 3, archiving: 98,
+          succeeded: 63, failed: 60,
+        },
+        output_states: {},
+        cleanup_states: {},
+        oldest_wait_since_submission_seconds: {},
+        images: { image_count: 0, waiting_trials: 0, states: {}, stages: {} },
+      },
+    });
+    renderBatchDetail();
+    const toggle = (await screen.findByText("Trial counts by state")).closest("summary")!;
+    expect(within(toggle).getByText("Verifying 3")).toBeInTheDocument();
+    expect(within(toggle).getByText("Archiving output 98")).toBeInTheDocument();
+    expect(within(toggle).getByText("Running 6")).toBeInTheDocument();
+    expect(within(toggle).queryByText("running 107")).not.toBeInTheDocument();
+    await userEvent.click(toggle);
+    const table = screen.getByRole("table", { name: "Trial states" });
+    expect(within(table).getByText("running")).toBeInTheDocument();
+    expect(within(within(table).getByText("running").closest("tr")!).getByText("107")).toBeInTheDocument();
+  });
+
   it.each(["nebius", "docker"])("keeps %s trial badges consistent with expanded trial counts", async (backend) => {
     const trialCounts = { queued: 21, "protected-pending": 0, claimed: 0, running: 23, materializing: 0, succeeded: 28, failed: 6, cancelled: 0 };
     mockBatch({
