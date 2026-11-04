@@ -690,6 +690,30 @@ def isolated_migration_postgres_url(migration_template_postgres_url: str) -> Ite
     )
 
 
+def allow_current_cancellation_columns(postgres_url: str) -> None:
+    """Add nullable drain columns without moving the pinned Alembic revision.
+
+    Historical tests that stay below 0189 and then use the current trial or
+    batch models need these columns. Callers that upgrade through 0189 must
+    not call this, or that migration fails on a duplicate column.
+    """
+    url = make_url(postgres_url).set(drivername="postgresql+psycopg").render_as_string(hide_password=False)
+    engine = create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text(
+                "ALTER TABLE trials ADD COLUMN IF NOT EXISTS cancellation_retained_at TIMESTAMPTZ"
+            ))
+            connection.execute(text(
+                "ALTER TABLE batches ADD COLUMN IF NOT EXISTS cancellation_requested_at TIMESTAMPTZ"
+            ))
+            connection.execute(text(
+                "ALTER TABLE batches ADD COLUMN IF NOT EXISTS cancellation_mode TEXT"
+            ))
+    finally:
+        engine.dispose()
+
+
 def retain_pool_schema(
     postgres_url: str,
     revision: str = "0176",
@@ -715,20 +739,7 @@ def retain_pool_schema(
     # Historical pool revisions do not have them; they are nullable and unused
     # by those tests, so add them without changing the pinned Alembic version.
     if include_current_columns and revision != "0189":
-        engine = create_engine(url)
-        try:
-            with engine.begin() as connection:
-                connection.execute(text(
-                    "ALTER TABLE trials ADD COLUMN IF NOT EXISTS cancellation_retained_at TIMESTAMPTZ"
-                ))
-                connection.execute(text(
-                    "ALTER TABLE batches ADD COLUMN IF NOT EXISTS cancellation_requested_at TIMESTAMPTZ"
-                ))
-                connection.execute(text(
-                    "ALTER TABLE batches ADD COLUMN IF NOT EXISTS cancellation_mode TEXT"
-                ))
-        finally:
-            engine.dispose()
+        allow_current_cancellation_columns(url)
 
 
 @pytest.fixture
