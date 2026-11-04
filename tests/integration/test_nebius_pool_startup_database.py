@@ -480,8 +480,10 @@ async def test_startup_authority_excludes_only_independent_preference(
     from alembic.config import Config
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+    from loom.db.schema_startup import service_schema_head
+
     url = isolated_migration_postgres_url
-    if revision != '0188':
+    if revision != service_schema_head():
         config = Config('database/migrations/alembic.ini')
         config.set_main_option('sqlalchemy.url', url.replace('%', '%%'))
         await asyncio.to_thread(command.downgrade, config, revision)

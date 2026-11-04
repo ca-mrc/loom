@@ -201,8 +201,9 @@ def _validate_remote(value: object) -> dict[str, Any]:
     # metadata and indexes. 0187 adds advisory placement/cache policy tables and
     # columns outside these fixed lease/command/trial read columns. 0188 adds
     # sticky pool bindings, shared timeout health, and an optional in-flight cap.
+    # 0189 adds the batch drain state and nullable cancellation columns.
     # None of these changes the fixed lease/command/trial read columns.
-    if value.get("schema_head") not in {"0175", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187", "0188"}:
+    if value.get("schema_head") not in {"0175", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187", "0188", "0189"}:
         raise DeploymentError("unsupported installed schema")
     count = value.get("active_count")
     leases = value.get("leases")

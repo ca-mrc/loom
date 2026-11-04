@@ -309,7 +309,7 @@ def global_role_database(platform_database):  # noqa: F811 -- imported shared fi
 
 @pytest.mark.parametrize("kind,schema_revision,upgrade_from", [
     (kind, revision, None)
-    for revision in ('0175', '0176', '0177', '0178', '0179', '0180', '0181', '0182', '0183', '0184', '0185', '0186', '0187', '0188')
+    for revision in ('0175', '0176', '0177', '0178', '0179', '0180', '0181', '0182', '0183', '0184', '0185', '0186', '0187', '0188', '0189')
     for kind in ('execution', 'build', 'registered-build')
 ] + [pytest.param('execution', '0178', '0175', id='upgrade-0175-to-0178')])
 async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_stage(
@@ -337,6 +337,7 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
         monkeypatch.setenv("LOOM_DB_" + role + "_PASSWORD", "restricted-role-password-" + "a" * 32)
     bootstrap.bootstrap_database({"namespace": "loom-nebius-platform"})
     url = make_url(global_role_database).set(drivername="postgresql+psycopg")
+    from loom.db.schema_startup import service_schema_head
     from tests.integration.conftest import retain_pool_schema
 
     if upgrade_from is not None:
@@ -349,9 +350,9 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
         # diagnostics do not grant runtime writes even on an audited old schema.
         bootstrap.bootstrap_database({'namespace': 'loom-nebius-platform'})
     # Prove actual migration layouts, not a relabeled current database.
-    if schema_revision != '0188':
+    if schema_revision != service_schema_head():
         await asyncio.to_thread(retain_pool_schema, url.render_as_string(hide_password=False), schema_revision)
-    # 0188 is the actual bootstrap head, not a relabeled retained schema.
+    # The current head is the actual bootstrap head, not a relabeled retained schema.
     admin = create_async_engine(url)
     worker = create_async_engine(url.set(username="loom_actuator", password="restricted-role-password-" + "a" * 32))
     scheduler = create_async_engine(url.set(username="loom_control_plane", password="restricted-role-password-" + "a" * 32))
@@ -391,7 +392,7 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
                     if not cursor.nextset():
                         break
             assert reports == [({"status": "staged"},)]
-            if schema_revision in {'0187', '0188'}:
+            if schema_revision in {'0187', '0188', '0189'}:
                 for table, column in (('nebius_cache_runtime_policies', 'storage_endpoint'),
                                       ('nebius_pool_placement_advice', 'trial_id')):
                     assert db.execute("SELECT has_table_privilege('loom_actuator',%s,'SELECT,INSERT,UPDATE,DELETE')",
@@ -406,7 +407,7 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
                         db.rollback()
                     db.execute(psycopg.sql.SQL('REVOKE SELECT({}) ON {} FROM loom_actuator').format(
                         psycopg.sql.Identifier(column), psycopg.sql.Identifier(table)))
-            if schema_revision in {"0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187", "0188"}:
+            if schema_revision in {"0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187", "0188", "0189"}:
                 assert db.execute("SELECT has_table_privilege('loom_actuator','task_source_publications','SELECT,INSERT,UPDATE,DELETE')").fetchone() == (False,)
                 db.execute("GRANT SELECT ON task_source_publications TO loom_actuator")
                 for action in ("observe", "stage", "inspect"):
@@ -414,7 +415,7 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
                         db.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action=action), prepare=False)
                     db.rollback()
                 db.execute("REVOKE SELECT ON task_source_publications FROM loom_actuator")
-            if schema_revision in {"0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187", "0188"} and kind == "execution":
+            if schema_revision in {"0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187", "0188", "0189"} and kind == "execution":
                 for table in ('nebius_pool_participant_catalogs', 'nebius_pool_profile_documents',
                               'nebius_pool_lifecycle_operations', 'nebius_pool_participant_lifecycle'):
                     assert db.execute("SELECT has_table_privilege('loom_actuator',%s,'SELECT,INSERT,UPDATE,DELETE')",
@@ -528,9 +529,9 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
                 password="restricted-role-password-" + "a" * 32).render_as_string(hide_password=False)) as db:
             assert db.execute("SELECT current_user").fetchone() == ("loom_actuator",)
             db.commit()
-            if schema_revision in {"0183", "0184", "0185", "0186", "0187", "0188"}:
+            if schema_revision in {"0183", "0184", "0185", "0186", "0187", "0188", "0189"}:
                 tables = ["provider_request_pools", "provider_request_pool_members"]
-                if schema_revision == "0188":
+                if schema_revision in {"0188", "0189"}:
                     tables.extend([
                         "provider_request_pool_bindings",
                         "provider_connection_timeout_health",
@@ -540,7 +541,7 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
                     with pytest.raises(psycopg.errors.InsufficientPrivilege):
                         db.execute(f"SELECT * FROM {table}")
                     db.rollback()
-            if schema_revision in {"0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187", "0188"}:
+            if schema_revision in {"0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187", "0188", "0189"}:
                 assert db.execute("SELECT has_table_privilege(current_user,'service_execution_live_events',"
                     "'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'), "
                     "has_any_column_privilege(current_user,'service_execution_live_events',"
