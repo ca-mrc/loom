@@ -1,4 +1,5 @@
 export interface RuntimeContract {
+  endpoint_dialect?: string | null;
   install_hint?: string | null;
 }
 

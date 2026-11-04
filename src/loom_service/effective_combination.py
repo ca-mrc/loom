@@ -27,6 +27,7 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from loom.models.types import ModelSpec
+from loom.provider_connection_routes import ProviderConnectionRouting
 from loom_service.agent_catalog import validate_agent_model_compat
 
 
@@ -36,7 +37,7 @@ class ProviderRouteError(ValueError):
 
 def freeze_connection_modes(
     trial_config: dict[str, Any], combinations: list[dict[str, Any]], *,
-    connection_id: UUID, provider_type: str, indices: set[int] | None = None,
+    connection_id: UUID, provider_type: str | ProviderConnectionRouting, indices: set[int] | None = None,
 ) -> None:
     """Freeze the derived mode on exactly the selections using this connection.
 

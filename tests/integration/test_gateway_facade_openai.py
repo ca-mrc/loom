@@ -318,6 +318,28 @@ async def test_facade_forwards_with_decrypted_key_and_records_llm_call(
     assert row["provider_extras"]["_loom_pricing_source"] == "operator-supplied"
 
 
+async def test_anthropic_connection_can_use_verified_chat_route(facade_setup):
+    from loom.db.schema import ProviderConnection
+
+    app, jwt, _, _, conn_id, captures = facade_setup
+    async with app.state.session_factory() as session:
+        connection = await session.get(ProviderConnection, conn_id)
+        assert connection is not None
+        connection.provider_type = "anthropic"
+        connection.alternate_route = {
+            "protocol": "openai_chat",
+            "base_url": "https://api.openai.com/chat/v1",
+            "verified_models": {"gpt-4o": True},
+        }
+        await session.commit()
+
+    response = await _post(app, jwt, **{"x-loom-provider-connection-id": str(conn_id)})
+    assert response.status_code == 200, response.text
+    request, = captures["requests"]
+    assert str(request.url) == "https://api.openai.com/chat/v1/chat/completions"
+    assert request.headers["Authorization"] == "Bearer sk-upstream-XYZ"
+
+
 async def test_facade_records_redacted_request_params(
     facade_setup,
     postgres_url: str,

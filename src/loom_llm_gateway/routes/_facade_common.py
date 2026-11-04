@@ -29,6 +29,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from loom.auth import AuthContext
 from loom.db.schema import ProviderConnection, ProviderConnectionShare
 from loom.models.types import ModelSpec
+from loom.provider_connection_routes import ProviderConnectionRouting
 from loom.security.redaction import redact_text
 from loom.security.secret_store import (
     DecryptError,
@@ -257,6 +258,7 @@ async def resolve_facade_connection(
     supported_types: frozenset[str],
     dialect_label: str,
     allow_request_pool: bool = False,
+    alternate_chat_model: str | None = None,
 ) -> ProviderConnection:
     """Lookup, ownership/share-scope, soft-delete, and dialect-type checks all in
     one helper. 404 (not 403) on cross-team to match loom_service's
@@ -293,7 +295,9 @@ async def resolve_facade_connection(
                 status_code=404,
                 detail="provider_connection not found",
             )
-    if row.provider_type not in supported_types:
+    if row.provider_type not in supported_types and (
+        alternate_chat_model is None or alternate_chat_url(row, alternate_chat_model) is None
+    ):
         raise HTTPException(
             status_code=400,
             detail=(
@@ -316,6 +320,15 @@ async def resolve_facade_connection(
                 detail="request pool requires hosted Terminus2 non-streaming complete-messages Chat",
             )
     return row
+
+
+def alternate_chat_url(row: ProviderConnection, model: str) -> str | None:
+    """Use the verified alternate only for models in the connection's scope."""
+    if row.allowed_models is not None and model not in row.allowed_models:
+        return None
+    routing = ProviderConnectionRouting.from_storage(row.provider_type, row.base_url, row.alternate_route)
+    route = routing.verified_alternate("openai_chat", model)
+    return route.base_url if route else None
 
 
 def token_usage_with_cost_metadata(

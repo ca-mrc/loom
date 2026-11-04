@@ -339,3 +339,29 @@ local direct-provider execution cannot opt in. Existing non-pooled connections
 retain their normal routing. Actual physical connection and failover reason are
 recorded on dispatch receipts; the final response is priced with the member that
 served it, while the Trial retains its logical connection and model schedule.
+
+### OpenAI Chat and Anthropic Messages on one connection
+
+An existing OpenAI-compatible or Anthropic connection can add the other wire
+route in **Settings → Wire routes**. Both routes use the connection's API key
+and share its team visibility and model allowlist. The alternate base URL can
+use a different path on the same scheme, hostname and port. This keeps both
+routes within the connection's existing egress policy.
+
+For a Chat connection whose upstream also supports Anthropic Messages:
+
+```bash
+loom providers route NAME anthropic_messages --base-url https://provider.example/v1
+loom providers route NAME anthropic_messages --test-model CLAUDE_MODEL_ID
+loom providers show NAME
+```
+
+Test each model against the alternate route before submitting it. This sends a
+small generation and checks the response protocol. The original connection test
+and model preflights continue to report the primary route. Editing the alternate
+URL or rotating the shared key clears the alternate verification results.
+
+New hosted Claude Code runs prefer a verified Messages route for the selected
+model. An existing run retains its stored Claude mode. A verified Chat route
+can also serve Chat runtimes on an Anthropic connection. The Chat route alone
+does not enable the separate Codex Responses interface.

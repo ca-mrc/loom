@@ -14,7 +14,7 @@ from fastapi import HTTPException
 from loom.db.schema import LlmCall
 from loom.llm_call_ledger import serialize_execution_accounting_call
 from loom.trajectory.llm_call_events import llm_call_row_to_event
-from loom_llm_gateway.execution_attempt_dispatch import authorize_anthropic_trial_model
+from loom_llm_gateway.execution_attempt_dispatch import authorize_anthropic_trial_route
 from loom_service.provider_connections_service import (
     _preflight_base_path_headers_body,
     _probe_url_and_headers,
@@ -44,7 +44,7 @@ def _authority(provider="vendor", name="code-model", mode="chat"):
 @pytest.mark.parametrize("mode,connection_type", [("native", "anthropic"), ("chat", "openai-compatible"), ("chat", "custom")])
 async def test_authorization_preserves_the_frozen_namespace(provider, mode, connection_type):
     session, ctx = _authority(provider=provider, mode=mode)
-    identity = await authorize_anthropic_trial_model(session, ctx, model="code-model", connection_type=connection_type)
+    identity, _native = await authorize_anthropic_trial_route(session, ctx, model="code-model", connection_type=connection_type)
     assert identity.provider == provider and identity.name == "code-model"
 
 
@@ -52,7 +52,7 @@ async def test_authorization_preserves_the_frozen_namespace(provider, mode, conn
 async def test_wrong_model_or_connection_mode_is_forbidden(model, connection_type):
     session, ctx = _authority()
     with pytest.raises(HTTPException) as exc:
-        await authorize_anthropic_trial_model(session, ctx, model=model, connection_type=connection_type)
+        await authorize_anthropic_trial_route(session, ctx, model=model, connection_type=connection_type)
     assert exc.value.status_code == 403
 
 

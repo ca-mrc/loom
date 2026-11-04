@@ -8641,6 +8641,7 @@ class ProviderConnection(Base):
         server_default=text("300"),
     )
     encrypted_api_key_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    alternate_route: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     allowed_models: Mapped[list[str] | None] = mapped_column(
         ARRAY(Text),
         nullable=True,
