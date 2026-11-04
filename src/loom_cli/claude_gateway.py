@@ -293,9 +293,16 @@ class _Call:
             async with asyncio.timeout(self.timeout()):
                 async for chunk in self.response.aiter_bytes():
                     converted = self.tracker.feed(chunk)
+                    if self.tracker.completed:
+                        break
                     if converted:
                         yield converted
                 self.tracker.finish()
+            # Stop at the protocol terminal event even if HTTP remains open.
+            # Close/account outside the inference timeout and before delivery.
+            await self.close()
+            if converted:
+                yield converted
         except (ValueError, TimeoutError, httpx.HTTPError) as exc:
             self.failure = ("upstream_timeout" if isinstance(exc, (TimeoutError, httpx.TimeoutException)) else
                             "upstream_transport" if isinstance(exc, httpx.HTTPError) else "upstream_protocol")

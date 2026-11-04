@@ -12,7 +12,11 @@ from loom.models.types import ModelSpec
 from loom_cli.claude_gateway import LocalClaudeRelay
 from loom_cli.rate_cards import RateCardEntry, RateCardTable
 from tests.unit.test_anthropic_chat_stream import _wire
-from tests.unit.test_claude_gateway_lifecycle import _SlowNativeStream
+from tests.unit.test_claude_gateway_lifecycle import (
+    _native_wire,
+    _SlowNativeStream,
+    _TerminalThenTimeout,
+)
 
 
 def _relay(dialect, handler, rates=()):
@@ -108,6 +112,27 @@ async def test_disconnect_closes_upstream_and_retains_partial_observed_usage():
         assert slow.closed and len(rows) == 1 and rows[0]["input_tokens"] == 12
         assert rows[0]["provider_extras"]["_loom_call_status"] == "failed"
         assert rows[0]["provider_extras"]["_loom_usage_status"] == "partial"
+    finally:
+        await relay.aclose()
+
+
+@pytest.mark.parametrize("dialect,input_tokens,output_tokens", [("anthropic", 12, 4), ("openai_chat", 100, 20)])
+async def test_terminal_event_finishes_relay_without_waiting_for_http_eof(dialect, input_tokens, output_tokens):
+    stream = _TerminalThenTimeout(_native_wire() if dialect == "anthropic" else _wire())
+    relay = _relay(dialect, lambda _: httpx.Response(200, stream=stream, headers={"content-type": "text/event-stream"}))
+    await relay.start(host="127.0.0.1")
+    try:
+        relay.activate(step_id="main")
+        async with httpx.AsyncClient(base_url=relay.base_url, trust_env=False) as client:
+            response = await client.post("/v1/messages", headers={"Authorization": f"Bearer {relay.token}"}, json=_payload(stream=True))
+        assert response.status_code == 200
+        assert response.text.count("event: message_stop") == 1
+        assert "event: error" not in response.text
+        rows = await relay.get_trial_llm_calls(relay.trial_id)
+        assert stream.closed and len(rows) == 1
+        assert rows[0]["input_tokens"] == input_tokens and rows[0]["output_tokens"] == output_tokens
+        assert "_loom_call_status" not in rows[0]["provider_extras"]
+        assert "_loom_usage_status" not in rows[0]["provider_extras"]
     finally:
         await relay.aclose()
 
