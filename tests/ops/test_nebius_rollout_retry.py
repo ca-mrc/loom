@@ -160,6 +160,88 @@ def test_failed_check_cli_reports_failed_without_leaking_exception(monkeypatch, 
     assert 'private database' not in output.out + output.err + (tmp_path / 'summary').read_text()
 
 
+@pytest.mark.parametrize('phase,reason_code', [
+    ('platform_configuration', 'SSHAuthenticationFailed'),
+    ('idle_snapshot', 'Forbidden'),
+    ('deployment_history', 'github_deployment_api_failed'),
+    ('candidate_ancestry', 'candidate_history_unavailable'),
+])
+@pytest.mark.parametrize('known_reason', [True, False])
+def test_readiness_failure_cli_reports_only_fixed_phase_and_reason(
+        monkeypatch, tmp_path, capsys, phase, reason_code, known_reason):
+    import sys
+
+    check_inputs(monkeypatch)
+    secret = 'password=private-value https://private.example.test token=private-token'
+    summary = tmp_path / 'summary'
+    monkeypatch.setenv('GITHUB_STEP_SUMMARY', str(summary))
+    monkeypatch.setattr(sys, 'argv', ['rollout', 'check', '--candidate', 'b' * 40,
+        '--kubeconfig', 'unused', '--namespace', 'platform', '--expected-cluster-id', 'cluster',
+        '--github', '--automatic'])
+    monkeypatch.setattr(module, 'deploy', lambda *a, **kw: pytest.fail('readiness must not deploy'))
+
+    def fail(*args, **kwargs):
+        raise module.DeploymentError(secret, reason_code=reason_code if known_reason else secret)
+
+    if phase == 'platform_configuration':
+        monkeypatch.setattr(module, 'Kubectl', lambda path: SimpleNamespace(get=fail))
+    else:
+        monkeypatch.setattr(module, {
+            'idle_snapshot': 'idle_snapshot', 'deployment_history': 'deployment_decision',
+            'candidate_ancestry': 'candidate_follows',
+        }[phase], fail)
+    assert module.main() == 1
+    output = capsys.readouterr()
+    diagnostics = [json.loads(line) for line in output.err.splitlines() if line.startswith('{')]
+    assert diagnostics[-1] == {'operation': 'readiness_check', 'phase': phase,
+        'status': 'failed', 'reason_code': reason_code if known_reason else 'unavailable'}
+    assert '"outcome": "failed"' in output.out
+    assert secret not in output.out + output.err + summary.read_text()
+    assert 'private-value' not in output.out + output.err + summary.read_text()
+
+
+def test_unknown_readiness_exception_retains_failure_without_disclosing_details(monkeypatch, capsys):
+    args = check_inputs(monkeypatch)
+
+    def fail(*args):
+        raise RuntimeError('private-query-and-connection')
+
+    monkeypatch.setattr(module, 'idle_snapshot', fail)
+    with pytest.raises(RuntimeError, match='private-query-and-connection'):
+        module.check_rollout(args)
+    diagnostic = json.loads(capsys.readouterr().err.splitlines()[-1])
+    assert diagnostic == {'operation': 'readiness_check', 'phase': 'idle_snapshot',
+        'status': 'failed', 'reason_code': 'unavailable'}
+
+
+@pytest.mark.parametrize('snapshot', [
+    {'locked': 'false', 'active': {'trials': 0, 'executions': 0, 'builds': 0, 'build_cleanup': 0}},
+    {'locked': False, 'active': {'trials': -1, 'executions': 0, 'builds': 0, 'build_cleanup': 0}},
+    {'locked': False, 'active': {'trials': 0, 'executions': 0, 'builds': 0}},
+    {'locked': False, 'active': {'trials': 0, 'executions': 0, 'builds': 0, 'build_cleanup': 0, 'extra': 0}},
+])
+def test_invalid_idle_snapshot_keeps_strict_shape_and_fixed_reason(snapshot):
+    kube = SimpleNamespace(run=lambda *args: json.dumps(snapshot))
+    with pytest.raises(module.DeploymentError) as error:
+        module.idle_snapshot(kube, 'platform')
+    assert error.value.reason_code == 'invalid_idle_snapshot'
+
+
+def test_rejected_platform_binding_has_fixed_reason(monkeypatch):
+    args = check_inputs(monkeypatch)
+    args.expected_cluster_id = 'foreign'
+    with pytest.raises(module.DeploymentError) as error:
+        module.check_rollout(args)
+    assert error.value.reason_code == 'rollout_check_platform_mismatch'
+
+
+def test_missing_candidate_history_has_fixed_reason(monkeypatch):
+    monkeypatch.setattr(module.subprocess, 'run', lambda *a, **kw: SimpleNamespace(returncode=1))
+    with pytest.raises(module.DeploymentError) as error:
+        module.candidate_follows(SHA, 'b' * 40)
+    assert error.value.reason_code == 'candidate_history_unavailable'
+
+
 @pytest.mark.parametrize('render_fails', [False, True])
 def test_candidate_manifest_archive_is_pinned_and_cleaned(monkeypatch, render_fails):
     import io
