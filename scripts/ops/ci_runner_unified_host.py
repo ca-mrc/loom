@@ -77,7 +77,7 @@ CPU_SAMPLER_HOOK = (
 
 def cpu_sample_values(first: tuple, last: tuple, spans: tuple,
                       cpus: int, ticks_per_second: int) -> dict[str, float]:
-    """Lower idle credit only inside a bounded counter-acquisition envelope."""
+    """Conservatively align valid CPU counters over their acquisition brackets."""
     invalid = {"total_cpus": cpus, "idle_cpus": -1.0, "pool_cpu_usage_cpus": 0.0}
     if (type(cpus) is not int or cpus <= 0 or type(ticks_per_second) is not int
             or ticks_per_second <= 0 or len(first) != 4 or len(last) != 4):
@@ -97,20 +97,15 @@ def cpu_sample_values(first: tuple, last: tuple, spans: tuple,
         return invalid
     # Every counter read falls within these brackets. Scheduler preemption
     # widens the observed interval; it is not evidence of corrupt counters.
-    inner_elapsed = end[0] - start[1]
     outer_elapsed = end[1] - start[0]
-    # Retain the operational accounting-consistency envelope, not a claim of
-    # kernel-atomic accounting. Do not normalize grossly inconsistent input.
-    tick_error = 2 * cpus + 8
-    if not (cpus * ticks_per_second * inner_elapsed - tick_error <= total
-            <= cpus * ticks_per_second * outer_elapsed + tick_error):
-        return invalid
     ratio_idle = idle / total * cpus
     # idle and iowait are independently truncated aggregate USER_HZ fields;
     # the two disjoint cgroups independently truncate usage to microseconds.
     # Subtract their known export uncertainty before using the common outer
     # interval. This only lowers credit; genuine excess still reaches policy.
     wall_idle = max(0, idle - 2) / ticks_per_second / outer_elapsed
+    if wall_idle > cpus:
+        return invalid  # The ratio cap must not conceal impossible idle credit.
     pool_usage = max(0, usage - 2) / 1e6 / outer_elapsed
     return {"total_cpus": cpus, "idle_cpus": min(ratio_idle, wall_idle),
             "pool_cpu_usage_cpus": pool_usage}
