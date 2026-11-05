@@ -32,7 +32,7 @@ def legacy_namespace(host):
 
         def read_text(self):
             assert self.name == "/proc/meminfo"
-            return "MemTotal: 16777216 kB\nMemAvailable: 12582912 kB\n"
+            return "MemTotal: 67108864 kB\nMemAvailable: 58720256 kB\n"
 
     namespace = {
         "__name__": "legacy_sampler_fixture",
@@ -40,9 +40,7 @@ def legacy_namespace(host):
         "SLICE": "loomciexpansion.slice",
         "os": SimpleNamespace(
             cpu_count=lambda: 8,
-            statvfs=lambda _: SimpleNamespace(
-                f_blocks=128 * 1024**3, f_frsize=1, f_bavail=64 * 1024**3
-            ),
+            statvfs=lambda _: SimpleNamespace(f_blocks=1024**4, f_frsize=1, f_bavail=800 * 1024**3),
         ),
         "time": SimpleNamespace(sleep=lambda _: None),
         "psi": lambda _: {"some": 0.0, "full": 0.0},
@@ -55,8 +53,8 @@ def legacy_namespace(host):
     return namespace
 
 
-def sample(namespace):
-    values = iter(((0, 0, 0, 100.0), (792, 600, 2000000, 101.0)))
+def sample(namespace, first=(0, 0, 0, 100.0), last=(792, 600, 2000000, 101.0)):
+    values = iter((first, last))
     namespace["counters"] = lambda: next(values)
     states = {index: SimpleNamespace(runner_id=index) for index in range(2)}
     inventory = {index: {"busy": True} for index in range(2)}
@@ -74,11 +72,17 @@ def test_snapshot_fixture_aligns_tick_and_wall_intervals(monkeypatch):
     monkeypatch.setattr(host.time, "monotonic", lambda: next(clock))
     monkeypatch.setattr(host.os, "sysconf", lambda _: 100)
     after = sample(namespace)
-    assert after["idle_cpus"] == pytest.approx(6.0)
-    assert after["pool_cpu_usage_cpus"] == before["pool_cpu_usage_cpus"]
-    assert after["idle_cpus"] + after["pool_cpu_usage_cpus"] == pytest.approx(8.0)
-    assert {key: value for key, value in after.items() if key != "idle_cpus"} == {
-        key: value for key, value in before.items() if key != "idle_cpus"
+    assert after["idle_cpus"] == pytest.approx(5.98 / 1.0002)
+    assert after["pool_cpu_usage_cpus"] == pytest.approx(1.999998 / 1.0002)
+    assert after["idle_cpus"] + after["pool_cpu_usage_cpus"] < 8.0
+    assert {
+        key: value
+        for key, value in after.items()
+        if key not in {"idle_cpus", "pool_cpu_usage_cpus"}
+    } == {
+        key: value
+        for key, value in before.items()
+        if key not in {"idle_cpus", "pool_cpu_usage_cpus"}
     }
 
 
@@ -116,7 +120,6 @@ def test_idle_credit_never_increases_when_tick_rate_is_high():
         ),
         ((0, 0, 0, 100.0), (100, 80, 2000000, 101.0), ((99.9999, 100.0001), (100.9999, 101.0001))),
         ((0, 0, 0, 100.0), (792, 600, 2000000, 99.0), ((99.9999, 100.0001), (98.9999, 99.0001))),
-        ((0, 0, 0, 100.0), (792, 600, 2000000, 101.0), ((99.9, 100.1), (100.9, 101.1))),
     ],
 )
 def test_bad_acquisition_remains_invalid(first, last, spans):
@@ -131,7 +134,7 @@ def test_hardware_exceeding_pool_usage_is_not_clipped_into_health():
         8,
         100,
     )
-    assert result["pool_cpu_usage_cpus"] == 9.0
+    assert result["pool_cpu_usage_cpus"] > 8.0
 
 
 def fixture_runtime(host, root):
@@ -185,3 +188,59 @@ def test_unknown_sampler_source_fails_before_any_installation(tmp_path, monkeypa
     assert (runtime / "expand_host.py").read_bytes() == adapter_before
     assert not (runtime / "ci_runner_unified_host.py").exists()
     assert not (runtime / "adaptive_pool.py.before-cpu-sampler").exists()
+
+
+def test_truthful_scheduler_preemption_lowers_credit_instead_of_invalidating():
+    result = plugin().cpu_sample_values(
+        (0, 0, 0, 100.0),
+        (816, 612, 2000000, 101.0),
+        ((99.98, 100.0), (101.0, 101.0001)),
+        8,
+        100,
+    )
+    assert result["idle_cpus"] == pytest.approx(6.10 / 1.0201)
+    assert result["pool_cpu_usage_cpus"] == pytest.approx(1.999998 / 1.0201)
+    assert 0 < result["idle_cpus"] + result["pool_cpu_usage_cpus"] < 8
+
+
+def test_export_quantization_cannot_create_physical_cpu_excess():
+    result = plugin().cpu_sample_values(
+        (0, 0, 0, 100.0),
+        (80, 42, 400001, 100.1),
+        ((100.0, 100.0), (100.1, 100.1)),
+        8,
+        100,
+    )
+    assert 42 / 100 / 0.1 + 400001 / 1e6 / 0.1 > 8.05
+    assert result["idle_cpus"] == pytest.approx(4.0)
+    assert result["pool_cpu_usage_cpus"] == pytest.approx(3.99999)
+    assert result["idle_cpus"] + result["pool_cpu_usage_cpus"] <= 8
+    excessive = plugin().cpu_sample_values(
+        (0, 0, 0, 100.0),
+        (80, 42, 900001, 100.1),
+        ((100.0, 100.0), (100.1, 100.1)),
+        8,
+        100,
+    )
+    assert excessive["pool_cpu_usage_cpus"] > 8
+
+
+@pytest.mark.parametrize(
+    "last,clock",
+    [
+        ((816, 612, 2000000, 101.0), (99.98, 100.0, 101.0, 101.0001)),
+        ((800, 402, 4000001, 101.0), (100.0, 100.0, 101.0, 101.0)),
+    ],
+)
+def test_installed_snapshot_preserves_busy_fields_under_delay_and_rounding(
+    monkeypatch, last, clock
+):
+    host = plugin()
+    namespace = legacy_namespace(host)
+    host.install_cpu_sampler(namespace)
+    times = iter(clock)
+    monkeypatch.setattr(host.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(host.os, "sysconf", lambda _: 100)
+    result = sample(namespace, last=last)
+    assert result["current_slots"] == result["busy_runners"] == 2
+    assert 0 < result["idle_cpus"] + result["pool_cpu_usage_cpus"] <= 8

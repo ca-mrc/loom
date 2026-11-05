@@ -183,22 +183,23 @@ unmarked hosts/writable markers, and still refuses remote Docker contexts.
 
 The same installer also owns the CPU snapshot adapter for the existing adaptive
 pool. It accepts the supported legacy counter/snapshot ABI and inserts an
-idempotent hook without rewriting retirement or policy code. Both CPU inputs
-use the counter timestamp interval: idle credit is the smaller of the original
-tick ratio and [USER_HZ](https://docs.kernel.org/filesystems/proc.html#miscellaneous-kernel-statistics-in-proc-stat)
-ticks divided by elapsed wall time; pool usage is unchanged.
-The correction only lowers idle credit. Counter resets, nonfinite/missing data,
-large total-tick discrepancies and slow or overlapping reads remain invalid.
+idempotent hook without rewriting retirement or policy code. The complete
+monotonic acquisition brackets provide a common outer interval for idle and
+pool CPU usage. Scheduler preemption during a counter read widens this interval
+and conservatively lowers credited capacity instead of invalidating truthful data.
+Idle credit is also capped by the original tick ratio.
 
-The acquisition envelope allows two endpoint ticks per CPU, eight exported
-counter-field quantizations, and measured read skew; read spans must stay below
-one USER_HZ tick and 1% of the sample interval. This is an operational consistency
-bound, not a kernel atomic-snapshot guarantee. Existing physical consistency,
-pressure, reserve, growth, hardware-ceiling and busy/idle policy checks remain
-unchanged. For N CPUs, H ticks/second, elapsed T and combined read span S,
-the accepted total-tick discrepancy is at most 2N + 8 + NHS; the downward idle
-adjustment is therefore bounded by (2N + 8 + NHS)/(HT) CPUs. The sampler backup
-is adaptive_pool.py.before-cpu-sampler.
+[The CPU counter implementation](https://raw.githubusercontent.com/torvalds/linux/v6.8/fs/proc/stat.c)
+exports idle and iowait as two independently truncated aggregate USER_HZ fields;
+[the cgroup accounting implementation](https://raw.githubusercontent.com/torvalds/linux/v6.8/kernel/cgroup/rstat.c)
+exports each disjoint group usage in microseconds. Subtracting two ticks and
+two microseconds respectively provides serialization lower bounds, preventing
+export rounding from inventing capacity. Negative/reset/nonfinite data and
+accounting totals outside the inner/outer time brackets plus the existing
+2N+8-tick operational envelope remain invalid. This envelope is not a kernel
+atomic-accounting guarantee. Existing physical consistency, pressure, reserve,
+growth, hardware-ceiling and busy/idle policy checks remain unchanged. The
+sampler backup is adaptive_pool.py.before-cpu-sampler.
 
 ## Activation and rollback
 

@@ -95,20 +95,25 @@ def cpu_sample_values(first: tuple, last: tuple, spans: tuple,
     total, idle, usage = (last[index] - first[index] for index in range(3))
     if elapsed <= 0 or total <= 0 or not 0 <= idle <= total or usage < 0:
         return invalid
-    read_span = start[1] - start[0] + end[1] - end[0]
-    if read_span > min(1 / ticks_per_second, elapsed / 100):
-        return invalid
-    # Operational consistency bound, not a kernel atomic-snapshot guarantee:
-    # two endpoint ticks per CPU, eight exported counter-field quantizations,
-    # plus the measured acquisition skew. Grossly inconsistent counters remain
-    # invalid; this never caps arbitrary telemetry into a healthy sample.
-    tick_error = 2 * cpus + 8 + cpus * ticks_per_second * read_span
-    if abs(total - cpus * ticks_per_second * elapsed) > tick_error:
+    # Every counter read falls within these brackets. Scheduler preemption
+    # widens the observed interval; it is not evidence of corrupt counters.
+    inner_elapsed = end[0] - start[1]
+    outer_elapsed = end[1] - start[0]
+    # Retain the operational accounting-consistency envelope, not a claim of
+    # kernel-atomic accounting. Do not normalize grossly inconsistent input.
+    tick_error = 2 * cpus + 8
+    if not (cpus * ticks_per_second * inner_elapsed - tick_error <= total
+            <= cpus * ticks_per_second * outer_elapsed + tick_error):
         return invalid
     ratio_idle = idle / total * cpus
-    wall_idle = idle / ticks_per_second / elapsed
+    # idle and iowait are independently truncated aggregate USER_HZ fields;
+    # the two disjoint cgroups independently truncate usage to microseconds.
+    # Subtract their known export uncertainty before using the common outer
+    # interval. This only lowers credit; genuine excess still reaches policy.
+    wall_idle = max(0, idle - 2) / ticks_per_second / outer_elapsed
+    pool_usage = max(0, usage - 2) / 1e6 / outer_elapsed
     return {"total_cpus": cpus, "idle_cpus": min(ratio_idle, wall_idle),
-            "pool_cpu_usage_cpus": usage / 1e6 / elapsed}
+            "pool_cpu_usage_cpus": pool_usage}
 
 
 def install_cpu_sampler(namespace: dict[str, Any]) -> None:
