@@ -114,7 +114,9 @@ def agent_phase_timed_out(result: Any) -> bool:
     if not isinstance(result, Mapping):
         return False
     runtime = result.get("runtime_result")
-    phases = runtime.get("phases") if isinstance(runtime, Mapping) else None
+    if not isinstance(runtime, Mapping):
+        return False
+    phases = runtime.get("phases")
     if not isinstance(phases, list) or not phases or not isinstance(phases[-1], Mapping):
         return False
     agent = phases[-1]
