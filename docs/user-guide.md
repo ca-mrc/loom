@@ -454,16 +454,19 @@ attempt with state `failed` and failure reason `timed_out` is also eligible when
 its independent verifier finished successfully with a numeric reward (including
 zero) and all required evidence is complete. A terminus-2 attempt with no
 numeric reward is eligible when the committed runtime output captured
-`artifacts/harbor/trajectory.json` and the failure is either an agent-budget
-timeout or a verifier error whose agent attempt committed. The archive keeps
-the original state, `failure_reason`, and a null reward. An agent-budget
-timeout adds `outcome=agent_budget_timeout`. A verifier that produced no reward
-adds `outcome=verification_indeterminate`. The Harbor trajectory is copied from
-that committed output when the event log has no final artifact reference; a
-missing file or a digest mismatch rejects the export. `recording.cast` is
-copied only when it was captured. Verifier files are copied when a committed
-verifier bundle exists, and these two outcomes may omit that bundle. An
-agent-budget timeout may end on a final turn that has no terminal observation.
+`artifacts/harbor/trajectory.json` and the failure is an agent-budget timeout,
+a verifier error whose agent attempt committed, or a verifier error whose agent
+phase hit that same budget. The archive keeps the original state,
+`failure_reason`, and a null reward. An agent phase that exited 124 adds
+`outcome=agent_budget_timeout`, including when the trial failure reason is
+`verifier_error`. A verifier error whose agent attempt committed and produced
+no reward adds `outcome=verification_indeterminate`. The Harbor trajectory is
+copied from that committed output when the event log has no final artifact
+reference; a missing file or a digest mismatch rejects the export.
+`recording.cast` is copied only when it was captured. Verifier files are copied
+when a committed verifier bundle exists, and these outcomes may omit that
+bundle. An agent phase that hit the budget may end on a final turn that has no
+terminal observation.
 Earlier turns still need their observation and their gateway call.
 `task_error`, `verifier_unavailable`, `oom_killed`, cancellation, and
 incomplete outputs remain excluded.

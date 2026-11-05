@@ -13,7 +13,7 @@ from tests.unit.test_native_delivery_acceptance import native_trial
 
 
 def fixture(kind: str):
-    timed_out = kind == "timed_out"
+    timed_out = kind in {"timed_out", "verifier_timeout"}
     trial, client = native_trial(timed_out=timed_out)
     runtime = trial.result["runtime_result"]
     agent = next(phase for phase in runtime["phases"] if phase["role"] == "agent")
@@ -21,7 +21,11 @@ def fixture(kind: str):
     runtime["verifier_rewards"] = None
     runtime["failure_reason"] = None
     trial.result["reward"] = None
-    if timed_out:
+    if kind == "verifier_timeout":
+        trial.failure_reason = "verifier_error"
+        runtime["status"] = "timed_out"
+        agent.update(exit_code=124, timed_out=True)
+    elif timed_out:
         runtime["status"] = "timed_out"
     else:
         trial.state = "failed"
@@ -71,6 +75,16 @@ def test_agent_budget_timeout_exports_trajectory_and_keeps_the_timeout():
     assert resolve_verifier_artifacts(
         trial, client=client, artifacts_bucket="artifacts",
     ) == []
+
+
+def test_verifier_error_after_an_agent_budget_exports_the_partial_trajectory():
+    trial, events, client, native = fixture("verifier_timeout")
+    bundle = build(trial, events, client)
+    assert bundle.native_artifacts["native/harbor_trajectory.json"] == native
+    assert bundle.export_provenance["outcome"] == "agent_budget_timeout"
+    assert bundle.export_provenance["native_artifact_authority"] == "committed_runtime_output"
+    assert trial.failure_reason == "verifier_error"
+    assert trial.result["reward"] is None
 
 
 def test_verifier_error_exports_the_agent_trajectory_without_a_score():

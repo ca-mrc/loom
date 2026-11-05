@@ -108,13 +108,32 @@ def is_scored_agent_timeout(*, state: str, result: Any, failure_reason: Any) -> 
     )
 
 
+def agent_phase_timed_out(result: Any) -> bool:
+    """The attempt's agent phase stopped on the task deadline."""
+
+    if not isinstance(result, Mapping):
+        return False
+    runtime = result.get("runtime_result")
+    phases = runtime.get("phases") if isinstance(runtime, Mapping) else None
+    if not isinstance(phases, list) or not phases or not isinstance(phases[-1], Mapping):
+        return False
+    agent = phases[-1]
+    return (
+        runtime.get("status") == "timed_out"
+        and agent.get("role") == "agent"
+        and agent.get("exit_code") == 124
+        and agent.get("timed_out") is True
+    )
+
+
 def is_ungraded_agent_trajectory(
     *, state: str, result: Any, failure_reason: Any, config: Any,
 ) -> bool:
     """A finished terminus-2 attempt can be delivered with its trajectory and no score.
 
-    The agent-budget and verifier-error shapes stay separate. Neither one is a
-    scored timeout, and a missing Harbor trajectory stays ineligible.
+    An agent-budget timeout and a verifier error stay separate labels. A verifier
+    error whose agent phase hit that same budget is still deliverable. Neither
+    shape is a scored timeout, and a missing Harbor trajectory stays ineligible.
     """
     if (
         state != "failed"
@@ -149,13 +168,9 @@ def is_ungraded_agent_trajectory(
         return False
     agent = phases[-1]
     if failure_reason == "timed_out":
-        return (
-            runtime.get("status") == "timed_out"
-            and agent.get("exit_code") == 124
-            and agent.get("timed_out") is True
-        )
+        return agent_phase_timed_out(result)
     if failure_reason == "verifier_error":
-        return (
+        return agent_phase_timed_out(result) or (
             runtime.get("status") == "succeeded"
             and agent.get("exit_code") == 0
             and agent.get("timed_out") is False

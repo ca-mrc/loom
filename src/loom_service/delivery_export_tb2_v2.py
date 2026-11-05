@@ -26,6 +26,7 @@ from loom.models.trajectory import (
     TrajectoryEvent,
 )
 from loom.terminal_result_semantics import (
+    agent_phase_timed_out,
     is_scored_agent_timeout,
     is_ungraded_agent_trajectory,
 )
@@ -1259,7 +1260,7 @@ def build_per_trial_v2_bundle(
         )
     join_errors = validate_v2_joins(
         events, committed_native_trajectory=committed_native is not None,
-        allow_final_unobserved_turn=ungraded and trial.failure_reason == "timed_out",
+        allow_final_unobserved_turn=ungraded and agent_phase_timed_out(trial.result),
     )
     if join_errors:
         raise Tb2V2ExportError(
@@ -1298,7 +1299,7 @@ def build_per_trial_v2_bundle(
         export_provenance["native_artifact_authority"] = "committed_runtime_output"
     if ungraded:
         export_provenance["outcome"] = (
-            "agent_budget_timeout" if trial.failure_reason == "timed_out"
+            "agent_budget_timeout" if agent_phase_timed_out(trial.result)
             else "verification_indeterminate"
         )
     native_artifacts = committed_native if committed_native is not None else resolve_native_artifacts(
