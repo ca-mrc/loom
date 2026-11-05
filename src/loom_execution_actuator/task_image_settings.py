@@ -65,6 +65,9 @@ class NativeTaskImageSettings(BaseModel):
     cache_transfer: Literal["tar", "blobs"] = "blobs"
     # BuildKit OCI export shape; archive is today's path, directory is measure-gated.
     oci_export_format: Literal["archive", "directory"] = "archive"
+    # Opt-in build-phase storage readings for sizing evidence (#2750). Omitted
+    # unless set, so existing contracts and rendered Jobs stay byte-identical.
+    record_boundary_usage: bool = Field(default=False, strict=True)
 
     @model_validator(mode="after")
     def bounded_requests(self) -> NativeTaskImageSettings:
@@ -79,7 +82,7 @@ class NativeTaskImageSettings(BaseModel):
         # actuator still uses the runtime default; explicit policies stay frozen.
         if "io_full_avg10_max" not in self.model_fields_set:
             settings.pop("io_full_avg10_max", None)
-        for key in ("cache_total_mib", "cache_gc_policy", "reuse_task_cache_for_verifier"):
+        for key in ("cache_total_mib", "cache_gc_policy", "reuse_task_cache_for_verifier", "record_boundary_usage"):
             if key not in self.model_fields_set:
                 settings.pop(key, None)
         return settings
@@ -92,7 +95,7 @@ class NativeTaskImageSettings(BaseModel):
             "cpu_millis", "memory_mib", "ephemeral_storage_mib", "max_processes", "active_deadline_seconds",
             "cpu_request_millis",
             "snapshotter", "export_cache_mode", "oci_export_format",
-            "reuse_task_cache_for_verifier",
+            "reuse_task_cache_for_verifier", "record_boundary_usage",
         )})
 
     def runtime_configuration(self) -> dict[str, Any]:
