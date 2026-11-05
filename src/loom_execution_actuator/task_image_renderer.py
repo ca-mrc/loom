@@ -44,6 +44,102 @@ MIN_TASK_IMAGE_EPHEMERAL_STORAGE_MIB = 16 * 1024
 _BUILD_BUDGET_GRACE_SECONDS = 300
 _JOB_DEADLINE_SLACK_SECONDS = 600
 _SCRATCH_DIRECTORIES = "/scratch/state /scratch/tmp /scratch/runtime /scratch/docker-config"
+# Opt-in phase-boundary storage readings (#2750). The untrusted build phase
+# reports these itself: sizing diagnostics only, never enforcement or a peak.
+BOUNDARY_USAGE_LOG = "/dev/termination-log"
+BOUNDARY_USAGE_MAX_RECORDS = 16
+# The kubelet keeps at most 4096 bytes of a container's termination message (and
+# less when the Pod's shared total is exceeded). The writer appends only while a
+# maximal line still fits; the parser must still tolerate truncation.
+BOUNDARY_USAGE_MESSAGE_BYTES = 4096
+BOUNDARY_USAGE_LINE_BYTES = 512
+# Wall-clock limits for one reading and for all readings of one build. They are
+# taken from the build Job's existing deadline, so a build already close to it
+# can be pushed over it by up to this budget.
+BOUNDARY_USAGE_TIMEOUT_SECONDS = 20
+BOUNDARY_USAGE_BUDGET_SECONDS = 30
+BOUNDARY_USAGE_CLOCK = "/proc/uptime"
+# Appends one bounded JSON line to the build container's termination message.
+# Setup, the rootless walk and result classification all run in one session
+# that is killed as a process group at its deadline; its files live under
+# /scratch/tmp, which cleanup already removes. The parent only polls, kills,
+# reads one small result file and appends one line. It never waits on a killed
+# group. Its poll count bounds each wait even if the clock is unreadable, and
+# each reading is charged at least its polling time, so the per-build budget
+# also holds with a frozen clock.
+# Milliseconds come from /proc/uptime by 64-bit shell arithmetic, not awk %d
+# (which BusyBox clamps to 32 bits after ~24.9 days of uptime).
+# Each volume keeps du's own exit code and read-error count. Only two complete
+# volumes are "ok"; otherwise "partial", "failed", "timeout" or "skipped".
+_BOUNDARY_USAGE_FUNCTION = r"""loom_usage_spent_ms=0
+loom_usage_walk=$(cat <<'LOOM_USAGE_WALK'
+for d in scratch:/scratch build:/loom/build; do
+  n=${d%%:*}; p=${d#*:}
+  { du -axk "$p" 2>/scratch/tmp/loom-usage/errors; echo "loom-rc $?"; } | awk -v n="$n" -v e=/scratch/tmp/loom-usage/errors '
+    $1 == "loom-rc" { rc = $2; next }
+    { c++; last = $1 }
+    END { x = 0; while ((getline line < e) > 0) x++; print n, (rc == "" ? 255 : rc), c + 0, (last == "" ? "-" : last), x }'
+done
+LOOM_USAGE_WALK
+)
+loom_usage_group=$(cat <<'LOOM_USAGE_GROUP'
+mkdir -p /scratch/tmp/loom-usage || exit 0
+TMPDIR=/scratch/tmp/loom-usage rootlesskit sh -c "$1" 2>/dev/null | awk 'NF == 5 && $1 ~ /^(scratch|build)$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/ && !seen[$1]++ {
+    if ($4 ~ /^[0-9]+$/) { d = d (d == "" ? "" : ",") "\"" $1 "\":{\"entries\":" $3 ",\"kib\":" $4 ",\"errors\":" $5 ",\"rc\":" $2 "}"; got++; if ($2 == 0 && $5 == 0) good++ } }
+  END { print (got == 0 ? "failed" : (got == 2 && good == 2 ? "ok" : "partial")); print d }' > "$2.tmp" && mv "$2.tmp" "$2"
+LOOM_USAGE_GROUP
+)
+loom_usage_ms() {
+  loom_up=
+  read -r loom_up loom_idle < @CLOCK@ 2>/dev/null || true
+  loom_s=${loom_up%.*}
+  loom_c=${loom_up#*.}
+  case "$loom_s" in ''|*[!0-9]*) loom_s=0 ;; esac
+  case "$loom_c" in [0-9][0-9]) ;; *) loom_c=00 ;; esac
+  echo $(( loom_s * 1000 + (1$loom_c - 100) * 10 ))
+}
+loom_boundary_usage() {
+  [ -w @LOG@ ] || return 0
+  [ "$(wc -l < @LOG@)" -lt @MAX@ ] && [ "$(wc -c < @LOG@)" -le @ROOM@ ] || return 0
+  usage_started=$(loom_usage_ms)
+  usage_status=skipped
+  usage_slept=0
+  usage_dirs=
+  usage_left=$(( @BUDGET_MS@ - loom_usage_spent_ms ))
+  if [ "$usage_left" -gt @TIMEOUT_MS@ ]; then usage_left=@TIMEOUT_MS@; fi
+  if [ "$usage_left" -gt 0 ]; then
+    usage_status=failed
+    usage_result=/scratch/tmp/loom-usage/result-$1-$2
+    setsid sh -c "$loom_usage_group" loom-usage "$loom_usage_walk" "$usage_result" > /dev/null 2>&1 &
+    usage_pid=$!
+    usage_deadline=$(( usage_started + usage_left ))
+    usage_polls=$(( usage_left / 100 + 1 ))
+    while usage_state=$(cut -d' ' -f3 "/proc/$usage_pid/stat" 2>/dev/null) && [ "$usage_state" != Z ]; do
+      if [ "$usage_polls" -le 0 ] || [ "$(loom_usage_ms)" -ge "$usage_deadline" ]; then
+        kill -KILL "-$usage_pid" 2>/dev/null || kill -KILL "$usage_pid" 2>/dev/null || true
+        usage_status=timeout
+        break
+      fi
+      usage_polls=$(( usage_polls - 1 ))
+      usage_slept=$(( usage_slept + 100 ))
+      sleep 0.1
+    done
+    if [ "$usage_status" != timeout ]; then
+      wait "$usage_pid" 2>/dev/null || true
+      if [ -f "$usage_result" ]; then { read -r usage_status; read -r usage_dirs; } < "$usage_result" || true; fi
+    fi
+  fi
+  usage_elapsed=$(( $(loom_usage_ms) - usage_started ))
+  # Charge at least the time spent polling, so a frozen clock still spends the budget.
+  if [ "$usage_elapsed" -lt "$usage_slept" ]; then usage_elapsed=$usage_slept; fi
+  loom_usage_spent_ms=$(( loom_usage_spent_ms + usage_elapsed ))
+  case "$usage_status" in
+    ok|partial) if [ -n "$usage_dirs" ]; then usage_dirs=",\"dirs\":{$usage_dirs}"; else usage_status=failed; fi ;;
+    failed|timeout|skipped) usage_dirs= ;;
+    *) usage_status=failed; usage_dirs= ;;
+  esac
+  printf '{"v":1,"point":"%s","component":%s,"at":%s,"status":"%s","elapsed_ms":%s%s}\n' "$1" "$2" "$(date +%s)" "$usage_status" "$usage_elapsed" "$usage_dirs" >> @LOG@ 2>/dev/null || true
+}"""
 
 
 @dataclass(frozen=True)
@@ -68,6 +164,7 @@ class TaskImageJobConfig:
     export_cache_mode: Literal["max", "min"] = "max"
     oci_export_format: Literal["archive", "directory"] = "archive"
     reuse_task_cache_for_verifier: bool = False
+    record_boundary_usage: bool = False
 
     def __post_init__(self) -> None:
         for image in (self.service_image, self.buildkit_image):
@@ -100,6 +197,8 @@ class TaskImageJobConfig:
             raise ValueError("task-image oci_export_format must be archive or directory")
         if type(self.reuse_task_cache_for_verifier) is not bool:
             raise ValueError("reuse_task_cache_for_verifier must be a boolean")
+        if type(self.record_boundary_usage) is not bool:
+            raise ValueError("record_boundary_usage must be a boolean")
 
 
 def task_image_job_name(materialization_id: UUID, lease_epoch: int) -> str:
@@ -113,6 +212,16 @@ def task_image_job_name(materialization_id: UUID, lease_epoch: int) -> str:
             "task-image Job identity requires a materialization and positive lease epoch"
         )
     return f"loom-img-{materialization_id.hex}-e{lease_epoch}"
+
+
+def boundary_usage_function() -> str:
+    """The exact shell defining ``loom_boundary_usage`` in instrumented builds."""
+    return (_BOUNDARY_USAGE_FUNCTION.replace("@LOG@", BOUNDARY_USAGE_LOG)
+            .replace("@MAX@", str(BOUNDARY_USAGE_MAX_RECORDS))
+            .replace("@ROOM@", str(BOUNDARY_USAGE_MESSAGE_BYTES - BOUNDARY_USAGE_LINE_BYTES))
+            .replace("@TIMEOUT_MS@", str(BOUNDARY_USAGE_TIMEOUT_SECONDS * 1000))
+            .replace("@BUDGET_MS@", str(BOUNDARY_USAGE_BUDGET_SECONDS * 1000))
+            .replace("@CLOCK@", BOUNDARY_USAGE_CLOCK))
 
 
 def _build_script(
@@ -130,11 +239,18 @@ def _build_script(
     component_build_targets: dict[str, str] | None = None,
     component_no_cache: frozenset[str] = frozenset(),
     reuse_task_cache_for_verifier: bool = False,
+    record_boundary_usage: bool = False,
 ) -> str:
     lines = [
         "set -eu",
         "mkdir -p /scratch/tmp /scratch/runtime /scratch/docker-config /scratch/state /loom/build/oci /loom/build/cache-out",
     ]
+    if record_boundary_usage:
+        lines.append(boundary_usage_function())
+
+    def usage(point: str, index: int) -> list[str]:
+        return [f"  loom_boundary_usage {point} {index} || true"] if record_boundary_usage else []
+
     for index, component in enumerate(components):
         dockerfile = PurePosixPath(component.dockerfile_path)
         context = PurePosixPath(_BUILD, "context", component.context_path).as_posix()
@@ -229,6 +345,8 @@ def _build_script(
                     '  echo \'{"loom_task_image_stage":"cleanup","event":"start",'
                     f'"component_index":{index}}}\''
                 ),
+                # Before cleanup removes this component's snapshots and content.
+                *usage("solve_end", index),
                 "  cleanup_started=$(date +%s)",
                 # The daemonless process has exited. Use the same user mapping to
                 # remove snapshots containing private directories owned by subuids;
@@ -254,6 +372,7 @@ def _build_script(
                     )
                     + ' "$result" "$(( (solve_ended - solve_started) * 1000 ))"'
                 ),
+                *usage("solve_failed", index),
                 "  case $result in 124) exit 124 ;; *) exit 1 ;; esac",
                 "fi",
             ]
@@ -477,6 +596,7 @@ def render_native_image_job(
                 component_build_targets=component_build_targets,
                 component_no_cache=component_no_cache,
                 reuse_task_cache_for_verifier=config.reuse_task_cache_for_verifier and workload == "task",
+                record_boundary_usage=config.record_boundary_usage and workload == "task",
             ),
         ],
         "env": [

@@ -57,6 +57,11 @@ from loom_execution_actuator.image_publication_receipt import decode_publication
 from loom_execution_actuator.kubernetes_api import exact_pods_absent
 from loom_execution_actuator.metrics import blocked_outcome, record_build_cycle
 from loom_execution_actuator.renderer import ExecutionTargetRuntime
+from loom_execution_actuator.task_image_boundary_usage import (
+    expected_components,
+    instrumented,
+    observed_boundary_usage,
+)
 from loom_execution_actuator.task_image_renderer import render_task_image_job
 from loom_execution_actuator.task_image_settings import (
     NativeTaskImageSettings as NativeTaskImageSettings,
@@ -571,6 +576,16 @@ def build_observation(observation: dict[str, Any]) -> dict[str, Any]:
                         phase["platform_diagnostic"] = diagnostic
             phases.append(phase)
         result["phases"] = phases
+        # Opt-in build-phase readings (#2750). Only an instrumented build's
+        # termination message is read, and only once the kubelet has kept it.
+        if instrumented(pod):
+            build = next((row for row in pod.get("status", {}).get("initContainerStatuses", [])
+                          if row.get("name") == "build"), None)
+            terminated = (build or {}).get("state", {}).get("terminated")
+            if isinstance(terminated, dict):
+                result["boundary_usage"] = observed_boundary_usage(
+                    terminated.get("message"), components=expected_components(pod),
+                    exit_code=terminated.get("exitCode"))
     if observation.get("builder_log"):
         result["builder_log"] = _stored_builder_log(observation["builder_log"])
     return result
