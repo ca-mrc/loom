@@ -5,25 +5,61 @@ import copy
 import importlib
 import json
 import os
+import re
 import subprocess
 import time
 from dataclasses import asdict
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import Mock, call
 
 import pytest
 
 from loom_service.pool_management.profiles import PoolProfileCatalog
-from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
+from tests.integration.test_execution_actuator_k3s import (
+    _build_timing,
+    _k3s_system_image_archive,
+    _load_client,
+    _start_k3s,
+)
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 from tests.unit.test_nebius_pool_application_image_render import pool_inputs as application_inputs
 from tests.unit.test_nebius_pool_application_image_render import render as render_application
 from tests.unit.test_nebius_pool_task_image_render import build_inputs as task_inputs
 from tests.unit.test_nebius_pool_task_image_render import render as render_task
 
+# Startup milestones only: component starts, image import, node registration
+# and controller leadership. Component flags are dropped and lines cut short.
+_K3S_MILESTONE = re.compile(r'Starting k3s v|Imported images|Running kube-(?:apiserver|controller-manager|scheduler)'
+    r'|k3s is up and running|[Rr]egistered node|leaderelection|validatingadmissionpolicy')
 
-def _add_build_policy_diagnostics(cluster, observed_policy, error):
+
+def _k3s_startup_milestones(output):
+    lines = [line.split(' --', 1)[0][:160] for line in output.splitlines() if _K3S_MILESTONE.search(line)]
+    return '\n'.join(lines if len(lines) <= 40 else [*lines[:20], '...', *lines[-20:]])
+
+
+def _controller_manager_leadership(core, wall_start):
+    """Seconds from test start until kube-controller-manager first led, if it has."""
+    from kubernetes import client
+    from kubernetes.client.exceptions import ApiException
+
+    try:
+        lease = client.CoordinationV1Api(core.api_client).read_namespaced_lease(
+            'kube-controller-manager', 'kube-system', _request_timeout=(2, 3))
+    except ApiException as error:
+        return 'absent' if error.status == 404 else f'unavailable: ApiException {error.status}'
+    except Exception as error:
+        return f'unavailable: {type(error).__name__}'
+    acquired = lease.spec.acquire_time if lease.spec else None
+    return round(acquired.timestamp() - wall_start, 2) if acquired else 'not acquired'
+
+
+def _add_build_policy_diagnostics(cluster, observed_policy, error, *, phases=None, leadership=None):
     """Retain bounded evidence from this test's disposable node before teardown."""
+    if phases is not None:
+        error.add_note('build policy phases (seconds from test start): ' + json.dumps(phases)
+            + f'; controller-manager leader lease: {leadership}')
     try:
         metadata = getattr(observed_policy, 'metadata', None)
         status = getattr(observed_policy, 'status', None)
@@ -38,15 +74,24 @@ def _add_build_policy_diagnostics(cluster, observed_policy, error):
         error.add_note(f'disposable node unavailable: {type(diagnostic_error).__name__}')
         return
     commands = [
-        ('node logs', ['docker', 'logs', '--tail=150', container_id]),
-        ('container state', ['docker', 'inspect', '--format={{json .State}}', container_id]),
+        ('node logs', ['docker', 'logs', '--tail=150', container_id], None, 16384),
+        ('container state', ['docker', 'inspect', '--format={{json .State}}', container_id], None, 16384),
         ('node conditions', ['docker', 'exec', container_id, 'kubectl', '--request-timeout=2s',
-            'get', 'nodes', '-o=jsonpath={range .items[*]}{.metadata.name}{": "}{.status.conditions}{"\\n"}{end}']),
+            'get', 'nodes', '-o=jsonpath={range .items[*]}{.metadata.name}{": "}{.status.conditions}{"\\n"}{end}'],
+            None, 16384),
+        # Process states and kernel stacks show a blocked wait (D-state,
+        # wchan) inside the node; the k3s log tail alone cannot.
+        ('node processes', ['docker', 'exec', container_id, 'sh', '-c',
+            'ps -ef; for p in /proc/[0-9]*; do echo "$p"; '
+            'cat "$p/comm" "$p/wchan" "$p/stack" 2>/dev/null; done'], None, 32768),
+        ('k3s startup milestones', ['docker', 'logs', container_id], _k3s_startup_milestones, 8192),
     ]
-    for label, command in commands:
+    for label, command, summarize, limit in commands:
         try:
-            result = subprocess.run(command, text=True, capture_output=True, timeout=3)
-            error.add_note(f'{label} (exit {result.returncode}):\n' + (result.stdout + result.stderr)[-16384:])
+            result = subprocess.run(command, text=True, capture_output=True, timeout=5)
+            output = result.stdout + result.stderr
+            error.add_note(f'{label} (exit {result.returncode}):\n'
+                + (summarize(output) if summarize else output)[-limit:])
         except Exception as diagnostic_error:
             error.add_note(f'{label} unavailable: {type(diagnostic_error).__name__}')
 
@@ -61,18 +106,33 @@ def test_build_policy_diagnostics_retain_status_and_bound_node_reads(monkeypatch
 
     def read(command, **kwargs):
         commands.append(command)
-        assert kwargs == {'text': True, 'capture_output': True, 'timeout': 3}
-        return SimpleNamespace(returncode=0, stdout='node evidence ' + 'x' * 20000, stderr='')
+        assert kwargs == {'text': True, 'capture_output': True, 'timeout': 5}
+        if command == ['docker', 'logs', 'owned-node']:
+            return SimpleNamespace(returncode=0, stderr='', stdout=(
+                'time="t0" level=info msg="Starting k3s v1.36"\n'
+                'time="t1" level=info msg="Running kube-controller-manager --private-flag=do-not-record-flag"\n'
+                + 'unrelated progress line\n' * 500
+                + 'I1104 leaderelection.go:271] successfully acquired lease kube-system/kube-controller-manager\n'))
+        return SimpleNamespace(returncode=0, stdout='node evidence ' + 'x' * 40000, stderr='')
 
     monkeypatch.setattr(subprocess, 'run', read)
-    _add_build_policy_diagnostics(cluster, observed, error)
+    _add_build_policy_diagnostics(cluster, observed, error,
+        phases={'api_ready': 31.5, 'policies_created': 32.0}, leadership='absent')
     notes = error.__notes__
-    assert '"observed_generation": null' in notes[0]
-    assert '"generation": 1' in notes[0]
-    assert '"type_checking": null' in notes[0]
-    assert len(commands) == 3
-    assert commands[0] == ['docker', 'logs', '--tail=150', 'owned-node']
-    assert all(len(note) < 17000 for note in notes)
+    assert notes[0] == ('build policy phases (seconds from test start): '
+        '{"api_ready": 31.5, "policies_created": 32.0}; controller-manager leader lease: absent')
+    assert '"observed_generation": null' in notes[1]
+    assert '"generation": 1' in notes[1]
+    assert '"type_checking": null' in notes[1]
+    assert [command[:3] for command in commands] == [['docker', 'logs', '--tail=150'],
+        ['docker', 'inspect', '--format={{json .State}}'], ['docker', 'exec', 'owned-node'],
+        ['docker', 'exec', 'owned-node'], ['docker', 'logs', 'owned-node']]
+    assert '"$p/wchan" "$p/stack"' in commands[3][-1]
+    assert len(notes[4]) < 33000 and all(len(note) < 17000 for note in notes[:4])
+    milestones = notes[-1].splitlines()
+    assert milestones[0] == 'k3s startup milestones (exit 0):'
+    assert len(milestones) == 4 and 'successfully acquired lease' in milestones[-1]
+    assert 'unrelated progress' not in notes[-1] and 'do-not-record-flag' not in notes[-1]
     assert 'do-not-record-spec' not in '\n'.join(notes)
 
 
@@ -83,13 +143,13 @@ def test_build_policy_diagnostics_failures_do_not_hide_original(monkeypatch):
 
     def unavailable(command, **kwargs):
         commands.append(command)
-        raise subprocess.TimeoutExpired(command, 3, output='private diagnostic data')
+        raise subprocess.TimeoutExpired(command, 5, output='private diagnostic data')
 
     monkeypatch.setattr(subprocess, 'run', unavailable)
     _add_build_policy_diagnostics(cluster, None, error)
     assert str(error) == 'original policy failure'
-    assert len(commands) == 3
-    assert sum('TimeoutExpired' in note for note in error.__notes__) == 3
+    assert len(commands) == 5
+    assert sum('TimeoutExpired' in note for note in error.__notes__) == 5
     assert 'private diagnostic data' not in '\n'.join(error.__notes__)
 
 
@@ -101,6 +161,30 @@ def test_build_policy_diagnostics_missing_node_preserves_original():
     _add_build_policy_diagnostics(SimpleNamespace(get_wrapped_container=unavailable), None, error)
     assert str(error) == 'original policy failure'
     assert error.__notes__[-1] == 'disposable node unavailable: RuntimeError'
+
+
+@pytest.mark.parametrize(('lease', 'expected'), [
+    (SimpleNamespace(spec=SimpleNamespace(acquire_time=datetime.fromtimestamp(130.5, tz=UTC))), 30.5),
+    (SimpleNamespace(spec=SimpleNamespace(acquire_time=None)), 'not acquired'),
+    (404, 'absent'),
+    (500, 'unavailable: ApiException 500'),
+    (TimeoutError(), 'unavailable: TimeoutError'),
+])
+def test_controller_manager_leadership_is_relative_and_never_raises(monkeypatch, lease, expected):
+    from kubernetes import client
+    from kubernetes.client.exceptions import ApiException
+
+    def read(self, name, namespace, **kwargs):
+        assert (name, namespace, kwargs) == ('kube-controller-manager', 'kube-system', {'_request_timeout': (2, 3)})
+        if isinstance(lease, int):
+            raise ApiException(status=lease)
+        if isinstance(lease, Exception):
+            raise lease
+        return lease
+
+    monkeypatch.setattr(client.CoordinationV1Api, 'read_namespaced_lease', read)
+    core = SimpleNamespace(api_client=client.ApiClient(client.Configuration(host='http://127.0.0.1:1')))
+    assert _controller_manager_leadership(core, 100.0) == expected
 
 
 def wait_for_namespace_admission(core, namespace, pod, *, deadline, policy_name=None):
@@ -271,10 +355,22 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
         for pod in pods:
             pod['spec']['runtimeClassName'] = 'build-runtime-fixture'
     policies = documents(namespace, catalog)
+    # Failure-boundary timing for #2611: where a cold runner spends its time,
+    # and whether the controller manager led before the policy budget began.
+    started, wall_start, phases, leadership = time.monotonic(), time.time(), {}, None
+
+    def reached(phase):
+        phases[phase] = round(time.monotonic() - started, 2)
+
+    _k3s_system_image_archive()
+    reached('system_images')
     cluster = _start_k3s(ephemeral_storage_floor='1Gi')
-    observed_policy = None
+    reached('node_started')
+    observed_policy = core = None
+    outcome = 'interrupted'
     try:
         _, core, _ = _load_client(cluster)
+        reached('api_ready')
         admission = client.AdmissionregistrationV1Api(core.api_client)
         if runtime_overhead is not None:
             client.NodeV1Api(core.api_client).create_runtime_class({'apiVersion': 'node.k8s.io/v1',
@@ -299,12 +395,14 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
         assert caught.value.status == 403 and 'PodSecurity' in caught.value.body
         for policy in policies:
             utils.create_from_dict(core.api_client, policy)
+        reached('policies_created')
         deadline = time.monotonic() + 25
         while True:
             policy = admission.read_validating_admission_policy(policies[0]['metadata']['name'])
             observed_policy = policy
             if policy.status and policy.status.type_checking:
                 assert not policy.status.type_checking.expression_warnings
+                reached('type_checked')
                 break
             assert time.monotonic() < deadline, 'build policy compilation did not finish'
             time.sleep(0.1)
@@ -314,6 +412,7 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
             except ApiException as exc:
                 assert exc.status == 403 and policies[0]['metadata']['name'] in exc.body, exc.body
                 assert 'Only sequential prepare, build and publish phases are allowed.' in exc.body
+                reached('probe_denied')
                 break
             assert time.monotonic() < deadline, 'pre-activation probe was not denied by the fixed policy'
             time.sleep(0.1)
@@ -407,6 +506,7 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
                     core.create_namespaced_pod(namespace, changed, dry_run='All')
                 assert denied.value.status == 403 and policies[0]['metadata']['name'] in denied.value.body, (damage, denied.value.body)
         if runtime_overhead == 500:
+            outcome = 'passed'
             return
         # This namespace-scoped policy must not govern a foreign/staging namespace.
         core.patch_namespace('unrelated-builds', {'metadata': {'labels': {'pod-security.kubernetes.io/enforce': 'privileged'}}})
@@ -436,8 +536,17 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
                     'requests': {'cpu': '2'}, 'limits': {'cpu': '2'}}}]}},
                 auth_settings=['BearerToken'], _return_http_data_only=True)
         assert denied.value.status == 403 and policies[0]['metadata']['name'] in denied.value.body
+        outcome = 'passed'
     except BaseException as error:
-        _add_build_policy_diagnostics(cluster, observed_policy, error)
+        outcome = type(error).__name__
+        if core is not None and leadership is None:
+            leadership = _controller_manager_leadership(core, wall_start)
+        _add_build_policy_diagnostics(cluster, observed_policy, error, phases=phases, leadership=leadership)
         raise
     finally:
+        # Read after every assertion so this lookup never spends the test's budgets.
+        if core is not None and leadership is None:
+            leadership = _controller_manager_leadership(core, wall_start)
+        _build_timing({'role': 'build-policy', 'event': 'phases', 'case': str(runtime_overhead),
+            'outcome': outcome, 'phases': phases, 'controller_manager_leader': leadership})
         cluster.stop()
