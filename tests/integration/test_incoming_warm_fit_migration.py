@@ -52,7 +52,7 @@ def _allow_current_cancellation_columns(url: str) -> None:
             ))
             connection.execute(text(
                 "ALTER TABLE provider_request_pools "
-                "ADD COLUMN IF NOT EXISTS max_pause_sec DOUBLE PRECISION NOT NULL DEFAULT 3600"
+                "ADD COLUMN IF NOT EXISTS max_pause_sec DOUBLE PRECISION NOT NULL DEFAULT 7200"
             ))
             connection.execute(text(
                 "ALTER TABLE provider_request_pools "

@@ -8776,7 +8776,7 @@ class ProviderRequestPool(Base):
         Float, nullable=False, default=200.0, server_default=text("200")
     )
     max_pause_sec: Mapped[float] = mapped_column(
-        Float, nullable=False, default=3600.0, server_default=text("3600")
+        Float, nullable=False, default=7200.0, server_default=text("7200")
     )
     config_version: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=1, server_default=text("1")

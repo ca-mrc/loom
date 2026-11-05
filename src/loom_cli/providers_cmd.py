@@ -771,7 +771,7 @@ def _pool(args: argparse.Namespace) -> int:
                     "max_pause_sec": (
                         args.max_pause_sec
                         if args.max_pause_sec is not None
-                        else current.get("max_pause_sec", 3600)
+                        else current.get("max_pause_sec", 7200)
                     ),
                     "config_version": (
                         args.expect_version

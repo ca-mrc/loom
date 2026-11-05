@@ -760,7 +760,7 @@ def allow_current_queue_columns(postgres_url: str) -> None:
                         ALTER TABLE provider_request_pools
                             ADD COLUMN IF NOT EXISTS queue_enabled BOOLEAN NOT NULL DEFAULT false,
                             ADD COLUMN IF NOT EXISTS stall_sec DOUBLE PRECISION NOT NULL DEFAULT 200,
-                            ADD COLUMN IF NOT EXISTS max_pause_sec DOUBLE PRECISION NOT NULL DEFAULT 3600,
+                            ADD COLUMN IF NOT EXISTS max_pause_sec DOUBLE PRECISION NOT NULL DEFAULT 7200,
                             ADD COLUMN IF NOT EXISTS config_version BIGINT NOT NULL DEFAULT 1;
                     END IF;
                 END $$
