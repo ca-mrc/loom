@@ -86,9 +86,10 @@ def _snapshot_rows(connection):
 def _assert_frozen_rows(connection, frozen):
     upgraded = _snapshot_rows(connection)
     for row in upgraded:
-        # 0181 adds an empty legacy preparation revision; every historical
-        # column, including timestamps and publication evidence, must survive.
+        # New identity columns default to empty for historical snapshots;
+        # every existing column, timestamp and publication record must survive.
         assert row.pop("preparation_revision") == ""
+        assert row.pop("input_manifest_sha256") == ""
     assert upgraded == frozen
 
 
