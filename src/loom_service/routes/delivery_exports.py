@@ -51,7 +51,7 @@ class _DeliveryExportSelection(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _exclusive_selection(self) -> "_DeliveryExportSelection":
+    def _exclusive_selection(self) -> _DeliveryExportSelection:
         if self.eligible_only and self.trial_ids:
             raise ValueError(
                 "selection.eligible_only cannot be combined with selection.trial_ids"
