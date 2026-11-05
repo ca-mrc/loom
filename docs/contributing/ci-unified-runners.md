@@ -180,6 +180,40 @@ before removal; busy guests stay intact. One-job shutdown and JIT shredding stay
 unchanged. The registry helper permits marked disposable guests, rejects shared
 unmarked hosts/writable markers, and still refuses remote Docker contexts.
 
+
+The same installer also owns the CPU snapshot adapter for the existing adaptive
+pool. It accepts the supported legacy counter/snapshot ABI and inserts an
+idempotent hook without rewriting retirement or policy code. The complete
+monotonic acquisition brackets provide a common outer interval for idle and
+pool CPU usage. Scheduler preemption during a counter read widens this interval
+and conservatively lowers credited capacity instead of invalidating truthful data.
+Idle credit is also capped by the original tick ratio.
+
+[The CPU counter implementation](https://raw.githubusercontent.com/torvalds/linux/v6.8/fs/proc/stat.c)
+exports idle and iowait as two independently truncated aggregate USER_HZ fields;
+[the cgroup accounting implementation](https://raw.githubusercontent.com/torvalds/linux/v6.8/kernel/cgroup/rstat.c)
+exports each disjoint group usage in microseconds. Subtracting two ticks and
+two microseconds respectively provides serialization lower bounds, preventing
+export rounding from inventing capacity. Negative/reset/nonfinite data and
+accounting totals outside the inner/outer time brackets plus the existing
+2N+8-tick operational envelope remain invalid. This envelope is not a kernel
+atomic-accounting guarantee. Existing physical consistency, pressure, reserve,
+growth, hardware-ceiling and busy/idle policy checks remain unchanged. The
+sampler backup is adaptive_pool.py.before-cpu-sampler.
+
+An unavailable CPU acquisition raises the existing pool operation error before
+policy evaluation or reconciliation. The failed service invocation stays
+visible and the normal timer tries again; it creates no guests, changes no
+quota and writes no successful status. It retains the current quota, which may
+already reflect an earlier invalid sample, until a valid observation updates it.
+Existing runners can continue accepting work. Fresh memory/I/O pressure handling
+and idle cleanup are also deferred for that invocation, including on hosts that
+already skipped quota writes for invalid samples. Repeated acquisition failures
+therefore leave stale status and allocation; they are not evidence of health.
+The existing growth state can survive an error gap shorter than its 180-second
+freshness window. Valid numeric CPU excess and valid pressure measurements still
+reach the unchanged resource policy.
+
 ## Activation and rollback
 
 Prepare both providers and prove actual native pickup, Docker and artifacts
