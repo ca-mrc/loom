@@ -85,6 +85,7 @@ from loom_service.trial_bundles import has_archive_path_traversal
 
 SELECTION_RULE = "highest_priority_deliverable_by_task_sample_combination"
 EXPLICIT_TRIAL_IDS_SELECTION_RULE = "explicit_trial_ids"
+ELIGIBLE_ONLY_SELECTION_RULE = "eligible_only"
 SCHEMA_VERSION = "1"
 TERMINAL_BATCH_STATES = {"finished", "cancelled"}
 PAYLOAD_CHECKSUMS_FILE = "checksums/SHA256SUMS"
@@ -488,13 +489,13 @@ async def _canonical_bundles_for_selected(
     return bundles
 
 
-def _select_trials(
+def _choose_delivery_trials(
     *,
     main: Batch,
     supplements: list[Batch],
     trials_by_batch: dict[UUID, list[Trial]],
     trajectories_bucket: str,
-) -> list[SelectedTrial]:
+) -> tuple[list[SelectedTrial], list[dict[str, Any]]]:
     batches = [main, *supplements]
     priority_by_batch = {batch.id: index for index, batch in enumerate(batches)}
     main_keys = {_trial_coordinate(trial) for trial in trials_by_batch.get(main.id, [])}
@@ -544,6 +545,26 @@ def _select_trials(
                 "latest_failure_reason": latest.failure_reason if latest is not None else None,
             }
         )
+    selected = [
+        selected_by_key[key]
+        for key in sorted(selected_by_key, key=lambda item: (item[0], item[1], item[2]))
+    ]
+    return selected, unresolved
+
+
+def _select_trials(
+    *,
+    main: Batch,
+    supplements: list[Batch],
+    trials_by_batch: dict[UUID, list[Trial]],
+    trajectories_bucket: str,
+) -> list[SelectedTrial]:
+    selected, unresolved = _choose_delivery_trials(
+        main=main,
+        supplements=supplements,
+        trials_by_batch=trials_by_batch,
+        trajectories_bucket=trajectories_bucket,
+    )
     if unresolved:
         raise UnresolvedDeliveryTrialsError(
             {
@@ -551,12 +572,42 @@ def _select_trials(
                 "unresolved_trials": unresolved,
             }
         )
-    selected = [
-        selected_by_key[key]
-        for key in sorted(selected_by_key, key=lambda item: (item[0], item[1], item[2]))
-    ]
     _assert_selected_terminal_consistency(selected)
     return selected
+
+
+def _select_eligible_trials(
+    *,
+    main: Batch,
+    supplements: list[Batch],
+    trials_by_batch: dict[UUID, list[Trial]],
+    trajectories_bucket: str,
+) -> tuple[list[SelectedTrial], dict[str, Any]]:
+    """Pack every eligible coordinate and record the ones that are not.
+
+    Priority across the batch family matches the full export. A coordinate
+    with no eligible attempt is skipped instead of rejecting the archive.
+    """
+    selected, unresolved = _choose_delivery_trials(
+        main=main,
+        supplements=supplements,
+        trials_by_batch=trials_by_batch,
+        trajectories_bucket=trajectories_bucket,
+    )
+    if not selected:
+        raise UnresolvedDeliveryTrialsError(
+            {
+                "message": "batch family has no delivery-eligible attempts",
+                "unresolved_trials": unresolved,
+            }
+        )
+    _assert_selected_terminal_consistency(selected)
+    return selected, {
+        "selection_rule": ELIGIBLE_ONLY_SELECTION_RULE,
+        "selected_trial_ids": [str(item.trial.id) for item in selected],
+        "skipped_coordinates_count": len(unresolved),
+        "skipped_coordinates": unresolved,
+    }
 
 
 def _is_delivery_eligible(trial: Trial) -> bool:
@@ -2500,6 +2551,7 @@ async def create_delivery_export(
     supplemental_batch_ids: list[UUID] | None,
     mode: DeliveryExportMode = "lightweight",
     trial_ids: list[UUID] | None = None,
+    eligible_only: bool = False,
     public_base_url: str | None = None,
 ) -> dict[str, Any]:
     main, supplements = await _load_batch_family(session, main_batch_id, supplemental_batch_ids)
@@ -2511,12 +2563,25 @@ async def create_delivery_export(
     batch_ids = [main.id, *[batch.id for batch in supplements]]
     trials_by_batch = await _trials_for_batches(session, batch_ids)
     selection_meta: dict[str, Any] | None = None
+    if trial_ids is not None and eligible_only:
+        raise InvalidDeliveryBatchFamilyError(
+            {
+                "message": "selection.eligible_only cannot be combined with selection.trial_ids",
+            }
+        )
     if trial_ids is not None:
         selected, selection_meta = _select_trials_by_ids(
             main=main,
             supplements=supplements,
             trials_by_batch=trials_by_batch,
             trial_ids=trial_ids,
+            trajectories_bucket=settings.trajectories_bucket,
+        )
+    elif eligible_only:
+        selected, selection_meta = _select_eligible_trials(
+            main=main,
+            supplements=supplements,
+            trials_by_batch=trials_by_batch,
             trajectories_bucket=settings.trajectories_bucket,
         )
     else:

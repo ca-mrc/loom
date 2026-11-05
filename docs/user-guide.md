@@ -447,6 +447,29 @@ those IDs. Unresolved sibling coordinates are skipped and recorded under
 `skipped_coordinates_count`, optional `skipped_coordinates`). Omitting
 `--trial-id` / `selection` keeps the default full-family behavior.
 
+To export every attempt that is eligible now, without listing trial IDs, pass
+`--eligible-only`. Coordinates that are not eligible are left out of the
+archive and recorded under `manifest.selection`
+(`selection_rule=eligible_only`). The export is rejected when the family has
+no eligible attempt. Missing
+objects and TB2 join failures still reject the selected attempts.
+
+```bash
+loom eval batch delivery-bundle <batch-id> \
+  --mode raw-harbor-tb2-v2 \
+  --eligible-only \
+  --output eligible-delivery.tar.gz
+```
+
+Equivalent API body:
+
+```json
+{
+  "mode": "raw-harbor-tb2-v2",
+  "selection": { "eligible_only": true }
+}
+```
+
 Before the archive is marked ready, the
 service verifies that every selected trajectory and ATIF object can be read
 through object storage. Successful attempts remain eligible. A native agent

@@ -3154,6 +3154,91 @@ def test_batch_delivery_bundle_forwards_explicit_trial_ids(
     assert output.read_bytes() == b"subset-archive"
 
 
+def test_batch_delivery_bundle_forwards_eligible_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output = tmp_path / "eligible.tar.gz"
+    digest = hashlib.sha256(b"eligible-archive").hexdigest()
+    artifact_id = "00000000-0000-0000-0000-00000000d316"
+    posted: dict[str, Any] = {}
+
+    class _StreamResponse:
+        def __init__(self) -> None:
+            self.status_code = 200
+            self.headers: dict[str, str] = {}
+            self.text = ""
+
+        def iter_bytes(self) -> Any:
+            yield b"eligible-archive"
+
+    class _StreamContext:
+        def __enter__(self) -> _StreamResponse:
+            return _StreamResponse()
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    class _FakeClient:
+        def __enter__(self) -> _FakeClient:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def post(self, path: str, *, json: dict[str, Any]) -> httpx.Response:
+            posted.update(json)
+            return httpx.Response(
+                201,
+                json={
+                    "id": artifact_id,
+                    "status": "ready",
+                    "archive_filename": "eligible.tar.gz",
+                    "sha256": digest,
+                    "download_url": (
+                        f"/api/v1/batches/{_BATCH_ID}/delivery-export/"
+                        f"{artifact_id}/download"
+                    ),
+                    "manifest": {
+                        "mode": "raw-harbor-tb2-v2",
+                        "selection_rule": "eligible_only",
+                        "trial_count": 3,
+                        "selection": {"skipped_coordinates_count": 2},
+                    },
+                },
+            )
+
+        def stream(self, method: str, path: str) -> _StreamContext:
+            return _StreamContext()
+
+    monkeypatch.setattr(
+        "loom_cli.eval_cmd.authed_client",
+        lambda _cfg, *, timeout=30.0: _FakeClient(),
+    )
+
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "delivery-bundle",
+            _BATCH_ID,
+            "--mode",
+            "raw-harbor-tb2-v2",
+            "--eligible-only",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert rc == 0
+    assert posted == {
+        "mode": "raw-harbor-tb2-v2",
+        "selection": {"eligible_only": True},
+    }
+    assert "skipped coordinates: 2" in capsys.readouterr().out
+
+
 # ──────────────────────────────────────────────────────────────────────
 # eval trial list / show
 # ──────────────────────────────────────────────────────────────────────

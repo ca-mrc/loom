@@ -204,6 +204,62 @@ def test_explicit_trial_ids_skip_unresolved_sibling_coordinates() -> None:
     ]
 
 
+def test_eligible_only_skips_coordinates_without_a_deliverable_attempt() -> None:
+    from loom_service.delivery_export import _select_eligible_trials
+    from loom_service.delivery_export_errors import UnresolvedDeliveryTrialsError
+
+    team_id = uuid4()
+    main_id = uuid4()
+
+    def trial(
+        *,
+        trial_id: UUID,
+        task_id: str,
+        state: str = "succeeded",
+        failure_reason: str | None = None,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=trial_id,
+            team_id=team_id,
+            batch_id=main_id,
+            task_id=task_id,
+            sample_idx=0,
+            combination_idx=0,
+            state=state,
+            submitted_at=datetime.now(UTC),
+            result={"aggregate_reward": 1.0} if state == "succeeded" else None,
+            failure_reason=failure_reason,
+            config={},
+            trajectory_index={},
+        )
+
+    ok = trial(trial_id=uuid4(), task_id="task-a")
+    failed = trial(
+        trial_id=uuid4(),
+        task_id="task-b",
+        state="failed",
+        failure_reason="task_error",
+    )
+    selected, meta = _select_eligible_trials(
+        main=cast(Any, SimpleNamespace(id=main_id)),
+        supplements=[],
+        trials_by_batch={main_id: [ok, failed]},
+        trajectories_bucket="trajectories",
+    )
+    assert [item.trial.id for item in selected] == [ok.id]
+    assert meta["selection_rule"] == "eligible_only"
+    assert meta["skipped_coordinates_count"] == 1
+    assert meta["skipped_coordinates"][0]["latest_failure_reason"] == "task_error"
+    with pytest.raises(UnresolvedDeliveryTrialsError) as empty:
+        _select_eligible_trials(
+            main=cast(Any, SimpleNamespace(id=main_id)),
+            supplements=[],
+            trials_by_batch={main_id: [failed]},
+            trajectories_bucket="trajectories",
+        )
+    assert empty.value.detail["message"] == "batch family has no delivery-eligible attempts"
+
+
 def test_explicit_trial_ids_reject_unknown_and_ineligible() -> None:
     from loom_service.delivery_export import _select_trials_by_ids
     from loom_service.delivery_export_errors import (
