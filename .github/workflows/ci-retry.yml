@@ -102,5 +102,5 @@ jobs:
           persist-credentials: false
       - name: Serve one native Actions job on this disposable hosted VM
         env:
-          LOOM_CI_JIT_CONFIG: ${{ secrets[format('LOOM_CI_HOSTED_JIT_{0}', inputs.slot)] }}
+          LOOM_CI_JIT_CONFIG: ${{ secrets[startsWith(inputs.request_id, 'v2_') && format('LOOM_CI_HOSTED_JIT_{0}_{1}', inputs.slot, inputs.request_id) || format('LOOM_CI_HOSTED_JIT_{0}', inputs.slot)] }}
         run: python3 scripts/ops/ci_hosted_worker.py

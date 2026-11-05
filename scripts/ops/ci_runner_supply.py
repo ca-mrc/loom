@@ -26,6 +26,8 @@ SOURCE_WORKFLOWS = frozenset(
 SOURCE_REPOSITORY = "ca-mrc/loom"
 SECRET_PREFIX = "LOOM_CI_HOSTED_JIT_"
 GRAPH_CACHE_VERSION = 3
+DISPATCH_GRACE_SECONDS = 300
+STARTUP_TIMEOUT_SECONDS = 900
 
 
 class SupplyError(RuntimeError):
@@ -287,6 +289,17 @@ def run_title(slot: int, nonce: str) -> str:
     return f"loom-ci-hosted slot={slot:02d} request={nonce}"
 
 
+def jit_secret_name(record: dict[str, Any]) -> str:
+    """New requests cannot consume a replacement slot's JIT credential."""
+    suffix = f"{record['slot']:02d}"
+    nonce = record["nonce"]
+    if nonce.startswith("v2_"):
+        if not re.fullmatch(r"v2_[0-9a-f]{32}", nonce):
+            raise SupplyError("invalid request-scoped worker identity")
+        suffix += "_" + nonce
+    return SECRET_PREFIX + suffix
+
+
 def new_worker(
     api: API, root: Path, slot: int, config: dict[str, Any], now: float
 ) -> dict[str, Any]:
@@ -307,7 +320,7 @@ def new_worker(
         "runner_name": name,
         "created_at": now,
         "phase": "prepared",
-        "nonce": uuid.uuid4().hex,
+        "nonce": "v2_" + uuid.uuid4().hex,
         "workflow_path": config["worker_workflow"],
         "ref": config["worker_ref"],
         "registered_capacity_dispatch": bool(config.get("registered_capacity_dispatch")),
@@ -324,7 +337,7 @@ def new_worker(
 def dispatch_worker(api: API, root: Path, record: dict[str, Any]) -> None:
     folder = root / f"slot-{record['slot']:02d}"
     if record["phase"] == "prepared":
-        api.set_secret(SECRET_PREFIX + f"{record['slot']:02d}", (folder / "jitconfig").read_text())
+        api.set_secret(jit_secret_name(record), (folder / "jitconfig").read_text())
         record["phase"] = "secret-ready"
         atomic_json(folder / "worker.json", record)
         (folder / "jitconfig").unlink()
@@ -332,6 +345,7 @@ def dispatch_worker(api: API, root: Path, record: dict[str, Any]) -> None:
         # Persist uncertainty before a non-idempotent dispatch. Never repeat a
         # dispatch merely because the response was lost.
         record["phase"] = "dispatch-uncertain"
+        record["dispatch_requested_at"] = time.time()
         atomic_json(folder / "worker.json", record)
         inputs = {"slot": f"{record['slot']:02d}", "request_id": record["nonce"]}
         if record.get("registered_capacity_dispatch"):
@@ -355,34 +369,110 @@ def dispatch_worker(api: API, root: Path, record: dict[str, Any]) -> None:
         atomic_json(folder / "worker.json", record)
 
 
+def owned_run(record: dict[str, Any], run: dict[str, Any] | None) -> dict[str, Any] | None:
+    if run is not None and run["display_title"] != run_title(record["slot"], record["nonce"]):
+        raise SupplyError("refusing cancellation of an unrelated workflow")
+    return run
+
+
 def retired_worker(api: API, root: Path, record: dict[str, Any], inventory: dict[int, Any]) -> bool:
     current = api.request("GET", f"/actions/runners/{record['runner_id']}", missing_ok=True)
     if current and current["busy"]:
         return False
+    if current and record.get("runner_name") and current["name"] != record["runner_name"]:
+        raise SupplyError("refusing retirement of an unrelated runner")
+    run = (
+        owned_run(record, api.request("GET", f"/actions/runs/{record['run_id']}", missing_ok=True))
+        if record.get("run_id") else None
+    )
     if current:
         try:
             api.request("DELETE", f"/actions/runners/{record['runner_id']}", missing_ok=True)
         except SupplyError:
             return False  # A racing busy runner or failed deletion prevents cancellation.
-    if record.get("run_id"):
-        run = api.request("GET", f"/actions/runs/{record['run_id']}")
-        if run["display_title"] != run_title(record["slot"], record["nonce"]):
-            raise SupplyError("refusing cancellation of an unrelated workflow")
-        if run["status"] != "completed":
-            try:
-                api.request("POST", f"/actions/runs/{record['run_id']}/cancel")
-            except SupplyHTTPError as exc:
-                if exc.status != 409:
-                    raise
-                # Cancellation can race completion while run status still lags.
-                # Keep this slot's record until terminal readback; other supply
-                # work may continue without fabricating a retirement receipt.
-                return False
+    if run and run["status"] != "completed":
+        try:
+            api.request("POST", f"/actions/runs/{record['run_id']}/cancel")
+        except SupplyHTTPError as exc:
+            if exc.status != 409:
+                raise
+            return False
+        # Cancellation is asynchronous. Do not reuse a slot on a POST receipt.
+        run = owned_run(record, api.request("GET", f"/actions/runs/{record['run_id']}", missing_ok=True))
+        if run and run["status"] != "completed":
+            return False
+    api.request("DELETE", "/actions/secrets/" + jit_secret_name(record), missing_ok=True)
     folder = root / f"slot-{record['slot']:02d}"
     (folder / "jitconfig").unlink(missing_ok=True)
     atomic_json(folder / "retired.json", {**record, "phase": "retired", "retired_at": time.time()})
     (folder / "worker.json").unlink()
     return True
+
+
+def donor_bootstrap_started(api: API, run: dict[str, Any]) -> float | None:
+    """The hosted capacity job, not its workflow, owns bootstrap allocation."""
+    if run["status"] != "in_progress":
+        return None
+    attempt = run.get("run_attempt")
+    if type(attempt) is not int or attempt < 1:
+        raise SupplyError("donor run has an invalid attempt")
+    jobs = api.pages(f"/actions/runs/{run['id']}/attempts/{attempt}/jobs", "jobs")
+    capacity = [job for job in jobs if job["name"] == "capacity"]
+    if len(capacity) > 1:
+        raise SupplyError("donor capacity job identity is ambiguous")
+    if not capacity or capacity[0]["status"] != "in_progress":
+        return None
+    try:
+        return datetime.fromisoformat(capacity[0]["started_at"].replace("Z", "+00:00")).timestamp()
+    except (KeyError, AttributeError, TypeError, ValueError):
+        raise SupplyError("donor capacity job has an invalid start time") from None
+
+
+def failed_start(record: dict[str, Any], worker: dict[str, Any] | None,
+                 run: dict[str, Any] | None, now: float,
+                 bootstrap_started: float | None = None) -> str | None:
+    if worker and (worker["busy"] or worker["status"] == "online"):
+        return None
+    if record.get("ever_busy"):
+        return None
+    age = now - record.get("dispatch_requested_at", record["created_at"])
+    if run is None and age >= DISPATCH_GRACE_SECONDS:
+        return "dispatch_not_observed"
+    if bootstrap_started is not None and now - bootstrap_started >= STARTUP_TIMEOUT_SECONDS:
+        return "startup_timeout"
+    return None
+
+
+def workflow_history(api: API, workflow: str, since: float, now: float) -> list[dict[str, Any]]:
+    """Partition filtered history before GitHub's 1,000-result search ceiling."""
+    pending = [(int(since), int(now))]
+    found: dict[int, dict[str, Any]] = {}
+    while pending:
+        lower, upper = pending.pop()
+        dates = [datetime.fromtimestamp(value, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                 for value in (lower, upper)]
+        path = "/actions/workflows/" + workflow + "/runs?created=" + urllib.parse.quote("..".join(dates), safe="")
+        first = api.request("GET", path + "&per_page=100&page=1")
+        total = first.get("total_count")
+        if type(total) is not int or total < 0:
+            raise SupplyError("workflow history has an invalid result count")
+        if total > 1000:
+            if upper - lower <= 1:
+                raise SupplyError("workflow history exceeds search limit within one second")
+            midpoint = (lower + upper) // 2
+            pending.extend([(midpoint, upper), (lower, midpoint)])
+            continue
+        rows = {}
+        for page in range(1, max(1, (total + 99) // 100) + 1):
+            payload = first if page == 1 else api.request("GET", path + f"&per_page=100&page={page}")
+            if payload.get("total_count") != total:
+                raise SupplyError("workflow history changed during pagination; retry next pass")
+            for run in payload["workflow_runs"]:
+                rows[run["id"]] = run
+        if len(rows) != total:
+            raise SupplyError("workflow history pagination is incomplete; retry next pass")
+        found.update(rows)
+    return list(found.values())
 
 
 def reconcile(config: dict[str, Any], root: Path, api: API, execute: bool) -> dict[str, Any]:
@@ -394,34 +484,58 @@ def reconcile(config: dict[str, Any], root: Path, api: API, execute: bool) -> di
         int(path.parent.name.split("-")[1]): load_json(path, {})
         for path in root.glob("slot-*/worker.json")
     }
-    # Search only the lifetime of outstanding requests, not the repository's
-    # entire provider history on every timer tick. Pagination remains complete.
-    earliest = min((row["created_at"] for row in records.values()), default=now)
-    since = datetime.fromtimestamp(earliest - 60, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    runs = (
-        api.pages(
-            "/actions/workflows/"
-            + config["worker_workflow"]
-            + "/runs?created=>="
-            + urllib.parse.quote(since, safe=""),
-            "workflow_runs",
-        )
-        if records
-        else []
-    )
-    by_title = {run["display_title"]: run for run in runs}
+    # Query every outstanding request's original workflow, including legacy
+    # dispatchers. Absence is usable evidence only after complete pagination;
+    # an API failure aborts before any retirement or replacement dispatch.
+    runs = []
+    workflows = {row.get("workflow_path", config["worker_workflow"]) for row in records.values()}
+    for workflow in sorted(workflows):
+        earliest = min(row["created_at"] for row in records.values()
+                       if row.get("workflow_path", config["worker_workflow"]) == workflow)
+        runs.extend(workflow_history(api, workflow, earliest - 60, now))
+    expected_titles = {run_title(slot, row["nonce"]) for slot, row in records.items()}
+    by_title = {}
+    for run in runs:
+        title = run["display_title"]
+        if title not in expected_titles:
+            continue
+        if title in by_title and by_title[title]["id"] != run["id"]:
+            raise SupplyError("multiple workflow runs have the same worker request identity")
+        by_title[title] = run
+    resolved = {}
+    bootstrap_starts = {}
+    for slot, record in records.items():
+        run = by_title.get(run_title(slot, record["nonce"]))
+        if record.get("run_id"):
+            if run and run["id"] != record["run_id"]:
+                raise SupplyError("worker request run identity changed")
+            run = owned_run(record, api.request("GET", f"/actions/runs/{record['run_id']}", missing_ok=True))
+        resolved[slot] = run
+        worker = inventory.get(record["runner_id"])
+        if run and not record.get("ever_busy") and not (
+            worker and (worker["busy"] or worker["status"] == "online")
+        ):
+            bootstrap_starts[slot] = donor_bootstrap_started(api, run)
     starting = sum(
-        inventory.get(row["runner_id"], {}).get("status") != "online" for row in records.values()
+        inventory.get(row["runner_id"], {}).get("status") != "online"
+        and not failed_start(row, inventory.get(row["runner_id"]), resolved[slot], now, bootstrap_starts.get(slot))
+        and not (resolved[slot] and resolved[slot]["status"] == "completed")
+        for slot, row in records.items()
     )
     plan = supply_plan(runners, demand, starting, int(config["max_github_workers"]))
     plan.update({"execute": execute, "created_slots": [], "retired_slots": []})
     if not execute:
         return plan
-    for slot, record in list(records.items()):
+    retiring = set()
+    # Retire the oldest expired requests first so a budget-limited pass makes
+    # the next history scan smaller, without discarding any unresolved record.
+    for slot, record in sorted(records.items(), key=lambda item: item[1]["created_at"]):
         worker = inventory.get(record["runner_id"])
-        run = by_title.get(run_title(slot, record["nonce"]))
+        run = resolved[slot]
         if run:
             record["run_id"] = run["id"]
+            if bootstrap_starts.get(slot) is not None:
+                record["startup_started_at"] = bootstrap_starts[slot]
         if worker and worker["status"] == "online":
             record.setdefault("ready_at", now)
         if worker and worker["busy"]:
@@ -434,8 +548,11 @@ def reconcile(config: dict[str, Any], root: Path, api: API, execute: bool) -> di
             and plan["desired_github"] < len(records)
             and now - record.get("ready_at", record["created_at"]) > 90
         )
-        if consumed or terminal or idle_unused:
-            if retired_worker(api, root, record, inventory):
+        failure = failed_start(record, worker, run, now, bootstrap_starts.get(slot))
+        if consumed or terminal or idle_unused or failure:
+            retiring.add(slot)
+            retiring_record = {**record, "retirement_reason": failure or "consumed_or_unused"}
+            if retired_worker(api, root, retiring_record, inventory):
                 del records[slot]
                 plan["retired_slots"].append(slot)
         else:
@@ -459,8 +576,15 @@ def reconcile(config: dict[str, Any], root: Path, api: API, execute: bool) -> di
             folder.rename(history / (folder.name + "-" + uuid.uuid4().hex[:10]))
         record = new_worker(api, root, slot, config, now)
         records[slot] = record
+        retiring.discard(slot)
         dispatch_worker(api, root, record)
         plan["created_slots"].append(slot)
+    plan["github_starting"] = sum(
+        slot not in retiring
+        and inventory.get(row["runner_id"], {}).get("status") != "online"
+        and not failed_start(row, inventory.get(row["runner_id"]), resolved.get(slot), now, bootstrap_starts.get(slot))
+        for slot, row in records.items()
+    )
     atomic_json(root / "status.json", {"observed_at": now, **plan})
     return plan
 

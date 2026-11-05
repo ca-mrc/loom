@@ -108,10 +108,34 @@ the existing common queue enabled, and let already queued/running nested jobs
 drain before retiring any idle capacity.
 
 For each slot the controller registers a fresh one-job JIT runner, encrypts the
-JIT config with the repository public key, sets `LOOM_CI_HOSTED_JIT_00` through
-`LOOM_CI_HOSTED_JIT_19`, and dispatches the already registered `ci-retry.yml` capacity branch with a unique
-request id. Dispatch uncertainty is persisted before POST and never blindly
-retried. A slot is not reused until its previous worker safely exits/retires.
+JIT config with the repository public key, sets a request-scoped
+`LOOM_CI_HOSTED_JIT_<slot>_v2_<nonce>` secret, and dispatches the already registered
+`ci-retry.yml` capacity branch with that unique `v2_<nonce>` request id. Legacy
+UUID requests keep their original per-slot secret lookup. A delayed legacy or
+retired request cannot consume the replacement request's JIT config. Retirement
+removes only that request's secret after runner deregistration and terminal donor
+readback.
+
+Dispatch uncertainty is persisted before POST and never blindly retried. On the
+next pass the controller queries the original workflow and the exact slot/request
+title. GitHub limits filtered workflow-run searches to 1,000 results, so the
+controller partitions the full outstanding-request lifetime into bounded
+created-time ranges until each range fits that ceiling, then verifies complete
+pagination against its reported count. Ranges share their split boundary and
+results are deduplicated by native run id, preserving boundary coverage. API-budget exhaustion, changing/incomplete
+pages and an unsplittable overfull range stop the pass before retirement; a recorded run id also receives direct readback.
+An API failure is not proof of absence. An unready request with no observed run
+gets five minutes of dispatch-visibility grace; an observed donor that never
+brings its runner online gets fifteen minutes after its owned `capacity` job
+starts running, using exact-attempt job readback.
+Time waiting in GitHub's native hosted queue is preserved and does not consume
+this bootstrap allowance. After
+those bounds, the controller freshly checks busy/ownership, deregisters the old
+runner, cancels only its exactly owned donor if one exists, waits for terminal
+readback, and records retirement before creating a new request. Busy/online
+workers are not expired by these startup bounds. Stale requests no longer count
+as starting capacity. A slot is not reused until its previous worker safely
+exits/retires; no manual deletion of `worker.json` is needed.
 
 The dispatcher retains its original default retry behavior, classification,
 required inputs, per-source serialization and retry-job permissions. Only
@@ -138,7 +162,8 @@ donor defers that slot's retirement while other supply work continues. GitHub
 run status can lag a terminal worker job. The controller keeps the slot record
 and any remaining JIT file, writes no retirement receipt, and waits for terminal
 run readback before ordinary finalization. Busy-runner and exact-title checks
-still precede cancellation; other API or transport errors still stop reconciliation.
+still precede cancellation; a successful cancellation POST also needs terminal
+readback before retirement. Other API or transport errors still stop reconciliation.
 
 On each OLDLAB host, install `scripts/ops/ci_runner_unified_host.py` and run it
 with `--install-runtime /usr/local/lib/loom-ci-runner-expansion

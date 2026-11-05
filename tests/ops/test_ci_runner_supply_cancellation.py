@@ -67,12 +67,16 @@ def _api(supply, monkeypatch, records, status=409):
 
         def request(self, method, path, body=None, *, missing_ok=False):
             self.calls.append((method, path))
+            if method == "GET" and path.startswith("/actions/workflows/"):
+                return {"total_count": len(records), "workflow_runs": [self.run(record) for record in records]}
             if method == "GET" and path.startswith("/actions/runners/"):
                 return None
             if method == "GET" and path.startswith("/actions/runs/"):
                 return self.run(
                     next(record for record in records if path.endswith(f"/{record['run_id']}"))
                 )
+            if method == "DELETE" and path.startswith("/actions/secrets/"):
+                return None
             return super().request(method, path, body, missing_ok=missing_ok)
 
     return API()
@@ -90,7 +94,7 @@ def test_cancel_conflict_defers_receipt_and_allows_other_supply_work(tmp_path, m
 
     def new_worker(api, root, slot, config, now):
         created.append(slot)
-        return {"slot": slot}
+        return {"slot": slot, "runner_id": 100 + slot, "created_at": 0}
 
     monkeypatch.setattr(supply, "new_worker", new_worker)
     monkeypatch.setattr(
