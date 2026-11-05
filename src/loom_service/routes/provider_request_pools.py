@@ -8,13 +8,16 @@ from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import (
     ProviderConnectionShare,
     ProviderModelCache,
     ProviderRequestPool,
+    ProviderRequestPoolGroupCap,
     ProviderRequestPoolMember,
+    Trial,
 )
 from loom.provider_model_preflight import preflight_failure_kind
 from loom_service.admin_audit import write_admin_audit_event
@@ -47,6 +50,11 @@ class RequestPoolConfig(BaseModel):
     cooldown_sec: float = Field(default=30, gt=0, le=3600, allow_inf_nan=False)
     timeout_burst_count: int = Field(default=3, ge=1, le=1000)
     timeout_window_sec: float = Field(default=60, gt=0, le=3600, allow_inf_nan=False)
+    queue_enabled: bool | None = None
+    group_caps: dict[str, int] | None = None
+    stall_sec: float | None = Field(default=None, gt=0, le=3600, allow_inf_nan=False)
+    max_pause_sec: float | None = Field(default=None, ge=0, le=86400, allow_inf_nan=False)
+    config_version: int | None = Field(default=None, ge=1)
 
     @field_validator("required_models")
     @classmethod
@@ -55,6 +63,18 @@ class RequestPoolConfig(BaseModel):
             raise ValueError("required_models must contain nonempty, trimmed model IDs")
         if len(value) != len(set(value)):
             raise ValueError("required_models must be unique")
+        return value
+
+    @field_validator("group_caps")
+    @classmethod
+    def _caps(cls, value: dict[str, int] | None) -> dict[str, int] | None:
+        if value is None:
+            return None
+        for group, cap in value.items():
+            if not group or len(group) > 64 or group.strip() != group:
+                raise ValueError("group cap names must be nonempty trimmed quota groups")
+            if cap < 1 or cap > 1000:
+                raise ValueError("group cap must be from 1 to 1000")
         return value
 
     @model_validator(mode="after")
@@ -81,11 +101,18 @@ class RequestPoolResponse(BaseModel):
     cooldown_sec: float
     timeout_burst_count: int
     timeout_window_sec: float
+    queue_enabled: bool
+    group_caps: dict[str, int]
+    stall_sec: float
+    max_pause_sec: float
+    config_version: int
     members: list[PoolMemberResponse]
 
 
 def _response(
-    pool: ProviderRequestPool, members: list[ProviderRequestPoolMember]
+    pool: ProviderRequestPool,
+    members: list[ProviderRequestPoolMember],
+    caps: dict[str, int],
 ) -> RequestPoolResponse:
     return RequestPoolResponse(
         connection_id=pool.connection_id,
@@ -95,6 +122,11 @@ def _response(
         cooldown_sec=pool.cooldown_sec,
         timeout_burst_count=pool.timeout_burst_count,
         timeout_window_sec=pool.timeout_window_sec,
+        queue_enabled=pool.queue_enabled,
+        group_caps=caps,
+        stall_sec=pool.stall_sec,
+        max_pause_sec=pool.max_pause_sec,
+        config_version=pool.config_version,
         members=[
             PoolMemberResponse(
                 connection_id=m.connection_id,
@@ -106,6 +138,17 @@ def _response(
             for m in members
         ],
     )
+
+
+async def _group_caps(session: AsyncSession, connection_id: UUID) -> dict[str, int]:
+    rows = (
+        await session.scalars(
+            select(ProviderRequestPoolGroupCap).where(
+                ProviderRequestPoolGroupCap.pool_connection_id == connection_id,
+            )
+        )
+    ).all()
+    return {row.quota_group: int(row.max_in_flight) for row in rows}
 
 
 @router.get(
@@ -131,7 +174,7 @@ async def get_request_pool(connection_id: UUID, sc: SessionAndCtx) -> RequestPoo
     # Sharing the logical route does not reveal otherwise inaccessible members.
     for member in members:
         await _get_active_connection(session, member.connection_id, ctx)
-    return _response(pool, members)
+    return _response(pool, members, await _group_caps(session, connection_id))
 
 
 @router.put(
@@ -246,6 +289,10 @@ async def put_request_pool(
             enabled=True,
         )
         session.add(pool)
+        created = True
+    else:
+        created = False
+    was_queue = bool(pool.queue_enabled)
     previous = list(
         (
             await session.scalars(
@@ -280,20 +327,90 @@ async def put_request_pool(
         for i, m in enumerate(payload.members)
     ]
     session.add_all(members)
+    if not created:
+        if payload.config_version is not None and payload.config_version != pool.config_version:
+            raise HTTPException(status_code=409, detail="provider_request_pool_version_conflict")
+        pool.config_version = int(pool.config_version) + 1
+    if payload.stall_sec is not None:
+        pool.stall_sec = payload.stall_sec
+    if payload.max_pause_sec is not None:
+        pool.max_pause_sec = payload.max_pause_sec
+    if payload.queue_enabled is not None:
+        pool.queue_enabled = payload.queue_enabled
+    groups = {member.quota_group for member in payload.members}
+    if payload.group_caps is not None:
+        unknown = set(payload.group_caps) - groups
+        if unknown:
+            raise HTTPException(status_code=400, detail="group cap does not match a pool member")
+        await session.execute(
+            delete(ProviderRequestPoolGroupCap).where(
+                ProviderRequestPoolGroupCap.pool_connection_id == connection_id,
+            )
+        )
+        session.add_all(
+            [
+                ProviderRequestPoolGroupCap(
+                    pool_connection_id=connection_id,
+                    quota_group=group,
+                    max_in_flight=cap,
+                )
+                for group, cap in sorted(payload.group_caps.items())
+            ]
+        )
+        stored_caps = dict(payload.group_caps)
+    else:
+        await session.execute(
+            delete(ProviderRequestPoolGroupCap).where(
+                ProviderRequestPoolGroupCap.pool_connection_id == connection_id,
+                ProviderRequestPoolGroupCap.quota_group.not_in(groups),
+            )
+        )
+        stored_caps = await _group_caps(session, connection_id)
+    if pool.queue_enabled and not groups <= set(stored_caps):
+        missing = sorted(groups - set(stored_caps))
+        raise HTTPException(
+            status_code=400,
+            detail=f"provider_queue_missing_group_caps:{','.join(missing)}",
+        )
+    if pool.queue_enabled and not was_queue:
+        running = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(Trial)
+                .where(
+                    Trial.provider_connection_id == connection_id,
+                    Trial.state == "running",
+                )
+            )
+            or 0
+        )
+        if running:
+            raise HTTPException(
+                status_code=409,
+                detail=f"provider_queue_running_attempts:{running}",
+            )
+    if payload.queue_enabled is True and not was_queue:
+        audit_action = "provider_request_pool.queue_configure"
+    elif payload.queue_enabled is False and was_queue:
+        audit_action = "provider_request_pool.queue_disable"
+    else:
+        audit_action = "provider_request_pool.configure"
     await write_admin_audit_event(
         session,
         actor=_provider_audit_actor(ctx, x_loom_admin_actor),
-        action="provider_request_pool.configure",
+        action=audit_action,
         target_type="provider_connection",
         target_id=str(connection_id),
         request=request,
         metadata={
             "member_connection_ids": [str(i) for i in member_ids],
             "required_models": payload.required_models,
+            "queue_enabled": pool.queue_enabled,
+            "config_version": pool.config_version,
         },
     )
     await session.commit()
-    return _response(pool, members)
+    return _response(pool, members, await _group_caps(session, connection_id))
 
 
 @router.delete(
@@ -339,4 +456,4 @@ async def disable_request_pool(
         request=request,
     )
     await session.commit()
-    return _response(pool, members)
+    return _response(pool, members, await _group_caps(session, connection_id))

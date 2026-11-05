@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -229,6 +230,59 @@ func runPlan(
 	result.Status = "succeeded"
 	result.FinishedAt = time.Now().UTC()
 	return result, nil
+}
+
+func openPhaseContext(
+	parent context.Context, timeout time.Duration, updates <-chan time.Time,
+) (context.Context, context.CancelFunc, time.Time, func() time.Time) {
+	deadline := time.Now().Add(timeout)
+	if updates == nil {
+		ctx, cancel := context.WithTimeout(parent, timeout)
+		if actual, ok := ctx.Deadline(); ok {
+			deadline = actual
+		}
+		return ctx, cancel, deadline, func() time.Time { return deadline }
+	}
+	ctx, cancel := context.WithCancelCause(parent)
+	var mu sync.Mutex
+	current := deadline
+	timer := time.NewTimer(time.Until(current))
+	go func() {
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				cancel(context.DeadlineExceeded)
+				return
+			case next, ok := <-updates:
+				if !ok {
+					return
+				}
+				mu.Lock()
+				if !next.After(current) {
+					mu.Unlock()
+					continue
+				}
+				current = next
+				remaining := time.Until(current)
+				mu.Unlock()
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(remaining)
+			}
+		}
+	}()
+	return ctx, func() { cancel(context.Canceled) }, deadline, func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return current
+	}
 }
 
 func runPhase(

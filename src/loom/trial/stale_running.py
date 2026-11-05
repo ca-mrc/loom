@@ -102,6 +102,8 @@ def evaluate_stale_running_trial(
     timeout_multiplier: float,
     grace_sec: float,
     silence_sec: float,
+    queue_waiting: bool = False,
+    pause_credit_sec: float = 0.0,
 ) -> StaleRunningDecision:
     now = _aware(now)
     started_at = _aware_or_none(started_at)
@@ -115,7 +117,7 @@ def evaluate_stale_running_trial(
         task_config=task_config,
     )
     hard_deadline_sec = (
-        agent_timeout_sec * timeout_multiplier + grace_sec
+        agent_timeout_sec * timeout_multiplier + grace_sec + max(0.0, pause_credit_sec)
         if agent_timeout_sec is not None and timeout_multiplier > 0
         else None
     )
@@ -167,6 +169,8 @@ def evaluate_stale_running_trial(
         return keep(f"worker_heartbeat_{heartbeat_status}")
     if hard_deadline_sec is None or runtime_sec is None:
         return keep("missing_timeout")
+    if queue_waiting:
+        return keep("provider_queue_waiting")
     if runtime_sec <= hard_deadline_sec:
         return keep("within_timeout")
     if silence_value_sec is None:

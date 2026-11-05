@@ -124,6 +124,7 @@ class _RequestAudit:
     session_factory: async_sessionmaker[AsyncSession] | None = None
     upstream_timeout_sec: float = 200.0
     connection_queue_max_wait_sec: float = 120.0
+    pause_capable: bool = False
 
 
 class ConnectionAtCapacityError(Exception):
@@ -132,6 +133,22 @@ class ConnectionAtCapacityError(Exception):
     def __init__(self, connection_id: UUID) -> None:
         self.connection_id = connection_id
         super().__init__(connection_id)
+
+
+class GroupQueuedError(Exception):
+    """The bound quota group has no slot this attempt may take."""
+
+    def __init__(self, group: str) -> None:
+        self.group = group
+        super().__init__(group)
+
+
+class QueueStalledError(Exception):
+    """The group has admitted nobody for a full stall interval."""
+
+    def __init__(self, group: str) -> None:
+        self.group = group
+        super().__init__(group)
 
 
 class DispatchAudit:
@@ -211,23 +228,7 @@ class DispatchAudit:
                     phase = "commit"
                     await _database_await(session.commit(), operation="admission", phase=phase)
                     phase = "session_exit"
-        except ConnectionAtCapacityError:
-            raise
-        except HTTPException:
-            # A routing policy may decline admission before any provider I/O.
-            raise
-        except asyncio.CancelledError:
-            logger.warning(
-                "gateway_dispatch_admission_cancelled_commit_unknown request_id=%s receipt_id=%s",
-                self.state.request_id,
-                receipt_id,
-            )
-            raise
-        except Exception as exc:
-            # Only fixed categories are safe: exception text, driver details,
-            # SQL binds and tracebacks must never enter these logs.
-            category = (
-                "timeout" if isinstance(exc, TimeoutError)
+        except (ConnectionAtCapacityError, GroupQueuedError, QueueStalledError):
                 else "database" if isinstance(exc, SQLAlchemyError)
                 else "other"
             )

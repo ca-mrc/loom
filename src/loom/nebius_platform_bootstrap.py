@@ -126,6 +126,8 @@ GATEWAY_TABLES = (
     "provider_models_cache",
     "provider_request_pools",
     "provider_request_pool_members",
+    "provider_request_pool_group_caps",
+    "gateway_dispatch_queue",
     "provider_request_pool_bindings",
     "provider_connection_timeout_health",
     "provider_connection_timeout_observations",
@@ -306,6 +308,8 @@ def _bootstrap_database(
                         "provider_models_cache",
                         "provider_request_pools",
                         "provider_request_pool_members",
+                        "provider_request_pool_group_caps",
+                        "gateway_dispatch_queue",
                         "provider_request_pool_bindings",
                         "provider_connection_timeout_health",
                         "provider_connection_timeout_observations",
@@ -340,6 +344,12 @@ def _bootstrap_database(
                         )
                         # Rotation locks/advances the configured pool and updates
                         # cooldown/quarantine; membership creation/deletion stay management-owned.
+                        cursor.execute(
+                            "GRANT SELECT, INSERT, UPDATE ON gateway_dispatch_queue TO loom_gateway"
+                        )
+                        cursor.execute(
+                            "GRANT USAGE, SELECT ON SEQUENCE gateway_dispatch_queue_seq TO loom_gateway"
+                        )
                         cursor.execute(
                             "GRANT UPDATE ON provider_request_pools, "
                             "provider_request_pool_members TO loom_gateway"
@@ -434,6 +444,14 @@ def _bootstrap_database(
                         sql.SQL(
                             "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO {}"
                         ).format(identifier)
+                    )
+            for role in ("loom_gateway", "loom_service", "loom_control_plane"):
+                if role in roles:
+                    cursor.execute(
+                        sql.SQL(
+                            "GRANT EXECUTE ON FUNCTION "
+                            "gateway_dispatch_queue_credit(uuid, double precision) TO {}"
+                        ).format(sql.Identifier(role))
                     )
             for name, token, _prefix, scope in tokens:
                 token_hash = hashlib.sha256(token.encode()).digest()

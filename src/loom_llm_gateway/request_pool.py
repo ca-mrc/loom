@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
@@ -34,10 +35,17 @@ from loom.db.schema import (
 from loom.provider_model_preflight import preflight_failure_kind
 from loom_llm_gateway.attempt_deadline import GatewayAttemptDeadline
 from loom_llm_gateway.dispatch_audit import DispatchAudit, request_dispatch_audit
+    ConnectionAtCapacityError,
+    DispatchAudit,
+    GroupQueuedError,
+    QueueStalledError,
+    request_dispatch_audit,
+)
 from loom_llm_gateway.execution_attempt_dispatch import (
     admitted_service_execution_models,
     authorize_trial_execution_dispatch,
 )
+from loom_llm_gateway.quota_queue import close_queue_row, decide_group_queue, touch_queue_row
 from loom_llm_gateway.retry import RetryBudgetExceededError
 from loom_llm_gateway.routes._facade_common import (
     decrypt_facade_api_key,
@@ -156,6 +164,13 @@ class PoolDispatchAudit(DispatchAudit):
         self.failover_reason: str | None = None
         self.possible_duplicate_inference = False
         self._keys: list[str] = []
+        self.queue_enabled = False
+        self.stall_sec = 200.0
+        self.max_pause_sec = 0.0
+        self._queue_members: list[ProviderRequestPoolMember] = []
+        self._queue_now = datetime.now(UTC)
+        self._queue_suppressed: set[UUID] = set()
+        self._queue_required: set[str] = set()
 
     async def _prepare_dispatch(self, session: AsyncSession, values: dict[str, Any]) -> None:
         pool, binding = await self._lock_pool_binding(session)
@@ -186,7 +201,13 @@ class PoolDispatchAudit(DispatchAudit):
         now = datetime.now(UTC)
         suppressed = await self._suppressed_members(session, members, now)
         selected = await self._select_member(
-            session, pool, members, binding, now, suppressed, required,
+            session,
+            pool,
+            members,
+            binding,
+            now,
+            suppressed,
+            required,
         )
         if selected is None:
             raise HTTPException(
@@ -201,6 +222,13 @@ class PoolDispatchAudit(DispatchAudit):
         self._keys.append(key)
         self.attempt_timeout_sec = pool.attempt_timeout_sec
         self.cooldown_sec = pool.cooldown_sec
+        self.queue_enabled = bool(pool.queue_enabled) and self.state.pause_capable
+        self.stall_sec = float(pool.stall_sec)
+        self.max_pause_sec = float(pool.max_pause_sec)
+        self._queue_members = members
+        self._queue_now = now
+        self._queue_suppressed = suppressed
+        self._queue_required = required
         values.update(
             provider_connection_id=row.id,
             pool_connection_id=self.pool_id,
@@ -208,7 +236,8 @@ class PoolDispatchAudit(DispatchAudit):
         )
 
     async def _lock_pool_binding(
-        self, session: AsyncSession,
+        self,
+        session: AsyncSession,
     ) -> tuple[ProviderRequestPool, ProviderRequestPoolBinding | None]:
         """Serialize a sticky Trial without serializing unrelated pool readers.
 
@@ -223,14 +252,23 @@ class PoolDispatchAudit(DispatchAudit):
             ProviderRequestPoolBinding.pool_connection_id == self.pool_id,
             ProviderRequestPoolBinding.trial_id == self.ctx.trial_id,
         )
-        shared = await session.scalar(select(ProviderRequestPoolBinding.trial_id).where(
-            ProviderRequestPoolBinding.pool_connection_id == self.pool_id,
-            ProviderRequestPoolBinding.trial_id == self.ctx.trial_id,
-        )) is not None
+        shared = (
+            await session.scalar(
+                select(ProviderRequestPoolBinding.trial_id).where(
+                    ProviderRequestPoolBinding.pool_connection_id == self.pool_id,
+                    ProviderRequestPoolBinding.trial_id == self.ctx.trial_id,
+                )
+            )
+            is not None
+        )
         while True:
-            pool = await session.scalar(select(ProviderRequestPool).where(
-                ProviderRequestPool.connection_id == self.pool_id,
-            ).with_for_update(read=shared))
+            pool = await session.scalar(
+                select(ProviderRequestPool)
+                .where(
+                    ProviderRequestPool.connection_id == self.pool_id,
+                )
+                .with_for_update(read=shared)
+            )
             if pool is None or not pool.enabled:
                 raise HTTPException(409, "request pool changed; retry the request")
             binding = await session.scalar(binding_query.with_for_update())
@@ -334,7 +372,11 @@ class PoolDispatchAudit(DispatchAudit):
             return None
         if binding is not None:
             current = next(
-                (member for member in members if member.connection_id == binding.member_connection_id),
+                (
+                    member
+                    for member in members
+                    if member.connection_id == binding.member_connection_id
+                ),
                 None,
             )
             if current is not None:
@@ -441,11 +483,15 @@ class PoolDispatchAudit(DispatchAudit):
             raise
         except Exception:
             logger.warning(
-                "request_pool_timeout_switch_unavailable pool_connection_id=%s", self.pool_id,
+                "request_pool_timeout_switch_unavailable pool_connection_id=%s",
+                self.pool_id,
             )
 
     async def _rebind_after_timeout(
-        self, session: AsyncSession, pool: ProviderRequestPool, now: datetime,
+        self,
+        session: AsyncSession,
+        pool: ProviderRequestPool,
+        now: datetime,
     ) -> None:
         assert self.row is not None and self.ctx.trial_id is not None
         members = list(
@@ -478,9 +524,7 @@ class PoolDispatchAudit(DispatchAudit):
             break
         if spare is None:
             return
-        binding = await session.get(
-            ProviderRequestPoolBinding, (self.pool_id, self.ctx.trial_id)
-        )
+        binding = await session.get(ProviderRequestPoolBinding, (self.pool_id, self.ctx.trial_id))
         if binding is None:
             session.add(
                 ProviderRequestPoolBinding(
@@ -510,7 +554,8 @@ class PoolDispatchAudit(DispatchAudit):
                     await session.commit()
         except Exception:
             logger.warning(
-                "request_pool_timeout_probe_unavailable pool_connection_id=%s", self.pool_id,
+                "request_pool_timeout_probe_unavailable pool_connection_id=%s",
+                self.pool_id,
             )
 
     async def send(
@@ -527,10 +572,19 @@ class PoolDispatchAudit(DispatchAudit):
             # must not suppress a provider or rotate the sticky binding.
             raise
         except httpx.TimeoutException as exc:
-            phase = next((name for kind, name in (
-                (httpx.ConnectTimeout, "connect"), (httpx.ReadTimeout, "read"),
-                (httpx.WriteTimeout, "write"), (httpx.PoolTimeout, "pool"),
-            ) if isinstance(exc, kind)), "unknown")
+            phase = next(
+                (
+                    name
+                    for kind, name in (
+                        (httpx.ConnectTimeout, "connect"),
+                        (httpx.ReadTimeout, "read"),
+                        (httpx.WriteTimeout, "write"),
+                        (httpx.PoolTimeout, "pool"),
+                    )
+                    if isinstance(exc, kind)
+                ),
+                "unknown",
+            )
             # Wrapping the exception deliberately discards request objects and
             # vendor text. Retain only the fixed transport phase and existing
             # opaque joins so an operator can distinguish network phases from
@@ -540,7 +594,9 @@ class PoolDispatchAudit(DispatchAudit):
                 "pool_connection_id=%s provider_connection_id=%s phase=%s",
                 self.state.request_id,
                 self.state.receipt_ids[-1] if self.state.receipt_ids else None,
-                self.pool_id, self.row.id if self.row is not None else None, phase,
+                self.pool_id,
+                self.row.id if self.row is not None else None,
+                phase,
             )
             await self._switch_after_timeout("upstream_timeout")
             raise PoolMemberSwitchedError("upstream_timeout") from None
@@ -566,3 +622,112 @@ class PoolDispatchAudit(DispatchAudit):
 
     def redact_log(self, log: dict[str, Any]) -> dict[str, Any]:
         return cast(dict[str, Any], json.loads(self.redact(json.dumps(log))))
+
+    async def _limit_in_flight(self, session: AsyncSession, values: dict[str, Any]) -> None:
+        if not self.queue_enabled:
+            await super()._limit_in_flight(session, values)
+            return
+        bound_connection = values.get("provider_connection_id")
+        if not isinstance(bound_connection, UUID):
+            return
+        choice = await decide_group_queue(
+            session,
+            pool_id=self.pool_id,
+            request_id=self.state.request_id,
+            bound_group=self.quota_group,
+            bound_connection_id=bound_connection,
+            attempt=int(values["attempt"]),
+            stall_sec=self.stall_sec,
+            upstream_timeout_sec=self.state.upstream_timeout_sec,
+            members=self._queue_members,
+        )
+        if choice.kind == "admit":
+            await close_queue_row(
+                session,
+                request_id=self.state.request_id,
+                outcome="admitted",
+                group=self.quota_group,
+                connection_id=bound_connection,
+            )
+            return
+        if choice.kind == "overflow" and choice.group is not None:
+            target = await self._overflow_member(session, choice.group)
+            if target is not None:
+                member, row, key = target
+                self.row, self.api_key = row, key
+                self._keys.append(key)
+                values["provider_connection_id"] = row.id
+                values["failover_reason"] = "quota_overflow"
+                await close_queue_row(
+                    session,
+                    request_id=self.state.request_id,
+                    outcome="overflow_admitted",
+                    group=member.quota_group,
+                    connection_id=row.id,
+                )
+                return
+        if choice.kind == "stall":
+            raise QueueStalledError(self.quota_group)
+        raise GroupQueuedError(self.quota_group)
+
+    async def _overflow_member(
+        self,
+        session: AsyncSession,
+        group: str,
+    ) -> tuple[ProviderRequestPoolMember, ProviderConnection, str] | None:
+        for member in self._queue_members:
+            if member.quota_group != group:
+                continue
+            found = await self._eligible(
+                session,
+                member,
+                self._queue_now,
+                self._queue_suppressed,
+                self._queue_required,
+            )
+            if found is not None:
+                return member, found[0], found[1]
+        return None
+
+    async def _admit_with_capacity(
+        self,
+        deadline: GatewayAttemptDeadline | None,
+        attempt: int,
+    ) -> UUID:
+        started = time.monotonic()
+        queued = False
+        while True:
+            try:
+                receipt_id = await self._admit(attempt)
+            except GroupQueuedError:
+                queued = True
+                await self._touch_queue_row()
+                try:
+                    await asyncio.sleep(1.0)
+                except asyncio.CancelledError:
+                    await self._close_queue("cancelled")
+                    raise
+                self._credit_queue_wait(deadline, time.monotonic() - started)
+                if deadline is not None and deadline.remaining() <= 0:
+                    await self._close_queue("cancelled")
+                    deadline.require_remaining()
+                continue
+            except QueueStalledError:
+                await self._close_queue("stalled")
+                raise HTTPException(
+                    status_code=429,
+                    detail="provider_queue_stalled",
+                    headers={"Retry-After": "1"},
+                ) from None
+            except ConnectionAtCapacityError:
+                return await super()._admit_with_capacity(deadline, attempt)
+            except asyncio.CancelledError:
+                if queued:
+                    await self._close_queue("cancelled")
+                raise
+            return receipt_id
+
+    def _credit_queue_wait(
+        self,
+        deadline: GatewayAttemptDeadline | None,
+        waited_sec: float,

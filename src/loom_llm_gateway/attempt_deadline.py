@@ -41,7 +41,7 @@ class AttemptDeadlineRequiredError(PermissionError):
 class GatewayAttemptDeadline:
     """A request-scoped monotonic cutoff derived from a signed JWT claim."""
 
-    __slots__ = ("_clock", "_metric_recorded", "monotonic_cutoff")
+    __slots__ = ("_clock", "_metric_recorded", "_queue_credit", "monotonic_cutoff")
 
     def __init__(
         self,
@@ -52,6 +52,20 @@ class GatewayAttemptDeadline:
         self.monotonic_cutoff = float(monotonic_cutoff)
         self._clock = clock
         self._metric_recorded = False
+        self._queue_credit = 0.0
+
+    def credit_queue_wait(self, waited_sec: float, *, max_pause_sec: float) -> None:
+        """Move this request's cutoff forward by time it spent in the queue.
+
+        The grant is the measured wait, capped at the pool pause ceiling.
+        Calling again with a larger total adds only the difference.
+        """
+
+        grant = min(max(0.0, waited_sec), max(0.0, max_pause_sec))
+        extra = grant - self._queue_credit
+        if extra > 0:
+            self.monotonic_cutoff += extra
+            self._queue_credit = grant
 
     @classmethod
     def from_wall_clock(

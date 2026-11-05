@@ -133,6 +133,20 @@ class AttemptDeadline:
             _wall_clock=wall_clock,
         )
 
+    def extend_to(self, wall_epoch_sec: float) -> bool:
+        """Move this deadline later. An earlier value leaves it unchanged."""
+
+        current = self.wall_deadline_epoch_sec
+        if current is None or not math.isfinite(wall_epoch_sec) or wall_epoch_sec <= current:
+            return False
+        object.__setattr__(
+            self,
+            "monotonic_deadline",
+            self.monotonic_deadline + (wall_epoch_sec - current),
+        )
+        object.__setattr__(self, "wall_deadline_epoch_sec", wall_epoch_sec)
+        return True
+
     def remaining(self) -> float:
         """Return the non-negative duration remaining on this attempt."""
 

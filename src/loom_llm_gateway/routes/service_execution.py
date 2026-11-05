@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal, cast
 from uuid import UUID, uuid4
 
@@ -25,6 +25,7 @@ from loom.db.schema import (
 from loom.execution_runtime_contract import ExecutionRuntimePlanV1
 from loom.llm_call_ledger import read_service_execution_llm_calls as read_lease_calls
 from loom.pipeline.artifact_commit import ArtifactCommitError
+from loom.quota_queue import committed_pause_credit
 from loom.service_execution_live import LiveTrajectoryError, append_live_events
 from loom.task_image_archives import PreparedImageArchiveV1
 from loom.trajectory.upload_observation import UploadSpan, observe_upload
@@ -179,6 +180,31 @@ async def _authorize(
             return lease
     except ServiceExecutionBrokerError as exc:
         raise _broker_http(exc) from exc
+
+
+@router.get("/effective-deadline")
+async def read_effective_deadline(
+    request: Request,
+    lease_id: LeaseIdHeader,
+    generation: GenerationHeader,
+    execution_role: RoleHeader,
+) -> dict[str, str]:
+    """Return the working deadline plus committed queue credit, capped by the lease."""
+
+    identity = _peer(lease_id, generation, execution_role)
+    if identity.execution_role != "attempt" or request.query_params:
+        raise HTTPException(status_code=403, detail="execution_deadline_scope_invalid")
+    lease = await _authorize(request, identity)
+    working = lease.working_deadline_at or lease.deadline_at
+    ceiling = (
+        0.0
+        if lease.working_deadline_at is None
+        else max(0.0, (lease.deadline_at - working).total_seconds())
+    )
+    async with request.app.state.session_factory() as session:
+        credit = await committed_pause_credit(session, lease.trial_id, ceiling)
+    effective = min(lease.deadline_at, working + timedelta(seconds=credit))
+    return {"deadline": effective.astimezone(UTC).isoformat()}
 
 
 @router.get("/llm-calls")

@@ -20,11 +20,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from loom.db.schema import (
     ExecutionAdmissionReservation,
     LlmCall,
+    ProviderRequestPool,
     Task,
     Trial,
     TrialEvent,
     Worker,
 )
+from loom.quota_queue import committed_pause_credits
 from loom.trial.stale_running import StaleRunningDecision, evaluate_stale_running_trial
 from loom_control_plane.metrics import WORKER_RECLAIM_TOTAL
 
@@ -177,10 +179,7 @@ async def reclaim_stale_running_trials(
                 ~exists()
                 .where(ExecutionAdmissionReservation.trial_id == Trial.id)
                 .where(ExecutionAdmissionReservation.execution_role == "attempt")
-                .where(
-                    ExecutionAdmissionReservation.owner_kind
-                    == "protected_worker_claim"
-                )
+                .where(ExecutionAdmissionReservation.owner_kind == "protected_worker_claim")
                 .where(ExecutionAdmissionReservation.state == "active")
             )
         )
@@ -209,9 +208,35 @@ async def reclaim_stale_running_trials(
             )
         ).all()
     }
+    connection_ids = [
+        trial.provider_connection_id
+        for trial, _task, _worker in rows
+        if trial.provider_connection_id is not None
+    ]
+    pools = (
+        {
+            pool.connection_id: pool
+            for pool in (
+                await session.scalars(
+                    select(ProviderRequestPool).where(
+                        ProviderRequestPool.connection_id.in_(connection_ids)
+                    )
+                )
+            ).all()
+        }
+        if connection_ids
+        else {}
+    )
+    limits = {
+        trial.id: float(pools[trial.provider_connection_id].max_pause_sec)
+        for trial, _task, _worker in rows
+        if trial.provider_connection_id in pools
+    }
+    credits = await committed_pause_credits(session, limits)
 
     reclaimed = 0
     for trial, task, worker in rows:
+        pause_credit_sec, waiting = credits.get(trial.id, (0.0, False))
         decision = evaluate_stale_running_trial(
             state=str(trial.state),
             started_at=trial.started_at,
@@ -226,6 +251,8 @@ async def reclaim_stale_running_trials(
             timeout_multiplier=timeout_multiplier,
             grace_sec=grace_sec,
             silence_sec=silence_sec,
+            queue_waiting=waiting,
+            pause_credit_sec=pause_credit_sec,
         )
         if not decision.reclaimable:
             continue

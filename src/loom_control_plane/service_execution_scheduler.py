@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from loom.db.schema import (
+    ProviderRequestPool,
     ServiceExecutionClass,
     ServiceExecutionLease,
     ServiceExecutionTarget,
@@ -96,6 +97,7 @@ class CompiledServiceExecution:
     allocate_resources: bool
     image_ready_at: datetime | None
     image_mode: Literal["reused", "built", "unknown", "prebuilt"]
+    working_deadline_at: datetime | None = None
 
 
 # Mirror required_task_image_components for the persisted TaskConfig shape.
@@ -124,6 +126,7 @@ SELECT t.id,
        task_definition.source_provenance AS task_source_provenance,
        task_definition.legacy_separate_verifier_checksum,
        t.config AS trial_config,
+       t.provider_connection_id AS provider_connection_id,
        b.service_execution_runtime_profile AS batch_runtime_profile
   FROM trials t
   JOIN batches b ON b.id = t.batch_id
@@ -234,17 +237,41 @@ def _deadline(
     *,
     now: datetime,
     maximum_seconds: int,
+    extra_seconds: float = 0,
 ) -> datetime:
     phase_seconds = sum(item.timeout_seconds for item in plan.setup) + plan.main.timeout_seconds + plan.main.finalization_timeout_seconds
     if plan.verifier is not None:
         phase_seconds += plan.verifier.timeout_seconds
-    requested_seconds = phase_seconds + plan.termination_grace_seconds + 600
+    requested_seconds = phase_seconds + plan.termination_grace_seconds + 600 + int(extra_seconds)
     if requested_seconds > maximum_seconds:
         raise ServiceExecutionConfigurationError(
             "service-execution runtime exceeds the scheduler deadline bound: "
             f"requested_seconds={requested_seconds}, maximum_seconds={maximum_seconds}"
         )
     return now + timedelta(seconds=requested_seconds)
+
+
+async def _queue_pause_seconds(session: AsyncSession, provider_connection_id: object) -> float:
+    """Outer pause allowance for a pool that has opted into the queue.
+
+    The allowance is reserved up front. Admission fails closed when the base
+    deadline plus this allowance exceeds the scheduler maximum.
+    """
+
+    if provider_connection_id is None:
+        return 0.0
+    try:
+        connection_id = (
+            provider_connection_id
+            if isinstance(provider_connection_id, UUID)
+            else UUID(str(provider_connection_id))
+        )
+    except ValueError:
+        return 0.0
+    pool = await session.get(ProviderRequestPool, connection_id)
+    if pool is None or not pool.queue_enabled:
+        return 0.0
+    return float(pool.max_pause_sec)
 
 
 async def _ready_targets(
@@ -550,8 +577,13 @@ async def _compile_service_candidate_plan(
             task_image_grant=grant,
             profile=runtime_profile,
         )
+    pause_sec = await _queue_pause_seconds(session, row["provider_connection_id"])
     deadline_at = _deadline(
         runtime_plan, now=current_time, maximum_seconds=maximum_deadline_seconds,
+        extra_seconds=pause_sec,
+    )
+    working_deadline_at = (
+        deadline_at - timedelta(seconds=int(pause_sec)) if pause_sec else None
     )
     targets = await _ready_targets(
         session,
@@ -572,7 +604,8 @@ async def _compile_service_candidate_plan(
         deadline_at=deadline_at, targets=tuple(targets), allocate_resources=allocate_resources,
         image_ready_at=max(row["submitted_at"], image_ready) if ready_times or not prerequisites else None,
         image_mode=("reused" if ready_times and image_ready <= row["submitted_at"]
-                    else "built" if ready_times else "unknown" if prerequisites else "prebuilt"))
+                    else "built" if ready_times else "unknown" if prerequisites else "prebuilt"),
+        working_deadline_at=working_deadline_at)
 
 
 async def _reserve_service_candidate(
@@ -636,6 +669,7 @@ async def _reserve_service_candidate(
                     image_admission_keyring=image_admission_keyring,
                     routing_reason=ExecutionRoutingReason.PREEXISTING_ASSIGNMENT,
                     deadline_at=compiled.deadline_at,
+                    working_deadline_at=compiled.working_deadline_at,
                     now=current_time,
                     capacity_wait_inputs={key: row[key] for key in (
                         "execution_route_generation", "execution_route_pool_name",
