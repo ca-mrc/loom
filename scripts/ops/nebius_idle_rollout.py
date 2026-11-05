@@ -40,6 +40,35 @@ if TYPE_CHECKING:
 
 REPOSITORY = "qianyi-sun/loom"
 
+# Diagnostics never use an exception message or an arbitrary server reason.
+READINESS_FAILURE_CODES = frozenset({
+    "CommandTimeout", "CommandFailed", "DeadlineExceeded",
+    "SSHHostKeyFailed", "SSHAuthenticationFailed", "SSHConnectTimeout",
+    "SSHConnectionClosed", "SSHCommandFailed",
+    "Forbidden", "Unauthorized", "NotFound", "Conflict", "Invalid", "BadRequest",
+    "InternalError", "ServiceUnavailable", "Timeout", "TooManyRequests",
+    "github_deployment_api_failed", "deployment_history_unavailable",
+    "deployment_status_unavailable", "invalid_idle_snapshot",
+    "rollout_check_connection_mismatch", "rollout_check_platform_mismatch",
+    "invalid_selected_candidate", "invalid_candidate_commit",
+    "candidate_history_unavailable", "candidate_ancestry_check_failed",
+})
+
+
+@contextmanager
+def readiness_phase(phase: str) -> Iterator[None]:
+    """Keep the failed read-only boundary visible without publishing its inputs."""
+    diagnostic = {"operation": "readiness_check", "phase": phase}
+    print(json.dumps({**diagnostic, "status": "started"}), file=sys.stderr, flush=True)
+    try:
+        yield
+    except Exception as exc:
+        reason = exc.reason_code if isinstance(exc, DeploymentError) else None
+        safe_reason = reason if type(reason) is str and reason in READINESS_FAILURE_CODES else "unavailable"
+        print(json.dumps({**diagnostic, "status": "failed", "reason_code": safe_reason}),
+              file=sys.stderr, flush=True)
+        raise
+
 
 def repository_name() -> str:
     """Use the running workflow's current name for presentation links."""
@@ -63,7 +92,7 @@ def github(path: str, payload: dict | None = None) -> dict | list:
     result = subprocess.run(command, input=json.dumps(payload) if payload is not None else None,
                             text=True, capture_output=True, check=False)
     if result.returncode:
-        raise DeploymentError("GitHub deployment API failed")
+        raise DeploymentError("GitHub deployment API failed", reason_code="github_deployment_api_failed")
     return json.loads(result.stdout)
 
 
@@ -149,7 +178,7 @@ def deployment_decision(config: dict, current: str, candidate: str) -> dict:
     while True:
         rows = github(f"deployments?environment=nebius-integration&per_page=100&page={page}")
         if not isinstance(rows, list):
-            raise DeploymentError("deployment history unavailable")
+            raise DeploymentError("deployment history unavailable", reason_code="deployment_history_unavailable")
         for row in rows:
             payload = row.get("payload")
             if (not isinstance(payload, dict) or payload.get("schema_version") != "loom.nebius-deployment.v1"
@@ -159,7 +188,7 @@ def deployment_decision(config: dict, current: str, candidate: str) -> dict:
                 continue
             statuses = github(f"deployments/{row['id']}/statuses?per_page=1")
             if not isinstance(statuses, list):
-                raise DeploymentError("deployment status unavailable")
+                raise DeploymentError("deployment status unavailable", reason_code="deployment_status_unavailable")
             state = statuses[0]["state"] if statuses else "pending"
             if state == "inactive":
                 continue
@@ -181,38 +210,44 @@ def idle_snapshot(kube: Kubectl, namespace: str) -> dict:
     if (type(result.get("locked")) is not bool or not isinstance(result.get("active"), dict)
             or set(result["active"]) != {"trials", "executions", "builds", "build_cleanup"}
             or any(type(value) is not int or value < 0 for value in result["active"].values())):
-        raise DeploymentError("invalid idle snapshot")
+        raise DeploymentError("invalid idle snapshot", reason_code="invalid_idle_snapshot")
     return result
 
 
 def check_rollout(args: argparse.Namespace, *, kube: Kubectl | None = None,
         candidate_ancestry: Callable[[str, str], bool] | None = None) -> dict:
-    if kube is not None and kube.kubeconfig != args.kubeconfig:
-        raise DeploymentError('protected rollout check connection differs')
-    kube = kube or Kubectl(args.kubeconfig)
-    data = kube.get("configmap", "loom-platform-config", args.namespace)["data"]
-    config = json.loads(data["environment.json"])
-    if config["namespace"] != args.namespace or config["cluster_id"] != args.expected_cluster_id:
-        raise DeploymentError("rollout check platform binding differs")
-    if config.get("regional_execution_targets"):
-        from loom.nebius_platform_render import validate_environment
+    with readiness_phase("platform_configuration"):
+        if kube is not None and kube.kubeconfig != args.kubeconfig:
+            raise DeploymentError('protected rollout check connection differs',
+                                  reason_code="rollout_check_connection_mismatch")
+        kube = kube or Kubectl(args.kubeconfig)
+        data = kube.get("configmap", "loom-platform-config", args.namespace)["data"]
+        config = json.loads(data["environment.json"])
+        if config["namespace"] != args.namespace or config["cluster_id"] != args.expected_cluster_id:
+            raise DeploymentError("rollout check platform binding differs",
+                                  reason_code="rollout_check_platform_mismatch")
+        if config.get("regional_execution_targets"):
+            from loom.nebius_platform_render import validate_environment
 
-        validate_environment(config)
-    current = json.loads(data["profile.json"])["candidate_sha"]
-    candidate = args.candidate
-    if not re.fullmatch(r"[0-9a-f]{40}", candidate):
-        raise DeploymentError("invalid selected candidate")
+            validate_environment(config)
+        current = json.loads(data["profile.json"])["candidate_sha"]
+        candidate = args.candidate
+        if not re.fullmatch(r"[0-9a-f]{40}", candidate):
+            raise DeploymentError("invalid selected candidate", reason_code="invalid_selected_candidate")
     result = {"status": "ready", "candidate_sha": candidate}
-    snapshot = idle_snapshot(kube, args.namespace)
+    with readiness_phase("idle_snapshot"):
+        snapshot = idle_snapshot(kube, args.namespace)
     if snapshot["locked"]:
         return {**result, "status": "blocked_recovery"}
     if args.github:
-        decision = deployment_decision(config, current, candidate)
+        with readiness_phase("deployment_history"):
+            decision = deployment_decision(config, current, candidate)
         if decision["status"] == "skipped_already_deployed" or (
                 getattr(args, "automatic", False) and decision["status"] == "blocked_recovery"):
             return {**result, **decision}
-    if current != candidate and not (candidate_ancestry or candidate_follows)(current, candidate):
-        return {**result, "status": "skipped_superseded"}
+    with readiness_phase("candidate_ancestry"):
+        if current != candidate and not (candidate_ancestry or candidate_follows)(current, candidate):
+            return {**result, "status": "skipped_superseded"}
     if any(snapshot["active"].values()):
         return {**result, "status": "skipped_busy", "guard": {"active": snapshot["active"]}}
     return result
@@ -368,16 +403,17 @@ def candidate_schema_head(sha: str) -> str:
 
 def candidate_follows(current: str, candidate: str) -> bool:
     if not all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (current, candidate)):
-        raise DeploymentError("invalid current or candidate commit")
+        raise DeploymentError("invalid current or candidate commit", reason_code="invalid_candidate_commit")
     # Unknown history is an error, never permission to downgrade.
     for sha in (current, candidate):
         if subprocess.run(["git", "cat-file", "-e", sha + "^{commit}"], cwd=ROOT,
                           capture_output=True).returncode:
-            raise DeploymentError("deployment requires Git history for both commits")
+            raise DeploymentError("deployment requires Git history for both commits",
+                                  reason_code="candidate_history_unavailable")
     result = subprocess.run(["git", "merge-base", "--is-ancestor", current, candidate],
                             cwd=ROOT, capture_output=True)
     if result.returncode not in {0, 1}:
-        raise DeploymentError("candidate ancestry check failed")
+        raise DeploymentError("candidate ancestry check failed", reason_code="candidate_ancestry_check_failed")
     return result.returncode == 0
 
 

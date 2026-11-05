@@ -2226,6 +2226,14 @@ The intermediate `ready` decision only admits an attempt; it is not deployment
 success. A green workflow or condition-check job can record a skip, and only
 verified deployment completion counts as `deployed`.
 
+For a failed readiness check, its logs identify the fixed phase
+`platform_configuration`, `idle_snapshot`, `deployment_history`, or
+`candidate_ancestry`. A failed phase reports only an allowlisted `reason_code`;
+unrecognized exceptions or reason values report `unavailable`. These diagnostics
+never publish exception messages, command arguments, connection settings or SQL
+data. The original failure still exits nonzero; diagnose that boundary before
+retrying, and keep the existing idle, backup and recovery requirements.
+
 Open the workflow's **Summary** to see the reason for a skipped rollout in plain
 language. For **waiting_idle**, the summary lists the active work and counts
 (such as running trials, execution reservations, image builds, or pending image
