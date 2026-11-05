@@ -18,6 +18,7 @@ from loom.db.schema import (
 )
 from loom.task_image_build_plan import parse_task_image_build_plan
 from loom.task_image_materialization import task_image_materialization_keys
+from loom.task_image_recipe import task_image_input_manifest_digest
 from loom_task_image_authority.config import _validate_https_origin
 from loom_task_image_authority.registry_public import validate_stored_registry_credential_public
 from loom_task_image_authority.registry_token import publication_repository
@@ -93,6 +94,7 @@ def _derive(
             task_config=row.task_config,
             task_id=row.task_id, task_checksum=row.task_checksum, cpu_arch=row.cpu_arch,
             bundle_content_manifest_sha256=plan.content_manifest_digest,
+            input_manifest_sha256=task_image_input_manifest_digest(row.task_source_provenance),
         )
     ):
         raise ValueError("frozen attempt identity changed")

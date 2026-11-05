@@ -208,3 +208,35 @@ def test_registered_source_is_bound_to_exact_config_revision_and_materialization
     body["build"]["task_config_json"] = rfc8785.dumps(changed).decode()
     with pytest.raises(ValueError):
         render(participant, body, profile)
+
+
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("historical", [False, True])
+def test_pool_reader_preserves_input_manifest_identity_and_old_claims(native, historical):
+    from loom.task_image_recipe import NATIVE_HARBOR_PREPARATION
+
+    participant, body, profile = build_inputs()
+    build = body["build"]
+    if native:
+        config = json.loads(build["task_config_json"])
+        config["upstream_conversion"] = {
+            "importer": "loom.harbor-native.v1", "original_config": "upstream-task.toml", "changes": [],
+        }
+        build["task_config_json"] = rfc8785.dumps(config).decode()
+    binding = {"schema_version": "loom.service-execution-input.v1",
+        "manifest_uri": "s3://source/tasks/input.json", "manifest_sha256": "sha256:" + "b" * 64,
+        "file_count": 1, "total_bytes": 2}
+    build["source"]["input_manifest"] = binding
+    build["materialization_key"] = task_image_materialization_key(
+        task_id=build["task_id"], task_checksum=build["task_checksum"], cpu_arch=build["cpu_arch"],
+        preparation_revision=NATIVE_HARBOR_PREPARATION if native else "",
+        input_manifest_sha256="" if historical else "b" * 64,
+    )
+    prepared = render(participant, body, profile)
+    frozen = json.loads(prepared.configmap["data"]["claim.json"])
+    assert frozen["materialization_key"] == build["materialization_key"]
+    assert frozen["task_source_provenance"]["service_execution_input"] == binding
+    if not historical:
+        binding["manifest_sha256"] = "sha256:" + "c" * 64
+        with pytest.raises(ValueError, match="pool_build_materialization_mismatch"):
+            render(participant, body, profile)

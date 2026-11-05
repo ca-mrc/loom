@@ -161,6 +161,7 @@ def test_manifest_identity_preserves_legacy_and_versions_uniqueness(
             "cpu_arch",
             COLUMN,
             "preparation_revision",
+            "input_manifest_sha256",
         ]
         with pytest.raises(DBAPIError, match="manifest-qualified materializations"):
             command.downgrade(config, "0135")
@@ -429,5 +430,136 @@ def test_native_preparation_upgrade_keeps_old_rows_and_rejects_wrong_keys_or_rel
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM task_image_materializations")) == 2
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == service_schema_head()
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_input_manifest_identity_preserves_history_and_binds_mode_only_revisions(
+    isolated_migration_postgres_url, native,
+):
+    from loom.task_image_recipe import NATIVE_HARBOR_PREPARATION, task_image_materialization_key
+
+    config = _config(isolated_migration_postgres_url)
+    command.downgrade(config, "0191")
+    engine = create_engine(isolated_migration_postgres_url)
+    identity = dict(task_id="input-manifest-upgrade", task_checksum=CHECKSUM, cpu_arch="arm64")
+    recipe = NATIVE_HARBOR_PREPARATION if native else ""
+    task_config = {"upstream_conversion": {"importer": "loom.harbor-native.v1"}} if native else {}
+    old_id = uuid4()
+    old_key = task_image_materialization_key(**identity, preparation_revision=recipe)
+    provenance = {"service_execution_input": {"manifest_uri": "s3://tasks/old/input.json", "manifest_sha256": "sha256:" + "b" * 64}}
+    old_values = {**identity, "id": old_id, "key": old_key, "recipe": recipe,
+                  "config": json.dumps(task_config), "provenance": json.dumps(provenance)}
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("""INSERT INTO task_image_materializations
+                (id,materialization_key,task_id,task_checksum,cpu_arch,task_config,preparation_revision,task_source_provenance)
+                VALUES (:id,:key,:task_id,:task_checksum,:cpu_arch,CAST(:config AS jsonb),:recipe,CAST(:provenance AS jsonb))"""), old_values)
+        command.upgrade(config, "head")
+        with engine.connect() as connection:
+            assert connection.execute(text("""SELECT materialization_key,input_manifest_sha256,task_source_provenance
+                FROM task_image_materializations WHERE id=:id"""), {"id": old_id}).one() == (old_key, "", provenance)
+        insert = text("""INSERT INTO task_image_materializations
+            (id,materialization_key,task_id,task_checksum,cpu_arch,task_config,preparation_revision,task_source_provenance,input_manifest_sha256)
+            VALUES (:id,:key,:task_id,:task_checksum,:cpu_arch,CAST(:config AS jsonb),:recipe,CAST(:provenance AS jsonb),:input)""")
+        new_id = None
+        for digest in ("b" * 64, "c" * 64):
+            new_id = uuid4()
+            new_provenance = {"service_execution_input": {**provenance["service_execution_input"], "manifest_sha256": "sha256:" + digest}}
+            values = {**old_values, "id": new_id, "input": digest, "provenance": json.dumps(new_provenance),
+                      "key": task_image_materialization_key(**identity, preparation_revision=recipe, input_manifest_sha256=digest)}
+            for mutation in ({"key": "f" * 64}, {"input": "d" * 64}, {"provenance": "{}"}):
+                with pytest.raises(DBAPIError):
+                    with engine.begin() as connection:
+                        connection.execute(insert, {**values, **mutation})
+            with engine.begin() as connection:
+                connection.execute(insert, values)
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT count(*) FROM task_image_materializations")) == 3
+        for assignment in (
+            "task_source='s3://changed/source/'",
+            "task_source_provenance=task_source_provenance || jsonb_build_object('extra', true)",
+            "input_manifest_sha256=repeat('d',64), materialization_key=:new_key, "
+            "task_source_provenance=jsonb_set(task_source_provenance, '{service_execution_input,manifest_sha256}', to_jsonb('sha256:' || repeat('d',64)))",
+        ):
+            with pytest.raises(DBAPIError, match="identity is immutable"):
+                with engine.begin() as connection:
+                    connection.execute(text(f"UPDATE task_image_materializations SET {assignment} WHERE id=:id"), {"id": new_id, "new_key": task_image_materialization_key(**identity, preparation_revision=recipe, input_manifest_sha256="d" * 64)})
+        with pytest.raises(DBAPIError, match="input-manifest-qualified materializations prevent downgrade"):
+            command.downgrade(config, "0191")
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT count(*) FROM task_image_materializations")) == 3
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == service_schema_head()
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_input_manifest_retired_generic_cache_can_refresh_only_equivalent_locations(
+    isolated_migration_postgres_url, native,
+):
+    from loom.task_image_recipe import NATIVE_HARBOR_PREPARATION, task_image_materialization_key
+
+    engine = create_engine(isolated_migration_postgres_url)
+    identity = dict(task_id="retired-input-manifest", task_checksum=CHECKSUM, cpu_arch="arm64")
+    recipe = NATIVE_HARBOR_PREPARATION if native else ""
+    task_config = {"upstream_conversion": {"importer": "loom.harbor-native.v1"}} if native else {}
+    row_id = uuid4()
+    digest = "b" * 64
+    provenance = {"service_execution_input": {
+        "manifest_uri": "s3://tasks/old/input.json", "manifest_sha256": "sha256:" + digest,
+        "file_count": 2, "total_bytes": 42,
+    }, "owner": "original"}
+    relocated = {**provenance, "service_execution_input": {
+        **provenance["service_execution_input"], "manifest_uri": "s3://tasks/new/input.json",
+    }}
+    update_source = text("""UPDATE task_image_materializations SET
+        task_source='s3://tasks/new/', task_source_provenance=CAST(:provenance AS jsonb), state=:state
+        WHERE id=:id""")
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("""INSERT INTO task_image_materializations
+                (id,materialization_key,task_id,task_checksum,cpu_arch,task_config,preparation_revision,
+                 task_source,task_source_provenance,input_manifest_sha256)
+                VALUES (:id,:key,:task_id,:task_checksum,:cpu_arch,CAST(:config AS jsonb),:recipe,
+                        's3://tasks/old/',CAST(:provenance AS jsonb),:input)"""),
+                {**identity, "id": row_id, "recipe": recipe, "config": json.dumps(task_config),
+                 "input": digest, "provenance": json.dumps(provenance),
+                 "key": task_image_materialization_key(**identity, preparation_revision=recipe, input_manifest_sha256=digest)})
+        for state in ("queued", "ready"):
+            with engine.begin() as connection:
+                connection.execute(text("UPDATE task_image_materializations SET state=:state WHERE id=:id"), {"state": state, "id": row_id})
+            with pytest.raises(DBAPIError, match="identity is immutable"):
+                with engine.begin() as connection:
+                    connection.execute(update_source, {"id": row_id, "provenance": json.dumps(relocated), "state": state})
+        with engine.begin() as connection:
+            connection.execute(text("UPDATE task_image_materializations SET state='retired' WHERE id=:id"), {"id": row_id})
+        for invalid in ({**relocated, "owner": "changed"}, {**relocated, "extra": "metadata"}):
+            with pytest.raises(DBAPIError, match="identity is immutable"):
+                with engine.begin() as connection:
+                    connection.execute(update_source, {"id": row_id, "provenance": json.dumps(invalid), "state": "queued"})
+        with pytest.raises(DBAPIError, match="identity is immutable"):
+            with engine.begin() as connection:
+                connection.execute(text("UPDATE task_image_materializations SET task_config=task_config || jsonb_build_object('changed',true) WHERE id=:id"), {"id": row_id})
+        with pytest.raises(DBAPIError, match="identity is immutable"):
+            with engine.begin() as connection:
+                connection.execute(text("""UPDATE task_image_materializations SET state='queued',
+                    input_manifest_sha256=repeat('c',64), materialization_key=:key,
+                    task_source_provenance=jsonb_set(task_source_provenance, '{service_execution_input,manifest_sha256}', to_jsonb('sha256:' || repeat('c',64)))
+                    WHERE id=:id"""), {"id": row_id, "key": task_image_materialization_key(
+                        **identity, preparation_revision=recipe, input_manifest_sha256="c" * 64,
+                    )})
+        if native:
+            with pytest.raises(DBAPIError, match="identity is immutable"):
+                with engine.begin() as connection:
+                    connection.execute(update_source, {"id": row_id, "provenance": json.dumps(relocated), "state": "queued"})
+        else:
+            for state in ("retired", "queued"):
+                with engine.begin() as connection:
+                    connection.execute(update_source, {"id": row_id, "provenance": json.dumps(relocated), "state": state})
+            with engine.connect() as connection:
+                assert connection.execute(text("""SELECT task_source,task_source_provenance,input_manifest_sha256,state
+                    FROM task_image_materializations WHERE id=:id"""), {"id": row_id}).one() == ("s3://tasks/new/", relocated, digest, "queued")
     finally:
         engine.dispose()

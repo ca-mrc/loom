@@ -19,9 +19,11 @@ from loom.db.schema import TaskImageMaterialization, TaskImageMaterializationAtt
 NOW = datetime(2026, 9, 2, 14, 0, tzinfo=UTC)
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "historical"
 # json_populate_recordset supplies NULL rather than column defaults for fields
-# absent from a frozen record. These rows predate preparation recipes and must
-# retain the legacy recipe, without rewriting any captured field or fixture.
-LEGACY_COLUMN_DEFAULTS = {"task_image_materializations": {"preparation_revision": ""}}
+# absent from a frozen record. These rows predate cache discriminators and must
+# retain their legacy identity without rewriting any captured field or fixture.
+LEGACY_COLUMN_DEFAULTS = {"task_image_materializations": {
+    "preparation_revision": "", "input_manifest_sha256": "",
+}}
 
 
 @pytest.fixture

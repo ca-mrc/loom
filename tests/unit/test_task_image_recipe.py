@@ -85,3 +85,57 @@ def test_native_builder_prepares_only_its_frozen_recipe(tmp_path, revision, vari
     if variable_user and revision:
         assert "ARG LOOM_PREPARATION_OWNER_1=${TASK_USER}" in prepared
         assert 'chown "$LOOM_PREPARATION_OWNER_1" ' in prepared
+
+
+@pytest.mark.parametrize("recipe", ["", NATIVE_HARBOR_PREPARATION])
+def test_input_manifest_mode_changes_select_fresh_image_identity(recipe):
+    identity = dict(task_id="sample/task", task_checksum="a" * 64, cpu_arch="x86_64")
+    original = task_image_materialization_key(**identity, preparation_revision=recipe)
+    executable = task_image_materialization_key(
+        **identity, preparation_revision=recipe, input_manifest_sha256="b" * 64,
+    )
+    data = task_image_materialization_key(
+        **identity, preparation_revision=recipe, input_manifest_sha256="c" * 64,
+    )
+    assert len({original, executable, data}) == 3
+    assert executable == task_image_materialization_key(
+        **identity, preparation_revision=recipe, input_manifest_sha256="b" * 64,
+    )
+
+
+def test_input_manifest_readers_preserve_frozen_historical_preparation():
+    identity = dict(task_id="sample/task", task_checksum="a" * 64, cpu_arch="x86_64")
+    config = {"upstream_conversion": {"importer": "loom.harbor-native.v1"}}
+    provenance = {"service_execution_input": {"manifest_sha256": "sha256:" + "b" * 64}}
+    historical = task_image_materialization_key(**identity)
+    historical_prepared = task_image_materialization_key(
+        **identity, preparation_revision=NATIVE_HARBOR_PREPARATION,
+    )
+    current = task_image_materialization_key(
+        **identity, preparation_revision=NATIVE_HARBOR_PREPARATION,
+        input_manifest_sha256="b" * 64,
+    )
+    readable = task_image_materialization_keys(
+        **identity, task_config=config, input_manifest_sha256="b" * 64,
+    )
+    assert {historical, historical_prepared, current} <= set(readable)
+    claim = {**identity, "task_config": config, "task_source_provenance": provenance}
+    assert frozen_preparation_revision({**claim, "materialization_key": historical}) == ""
+    for key in (historical_prepared, current):
+        assert frozen_preparation_revision({**claim, "materialization_key": key}) == NATIVE_HARBOR_PREPARATION
+
+
+def test_input_manifest_cache_discriminator_uses_digest_without_location():
+    from loom.task_image_recipe import task_image_input_manifest_digest
+
+    original = {"service_execution_input": {
+        "manifest_uri": "s3://tasks/generation-1/manifest.json",
+        "manifest_sha256": "sha256:" + "b" * 64,
+    }}
+    relocated = {"service_execution_input": {
+        **original["service_execution_input"],
+        "manifest_uri": "s3://tasks/generation-2/manifest.json",
+    }}
+    assert task_image_input_manifest_digest(original) == "b" * 64
+    assert task_image_input_manifest_digest(relocated) == "b" * 64
+    assert task_image_input_manifest_digest({}) == ""

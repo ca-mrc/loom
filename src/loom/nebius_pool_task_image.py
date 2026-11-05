@@ -20,6 +20,7 @@ from loom.task_image_materialization import (
     declared_task_image_architectures,
     task_image_materialization_keys,
 )
+from loom.task_image_recipe import task_image_input_manifest_digest
 
 _Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 _ModeDigest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
@@ -85,16 +86,20 @@ class PoolTaskImageWorkloadV1(BaseModel):
                 or self.cpu_arch not in declared_task_image_architectures(task)):
             raise ValueError("pool_build_task_identity")
         content_digest = ""
+        input_digest = ""
         if isinstance(self.source, PoolRegisteredBuildSourceV1):
             source = self.source.registration
             if (self.task_id, self.task_checksum, self.task_config_json) != (
                     source.catalog_task_id, source.manifest.task_checksum, source.task_config_json):
                 raise ValueError("pool_build_registered_source_mismatch")
             content_digest = source.manifest.digest
+        else:
+            input_digest = task_image_input_manifest_digest(self.source.provenance())
         if self.materialization_key not in task_image_materialization_keys(
                 task_config=payload,
             task_id=self.task_id, task_checksum=self.task_checksum, cpu_arch=self.cpu_arch,
             bundle_content_manifest_sha256=content_digest,
+            input_manifest_sha256=input_digest,
         ):
             raise ValueError("pool_build_materialization_mismatch")
         return self
