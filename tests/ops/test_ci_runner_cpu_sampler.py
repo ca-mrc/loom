@@ -118,7 +118,7 @@ def test_idle_credit_never_increases_when_tick_rate_is_high():
             (792, 800, 2000000, 101.0),
             ((99.9999, 100.0001), (100.9999, 101.0001)),
         ),
-        ((0, 0, 0, 100.0), (100, 80, 2000000, 101.0), ((99.9999, 100.0001), (100.9999, 101.0001))),
+        ((0, 0, 0, 100.0), (0, 0, 0, 101.0), ((99.9999, 100.0001), (100.9999, 101.0001))),
         ((0, 0, 0, 100.0), (792, 600, 2000000, 99.0), ((99.9999, 100.0001), (98.9999, 99.0001))),
     ],
 )
@@ -253,7 +253,7 @@ def test_installed_snapshot_preserves_busy_fields_under_delay_and_rounding(
         ((0, 0, 0, float("nan")), (792, 600, 2000000, 101.0)),
         ((0, 0, 0, 100.0), (0, 0, 0, 101.0)),
         ((0, 0, 2000000, 100.0), (792, 600, 1999999, 101.0)),
-        ((0, 0, 0, 100.0), (100, 80, 2000000, 101.0)),
+        ((0, 0, 0, 100.0), (1000, 803, 0, 101.0)),
     ],
 )
 def test_unavailable_acquisition_raises_before_other_snapshot_reads(monkeypatch, first, last):
@@ -279,3 +279,56 @@ def test_valid_numeric_hardware_excess_still_reaches_policy_inputs(monkeypatch):
     assert result["idle_cpus"] == 0
     assert result["pool_cpu_usage_cpus"] > result["total_cpus"]
     assert result["current_slots"] == result["busy_runners"] == 2
+
+
+@pytest.mark.parametrize(
+    "total,idle,usage", [(100, 80, 2000000), (720, 600, 2000000), (880, 600, 2000000)]
+)
+def test_total_accounting_does_not_require_wall_tick_identity(total, idle, usage):
+    result = plugin().cpu_sample_values(
+        (0, 0, 0, 100.0),
+        (total, idle, usage, 101.0),
+        ((99.9999, 100.0001), (100.9999, 101.0001)),
+        8,
+        100,
+    )
+    assert 0 <= result["idle_cpus"] <= idle / total * 8
+    assert result["idle_cpus"] + result["pool_cpu_usage_cpus"] <= 8.05
+
+
+def test_snapshot_accepts_independent_total_accounting(monkeypatch):
+    host = plugin()
+    namespace = legacy_namespace(host)
+    host.install_cpu_sampler(namespace)
+    clock = iter((99.9999, 100.0001, 100.9999, 101.0001))
+    monkeypatch.setattr(host.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(host.os, "sysconf", lambda _: 100)
+    result = sample(namespace, last=(840, 760, 250000, 101.0))
+    assert result["idle_cpus"] == pytest.approx(760 / 840 * 8)
+    assert result["idle_cpus"] + result["pool_cpu_usage_cpus"] < 8
+    assert result["current_slots"] == result["busy_runners"] == 2
+
+
+@pytest.mark.parametrize("idle", [801, 802])
+def test_direct_idle_credit_accepts_physical_boundary_after_export_rounding(idle):
+    result = plugin().cpu_sample_values(
+        (0, 0, 0, 100.0),
+        (1000, idle, 0, 101.0),
+        ((100.0, 100.0), (101.0, 101.0)),
+        8,
+        100,
+    )
+    assert result["idle_cpus"] == pytest.approx(idle / 1000 * 8)
+
+
+@pytest.mark.parametrize("total,idle", [(1000, 803), (10000, 6000)])
+def test_direct_idle_excess_is_not_hidden_by_ratio(total, idle):
+    assert idle / total * 8 < 8
+    result = plugin().cpu_sample_values(
+        (0, 0, 0, 100.0),
+        (total, idle, 0, 101.0),
+        ((100.0, 100.0), (101.0, 101.0)),
+        8,
+        100,
+    )
+    assert result["idle_cpus"] < 0

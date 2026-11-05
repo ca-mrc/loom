@@ -194,12 +194,15 @@ exports idle and iowait as two independently truncated aggregate USER_HZ fields;
 [the cgroup accounting implementation](https://raw.githubusercontent.com/torvalds/linux/v6.8/kernel/cgroup/rstat.c)
 exports each disjoint group usage in microseconds. Subtracting two ticks and
 two microseconds respectively provides serialization lower bounds, preventing
-export rounding from inventing capacity. Negative/reset/nonfinite data and
-accounting totals outside the inner/outer time brackets plus the existing
-2N+8-tick operational envelope remain invalid. This envelope is not a kernel
-atomic-accounting guarantee. Existing physical consistency, pressure, reserve,
-growth, hardware-ceiling and busy/idle policy checks remain unchanged. The
-sampler backup is adaptive_pool.py.before-cpu-sampler.
+export rounding from inventing capacity. [Kernel CPU accounting is sampled](https://docs.kernel.org/admin-guide/cpu-load.html).
+The adapter does not require total tick deltas to equal CPU count multiplied by
+USER_HZ and elapsed wall time. It rejects direct wall-idle credit above the CPU
+count before the ratio cap can conceal it. Missing/nonfinite/reset counters,
+nonadvancing totals, idle above total ticks, and unordered acquisition brackets
+remain invalid. Genuine numeric pool-CPU excess still reaches the unchanged
+policy. Existing physical consistency, pressure, reserve, growth,
+hardware-ceiling and busy/idle policy checks remain unchanged. The sampler
+backup is adaptive_pool.py.before-cpu-sampler.
 
 An unavailable CPU acquisition raises the existing pool operation error before
 policy evaluation or reconciliation. The failed service invocation stays
