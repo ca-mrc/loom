@@ -64,7 +64,9 @@ BOUNDARY_USAGE_CLOCK = "/proc/uptime"
 # that is killed as a process group at its deadline; its files live under
 # /scratch/tmp, which cleanup already removes. The parent only polls, kills,
 # reads one small result file and appends one line. It never waits on a killed
-# group, and its poll count bounds the wait even if the clock is unreadable.
+# group. Its poll count bounds each wait even if the clock is unreadable, and
+# each reading is charged at least its polling time, so the per-build budget
+# also holds with a frozen clock.
 # Milliseconds come from /proc/uptime by 64-bit shell arithmetic, not awk %d
 # (which BusyBox clamps to 32 bits after ~24.9 days of uptime).
 # Each volume keeps du's own exit code and read-error count. Only two complete
@@ -101,6 +103,7 @@ loom_boundary_usage() {
   [ "$(wc -l < @LOG@)" -lt @MAX@ ] && [ "$(wc -c < @LOG@)" -le @ROOM@ ] || return 0
   usage_started=$(loom_usage_ms)
   usage_status=skipped
+  usage_slept=0
   usage_dirs=
   usage_left=$(( @BUDGET_MS@ - loom_usage_spent_ms ))
   if [ "$usage_left" -gt @TIMEOUT_MS@ ]; then usage_left=@TIMEOUT_MS@; fi
@@ -118,6 +121,7 @@ loom_boundary_usage() {
         break
       fi
       usage_polls=$(( usage_polls - 1 ))
+      usage_slept=$(( usage_slept + 100 ))
       sleep 0.1
     done
     if [ "$usage_status" != timeout ]; then
@@ -126,7 +130,8 @@ loom_boundary_usage() {
     fi
   fi
   usage_elapsed=$(( $(loom_usage_ms) - usage_started ))
-  if [ "$usage_elapsed" -lt 0 ]; then usage_elapsed=0; fi
+  # Charge at least the time spent polling, so a frozen clock still spends the budget.
+  if [ "$usage_elapsed" -lt "$usage_slept" ]; then usage_elapsed=$usage_slept; fi
   loom_usage_spent_ms=$(( loom_usage_spent_ms + usage_elapsed ))
   case "$usage_status" in
     ok|partial) if [ -n "$usage_dirs" ]; then usage_dirs=",\"dirs\":{$usage_dirs}"; else usage_status=failed; fi ;;

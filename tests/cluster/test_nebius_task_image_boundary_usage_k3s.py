@@ -96,7 +96,7 @@ def test_kubelet_keeps_truncates_or_omits_the_build_reading():
         # Non-root container, read-only root filesystem: the kubelet's message file is writable.
         success = build_observation(observed["success"])["boundary_usage"]
         assert observed["success"]["status"].get("succeeded") == 1
-        assert success["status"] == "recorded", message("success")
+        assert success["status"] == "complete" and success["missing"] == [], message("success")
         record, = success["records"]
         assert record["status"] == "ok" and record["point"] == "solve_end"
         assert record["dirs"]["scratch"]["kib"] >= 2048 and record["dirs"]["scratch"]["errors"] == 0
@@ -105,6 +105,7 @@ def test_kubelet_keeps_truncates_or_omits_the_build_reading():
         assert observed["failure"]["status"].get("failed") == 1 and message("failure")["exitCode"] == 3
         failure = build_observation(observed["failure"])["boundary_usage"]
         assert [(r["point"], r["status"]) for r in failure["records"]] == [("solve_failed", "ok")]
+        assert failure["status"] == "complete"
 
         # Nothing written: explicitly missing, not zero.
         assert build_observation(observed["missing"])["boundary_usage"]["status"] == "missing"

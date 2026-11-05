@@ -32,7 +32,7 @@ def _instrument(kube, message):
 
 
 @pytest.mark.parametrize(("message", "explode", "status", "records"), [
-    (json.dumps(_VALID), False, "recorded", 1),
+    (json.dumps(_VALID), False, "complete", 1),
     (json.dumps({**_VALID, "point": []}), False, "rejected", 0),
     ("[" * 300, False, "rejected", 0),
     (json.dumps(_VALID), True, "rejected", 0),

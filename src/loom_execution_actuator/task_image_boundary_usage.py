@@ -5,10 +5,16 @@ is schema validation only: a fabricated record that matches the schema is still
 accepted, which is why every result carries ``build_phase_self_report``
 provenance. They are sizing diagnostics, never enforcement, never a Pod total
 and never a guaranteed peak. Parsing is total: any input yields a result.
+
+A message alone cannot show that a record was lost (for example truncated at a
+line boundary), so the observed result is compared against the readings the
+rendered build should have written for its components and exit code, and any
+gap is reported as ``incomplete`` with the missing (point, component) pairs.
 """
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from loom_execution_actuator.task_image_renderer import (
@@ -27,17 +33,33 @@ _VOLUMES = frozenset({"scratch", "build"})
 _RECORD_KEYS = frozenset({"v", "point", "component", "at", "status", "elapsed_ms"})
 _VOLUME_KEYS = frozenset({"entries", "kib", "errors", "rc"})
 _MAX_COUNTER = 2**53
+_CALL = re.compile(r"loom_boundary_usage solve_end (\d+) \|\| true")
 
 
-def instrumented(pod: dict[str, Any]) -> bool:
-    """Whether this Pod's rendered build command carries the reading function."""
+def _build_script(pod: Any) -> str | None:
     spec = pod.get("spec") if isinstance(pod, dict) else None
     containers = spec.get("initContainers") if isinstance(spec, dict) else None
     for container in containers if isinstance(containers, list) else []:
         if isinstance(container, dict) and container.get("name") == "build":
             command = container.get("command")
-            return isinstance(command, list) and bool(command) and isinstance(command[-1], str) and MARKER in command[-1]
-    return False
+            if isinstance(command, list) and command and isinstance(command[-1], str):
+                return command[-1]
+    return None
+
+
+def instrumented(pod: dict[str, Any]) -> bool:
+    """Whether this Pod's rendered build command carries the reading function."""
+    script = _build_script(pod)
+    return script is not None and MARKER in script
+
+
+def expected_components(pod: dict[str, Any]) -> int | None:
+    """Component count the rendered build reads for, or None if it cannot be derived."""
+    script = _build_script(pod)
+    indexes = {int(match) for match in _CALL.findall(script or "")}
+    if not indexes or indexes != set(range(len(indexes))) or len(indexes) > MAX_NATIVE_BUILD_COMPONENTS:
+        return None
+    return len(indexes)
 
 
 def _counter(value: Any, limit: int = _MAX_COUNTER) -> bool:
@@ -104,9 +126,48 @@ def parse_boundary_usage(message: Any) -> dict[str, Any]:
     return {"source": SOURCE, "status": status, "records": records, "rejected": rejected}
 
 
-def observed_boundary_usage(message: Any) -> dict[str, Any]:
+def _coverage(parsed: dict[str, Any], *, components: int | None, exit_code: Any) -> dict[str, Any]:
+    """Compare records with the readings this build should have written.
+
+    A successful build reads at ``solve_end`` for every component. A build that
+    failed in its solve reads at ``solve_end`` for each earlier component and at
+    ``solve_failed`` for the failing one. Records outside that set are counted as
+    rejected. A failure outside a solve (or a lost ``solve_failed`` record) leaves
+    the failing component unknown, reported as ``{"point": "solve_failed",
+    "component": None}``.
+    """
+    records, rejected = parsed["records"], parsed["rejected"]
+    if components is None:
+        missing: list[dict[str, Any]] | None = None  # cannot judge; report records as they are
+        kept = records
+    else:
+        failures = sorted(r["component"] for r in records if r["point"] == "solve_failed")
+        if exit_code == 0:
+            expected = {("solve_end", index) for index in range(components)}
+        elif failures and failures[0] < components:
+            failing = failures[0]
+            expected = {("solve_end", index) for index in range(failing)} | {("solve_failed", failing)}
+        else:
+            reached = max((r["component"] for r in records if r["point"] == "solve_end"), default=-1)
+            expected = {("solve_end", index) for index in range(min(reached + 1, components))}
+        kept = [r for r in records if (r["point"], r["component"]) in expected]
+        rejected += len(records) - len(kept)
+        got = {(r["point"], r["component"]) for r in kept}
+        missing = [{"point": point, "component": index} for point, index in sorted(expected - got, key=lambda x: (x[1], x[0]))]
+        if exit_code != 0 and not (failures and failures[0] < components):
+            missing.append({"point": "solve_failed", "component": None})
+    if kept:
+        status = "incomplete" if missing else "complete" if missing is not None else "recorded"
+    else:
+        status = "rejected" if rejected else "missing"
+    return {"source": SOURCE, "status": status, "records": kept, "rejected": rejected,
+            "components": components, "missing": missing}
+
+
+def observed_boundary_usage(message: Any, *, components: int | None = None, exit_code: Any = None) -> dict[str, Any]:
     """Lifecycle-safe wrapper: telemetry can never raise into build reconciliation."""
     try:
-        return parse_boundary_usage(message)
-    except Exception:  # pragma: no cover - parse_boundary_usage is total; this is the isolation boundary
-        return {"source": SOURCE, "status": "rejected", "records": [], "rejected": 1}
+        return _coverage(parse_boundary_usage(message), components=components, exit_code=exit_code)
+    except Exception:  # pragma: no cover - parsing is total; this is the isolation boundary
+        return {"source": SOURCE, "status": "rejected", "records": [], "rejected": 1,
+                "components": components, "missing": None}

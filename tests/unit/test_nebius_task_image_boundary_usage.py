@@ -16,6 +16,7 @@ import pytest
 from loom.native_image_build import NativeImageBuildComponentV1
 from loom_execution_actuator.task_image_boundary_usage import (
     MARKER,
+    expected_components,
     instrumented,
     observed_boundary_usage,
     parse_boundary_usage,
@@ -287,7 +288,23 @@ def test_frozen_clock_is_bounded_by_the_poll_count(inputs, tmp_path) -> None:  #
     assert result.returncode == 0, result.stderr
     assert time.monotonic() - started < 15
     (record,) = parse_boundary_usage(message)["records"]
-    assert record["status"] == "timeout" and record["elapsed_ms"] == 0
+    # Charged at least its polling time (11 polls of 100 ms), not the frozen clock's zero.
+    assert record["status"] == "timeout" and record["elapsed_ms"] >= 1000
+
+
+@pytest.mark.parametrize(("budget_ms", "second"), [(1500, {"timeout"}), (1000, {"skipped"})])
+def test_frozen_clock_still_spends_the_per_build_budget(inputs, tmp_path, budget_ms, second) -> None:  # noqa: F811
+    clock = tmp_path / "uptime"
+    clock.write_text("2147484.00 1.00\n")  # never advances
+    started = time.monotonic()
+    result, _, message = _run(inputs, tmp_path, walk="hang", timeout_ms=1000, budget_ms=budget_ms, clock=clock)
+    wall = time.monotonic() - started
+    assert result.returncode == 0, result.stderr
+    first, later = parse_boundary_usage(message)["records"]
+    assert first["status"] == "timeout" and later["status"] in second
+    # Two components share one budget; a frozen clock cannot hand the second a fresh one.
+    assert first["elapsed_ms"] + later["elapsed_ms"] <= budget_ms + 200
+    assert wall < 15
 
 
 def test_spent_budget_skips_later_readings(inputs, tmp_path) -> None:  # noqa: F811
@@ -398,31 +415,71 @@ def test_message_stops_growing_before_the_kubelet_limit(inputs, tmp_path) -> Non
 
 # --- observation -----------------------------------------------------------
 
-def _observed_job(*, instrumented_script: bool, message):
-    command = ["sh", "-c", ("set -eu\n" + MARKER + "\n}") if instrumented_script else "set -eu"]
-    build_state = {"terminated": {"exitCode": 0, "reason": "Completed", "finishedAt": "2026-11-05T00:00:00Z",
+def _observed_job(*, instrumented_script: bool, message, components=2, exit_code=0):
+    calls = "".join(f"  loom_boundary_usage solve_end {i} || true\n  loom_boundary_usage solve_failed {i} || true\n"
+                    for i in range(components))
+    command = ["sh", "-c", ("set -eu\n" + MARKER + "\n}\n" + calls) if instrumented_script else "set -eu"]
+    build_state = {"terminated": {"exitCode": exit_code, "reason": "Completed" if exit_code == 0 else "Error",
+                                  "finishedAt": "2026-11-05T00:00:00Z",
                                   **({} if message is None else {"message": message})}}
-    return {"metadata": {"uid": "job-uid"}, "status": {"succeeded": 1}, "pods": [{
+    return {"metadata": {"uid": "job-uid"}, "status": {"succeeded" if exit_code == 0 else "failed": 1}, "pods": [{
         "metadata": {"name": "pod", "uid": "pod-uid", "ownerReferences": [{"kind": "Job", "uid": "job-uid"}]},
         "spec": {"nodeName": "node-a", "initContainers": [{"name": "prepare", "command": ["python"]},
                                                           {"name": "build", "command": command}]},
         "status": {"initContainerStatuses": [{"name": "build", "state": build_state}]}}]}
 
 
+def _usage(message, **kwargs):
+    return build_observation(_observed_job(instrumented_script=True, message=message, **kwargs))["boundary_usage"]
+
+
+def _lines(*records):
+    return "\n".join(json.dumps(r) for r in records)
+
+
 def test_observation_keeps_readings_only_for_instrumented_builds() -> None:
-    message = json.dumps(_record())
-    observed = build_observation(_observed_job(instrumented_script=True, message=message))
-    assert observed["boundary_usage"]["status"] == "recorded"
-    assert observed["boundary_usage"]["records"][0]["dirs"]["scratch"]["kib"] == 5132
+    message = _lines(_record(), _record(component=1))
+    usage = _usage(message)
+    assert usage["status"] == "complete" and usage["components"] == 2 and usage["missing"] == []
+    assert usage["records"][0]["dirs"]["scratch"]["kib"] == 5132
     assert "boundary_usage" not in build_observation(_observed_job(instrumented_script=False, message=message))
-    missing = build_observation(_observed_job(instrumented_script=True, message=None))
-    assert missing["boundary_usage"] == {"source": "build_phase_self_report", "status": "missing",
-                                         "records": [], "rejected": 0}
+    assert _usage(None) == {"source": "build_phase_self_report", "status": "missing", "records": [], "rejected": 0,
+                            "components": 2, "missing": [{"point": "solve_end", "component": 0},
+                                                         {"point": "solve_end", "component": 1}]}
+
+
+def test_a_record_lost_at_a_line_boundary_is_incomplete_not_recorded() -> None:
+    # Truncation at a line boundary leaves only valid lines; coverage reveals the gap.
+    usage = _usage(_lines(_record()))
+    assert usage["status"] == "incomplete" and usage["missing"] == [{"point": "solve_end", "component": 1}]
+
+
+def test_failed_builds_expect_earlier_solve_ends_and_the_failing_reading() -> None:
+    complete = _usage(_lines(_record(), _record(point="solve_failed", component=1)), exit_code=1)
+    assert complete["status"] == "complete" and complete["missing"] == []
+    lost = _usage(_lines(_record()), exit_code=1)  # the solve_failed reading never arrived
+    assert lost["status"] == "incomplete"
+    assert lost["missing"] == [{"point": "solve_failed", "component": None}]
+    early = _usage(_lines(_record(point="solve_failed", component=1)), exit_code=1)
+    assert early["status"] == "incomplete" and early["missing"] == [{"point": "solve_end", "component": 0}]
+
+
+def test_records_outside_the_expected_set_are_rejected() -> None:
+    usage = _usage(_lines(_record(), _record(component=1), _record(point="solve_failed", component=0)))
+    assert usage["status"] == "complete" and usage["rejected"] == 1 and len(usage["records"]) == 2
+    beyond = _usage(_lines(_record(), _record(component=1), _record(component=5)))
+    assert beyond["rejected"] == 1 and beyond["status"] == "complete"
+
+
+def test_underivable_component_count_reports_records_without_claiming_coverage() -> None:
+    usage = _usage(_lines(_record()), components=0)
+    assert usage["status"] == "recorded" and usage["components"] is None and usage["missing"] is None
 
 
 def test_malformed_message_never_raises_from_observation() -> None:
     for message in (json.dumps(_record(point=[])), json.dumps(_record(status={})), "[" * 400):
-        assert build_observation(_observed_job(instrumented_script=True, message=message))["boundary_usage"] == _REJECTED
+        usage = _usage(message)
+        assert usage["status"] == "rejected" and usage["records"] == [] and usage["rejected"] == 1
 
 
 def test_unexpected_parser_failure_is_isolated(monkeypatch) -> None:
@@ -430,11 +487,19 @@ def test_unexpected_parser_failure_is_isolated(monkeypatch) -> None:
         raise RuntimeError("unexpected")
 
     monkeypatch.setattr("loom_execution_actuator.task_image_boundary_usage.parse_boundary_usage", explode)
-    observed = build_observation(_observed_job(instrumented_script=True, message=json.dumps(_record())))
-    assert observed["boundary_usage"] == _REJECTED
+    usage = _usage(_lines(_record(), _record(component=1)))
+    assert usage == {"source": "build_phase_self_report", "status": "rejected", "records": [], "rejected": 1,
+                     "components": 2, "missing": None}
 
 
 def test_running_build_has_no_reading_yet() -> None:
     job = _observed_job(instrumented_script=True, message=None)
     job["pods"][0]["status"]["initContainerStatuses"][0]["state"] = {"running": {"startedAt": "2026-11-05T00:00:00Z"}}
     assert "boundary_usage" not in build_observation(job)
+
+
+def test_component_count_is_read_from_the_real_rendered_command(inputs) -> None:  # noqa: F811
+    inputs["config"] = replace(inputs["config"], record_boundary_usage=True)
+    for count in (1, 2):
+        _, job = render_task_image_job(**{**inputs, "components": inputs["components"][:count]})
+        assert expected_components(job["spec"]["template"]) == count
