@@ -7019,6 +7019,8 @@ export interface components {
              * @default 20
              */
             attempt_timeout_sec: number;
+            /** Config Version */
+            config_version?: number | null;
             /**
              * Cooldown Sec
              * @default 30
@@ -7029,10 +7031,20 @@ export interface components {
              * @constant
              */
             equivalent_models: true;
+            /** Group Caps */
+            group_caps?: {
+                [key: string]: number;
+            } | null;
+            /** Max Pause Sec */
+            max_pause_sec?: number | null;
             /** Members */
             members: components["schemas"]["PoolMemberConfig"][];
+            /** Queue Enabled */
+            queue_enabled?: boolean | null;
             /** Required Models */
             required_models: string[];
+            /** Stall Sec */
+            stall_sec?: number | null;
             /**
              * Timeout Burst Count
              * @default 3
@@ -7048,6 +7060,8 @@ export interface components {
         RequestPoolResponse: {
             /** Attempt Timeout Sec */
             attempt_timeout_sec: number;
+            /** Config Version */
+            config_version: number;
             /**
              * Connection Id
              * Format: uuid
@@ -7057,10 +7071,20 @@ export interface components {
             cooldown_sec: number;
             /** Enabled */
             enabled: boolean;
+            /** Group Caps */
+            group_caps: {
+                [key: string]: number;
+            };
+            /** Max Pause Sec */
+            max_pause_sec: number;
             /** Members */
             members: components["schemas"]["PoolMemberResponse"][];
+            /** Queue Enabled */
+            queue_enabled: boolean;
             /** Required Models */
             required_models: string[];
+            /** Stall Sec */
+            stall_sec: number;
             /** Timeout Burst Count */
             timeout_burst_count: number;
             /** Timeout Window Sec */

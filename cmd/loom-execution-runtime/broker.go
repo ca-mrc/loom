@@ -34,16 +34,16 @@ type workloadIdentity struct {
 }
 
 type workloadBroker struct {
-	phaseContext  context.Context
-	phaseCancel   context.CancelFunc
-	podTokenFile  string
-	root          *url.URL
-	identity      workloadIdentity
-	client        *http.Client
-	mu            sync.Mutex
-	tokenRefresh  chan struct{}
-	token         string
-	expires       time.Time
+	phaseContext        context.Context
+	phaseCancel         context.CancelFunc
+	podTokenFile        string
+	root                *url.URL
+	identity            workloadIdentity
+	client              *http.Client
+	mu                  sync.Mutex
+	tokenRefresh        chan struct{}
+	token               string
+	expires             time.Time
 	phaseDeadline       time.Time
 	phaseBound          bool
 	phaseRole           string

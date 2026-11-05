@@ -229,6 +229,22 @@ class DispatchAudit:
                     await _database_await(session.commit(), operation="admission", phase=phase)
                     phase = "session_exit"
         except (ConnectionAtCapacityError, GroupQueuedError, QueueStalledError):
+            raise
+        except HTTPException:
+            # A routing policy may decline admission before any provider I/O.
+            raise
+        except asyncio.CancelledError:
+            logger.warning(
+                "gateway_dispatch_admission_cancelled_commit_unknown request_id=%s receipt_id=%s",
+                self.state.request_id,
+                receipt_id,
+            )
+            raise
+        except Exception as exc:
+            # Only fixed categories are safe: exception text, driver details,
+            # SQL binds and tracebacks must never enter these logs.
+            category = (
+                "timeout" if isinstance(exc, TimeoutError)
                 else "database" if isinstance(exc, SQLAlchemyError)
                 else "other"
             )

@@ -34,7 +34,7 @@ from loom.db.schema import (
 )
 from loom.provider_model_preflight import preflight_failure_kind
 from loom_llm_gateway.attempt_deadline import GatewayAttemptDeadline
-from loom_llm_gateway.dispatch_audit import DispatchAudit, request_dispatch_audit
+from loom_llm_gateway.dispatch_audit import (
     ConnectionAtCapacityError,
     DispatchAudit,
     GroupQueuedError,
@@ -727,7 +727,48 @@ class PoolDispatchAudit(DispatchAudit):
                 raise
             return receipt_id
 
+    async def _touch_queue_row(self) -> None:
+        if self.state.session_factory is None:
+            return
+        try:
+            async with asyncio.timeout(1.0), self.state.session_factory() as session:
+                await touch_queue_row(
+                    session,
+                    pool_id=self.pool_id,
+                    request_id=self.state.request_id,
+                    trial_id=self.ctx.trial_id,
+                    bound_group=self.quota_group,
+                )
+                await session.commit()
+        except Exception:
+            logger.warning(
+                "request_pool_queue_touch_unavailable pool_connection_id=%s",
+                self.pool_id,
+            )
+
+    async def _close_queue(self, outcome: str) -> None:
+        if self.state.session_factory is None:
+            return
+        try:
+            async with asyncio.timeout(1.0), self.state.session_factory() as session:
+                await close_queue_row(
+                    session,
+                    request_id=self.state.request_id,
+                    outcome=outcome,
+                )
+                await session.commit()
+        except Exception:
+            logger.warning(
+                "request_pool_queue_close_unavailable pool_connection_id=%s outcome=%s",
+                self.pool_id,
+                outcome,
+            )
+
     def _credit_queue_wait(
         self,
         deadline: GatewayAttemptDeadline | None,
         waited_sec: float,
+    ) -> None:
+        if deadline is None or not self.queue_enabled:
+            return
+        deadline.credit_queue_wait(waited_sec, max_pause_sec=self.max_pause_sec)
