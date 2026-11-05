@@ -691,10 +691,10 @@ def isolated_migration_postgres_url(migration_template_postgres_url: str) -> Ite
 
 
 def allow_current_cancellation_columns(postgres_url: str) -> None:
-    """Add drain and admission-pause columns without moving the Alembic revision.
+    """Add drain, admission-pause, and queue columns without moving Alembic.
 
-    Historical tests that stay below 0189 or 0191 and then use the current
-    trial or batch models need these columns. Both migrations add them with
+    Historical tests that stay below 0189, 0191, or 0193 and then use the
+    current models need these columns. The migrations add them with
     ``IF NOT EXISTS``, so a later upgrade through them still succeeds.
     """
     url = make_url(postgres_url).set(drivername="postgresql+psycopg").render_as_string(hide_password=False)
@@ -720,6 +720,16 @@ def allow_current_cancellation_columns(postgres_url: str) -> None:
                 "ALTER TABLE trials ADD COLUMN IF NOT EXISTS "
                 "admission_pause_releases INTEGER NOT NULL DEFAULT 0"
             ))
+            # Current lease models select working_deadline_at on every read.
+            # Pre-lease revisions have no table; later 0193 still uses IF NOT EXISTS.
+            connection.execute(text("""
+                DO $$ BEGIN
+                    IF to_regclass('execution_leases') IS NOT NULL THEN
+                        ALTER TABLE execution_leases
+                            ADD COLUMN IF NOT EXISTS working_deadline_at TIMESTAMPTZ;
+                    END IF;
+                END $$
+            """))
     finally:
         engine.dispose()
 
@@ -735,9 +745,14 @@ def allow_current_queue_columns(postgres_url: str) -> None:
     engine = create_engine(url)
     try:
         with engine.begin() as connection:
-            connection.execute(text(
-                "ALTER TABLE execution_leases ADD COLUMN IF NOT EXISTS working_deadline_at TIMESTAMPTZ"
-            ))
+            connection.execute(text("""
+                DO $$ BEGIN
+                    IF to_regclass('execution_leases') IS NOT NULL THEN
+                        ALTER TABLE execution_leases
+                            ADD COLUMN IF NOT EXISTS working_deadline_at TIMESTAMPTZ;
+                    END IF;
+                END $$
+            """))
             # The pool table itself arrives at 0183; pre-pool revisions have none.
             connection.execute(text("""
                 DO $$ BEGIN
