@@ -738,22 +738,18 @@ def allow_current_queue_columns(postgres_url: str) -> None:
             connection.execute(text(
                 "ALTER TABLE execution_leases ADD COLUMN IF NOT EXISTS working_deadline_at TIMESTAMPTZ"
             ))
-            connection.execute(text(
-                "ALTER TABLE provider_request_pools "
-                "ADD COLUMN IF NOT EXISTS queue_enabled BOOLEAN NOT NULL DEFAULT false"
-            ))
-            connection.execute(text(
-                "ALTER TABLE provider_request_pools "
-                "ADD COLUMN IF NOT EXISTS stall_sec DOUBLE PRECISION NOT NULL DEFAULT 200"
-            ))
-            connection.execute(text(
-                "ALTER TABLE provider_request_pools "
-                "ADD COLUMN IF NOT EXISTS max_pause_sec DOUBLE PRECISION NOT NULL DEFAULT 3600"
-            ))
-            connection.execute(text(
-                "ALTER TABLE provider_request_pools "
-                "ADD COLUMN IF NOT EXISTS config_version BIGINT NOT NULL DEFAULT 1"
-            ))
+            # The pool table itself arrives at 0183; pre-pool revisions have none.
+            connection.execute(text("""
+                DO $$ BEGIN
+                    IF to_regclass('provider_request_pools') IS NOT NULL THEN
+                        ALTER TABLE provider_request_pools
+                            ADD COLUMN IF NOT EXISTS queue_enabled BOOLEAN NOT NULL DEFAULT false,
+                            ADD COLUMN IF NOT EXISTS stall_sec DOUBLE PRECISION NOT NULL DEFAULT 200,
+                            ADD COLUMN IF NOT EXISTS max_pause_sec DOUBLE PRECISION NOT NULL DEFAULT 3600,
+                            ADD COLUMN IF NOT EXISTS config_version BIGINT NOT NULL DEFAULT 1;
+                    END IF;
+                END $$
+            """))
     finally:
         engine.dispose()
 
