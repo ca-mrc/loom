@@ -198,7 +198,7 @@ def current_task_image_reference(row: Any) -> ColumnElement[bool]:
         func.to_jsonb(source.table_valued(), type_=JSONB)["preparation_revision"].astext,
         "",
     )
-    input_digest = func.coalesce(
+    input_digest: ColumnElement[str] = func.coalesce(
         source.c.task_source_provenance["service_execution_input"]["manifest_sha256"].astext, "",
     )
     if inspected.is_instance:
@@ -315,7 +315,9 @@ def _assert_no_pending_task_image_writes(session: AsyncSession) -> None:
         raise RuntimeError("task image ensure has pending materialization writes")
 
 
-def _same_task_image_source(row: Any, task: Task, *, input_digest: str) -> bool:
+def _same_task_image_source(
+    row: TaskImageMaterialization, task: Task, *, input_digest: str,
+) -> bool:
     if not input_digest:
         return row.task_source == task.source and row.task_source_provenance == task.source_provenance
     # A rebuild can publish identical inputs under a new generation's location.
