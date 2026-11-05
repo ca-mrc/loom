@@ -295,9 +295,10 @@ func runPhase(
 	trustedEnvironment map[string]string,
 	phaseBoundary ...func(string, time.Time),
 ) (phaseEvidence, error) {
-	phaseCtx, cancel := context.WithTimeout(parent, time.Duration(item.TimeoutSeconds)*time.Second)
+	phaseCtx, cancel, deadline, currentDeadline := openPhaseContext(
+		parent, time.Duration(item.TimeoutSeconds)*time.Second, item.DeadlineUpdates,
+	)
 	defer cancel()
-	deadline, _ := phaseCtx.Deadline()
 	for _, boundary := range phaseBoundary {
 		boundary(item.Role, deadline)
 		defer boundary(item.Role, time.Time{})
@@ -398,7 +399,8 @@ func runPhase(
 	evidence := phaseEvidence{
 		verifierReportPrepared: reportPrepared,
 		Role:                   item.Role, Ordinal: ordinal, StartedAt: started, FinishedAt: finished,
-		ExitCode: 0, TimedOut: errors.Is(phaseCtx.Err(), context.DeadlineExceeded) || !finished.Before(deadline),
+		// A moved deadline cancels with DeadlineExceeded as the cause, not Err().
+		ExitCode: 0, TimedOut: errors.Is(context.Cause(phaseCtx), context.DeadlineExceeded) || !finished.Before(currentDeadline()),
 		Stdout: stdout.evidence(filepath.Base(stdoutPath)), Stderr: stderr.evidence(filepath.Base(stderrPath)),
 	}
 	if err != nil {
