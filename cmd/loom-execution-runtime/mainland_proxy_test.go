@@ -160,6 +160,11 @@ func TestMainlandProxyRealHTTPConnectAndGuestUseSameRules(t *testing.T) {
 			if !policy.permits(webDestination{Host: "github.com", Protocol: "https"}) {
 				t.Fatal("task restrictions changed trusted setup egress")
 			}
+			// HTTP completion does not join a handler's deferred audit write.
+			// Stop waits for all handlers before this test reads their buffer.
+			if err := stop(); err != nil {
+				t.Fatal(err)
+			}
 			if !strings.Contains(evidence.String(), "mainland_proxy_gfw_denied") || !strings.Contains(evidence.String(), "mainland_proxy_greatfire_denied") {
 				t.Fatal("restriction evidence missing")
 			}
