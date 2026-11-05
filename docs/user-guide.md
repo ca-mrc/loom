@@ -948,6 +948,15 @@ combinations and reruns. A connection must support the selected model's tool
 calls and usage reporting. A successful text-only model preflight does not
 qualify its tool behavior.
 
+In hosted **New Batch**, select `claude-code`, the Provider Connection and its
+model. An Anthropic connection uses native Messages. An OpenAI-compatible
+connection uses Chat translation unless the selected model has a verified
+alternate Messages route, which new Claude submissions prefer. If the upstream
+supports both protocols, configure and test that route in the connection's
+**Settings → Wire routes**; both routes reuse its stored key. See
+[OpenAI Chat and Anthropic Messages on one connection](integrations/provider-onboarding.md#openai-chat-and-anthropic-messages-on-one-connection)
+for the UI and CLI procedure. Existing runs retain their frozen mode.
+
 For laptop-only runs, a local Linux x86-64 Docker daemon is required for the
 pinned runtime and relay. Both glibc and musl task images are supported; they
 need `tar`, `gzip`, the matching runtime libraries and Bash for Bash tool use.
@@ -994,6 +1003,14 @@ zero rate. Hosted output follows the same evidence contract through Gateway
 and materialization. Source and deterministic Docker coverage establish these
 runtime contracts; deployment and live-provider qualification remain specific
 to the selected environment and endpoint.
+
+The completed [Claude Code qualification record](https://github.com/ca-mrc/loom/issues/2763#issuecomment-6648815420)
+documents real CLI execution through native and translated hosted providers,
+workspace tools, verifier results, trajectories, accounting and cleanup.
+Hosted qualification used API submissions; laptop-only qualification used the
+real CLI with controlled providers. Browser UI click-through was outside that
+qualification. The record also preserves a recovered stream failure and links
+the separate [setup transfer investigation](https://github.com/ca-mrc/loom/issues/2795).
 
 ### Supported agents and model access
 

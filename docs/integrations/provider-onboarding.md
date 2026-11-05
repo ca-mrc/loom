@@ -130,10 +130,12 @@ loom qa matrix \
 This command does not log in, contact a provider, or submit batches. Its
 endpoint taxonomy, output schema, and provenance fields are fixed in the CLI;
 it does not discover arbitrary provider endpoint types or establish general
-provider support. It covers the five supported product entries: Oracle,
-`direct-completion`, Terminus-2, OpenHands and Codex (#2054). Deferred
-harnesses such as `opencode`, `aider`, Claude Code and Gemini CLI stay in the
-catalog for historical records but are not tested. The JSON schema records each agent harness x
+provider support. It covers six supported product entries: Oracle,
+`direct-completion`, Terminus-2, OpenHands, Codex and Claude Code. See
+[Claude Code connections](../user-guide.md#claude-code-connections) for its
+configuration and qualification evidence. Deferred harnesses such as
+`opencode`, `aider` and Gemini CLI stay in the catalog for historical records
+but are not tested. The JSON schema records each agent harness x
 provider endpoint cell as `supported`, `skipped`, or `blocked`, with protocol
 surface (`chat`, `responses`, `messages`, or `gemini`), streaming, tool-use,
 request-param, max-token, usage, diagnostic, and redaction status. Generic

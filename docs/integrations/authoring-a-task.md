@@ -59,7 +59,7 @@ required_artifacts = ["result.txt"]
 |---|---|---|
 | `oracle` | Baseline + dev fixtures | Runs `solution/solve.sh` inside the sandbox. Tasks that set `[agent].name = "oracle"` must include it. |
 | `direct-completion` | Response-only LLM agent | One direct completion through the Gateway, with exact-path text projection; no workspace tools. The legacy `litellm` name is accepted as an alias. |
-| `claude-code` | Launcher CLI agent | Runs `claude` inside the container; workers resolve its pinned install contract into a content-addressed task image. |
+| `claude-code` | Installed workspace agent | Installs the pinned CLI during setup in the task sandbox and reuses a verified install cache; see the [runtime requirements](../user-guide.md#claude-code-connections). |
 
 Workspace-oriented tasks must declare their execution requirement at the top
 level of `task.toml`:
