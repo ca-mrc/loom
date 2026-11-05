@@ -669,7 +669,7 @@ async def _reserve_service_candidate(
                     image_admission_keyring=image_admission_keyring,
                     routing_reason=ExecutionRoutingReason.PREEXISTING_ASSIGNMENT,
                     deadline_at=compiled.deadline_at,
-                    working_deadline_at=compiled.working_deadline_at,
+                    working_deadline_at=getattr(compiled, "working_deadline_at", None),
                     now=current_time,
                     capacity_wait_inputs={key: row[key] for key in (
                         "execution_route_generation", "execution_route_pool_name",
