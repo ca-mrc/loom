@@ -737,7 +737,7 @@ def retain_pool_schema(
     Callers that then run the real Alembic upgrade may pass
     ``include_current_columns=False`` so 0189 and 0191 add their columns.
     """
-    if revision not in {"0175", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187", "0188", "0189", "0190", "0191"}:
+    if revision not in {"0175", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187", "0188", "0189", "0190", "0191", "0192"}:
         raise ValueError("unsupported retained pool test revision")
     repo_root = Path(__file__).resolve().parents[2]
     cfg = AlembicConfig(str(repo_root / "database" / "migrations" / "alembic.ini"))
@@ -748,7 +748,7 @@ def retain_pool_schema(
     # Current models name the drain columns on every trial and batch write.
     # Historical pool revisions do not have them; they are nullable and unused
     # by those tests, so add them without changing the pinned Alembic version.
-    if include_current_columns and revision != "0191":
+    if include_current_columns and revision not in {"0191", "0192"}:
         allow_current_cancellation_columns(url)
 
 

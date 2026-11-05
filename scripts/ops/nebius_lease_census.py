@@ -203,8 +203,9 @@ def _validate_remote(value: object) -> dict[str, Any]:
     # sticky pool bindings, shared timeout health, and an optional in-flight cap.
     # 0189 adds batch drain state. 0190 adds only provider route configuration.
     # 0191 adds the batch admission pause and a defaulted trial refund counter.
-    # None of these changes the fixed lease/command/trial read columns.
-    if value.get("schema_head") not in {"0175", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187", "0188", "0189", "0190", "0191"}:
+    # 0192 adds only the task-image input-manifest cache discriminator and its
+    # identity constraints. None changes these fixed lease/command/trial reads.
+    if value.get("schema_head") not in {"0175", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187", "0188", "0189", "0190", "0191", "0192"}:
         raise DeploymentError("unsupported installed schema")
     count = value.get("active_count")
     leases = value.get("leases")
