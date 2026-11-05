@@ -121,6 +121,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("SET LOCAL lock_timeout = '5s'")
+    # Dropping the queue foreign key takes ACCESS EXCLUSIVE on trials, and
+    # dropping working_deadline_at takes it on execution_leases. A reader's
+    # ACCESS SHARE does not conflict with a weaker lock, so those drops would
+    # wait until statement_timeout. Refuse that reader first.
+    op.execute("LOCK TABLE trials, execution_leases IN ACCESS EXCLUSIVE MODE NOWAIT")
     op.execute("DROP FUNCTION IF EXISTS gateway_dispatch_queue_credit(uuid, double precision)")
     op.execute("ALTER TABLE execution_leases DROP COLUMN IF EXISTS working_deadline_at")
     op.execute("DROP TABLE IF EXISTS gateway_dispatch_queue")
