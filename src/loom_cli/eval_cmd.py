@@ -1356,8 +1356,13 @@ def _batch_delivery_bundle(args: argparse.Namespace) -> int:
             payload["mode"] = args.mode
         if args.supplemental_batch_id:
             payload["supplemental_batch_ids"] = list(args.supplemental_batch_id)
+        if getattr(args, "trial_id", None) and getattr(args, "eligible_only", False):
+            sys.stderr.write("error: --trial-id and --eligible-only cannot be combined.\n")
+            return 1
         if getattr(args, "trial_id", None):
             payload["selection"] = {"trial_ids": list(args.trial_id)}
+        elif getattr(args, "eligible_only", False):
+            payload["selection"] = {"eligible_only": True}
         expected_sha = ""
         output: Path | None = None
         actual_hash = hashlib.sha256()
@@ -1414,6 +1419,10 @@ def _batch_delivery_bundle(args: argparse.Namespace) -> int:
                 f"{object_counts.get('atif', 0)} ATIF"
             )
         print(f"Delivery bundle ready: {trial_count} trials{object_text}")
+        selection = manifest.get("selection")
+        skipped = selection.get("skipped_coordinates_count") if isinstance(selection, dict) else None
+        if isinstance(skipped, int) and skipped > 0:
+            print(f"skipped coordinates: {skipped}")
         print(f"archive: {output}")
         print(f"sha256:  {actual_sha}")
         print(f"sidecar: {output.with_suffix(output.suffix + '.sha256')}")
@@ -2450,8 +2459,17 @@ def dispatch(argv: list[str]) -> int:
         default=[],
         help=(
             "Export only this trial UUID from the authorized batch family. "
-            "Repeat to select multiple trials. When omitted, every main "
-            "task/sample/combination coordinate must resolve (default)."
+            "Repeat to select multiple trials. When this and --eligible-only "
+            "are both omitted, every main coordinate must resolve."
+        ),
+    )
+    p_bdel.add_argument(
+        "--eligible-only",
+        action="store_true",
+        help=(
+            "Export every attempt that is delivery-eligible now and skip "
+            "coordinates that are not. Skipped coordinates are recorded in "
+            "the manifest. Cannot be combined with --trial-id."
         ),
     )
     p_bdel.add_argument(

@@ -152,6 +152,9 @@ def test_ungraded_timeout_and_verifier_error_keep_a_committed_trajectory() -> No
     assert is_ungraded_agent_trajectory(
         state="failed", result=verifier, failure_reason="verifier_error", config=config,
     )
+    assert is_ungraded_agent_trajectory(
+        state="failed", result=timeout, failure_reason="verifier_error", config=config,
+    )
     assert not is_scored_agent_timeout(state="failed", result=timeout, failure_reason="timed_out")
     assert not is_ungraded_agent_trajectory(
         state="failed", result=_scored_timeout_result(), failure_reason="timed_out", config=config,

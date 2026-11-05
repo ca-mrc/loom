@@ -16,6 +16,13 @@ function deliveryTrialText(delivery: DeliveryExport | undefined): string {
   return typeof count === "number" ? `${count} trials` : "not prepared";
 }
 
+function deliverySkippedText(delivery: DeliveryExport | undefined): string | null {
+  const selection = delivery?.manifest?.selection;
+  if (!selection || typeof selection !== "object") return null;
+  const count = (selection as { skipped_coordinates_count?: unknown }).skipped_coordinates_count;
+  return typeof count === "number" && count > 0 ? `${count} coordinates skipped` : null;
+}
+
 function deliveryObjectText(delivery: DeliveryExport | undefined): string | null {
   const counts = delivery?.manifest?.object_counts;
   if (!counts) return null;
@@ -48,7 +55,7 @@ function DeliveryExportForm({ batchId, state }: { batchId: string; state: string
   const queryClient = useQueryClient();
   const auth = useAuth();
   const canPrepare = auth.isAdmin || auth.me?.scopes.includes("submit");
-  const [scope, setScope] = useState<"family" | "selected">("family");
+  const [scope, setScope] = useState<"family" | "eligible" | "selected">("family");
   const [mode, setMode] = useState<NonNullable<DeliveryExportRequest["mode"]>>("raw-harbor-tb2-v2");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const trials = useInfiniteQuery({
@@ -89,8 +96,9 @@ function DeliveryExportForm({ batchId, state }: { batchId: string; state: string
   const deliveryExport = createDeliveryExport.data ?? deliveryQuery.data;
   const deliveryStatus = deliveryExport?.status === "ready" ? "ready" : "not ready";
   const deliveryObjects = deliveryObjectText(deliveryExport);
+  const skippedText = deliverySkippedText(deliveryExport);
   return <section aria-label="Batch delivery export">
-    <p className="mb-2 text-sm text-slate-600">Export final results for the whole batch family, or choose exact Trials from this batch. Selected results retain their original outcomes; the service checks eligibility and reports missing contents.</p>
+    <p className="mb-2 text-sm text-slate-600">Export the whole batch family, only the trials that are eligible now, or exact Trials from this batch. Selected results retain their original outcomes; the service checks eligibility and reports missing contents.</p>
 
     {canPrepare ? <fieldset disabled={createDeliveryExport.isPending} className="mb-4 stack-y-3">
       <legend className="font-medium">Prepare a delivery bundle</legend>
@@ -105,9 +113,10 @@ function DeliveryExportForm({ batchId, state }: { batchId: string; state: string
       </label>
       <div className="flex flex-wrap gap-4 text-sm">
         <label><input type="radio" checked={scope === "family"} onChange={() => setScope("family")} /> Whole batch family</label>
+        <label><input type="radio" checked={scope === "eligible"} onChange={() => setScope("eligible")} /> Eligible trials</label>
         <label><input type="radio" checked={scope === "selected"} onChange={() => setScope("selected")} /> Selected Trials</label>
       </div>
-      {scope === "family" ? <p className="text-xs text-slate-600">Includes linked reruns using the existing final-attempt selection rules. Unresolved results remain visible as export errors.</p> : <div className="stack-y-2">
+      {scope === "family" ? <p className="text-xs text-slate-600">Includes linked reruns using the existing final-attempt selection rules. Unresolved results remain visible as export errors.</p> : scope === "eligible" ? <p className="text-xs text-slate-600">Exports every attempt that is eligible now. Coordinates that are not eligible are left out and recorded on the prepared bundle.</p> : <div className="stack-y-2">
         <p className="text-sm">{selectedIds.length} Trials selected. Selection is preserved when more Trials are loaded.</p>
         {trials.isPending ? <p>Loading Trials…</p> : null}
         {trials.isError ? <ErrorState error={trials.error} /> : null}
@@ -121,8 +130,12 @@ function DeliveryExportForm({ batchId, state }: { batchId: string; state: string
         {trials.hasNextPage ? <Button variant="secondary" disabled={trials.isFetchingNextPage} onClick={() => void trials.fetchNextPage()}>Load more Trials</Button> : null}
         <Button variant="secondary" disabled={selectedIds.length === 0} onClick={() => setSelectedIds([])}>Clear selection</Button>
       </div>}
-      <Button variant="secondary" disabled={createDeliveryExport.isPending || (scope === "selected" && selectedIds.length === 0)} onClick={() => createDeliveryExport.mutate({ mode, ...(scope === "selected" ? { selection: { trial_ids: selectedIds } } : {}) })}>
-        {createDeliveryExport.isPending ? "Preparing..." : scope === "selected" ? "Prepare selected bundle" : "Prepare bundle"}
+      <Button variant="secondary" disabled={createDeliveryExport.isPending || (scope === "selected" && selectedIds.length === 0)} onClick={() => createDeliveryExport.mutate({
+        mode,
+        ...(scope === "selected" ? { selection: { trial_ids: selectedIds, eligible_only: false } } : {}),
+        ...(scope === "eligible" ? { selection: { eligible_only: true } } : {}),
+      })}>
+        {createDeliveryExport.isPending ? "Preparing..." : scope === "selected" ? "Prepare selected bundle" : scope === "eligible" ? "Prepare eligible bundle" : "Prepare bundle"}
       </Button>
     </fieldset> : null}
 
@@ -143,6 +156,7 @@ function DeliveryExportForm({ batchId, state }: { batchId: string; state: string
           </div>
           <div className="mt-1 text-xs text-slate-600">
             {deliveryTrialText(deliveryExport)}
+            {skippedText ? ` · ${skippedText}` : ""}
             {deliveryObjects ? ` · ${deliveryObjects}` : ""}
             {typeof deliveryExport?.manifest?.mode === "string" ? ` · ${deliveryExport.manifest.mode}` : ""}
           </div>
