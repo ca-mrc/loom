@@ -136,6 +136,9 @@ def install_cpu_sampler(namespace: dict[str, Any]) -> None:
         cpus = namespace["os"].cpu_count()
         cpu = cpu_sample_values(first, last, (first_span, last_span),
                                 cpus, os.sysconf("SC_CLK_TCK"))
+        if cpu["idle_cpus"] == -1.0:
+            raise namespace["b"].PoolOperationError(
+                "CPU acquisition unavailable; reconciliation skipped")
         # Preserve the existing non-CPU snapshot fields and their policy inputs.
         path = namespace["Path"]
         mem = {line.split(":")[0]: int(line.split()[1]) * 1024

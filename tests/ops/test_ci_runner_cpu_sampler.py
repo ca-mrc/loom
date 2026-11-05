@@ -244,3 +244,38 @@ def test_installed_snapshot_preserves_busy_fields_under_delay_and_rounding(
     result = sample(namespace, last=last)
     assert result["current_slots"] == result["busy_runners"] == 2
     assert 0 < result["idle_cpus"] + result["pool_cpu_usage_cpus"] <= 8
+
+
+@pytest.mark.parametrize(
+    "first,last",
+    [
+        ((0, 0, 0), (792, 600, 2000000, 101.0)),
+        ((0, 0, 0, float("nan")), (792, 600, 2000000, 101.0)),
+        ((0, 0, 0, 100.0), (0, 0, 0, 101.0)),
+        ((0, 0, 2000000, 100.0), (792, 600, 1999999, 101.0)),
+        ((0, 0, 0, 100.0), (100, 80, 2000000, 101.0)),
+    ],
+)
+def test_unavailable_acquisition_raises_before_other_snapshot_reads(monkeypatch, first, last):
+    host = plugin()
+    namespace = legacy_namespace(host)
+    host.install_cpu_sampler(namespace)
+    clock = iter((99.9999, 100.0001, 100.9999, 101.0001))
+    monkeypatch.setattr(host.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(host.os, "sysconf", lambda _: 100)
+    namespace["Path"] = lambda *_: pytest.fail("unavailable acquisition read other telemetry")
+    with pytest.raises(namespace["b"].PoolOperationError, match="CPU acquisition unavailable"):
+        sample(namespace, first=first, last=last)
+
+
+def test_valid_numeric_hardware_excess_still_reaches_policy_inputs(monkeypatch):
+    host = plugin()
+    namespace = legacy_namespace(host)
+    host.install_cpu_sampler(namespace)
+    clock = iter((99.9999, 100.0001, 100.9999, 101.0001))
+    monkeypatch.setattr(host.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(host.os, "sysconf", lambda _: 100)
+    result = sample(namespace, last=(800, 0, 9000000, 101.0))
+    assert result["idle_cpus"] == 0
+    assert result["pool_cpu_usage_cpus"] > result["total_cpus"]
+    assert result["current_slots"] == result["busy_runners"] == 2

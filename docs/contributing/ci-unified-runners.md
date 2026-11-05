@@ -201,6 +201,19 @@ atomic-accounting guarantee. Existing physical consistency, pressure, reserve,
 growth, hardware-ceiling and busy/idle policy checks remain unchanged. The
 sampler backup is adaptive_pool.py.before-cpu-sampler.
 
+An unavailable CPU acquisition raises the existing pool operation error before
+policy evaluation or reconciliation. The failed service invocation stays
+visible and the normal timer tries again; it creates no guests, changes no
+quota and writes no successful status. It retains the current quota, which may
+already reflect an earlier invalid sample, until a valid observation updates it.
+Existing runners can continue accepting work. Fresh memory/I/O pressure handling
+and idle cleanup are also deferred for that invocation, including on hosts that
+already skipped quota writes for invalid samples. Repeated acquisition failures
+therefore leave stale status and allocation; they are not evidence of health.
+The existing growth state can survive an error gap shorter than its 180-second
+freshness window. Valid numeric CPU excess and valid pressure measurements still
+reach the unchanged resource policy.
+
 ## Activation and rollback
 
 Prepare both providers and prove actual native pickup, Docker and artifacts
