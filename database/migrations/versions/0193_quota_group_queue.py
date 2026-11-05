@@ -19,10 +19,10 @@ def upgrade() -> None:
     op.execute(
         """
         ALTER TABLE provider_request_pools
-            ADD COLUMN queue_enabled boolean NOT NULL DEFAULT false,
-            ADD COLUMN stall_sec double precision NOT NULL DEFAULT 200,
-            ADD COLUMN max_pause_sec double precision NOT NULL DEFAULT 3600,
-            ADD COLUMN config_version bigint NOT NULL DEFAULT 1,
+            ADD COLUMN IF NOT EXISTS queue_enabled boolean NOT NULL DEFAULT false,
+            ADD COLUMN IF NOT EXISTS stall_sec double precision NOT NULL DEFAULT 200,
+            ADD COLUMN IF NOT EXISTS max_pause_sec double precision NOT NULL DEFAULT 3600,
+            ADD COLUMN IF NOT EXISTS config_version bigint NOT NULL DEFAULT 1,
             ADD CONSTRAINT provider_request_pool_queue_check
                 CHECK (stall_sec > 0 AND max_pause_sec >= 0 AND config_version > 0)
         """
@@ -115,7 +115,7 @@ def upgrade() -> None:
     op.execute(
         """
         ALTER TABLE execution_leases
-            ADD COLUMN working_deadline_at timestamptz
+            ADD COLUMN IF NOT EXISTS working_deadline_at timestamptz
         """
     )
 

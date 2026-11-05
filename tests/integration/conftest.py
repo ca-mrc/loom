@@ -724,6 +724,40 @@ def allow_current_cancellation_columns(postgres_url: str) -> None:
         engine.dispose()
 
 
+def allow_current_queue_columns(postgres_url: str) -> None:
+    """Add the quota-group queue columns without moving the Alembic revision.
+
+    Current lease and pool models select these columns on every read. Migration
+    0193 adds them with ``IF NOT EXISTS``, so a later upgrade still succeeds.
+    """
+
+    url = make_url(postgres_url).set(drivername="postgresql+psycopg").render_as_string(hide_password=False)
+    engine = create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text(
+                "ALTER TABLE execution_leases ADD COLUMN IF NOT EXISTS working_deadline_at TIMESTAMPTZ"
+            ))
+            connection.execute(text(
+                "ALTER TABLE provider_request_pools "
+                "ADD COLUMN IF NOT EXISTS queue_enabled BOOLEAN NOT NULL DEFAULT false"
+            ))
+            connection.execute(text(
+                "ALTER TABLE provider_request_pools "
+                "ADD COLUMN IF NOT EXISTS stall_sec DOUBLE PRECISION NOT NULL DEFAULT 200"
+            ))
+            connection.execute(text(
+                "ALTER TABLE provider_request_pools "
+                "ADD COLUMN IF NOT EXISTS max_pause_sec DOUBLE PRECISION NOT NULL DEFAULT 3600"
+            ))
+            connection.execute(text(
+                "ALTER TABLE provider_request_pools "
+                "ADD COLUMN IF NOT EXISTS config_version BIGINT NOT NULL DEFAULT 1"
+            ))
+    finally:
+        engine.dispose()
+
+
 def retain_pool_schema(
     postgres_url: str,
     revision: str = "0176",
@@ -750,6 +784,8 @@ def retain_pool_schema(
     # by those tests, so add them without changing the pinned Alembic version.
     if include_current_columns and revision not in {"0191", "0192"}:
         allow_current_cancellation_columns(url)
+    if include_current_columns:
+        allow_current_queue_columns(url)
 
 
 @pytest.fixture
