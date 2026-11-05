@@ -2242,6 +2242,12 @@ distinct tasks. A historical failed task-image build alone does not block rollou
 its cleanup can still block while pending. Busy checks exit promptly; they do not
 hold a runner or dispatch pause while waiting for the next scheduled check.
 
+The cleanup count uses the existing schema 0186 stored release projection, so
+released historical Job manifests are not decompressed on every idle check.
+It still counts every non-SQL-null native build without a release marker,
+including records created before a capacity reservation. The ten-second
+read-only probe, exact activity counts and atomic rollout guard are unchanged.
+
 If the upstream `nebius-candidate` publication failed, was cancelled, or otherwise
 did not succeed, a read-only **Explain why automatic rollout did not start** job
 reports that conclusion and links to the upstream run. It also explains when

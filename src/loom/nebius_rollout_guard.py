@@ -30,7 +30,7 @@ ACTIVITY_SQL = """
             WHERE state IN ('claimed','running')) AS builds,
           (SELECT count(*) FROM task_image_materialization_attempts
             WHERE native_build IS NOT NULL
-              AND native_build->>'capacity_released_at' IS NULL) AS build_cleanup
+              AND native_capacity_released_at IS NULL) AS build_cleanup
     """
 
 async def admission_open(session: AsyncSession) -> bool:
