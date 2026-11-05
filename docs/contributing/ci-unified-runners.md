@@ -180,6 +180,26 @@ before removal; busy guests stay intact. One-job shutdown and JIT shredding stay
 unchanged. The registry helper permits marked disposable guests, rejects shared
 unmarked hosts/writable markers, and still refuses remote Docker contexts.
 
+
+The same installer also owns the CPU snapshot adapter for the existing adaptive
+pool. It accepts the supported legacy counter/snapshot ABI and inserts an
+idempotent hook without rewriting retirement or policy code. Both CPU inputs
+use the counter timestamp interval: idle credit is the smaller of the original
+tick ratio and [USER_HZ](https://docs.kernel.org/filesystems/proc.html#miscellaneous-kernel-statistics-in-proc-stat)
+ticks divided by elapsed wall time; pool usage is unchanged.
+The correction only lowers idle credit. Counter resets, nonfinite/missing data,
+large total-tick discrepancies and slow or overlapping reads remain invalid.
+
+The acquisition envelope allows two endpoint ticks per CPU, eight exported
+counter-field quantizations, and measured read skew; read spans must stay below
+one USER_HZ tick and 1% of the sample interval. This is an operational consistency
+bound, not a kernel atomic-snapshot guarantee. Existing physical consistency,
+pressure, reserve, growth, hardware-ceiling and busy/idle policy checks remain
+unchanged. For N CPUs, H ticks/second, elapsed T and combined read span S,
+the accepted total-tick discrepancy is at most 2N + 8 + NHS; the downward idle
+adjustment is therefore bounded by (2N + 8 + NHS)/(HT) CPUs. The sampler backup
+is adaptive_pool.py.before-cpu-sampler.
+
 ## Activation and rollback
 
 Prepare both providers and prove actual native pickup, Docker and artifacts
