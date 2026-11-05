@@ -322,7 +322,7 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
 ) -> None:
     from scripts.ops import nebius_pool_migration_guard as migration
 
-    from loom.nebius_rollout_guard import acquire, release
+    from loom.nebius_rollout_guard import CLEANUP_PROJECTION_SQL, acquire, release
     from tests.integration.test_nebius_pool_build_outbox import grant as build_grant
     from tests.integration.test_nebius_pool_build_outbox import local_setup, outbox
     from tests.integration.test_nebius_pool_execution_outbox import grant as execution_grant
@@ -379,6 +379,10 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
                 db.rollback()
                 assert db.execute("SELECT has_table_privilege('loom_actuator','nebius_pool_execution_outbox','INSERT')").fetchone() == (False,)
                 db.execute("DELETE FROM nebius_rollout_guard")
+        # Catalog capability inspection needs no additional runtime grant,
+        # including on a genuinely downgraded pre-projection database.
+        async with actuators() as session:
+            assert (await session.scalar(text(CLEANUP_PROJECTION_SQL))) is (schema_revision >= "0186")
         async with owners.begin() as session:
             assert (await acquire(session, owner=owner, candidate=candidate))["status"] == "acquired"
         with psycopg.connect(url.set(drivername="postgresql").render_as_string(hide_password=False), autocommit=True) as db:

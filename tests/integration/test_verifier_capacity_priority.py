@@ -303,4 +303,3 @@ async def test_equal_age_verifier_head_uses_parent_identity_tiebreaker(verifier_
     async with h.sessions() as session:
         heads, _ = await execution_capacity_wait.read_execution_capacity_waits(session, now=h.now)
         assert len(heads) == 1 and heads[0].trial_id == first_parent
-

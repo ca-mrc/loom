@@ -2242,11 +2242,15 @@ distinct tasks. A historical failed task-image build alone does not block rollou
 its cleanup can still block while pending. Busy checks exit promptly; they do not
 hold a runner or dispatch pause while waiting for the next scheduled check.
 
-The cleanup count uses the existing schema 0186 stored release projection, so
-released historical Job manifests are not decompressed on every idle check.
+The interactive idle check and atomic guard inspect the database's column
+capability and use the schema 0186 stored release projection when present, so
+released historical Job manifests are not decompressed on every current-schema
+idle check. Accepted older schemas and historical pool SQL retain the original
+JSON predicate; a capability query failure stops the check instead of falling
+back. The atomic guard chooses after acquiring its exclusive transaction lock.
 It still counts every non-SQL-null native build without a release marker,
 including records created before a capacity reservation. The ten-second
-read-only probe, exact activity counts and atomic rollout guard are unchanged.
+read-only statements, exact activity counts and atomic rollout guard are retained.
 
 If the upstream `nebius-candidate` publication failed, was cancelled, or otherwise
 did not succeed, a read-only **Explain why automatic rollout did not start** job

@@ -106,12 +106,15 @@ def test_read_only_snapshot_uses_database_without_control_plane():
     calls = []
     def run(*args):
         calls.append(args)
+        if 'pg_catalog.pg_attribute' in args[-1]:
+            return 'true'
         return json.dumps({'locked': False, 'active': {'trials': 0, 'executions': 0, 'builds': 0, 'build_cleanup': 0}})
     assert module.idle_snapshot(SimpleNamespace(run=run), 'platform')['locked'] is False
-    argv = calls[0]
-    assert 'statefulset/loom-postgres' in argv and 'deployment/loom-control-plane' not in argv
-    assert 'BEGIN READ ONLY' in argv[-1] and 'ROLLBACK' in argv[-1]
-    assert 'INSERT' not in argv[-1] and 'DELETE' not in argv[-1]
+    assert len(calls) == 2
+    for argv in calls:
+        assert 'statefulset/loom-postgres' in argv and 'deployment/loom-control-plane' not in argv
+        assert "BEGIN READ ONLY; SET LOCAL statement_timeout='10s'" in argv[-1] and 'ROLLBACK' in argv[-1]
+        assert 'INSERT' not in argv[-1] and 'DELETE' not in argv[-1]
 
 
 def test_automatic_run_rechecks_decision_before_any_mutation(monkeypatch):
@@ -127,6 +130,8 @@ def test_automatic_protected_check_reuses_exact_connection_and_ancestry(monkeypa
         namespace='platform', expected_cluster_id='cluster', candidate='b' * 40)
     def run(*command):
         calls.append(command)
+        if 'pg_catalog.pg_attribute' in command[-1]:
+            return 'true'
         return json.dumps({'locked': False, 'active': {'trials': 1, 'executions': 0, 'builds': 0, 'build_cleanup': 0}})
     kube = SimpleNamespace(kubeconfig=args.kubeconfig, run=run,
         get=lambda *_: {'data': {'environment.json': json.dumps(CONFIG),
@@ -143,7 +148,7 @@ def test_automatic_protected_check_reuses_exact_connection_and_ancestry(monkeypa
     args.kubeconfig = tmp_path / 'foreign-config'
     with pytest.raises(module.DeploymentError, match='connection'):
         module.check_rollout(args, kube=kube, candidate_ancestry=follows)
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 def test_failed_check_cli_reports_failed_without_leaking_exception(monkeypatch, tmp_path, capsys):
@@ -221,10 +226,51 @@ def test_unknown_readiness_exception_retains_failure_without_disclosing_details(
     {'locked': False, 'active': {'trials': 0, 'executions': 0, 'builds': 0, 'build_cleanup': 0, 'extra': 0}},
 ])
 def test_invalid_idle_snapshot_keeps_strict_shape_and_fixed_reason(snapshot):
-    kube = SimpleNamespace(run=lambda *args: json.dumps(snapshot))
+    kube = SimpleNamespace(run=lambda *args: 'true' if 'pg_catalog.pg_attribute' in args[-1]
+        else json.dumps(snapshot))
     with pytest.raises(module.DeploymentError) as error:
         module.idle_snapshot(kube, 'platform')
     assert error.value.reason_code == 'invalid_idle_snapshot'
+
+
+@pytest.mark.parametrize('has_projection', [False, True])
+def test_idle_snapshot_selects_cleanup_predicate_from_database_capability(has_projection):
+    calls = []
+
+    def run(*args):
+        calls.append(args[-1])
+        if 'pg_catalog.pg_attribute' in args[-1]:
+            return json.dumps(has_projection)
+        return json.dumps({'locked': False, 'active': {
+            'trials': 0, 'executions': 0, 'builds': 0, 'build_cleanup': 0}})
+
+    module.idle_snapshot(SimpleNamespace(run=run), 'platform')
+    assert len(calls) == 2
+    assert ('native_capacity_released_at IS NULL' in calls[1]) is has_projection
+    assert ("native_build->>'capacity_released_at' IS NULL" in calls[1]) is not has_projection
+
+
+@pytest.mark.parametrize('capability', [None, 0, 1, 'false', {}, []])
+def test_idle_snapshot_unknown_capability_stops_before_activity_query(capability):
+    calls = []
+    kube = SimpleNamespace(run=lambda *args: calls.append(args[-1]) or json.dumps(capability))
+    with pytest.raises(module.DeploymentError) as error:
+        module.idle_snapshot(kube, 'platform')
+    assert error.value.reason_code == 'invalid_idle_snapshot'
+    assert len(calls) == 1
+
+
+def test_idle_snapshot_capability_failure_is_not_a_legacy_fallback():
+    failure = module.DeploymentError('metadata command failed', reason_code='CommandFailed')
+    calls = []
+
+    def run(*args):
+        calls.append(args[-1])
+        raise failure
+
+    with pytest.raises(module.DeploymentError) as error:
+        module.idle_snapshot(SimpleNamespace(run=run), 'platform')
+    assert error.value is failure and len(calls) == 1
 
 
 def test_rejected_platform_binding_has_fixed_reason(monkeypatch):
