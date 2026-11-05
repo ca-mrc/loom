@@ -525,6 +525,18 @@ class DispatchAuditUnavailableError(RuntimeError):
     """Admission failed closed before provider I/O; contains no driver details."""
 
 
+def _broker_pause_header(request: Request) -> bool:
+    """True only for the exact header the hosted broker writes.
+
+    A scope with no headers, which older audit fixtures use, is not capable.
+    """
+
+    raw = request.scope.get("headers")
+    if not raw:
+        return False
+    return any(name.lower() == b"x-loom-pause-capable" and value == b"1" for name, value in raw)
+
+
 def audit_for_request(
     request: Request,
     ctx: AuthContext,
@@ -539,7 +551,7 @@ def audit_for_request(
     # The hosted broker deletes any agent-supplied copy and sets this only
     # when that runtime follows a moved deadline. Exact "1" keeps every other
     # caller, including an old runtime, on today's admission path.
-    state.pause_capable = request.headers.get("x-loom-pause-capable") == "1"
+    state.pause_capable = _broker_pause_header(request)
     settings = getattr(request.app.state, "settings", None)
     if settings is not None:
         state.upstream_timeout_sec = float(settings.upstream_timeout_sec)
