@@ -138,12 +138,15 @@ def test_failed_deregistration_preserves_provider(tmp_path):
     class API:
         def request(self, method, path, **kwargs):
             calls.append((method, path))
-            if method == "GET":
+            if path == "/actions/runners/3" and method == "GET":
                 return {"busy": False}
+            if path == "/actions/runs/9" and method == "GET":
+                return {"display_title": supply.run_title(0, "test"), "status": "in_progress"}
             raise supply.SupplyError("racing busy runner")
 
-    assert not supply.retired_worker(API(), tmp_path, {"runner_id": 3, "run_id": 9}, {})
-    assert calls == [("GET", "/actions/runners/3"), ("DELETE", "/actions/runners/3")]
+    assert not supply.retired_worker(API(), tmp_path, {"runner_id": 3, "run_id": 9, "slot": 0, "nonce": "test"}, {})
+    assert calls == [("GET", "/actions/runners/3"), ("GET", "/actions/runs/9"),
+                     ("DELETE", "/actions/runners/3")]
 
 
 def test_lost_dispatch_response_is_not_repeated(tmp_path):
