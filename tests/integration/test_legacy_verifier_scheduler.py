@@ -4,10 +4,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.orm import undefer
 
 from loom.db.schema import Task, TaskImageMaterialization, Trial
 from loom.execution_runtime_contract import ExecutionRuntimePlanV1
 from loom.nebius_rollout_guard import acquire, release
+from loom.task_image_recipe import task_image_materialization_key
 from loom_control_plane.service_execution_scheduler import reserve_next_service_execution
 from tests.integration.test_service_execution_image_readiness import (
     TASK_IMAGE,
@@ -37,7 +39,9 @@ async def test_scheduler_persists_revision_bound_default_before_admission(
     guard_owned = False
     try:
         async with sessions() as session:
-            trial_id, ids = await _seed_preparing_trial(session, now=now, state="ready")
+            trial_id, ids = await _seed_preparing_trial(
+                session, now=now, state="ready", historical_image_identity=True,
+            )
             trial = await session.get(Trial, trial_id)
             task = await session.get(Task, trial.task_id)
             shared = deepcopy(task.config)
@@ -48,7 +52,15 @@ async def test_scheduler_persists_revision_bound_default_before_admission(
             trial.config = {**trial.config, "verifier_env_mode": override}
             # Seed the historical frozen revision, including the unused ARM alternative.
             for identity in ids.values():
-                image = await session.get(TaskImageMaterialization, identity)
+                image = await session.get(
+                    TaskImageMaterialization, identity,
+                    options=[undefer(TaskImageMaterialization.input_manifest_sha256)],
+                )
+                assert image.input_manifest_sha256 == ""
+                assert image.materialization_key == task_image_materialization_key(
+                    task_id=task.id, task_checksum="2" * 64, cpu_arch=image.cpu_arch,
+                )
+                assert image.task_source_provenance == task.source_provenance
                 image.task_config = deepcopy(shared)
                 if image.cpu_arch == "x86_64":
                     image.registry_images = {"task": TASK_IMAGE}

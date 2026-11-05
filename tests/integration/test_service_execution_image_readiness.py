@@ -49,7 +49,9 @@ CONTROLLER_IMAGE = "registry.example/controller@sha256:" + "9" * 64
 
 async def _seed_preparing_trial(
     session: AsyncSession, *, now: datetime, state: str, fixture: bool = False, independent_verifier: bool = False,
+    historical_image_identity: bool = False,
 ) -> tuple[UUID, dict[str, UUID]]:
+    """Prepare current inputs unless a test explicitly needs a historical cache row."""
     trial_id, target = await fixtures._seed_ready_trial(session, now=now)
     await fixtures._configure_scheduler_trial(session, trial_id=trial_id, now=now)
     trial = await session.get(Trial, trial_id)
@@ -113,24 +115,35 @@ async def _seed_preparing_trial(
         "manifest_sha256": "sha256:" + "d" * 64,
         "file_count": 3, "total_bytes": 4096,
     }}
-    rows = await ensure_task_image_materializations(session, task_row=task)
+    def historical_image(cpu_arch: str) -> TaskImageMaterialization:
+        # Old caches carried full SEI provenance before its digest became part
+        # of image identity. Seed that real historical shape without weakening
+        # the immutability of current input-manifest-qualified rows.
+        return TaskImageMaterialization(
+            id=uuid4(),
+            materialization_key=task_image_materialization_key(
+                task_id=task.id, task_checksum=task.checksum, cpu_arch=cpu_arch,
+            ),
+            preparation_revision="", input_manifest_sha256="",
+            task_id=task.id,
+            task_checksum=task.checksum,
+            cpu_arch=cpu_arch,
+            task_config=deepcopy(task.config),
+            task_source=task.source,
+            task_source_provenance=deepcopy(task.source_provenance),
+            state="failed",
+        )
+
+    if historical_image_identity:
+        rows = (historical_image("x86_64"),)
+        session.add_all(rows)
+    else:
+        rows = await ensure_task_image_materializations(session, task_row=task)
     assert {row.cpu_arch for row in rows} == {"x86_64"}
     # Historical ARM records may remain linked to frozen Trials. Insert one
     # explicitly so readiness/tamper checks still prove it cannot authorize an
     # x86 execution; new preparation must never enqueue another ARM build.
-    legacy_arm = TaskImageMaterialization(
-        id=uuid4(),
-        materialization_key=task_image_materialization_key(
-            task_id=task.id, task_checksum=task.checksum, cpu_arch="arm64",
-        ),
-        task_id=task.id,
-        task_checksum=task.checksum,
-        cpu_arch="arm64",
-        task_config=deepcopy(task.config),
-        task_source=task.source,
-        task_source_provenance=deepcopy(task.source_provenance),
-        state="failed",
-    )
+    legacy_arm = historical_image("arm64")
     session.add(legacy_arm)
     session.add(TrialTaskImageMaterialization(trial_id=trial_id, materialization_id=legacy_arm.id))
     for row in rows:
@@ -364,7 +377,10 @@ async def test_fixture_reservation_requires_exact_frozen_components(
     trial_id = None
     try:
         async with sessions() as session:
-            trial_id, ids = await _seed_preparing_trial(session, now=now, state="queued", fixture=True)
+            trial_id, ids = await _seed_preparing_trial(
+                session, now=now, state="queued", fixture=True,
+                historical_image_identity=tamper == "prebuilt",
+            )
             row = await session.get(TaskImageMaterialization, ids["x86_64"])
             assert row is not None
             row.state = "ready"
