@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 
 from loom.auth import AuthContext
@@ -40,6 +40,23 @@ class _DeliveryExportSelection(BaseModel):
             "eligible and pass object/TB2 validation."
         ),
     )
+    eligible_only: bool = Field(
+        default=False,
+        description=(
+            "Pack every delivery-eligible attempt in the batch family and "
+            "record coordinates that are not eligible. Mutually exclusive "
+            "with trial_ids. Omit both for the full-family export that fails "
+            "closed when any coordinate is unresolved."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _exclusive_selection(self) -> _DeliveryExportSelection:
+        if self.eligible_only and self.trial_ids:
+            raise ValueError(
+                "selection.eligible_only cannot be combined with selection.trial_ids"
+            )
+        return self
 
 
 class _DeliveryExportRequest(BaseModel):
@@ -139,6 +156,11 @@ async def create_batch_delivery_export(
                     and payload.selection.trial_ids is not None
                 )
                 else None
+            ),
+            eligible_only=(
+                payload is not None
+                and payload.selection is not None
+                and payload.selection.eligible_only
             ),
             public_base_url=public_base_url(request),
         )

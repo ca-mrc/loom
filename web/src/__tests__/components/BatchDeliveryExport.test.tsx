@@ -37,6 +37,21 @@ it("prepares v2 with default whole-family resolution even when an older export e
   expect(api.listTrials).not.toHaveBeenCalled();
 });
 
+it("prepares a bundle of the trials that are eligible now", async () => {
+  vi.mocked(api.createBatchDeliveryExport).mockResolvedValue({
+    ...ready,
+    manifest: { trial_count: 3, mode: "raw-harbor-tb2-v2", selection: { skipped_coordinates_count: 2 } },
+  } as never);
+  show();
+  await userEvent.click(screen.getByRole("radio", { name: "Eligible trials" }));
+  await userEvent.click(screen.getByRole("button", { name: "Prepare eligible bundle" }));
+  await waitFor(() => expect(api.createBatchDeliveryExport).toHaveBeenCalledWith("batch-a", {
+    mode: "raw-harbor-tb2-v2", selection: { eligible_only: true },
+  }));
+  expect(api.listTrials).not.toHaveBeenCalled();
+  expect(await screen.findByText(/2 coordinates skipped/)).toBeInTheDocument();
+});
+
 it("keeps exact selected IDs across pages, including a scored failure, and downloads the resulting package", async () => {
   const download = vi.spyOn(api, "downloadBatchDeliveryExport").mockResolvedValue(undefined);
   show();
@@ -47,7 +62,7 @@ it("keeps exact selected IDs across pages, including a scored failure, and downl
   await userEvent.click(await screen.findByRole("checkbox", { name: "Select trial-b" }));
   await userEvent.click(screen.getByRole("button", { name: "Prepare selected bundle" }));
   await waitFor(() => expect(api.createBatchDeliveryExport).toHaveBeenCalledWith("batch-a", {
-    mode: "raw-harbor-tb2-v2", selection: { trial_ids: ["trial-a", "trial-b"] },
+    mode: "raw-harbor-tb2-v2", selection: { trial_ids: ["trial-a", "trial-b"], eligible_only: false },
   }));
   await userEvent.click(screen.getByRole("button", { name: "Download bundle" }));
   expect(download).toHaveBeenCalledWith("/download", "v2.tar.gz");

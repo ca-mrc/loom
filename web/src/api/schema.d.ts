@@ -9157,6 +9157,12 @@ export interface components {
         /** _DeliveryExportSelection */
         _DeliveryExportSelection: {
             /**
+             * Eligible Only
+             * @description Pack every delivery-eligible attempt in the batch family and record coordinates that are not eligible. Mutually exclusive with trial_ids. Omit both for the full-family export that fails closed when any coordinate is unresolved.
+             * @default false
+             */
+            eligible_only: boolean;
+            /**
              * Trial Ids
              * @description Optional explicit trial UUID list within the authorized batch family. When set, only these trials are packed and unresolved sibling coordinates are skipped. Selected trials must still be delivery-eligible and pass object/TB2 validation.
              */
