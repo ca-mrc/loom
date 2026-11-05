@@ -2,7 +2,7 @@
 
 from collections.abc import AsyncIterator
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -21,6 +21,9 @@ from loom.db.schema import (
     Trial,
     TrialTaskImageMaterialization,
 )
+from loom.models.task_checksum import task_checksum
+from loom.service_execution_materialization import prepare_service_execution_input_manifest
+from loom.task_image_recipe import native_preparation_revision, task_image_materialization_key
 from loom.taskset.materialize import MaterializeOutput, TaskRowDraft
 from loom_control_plane.routes.trials import _ensure_trial_task_image_links
 from loom_service.taskset_materializer import LeaseLost, MaterializationLease, publish_if_current
@@ -122,7 +125,8 @@ async def publication(postgres_url: str) -> AsyncIterator[Publication]:
 
 
 async def _seed(
-    publication: Publication, *drafts: TaskRowDraft, history: bool = False
+    publication: Publication, *drafts: TaskRowDraft, history: bool = False,
+    historical_image: bool = False,
 ) -> UUID | None:
     async with publication.sessions() as session, session.begin():
         tasks = [
@@ -154,7 +158,27 @@ async def _seed(
                 result={"fixture": "original"},
             )
         )
-        await _ensure_trial_task_image_links(session, trial_id=trial_id, task_row=tasks[0])
+        if historical_image:
+            task = tasks[0]
+            revision = native_preparation_revision(task.config)
+            image_id = uuid4()
+            session.add(TaskImageMaterialization(
+                id=image_id,
+                materialization_key=task_image_materialization_key(
+                    task_id=task.id, task_checksum=task.checksum,
+                    cpu_arch="x86_64", preparation_revision=revision,
+                ),
+                task_id=task.id, task_checksum=task.checksum, cpu_arch="x86_64",
+                preparation_revision=revision, input_manifest_sha256="",
+                task_config=task.config, task_source=task.source,
+                task_source_provenance=task.source_provenance, state="queued",
+            ))
+            await session.flush()
+            session.add(TrialTaskImageMaterialization(
+                trial_id=trial_id, materialization_id=image_id,
+            ))
+        else:
+            await _ensure_trial_task_image_links(session, trial_id=trial_id, task_row=tasks[0])
         return trial_id
 
 
@@ -187,6 +211,7 @@ async def test_same_id_rebuild_preserves_trial_and_frozen_image_revision(publica
             await session.scalars(
                 select(TaskImageMaterialization).options(
                     undefer(TaskImageMaterialization.preparation_revision),
+                    undefer(TaskImageMaterialization.input_manifest_sha256),
                 ).where(
                     TaskImageMaterialization.task_id == old.id,
                 )
@@ -211,6 +236,7 @@ async def test_same_id_rebuild_preserves_trial_and_frozen_image_revision(publica
         assert _columns(await session.get(Trial, trial_id)) == trial_before
         frozen_after = await session.get(TaskImageMaterialization, image_id, options=(
             undefer(TaskImageMaterialization.preparation_revision),
+            undefer(TaskImageMaterialization.input_manifest_sha256),
         ))
         assert _columns(frozen_after) == frozen_before
         # A replay of the old submission must retain its original revision.
@@ -333,6 +359,7 @@ async def test_duplicate_retained_ids_reject_without_changing_publication(public
                     for row in await session.scalars(
                         select(TaskImageMaterialization).options(
                             undefer(TaskImageMaterialization.preparation_revision),
+                    undefer(TaskImageMaterialization.input_manifest_sha256),
                         ).where(
                             TaskImageMaterialization.task_id == old.id
                         ),
@@ -356,3 +383,163 @@ async def test_duplicate_retained_ids_reject_without_changing_publication(public
     if isinstance(rejected.value, ValueError):
         assert "duplicate" in str(rejected.value).lower()
     assert await snapshot() == before
+
+
+@pytest.mark.parametrize("historical_image", [False, True])
+@pytest.mark.parametrize("native_harbor,retired_image", [(False, False), (True, False), (False, True)])
+@pytest.mark.parametrize("mode_changed", [False, True])
+async def test_input_manifest_rebuild_selects_current_modes_and_preserves_history(
+    publication, tmp_path, native_harbor, mode_changed, historical_image, retired_image,
+):
+    bundle = tmp_path / "bundle"
+    helper = bundle / "tests" / "helper"
+    helper.parent.mkdir(parents=True)
+    helper.write_bytes(b"#!/bin/sh\nexit 0\n")
+    helper.chmod(0o644)
+    checksum = task_checksum(bundle)
+    draft = publication.draft("kept")
+    if native_harbor:
+        draft.config["upstream_conversion"] = {
+            "importer": "loom.harbor-native.v1",
+            "original_config": "upstream-task.toml",
+            "changes": [],
+        }
+
+    def generation(number):
+        _, provenance = prepare_service_execution_input_manifest(
+            bundle, task_checksum=checksum, bucket="tasks",
+            manifest_key=f"{publication.task_set_id}/generation-{number}/inputs.json",
+        )
+        return replace(
+            draft, checksum=checksum,
+            source=f"s3://tasks/{publication.task_set_id}/generation-{number}/kept/",
+            source_provenance=provenance,
+        )
+
+    old = generation(1)
+    trial_id = await _seed(publication, old, history=True, historical_image=historical_image)
+    if retired_image:
+        async with publication.sessions() as session, session.begin():
+            image = (await session.scalars(select(TaskImageMaterialization).where(
+                TaskImageMaterialization.task_id == old.id,
+            ))).one()
+            image.state = "retired"
+    async with publication.sessions() as session:
+        trial_before = _columns(await session.get(Trial, trial_id))
+        original = (await session.scalars(
+            select(TaskImageMaterialization).where(TaskImageMaterialization.task_id == old.id),
+        )).one()
+        original_id = original.id
+        original_snapshot = (
+            original.materialization_key, deepcopy(original.task_config),
+            original.task_source, deepcopy(original.task_source_provenance),
+        )
+
+    if mode_changed:
+        helper.chmod(0o755)
+    replacement = generation(2)
+    assert task_checksum(bundle) == old.checksum == replacement.checksum
+    old_digest = old.source_provenance["service_execution_input"]["manifest_sha256"]
+    new_digest = replacement.source_provenance["service_execution_input"]["manifest_sha256"]
+    assert (old_digest != new_digest) is mode_changed
+    await _publish(publication, replacement)
+
+    async with publication.sessions() as session, session.begin():
+        current = await session.get(Task, old.id)
+        assert current.source_provenance == replacement.source_provenance
+        assert _columns(await session.get(Trial, trial_id)) == trial_before
+        original = await session.get(TaskImageMaterialization, original_id)
+        expected_snapshot = original_snapshot
+        if retired_image and not mode_changed and not historical_image:
+            expected_snapshot = (
+                original_snapshot[0], original_snapshot[1],
+                replacement.source, replacement.source_provenance,
+            )
+        assert (
+            original.materialization_key, original.task_config,
+            original.task_source, original.task_source_provenance,
+        ) == expected_snapshot
+        await _ensure_trial_task_image_links(session, trial_id=trial_id, task_row=current)
+        assert await session.scalar(select(TrialTaskImageMaterialization.materialization_id).where(
+            TrialTaskImageMaterialization.trial_id == trial_id,
+        )) == original_id
+
+        fresh_trial_id = uuid4()
+        await session.execute(insert(Trial).values(
+            id=fresh_trial_id, team_id=publication.team_id, task_id=current.id,
+            config={"agent_name": "oracle"}, requires_caps={}, state="queued",
+        ))
+        await _ensure_trial_task_image_links(session, trial_id=fresh_trial_id, task_row=current)
+        selected_id = await session.scalar(select(TrialTaskImageMaterialization.materialization_id).where(
+            TrialTaskImageMaterialization.trial_id == fresh_trial_id,
+        ))
+        expected_new_image = mode_changed or historical_image
+        assert (selected_id != original_id) is expected_new_image
+        selected = await session.get(TaskImageMaterialization, selected_id)
+        assert selected.task_source_provenance["service_execution_input"]["manifest_sha256"] == new_digest
+        images = list(await session.scalars(select(TaskImageMaterialization).where(
+            TaskImageMaterialization.task_id == current.id,
+        )))
+        assert len(images) == (2 if expected_new_image else 1)
+        task_set = await session.get(TaskSet, publication.task_set_id)
+        assert task_set.status == "ready"
+
+
+async def test_retired_input_manifest_rebuild_downloads_after_old_generation_is_collected(
+    publication, tmp_path,
+):
+    from loom_execution_actuator.task_image_runtime import download_bundle
+    from tests.unit.test_harbor_taskset_materialize import ObjectStore
+
+    bundle = tmp_path / "bundle"
+    helper = bundle / "tests" / "helper"
+    helper.parent.mkdir(parents=True)
+    helper.write_bytes(b"#!/bin/sh\nexit 0\n")
+    helper.chmod(0o755)
+    checksum = task_checksum(bundle)
+    draft = publication.draft("kept")
+    store = ObjectStore(b"")
+    store.objects.clear()
+
+    def generation(number):
+        prefix = f"{publication.task_set_id}/generation-{number}/"
+        body, provenance = prepare_service_execution_input_manifest(
+            bundle, task_checksum=checksum, bucket="tasks", manifest_key=prefix + "inputs.json",
+        )
+        store.objects[prefix + "inputs.json"] = body
+        store.objects[prefix + "bundle/tests/helper"] = helper.read_bytes()
+        return replace(draft, checksum=checksum, source=f"s3://tasks/{prefix}bundle/",
+                       source_provenance=provenance)
+
+    old = generation(1)
+    trial_id = await _seed(publication, old, history=True)
+    async with publication.sessions() as session, session.begin():
+        image = (await session.scalars(select(TaskImageMaterialization).where(
+            TaskImageMaterialization.task_id == old.id,
+        ))).one()
+        original_id = image.id
+        image.state = "retired"
+        current = await session.get(Task, old.id)
+        current.checksum = "b" * 64
+        current.source = "s3://tasks/intervening-byte-revision/"
+        current.source_provenance = {}
+    # Generation GC may collect a retired, non-current byte revision after
+    # terminal Trials finish. Only the freshly rebuilt equivalent copy remains.
+    store.objects.clear()
+    replacement = generation(2)
+    await _publish(publication, replacement)
+    async with publication.sessions() as session:
+        image = await session.get(TaskImageMaterialization, original_id)
+        assert image.state == "queued"
+        assert image.task_source == replacement.source
+        assert image.task_source_provenance == replacement.source_provenance
+        assert await session.scalar(select(TrialTaskImageMaterialization.materialization_id).where(
+            TrialTaskImageMaterialization.trial_id == trial_id,
+        )) == original_id
+        download_bundle({
+            "task_source": image.task_source, "task_checksum": image.task_checksum,
+            "task_source_provenance": image.task_source_provenance, "source_bucket": "tasks",
+        }, store, tmp_path / "restored")
+    restored = tmp_path / "restored/tests/helper"
+    assert restored.read_bytes() == helper.read_bytes()
+    assert restored.stat().st_mode & 0o111

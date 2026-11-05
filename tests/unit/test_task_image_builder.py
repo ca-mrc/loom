@@ -293,10 +293,12 @@ async def test_published_image_architecture_must_match_claim(
 
 
 @pytest.mark.parametrize("native_recipe", [False, True])
+@pytest.mark.parametrize("input_manifest", [False, True])
 async def test_materialization_builds_and_publishes_every_dockerfile_component(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     native_recipe: bool,
+    input_manifest: bool,
 ) -> None:
     claim = _claim()
     if native_recipe:
@@ -306,6 +308,16 @@ async def test_materialization_builds_and_publishes_every_dockerfile_component(
         claim = replace(claim, materialization_key=task_image_materialization_key(
             task_id=claim.task_id, task_checksum=claim.task_checksum, cpu_arch=claim.cpu_arch,
             preparation_revision=NATIVE_HARBOR_PREPARATION,
+        ))
+    if input_manifest:
+        from loom.task_image_recipe import NATIVE_HARBOR_PREPARATION, task_image_materialization_key
+
+        claim = replace(claim, task_source_provenance={"service_execution_input": {
+            "manifest_sha256": "sha256:" + "b" * 64,
+        }}, materialization_key=task_image_materialization_key(
+            task_id=claim.task_id, task_checksum=claim.task_checksum, cpu_arch=claim.cpu_arch,
+            preparation_revision=NATIVE_HARBOR_PREPARATION if native_recipe else "",
+            input_manifest_sha256="b" * 64,
         ))
     task_dir = tmp_path / "task"
     (task_dir / "environment").mkdir(parents=True)
@@ -324,7 +336,7 @@ async def test_materialization_builds_and_publishes_every_dockerfile_component(
         assert ("mkdir -p /solution" in (task_dir / "environment/Dockerfile").read_text()) is native_recipe
         if native_recipe:
             assert "ARG LOOM_PREPARATION_OWNER_1=${TASK_USER}" in (task_dir / "environment/Dockerfile").read_text()
-        assert kwargs["task_checksum"] == (claim.materialization_key if native_recipe else claim.task_checksum)
+        assert kwargs["task_checksum"] == (claim.materialization_key if native_recipe or input_manifest else claim.task_checksum)
         return "loom-task:base"
 
     async def sidecars(**kwargs: Any) -> dict[str, str]:

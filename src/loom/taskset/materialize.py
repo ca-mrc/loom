@@ -309,6 +309,9 @@ def _safe_extract_tar_bytes(
                 with src, target.open("wb") as dst:
                     while chunk := src.read(1024 * 1024):
                         dst.write(chunk)
+                # Preserve executable intent using the execution-input manifest's
+                # normal modes; discard privileged and group/world-write bits.
+                target.chmod(0o755 if member.mode & 0o111 else 0o644)
     except tarfile.TarError as exc:
         raise _UnsafeBundleArchiveError("bundle archive is not a readable tar file") from exc
 

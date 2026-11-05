@@ -39,6 +39,7 @@ from loom.task_image_metadata import TaskImageRuntimeMetadataV1
 from loom.task_image_recipe import (
     NATIVE_HARBOR_PREPARATION,
     native_preparation_revision,
+    task_image_input_manifest_digest,
 )
 from loom.task_image_recipe import (
     canonical_task_checksum as canonical_task_checksum,
@@ -197,12 +198,19 @@ def current_task_image_reference(row: Any) -> ColumnElement[bool]:
         func.to_jsonb(source.table_valued(), type_=JSONB)["preparation_revision"].astext,
         "",
     )
+    input_digest = func.coalesce(
+        source.c.task_source_provenance["service_execution_input"]["manifest_sha256"].astext, "",
+    )
     if inspected.is_instance:
+        input_digest = select(input_digest).where(source.c.id == row.id).scalar_subquery()
         # GC also supplies a locked ORM snapshot. Its deferred field must not
         # lazy-load; read the optional value by that exact id in the same SQL.
         revision = select(revision).where(source.c.id == row.id).scalar_subquery()
     return and_(
         Task.id == row.task_id,
+        or_(digest != "", input_digest == func.coalesce(
+            Task.source_provenance["service_execution_input"]["manifest_sha256"].astext, "",
+        )),
         revision == case(
             (Task.config["upstream_conversion"]["importer"].astext == "loom.harbor-native.v1",
              NATIVE_HARBOR_PREPARATION), else_="",
@@ -307,6 +315,19 @@ def _assert_no_pending_task_image_writes(session: AsyncSession) -> None:
         raise RuntimeError("task image ensure has pending materialization writes")
 
 
+def _same_task_image_source(row: Any, task: Task, *, input_digest: str) -> bool:
+    if not input_digest:
+        return row.task_source == task.source and row.task_source_provenance == task.source_provenance
+    # A rebuild can publish identical inputs under a new generation's location.
+    # Keep the previously frozen source while comparing every other field.
+    def without_location(provenance: Mapping[str, Any]) -> dict[str, Any]:
+        binding = dict(provenance["service_execution_input"])
+        binding.pop("manifest_uri", None)
+        return {**provenance, "service_execution_input": binding}
+
+    return without_location(row.task_source_provenance) == without_location(task.source_provenance)
+
+
 async def _lock_task_image_materializations(
     session: AsyncSession, *, task_row: Task
 ) -> tuple[TaskImageMaterialization, ...]:
@@ -323,6 +344,7 @@ async def _lock_task_image_materializations(
     task_checksum = canonical_task_checksum(task_row.checksum)
     preparation_revision = native_preparation_revision(task_row.config)
     manifest_digest = task_bundle_content_manifest_digest(task_row.source_provenance)
+    input_digest = task_image_input_manifest_digest(task_row.source_provenance)
     if manifest_digest and task.task.id != task_row.id:
         raise TaskImageSnapshotConflictError("frozen task snapshot identity differs from the materialization")
     if manifest_digest:
@@ -336,6 +358,7 @@ async def _lock_task_image_materializations(
             task_checksum=task_checksum,
             cpu_arch=cpu_arch,
             bundle_content_manifest_sha256=manifest_digest,
+            input_manifest_sha256=input_digest,
         )
         for cpu_arch in architectures
     }
@@ -348,6 +371,7 @@ async def _lock_task_image_materializations(
                 # New native producers require the current schema. Legacy
                 # writers omit the field entirely on audited older layouts.
                 **({"preparation_revision": preparation_revision} if preparation_revision else {}),
+                **({"input_manifest_sha256": input_digest} if input_digest else {}),
                 task_id=task_row.id,
                 task_checksum=task_checksum,
                 bundle_content_manifest_sha256=manifest_digest,
@@ -373,13 +397,12 @@ async def _lock_task_image_materializations(
     by_arch = {row.cpu_arch: row for row in rows}
     if set(by_arch) != set(architectures):
         raise TaskImageSnapshotConflictError("task image materialization identity conflict")
-    if (manifest_digest or preparation_revision) and any(
+    if (manifest_digest or input_digest or preparation_revision) and any(
         row.bundle_content_manifest_sha256 != manifest_digest
         or row.task_id != task_row.id
         or row.task_checksum != task_checksum
         or row.task_config != task_row.config
-        or row.task_source != task_row.source
-        or row.task_source_provenance != task_row.source_provenance
+        or not _same_task_image_source(row, task_row, input_digest=input_digest)
         for row in rows
     ):
         raise TaskImageSnapshotConflictError("frozen content-manifest snapshot conflicts with existing materialization")
@@ -389,8 +412,8 @@ async def _lock_task_image_materializations(
         if row.task_config != task_row.config:
             raise TaskImageSnapshotConflictError("task image materialization snapshot conflicts with task checksum")
         if row.state == "retired" and not manifest_digest and not preparation_revision:
-            # Legacy caches may need current upload objects after retention GC.
-            # Manifest-bearing sources retain the exact admitted journal identity.
+            # Retired generic caches can refresh equivalent transport locations.
+            # Mode-qualified inputs already matched every non-location field above.
             row.task_source = task_row.source
             row.task_source_provenance = task_row.source_provenance or {}
     return tuple(by_arch[cpu_arch] for cpu_arch in architectures)

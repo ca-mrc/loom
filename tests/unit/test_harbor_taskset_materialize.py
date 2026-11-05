@@ -2,6 +2,9 @@
 
 import io
 import json
+import os
+import stat
+import subprocess
 import tarfile
 import tomllib
 from uuid import uuid4
@@ -116,3 +119,83 @@ def test_taskset_intake_uses_stable_source_identity_and_preserves_authored_bytes
     for name, content in published_files.items():
         assert (restored / name).read_bytes() == content
     assert store.objects["tasksets/user/team/slice/bundle.tar.gz"] == archive.getvalue()
+
+
+def test_uploaded_executable_helpers_survive_manifest_and_native_verifier(tmp_path):
+    files = {
+        "task.toml": (
+            b'version = "1.0"\n[metadata]\ntags = ["shell"]\n'
+            b'[environment]\ncpus = 1\nmemory_mb = 2048\nstorage_mb = 4096\n'
+        ),
+        "instruction.md": b"Run the helpers.\n",
+        "environment/Dockerfile": b"FROM ubuntu:24.04\nWORKDIR /app\n",
+        "tests/test.sh": (
+            b'set -eu\n'
+            b'"$LOOM_HARBOR_TEST_DIR/terminalgen_author_test.sh"\n'
+            b'"$LOOM_HARBOR_TEST_DIR/native-helper"\n'
+            b'printf "1\\n" > "$LOOM_HARBOR_LOG_DIR/reward.txt"\n'
+        ),
+        "tests/terminalgen_author_test.sh": b"#!/bin/sh\nprintf 'authored helper ran\\n'\n",
+        "tests/native-helper": b"#!/bin/sh\nprintf 'extensionless helper ran\\n'\n",
+        "tests/not-executable.sh": b"#!/bin/sh\nexit 1\n",
+        "tests/data.txt": b"ordinary data\n",
+    }
+    authored_modes = {
+        "tests/terminalgen_author_test.sh": 0o775,
+        "tests/native-helper": 0o710,
+        "tests/data.txt": 0o666,
+    }
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w:gz") as stream:
+        for name, content in files.items():
+            entry = tarfile.TarInfo("tasks/alpha/" + name)
+            entry.size = len(content)
+            entry.mode = authored_modes.get(name, 0o644)
+            stream.addfile(entry, io.BytesIO(content))
+    store = ObjectStore(archive.getvalue())
+    manifest = UserTaskSetManifest.model_validate({
+        "apiVersion": "loom.taskset/v1", "kind": "UserTaskSet",
+        "metadata": {"name": "slice", "display_name": "Slice"},
+        "intents": ["trajectory_generation"],
+        "source": {"type": "bundle-upload", "locator": "bundle.tar.gz"},
+    })
+    result = materialize_task_set(
+        manifest=manifest, task_set_id="ts/team/slice", owning_team_id="team",
+        materialization_job_id=uuid4(), materialization_epoch=1,
+        intents=["trajectory_generation"], verifier_blob_uri=None,
+        minio_client=store, artifacts_bucket="artifacts", upstream_cache_root=tmp_path,
+    )
+    assert result.status == "ready", result.error_summary
+    task = result.task_rows[0]
+    binding = task.source_provenance["service_execution_input"]
+    published = json.loads(store.objects[binding["manifest_uri"].removeprefix("s3://artifacts/")])
+    modes = {item["relative_path"]: item["mode"] for item in published["files"]}
+    expected_modes = {
+        "tests/terminalgen_author_test.sh": "0755",
+        "tests/native-helper": "0755",
+        "tests/not-executable.sh": "0644",
+        "tests/data.txt": "0644",
+    }
+    assert {name: modes[name] for name in expected_modes} == expected_modes
+
+    restored = tmp_path / "native-restored"
+    download_bundle({
+        "task_source": task.source, "task_checksum": task.checksum,
+        "task_source_provenance": task.source_provenance, "source_bucket": "artifacts",
+    }, store, restored)
+    for name, expected in expected_modes.items():
+        assert stat.S_IMODE((restored / name).stat().st_mode) == int(expected, 8)
+        assert (restored / name).read_bytes() == files[name]
+    output = tmp_path / "output.json"
+    completed = subprocess.run(
+        ["sh", str(restored / "verifier/run.sh")],
+        env={**os.environ, "LOOM_TASK_DIR": str(restored),
+             "LOOM_VERIFIER_OUTPUT": str(output),
+             "LOOM_HARBOR_TEST_DIR": str(tmp_path / "tests"),
+             "LOOM_HARBOR_LOG_DIR": str(tmp_path / "logs")},
+        capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "authored helper ran" in completed.stdout
+    assert "extensionless helper ran" in completed.stdout
+    assert json.loads(output.read_text())["rewards"] == {"reward": 1.0}

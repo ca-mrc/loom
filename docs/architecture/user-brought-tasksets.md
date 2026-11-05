@@ -41,6 +41,13 @@ collisions at `verifier/run.sh` fail materialization with a diagnostic.
 An explicitly selected non-script verifier (such as `pytest`) or a custom
 script path keeps its existing intake behavior and does not receive this bridge.
 
+Uploaded tar files preserve authored executable intent: a regular file with any
+execute bit becomes `0755`, and other regular files become `0644`. Special mode
+bits and additional write permissions are discarded. File names and extensions
+do not determine executability. The execution input manifest carries these modes
+through object storage and restores them before image preparation and execution.
+Existing archive path, link, file-type and size restrictions still apply.
+
 The projected verifier defaults to `shared`; explicit modes are preserved.
 For container tasks, an omitted user becomes `environment.user = "image"` until
 the final OCI image is built. Publication resolves USER against the final image's
@@ -96,6 +103,20 @@ the same fenced publication transaction. Removing a task still referenced by
 history remains rejected atomically. Existing Trials keep their frozen native
 image-materialization associations; rebuilding does not attach the new revision
 to those Trials.
+
+The execution input manifest also distinguishes image preparation revisions
+when only file modes change and the path/content checksum stays the same.
+Rebuilding identical inputs at a new storage location can reuse a cached image;
+rebuilding changed executable modes selects a new one. Retired ordinary caches
+can refresh equivalent storage locations before requeueing, while their input
+contents, modes and historical Trial bindings remain unchanged. The mode-aware
+cache requires database revision `0192`.
+To recover inputs materialized before an executable-mode extraction fix, deploy
+the fix, run `loom tasksets rebuild ID_OR_SLUG`, wait for materialization and
+image preparation, and start a new Trial against the rebuilt TaskSet. Confirm
+that the affected verifier can directly execute its helper and produces a
+numeric reward. Rebuild does not rerun or regrade historical Trials; a retry or
+regrade that retains their frozen image links still uses the old inputs.
 
 Sandbox file-transfer failures expose only fixed reason codes such as
 `file_permission_denied`, `file_read_only_filesystem`, `file_io_error`,

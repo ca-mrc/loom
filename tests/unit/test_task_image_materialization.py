@@ -418,3 +418,30 @@ def test_authored_password_reaches_the_task_environment_only():
     assert resolved.environment.environment["KEPT"] == "task-value"
     assert os.environ.get("PASSWORD") != value
     assert value not in os.environ.get("PASSWORD", "")
+
+
+def test_identical_input_rebuild_reuses_frozen_source_but_rejects_other_provenance_changes():
+    from copy import deepcopy
+    from types import SimpleNamespace
+
+    from loom.task_image_materialization import _same_task_image_source
+
+    provenance = {"service_execution_input": {
+        "manifest_uri": "s3://tasks/generation-1/input.json",
+        "manifest_sha256": "sha256:" + "b" * 64,
+        "file_count": 2,
+        "total_bytes": 42,
+    }, "owner": "original"}
+    row = SimpleNamespace(task_source="s3://tasks/generation-1/", task_source_provenance=provenance)
+    replacement = deepcopy(provenance)
+    replacement["service_execution_input"]["manifest_uri"] = "s3://tasks/generation-2/input.json"
+    task = SimpleNamespace(source="s3://tasks/generation-2/", source_provenance=replacement)
+    assert _same_task_image_source(row, task, input_digest="b" * 64)
+    assert row.task_source_provenance == provenance
+    assert not _same_task_image_source(row, task, input_digest="")
+    for mutation in ({"owner": "changed"}, {"unexpected": "metadata"}):
+        task.source_provenance = {**replacement, **mutation}
+        assert not _same_task_image_source(row, task, input_digest="b" * 64)
+    task.source_provenance = deepcopy(replacement)
+    task.source_provenance["service_execution_input"]["manifest_sha256"] = "sha256:" + "c" * 64
+    assert not _same_task_image_source(row, task, input_digest="b" * 64)

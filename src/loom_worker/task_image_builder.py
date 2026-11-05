@@ -36,7 +36,7 @@ from loom.task_image_materialization import (
     task_bundle_content_manifest_digest,
     task_image_materialization_keys,
 )
-from loom.task_image_recipe import frozen_preparation_revision
+from loom.task_image_recipe import frozen_preparation_revision, task_image_input_manifest_digest
 from loom.trajectory.storage import bundle_file_metadata_sha256
 from loom_worker.config import WorkerSettings
 from loom_worker.control_plane_client import HttpControlPlaneClient, TaskImageBuildClaim
@@ -201,6 +201,7 @@ async def materialize_and_publish_task_images(
     if claim.cpu_arch not in required_task_image_architectures(task_config):
         raise RuntimeError("task image claim architecture is not required by its task snapshot")
     manifest_digest = task_bundle_content_manifest_digest(claim.task_source_provenance)
+    input_digest = task_image_input_manifest_digest(claim.task_source_provenance)
     if manifest_digest and (
         task_config.task.id != claim.task_id
         or claim.materialization_key
@@ -254,6 +255,9 @@ async def materialize_and_publish_task_images(
                         f"expected={expected_metadata_checksum} "
                         f"actual={actual_metadata_checksum}"
                     )
+
+        if input_digest:
+            image_cache_checksum = claim.materialization_key
 
         if frozen_preparation_revision(asdict(claim)):
             # Verification above owns the immutable source boundary. Only this
