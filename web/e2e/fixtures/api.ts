@@ -182,6 +182,7 @@ function defaultApiResponse(
   role: BrowserRole,
   method: string,
   path: string,
+  search: URLSearchParams,
 ): FixtureResponse | null {
   if (method !== "GET") return null;
   if (path === "/v1/auth/me") {
@@ -194,6 +195,21 @@ function defaultApiResponse(
   }
   if (path === "/v1/overview") return jsonResponse(overview);
   if (path === "/v1/monitor/summary") return jsonResponse(monitorSummary());
+  if (path === "/v1/monitor/resource-trends") {
+    const window = search.get("window") ?? "1h";
+    const emptyMetric = {
+      status: "unavailable", last_sample_at: null, points: [], latest: null,
+      covered_nodes: null, ready_nodes: null,
+    };
+    return jsonResponse({
+      target_id: null,
+      pools: [],
+      window,
+      step_seconds: window === "24h" ? 300 : window === "15m" ? 15 : 30,
+      generated_at: new Date().toISOString(),
+      metrics: { cpu: emptyMetric, memory: emptyMetric, disk: emptyMetric },
+    });
+  }
   if (path === "/v1/tasksets") return jsonResponse({ items: [taskSet] });
   if (path === "/v1/tasksets/task-set-1") return jsonResponse(taskSet);
   if (path === "/v1/auth/public-teams") return jsonResponse({ items: [team] });
@@ -231,6 +247,16 @@ function defaultApiResponse(
   if (path === "/v1/tasks") return jsonResponse({ items: [], next_cursor: null });
   if (path.startsWith("/v1/run-library")) return jsonResponse({ items: [], next_cursor: null });
   if (path === "/v1/batches") return jsonResponse({ items: [], next_cursor: null });
+  if (/^\/v1\/batches\/[^/]+\/resource-usage\/summary$/.test(path)) {
+    return jsonResponse({
+      cpu_usage_usec: null,
+      largest_trial_memory_peak_bound_bytes: null,
+      largest_trial_disk_peak_bound_bytes: null,
+      sampled_trial_count: 0,
+      trial_count: 0,
+      last_observed_at: null,
+    });
+  }
   if (path === "/v1/trials") return jsonResponse({ items: [], next_cursor: null });
   return null;
 }
@@ -348,7 +374,7 @@ export async function installApiFixture(
     if (relativePath === "/loom-frontend-config.json" && method === "GET") {
       response = jsonResponse(runtimeConfig(harness));
     } else if (relativePath.startsWith("/api/")) {
-      response = defaultApiResponse(role, method, pathname);
+      response = defaultApiResponse(role, method, pathname, url.searchParams);
     } else {
       await route.fallback();
       return;

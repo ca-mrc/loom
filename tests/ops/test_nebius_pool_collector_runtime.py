@@ -57,6 +57,9 @@ def test_single_collector_consumes_pool_mode_and_preserves_cloud_authority(colle
     assert collector["metadata"]["uid"] == original["metadata"]["uid"]
     assert collector["spec"]["suspend"] is True and collector["spec"]["concurrencyPolicy"] == "Forbid"
     assert configuration["immutable"] is True and "uid" not in configuration["metadata"]
+    standalone_setting = "LOOM_EXECUTION_CAPACITY_COLLECTOR_RESOURCE_OBSERVATION_NAMESPACE"
+    assert standalone_setting in configmap["data"]
+    assert standalone_setting not in configuration["data"]
     pod = collector["spec"]["jobTemplate"]["spec"]["template"]["spec"]
     container, = pod["containers"]
     init, = pod["initContainers"]

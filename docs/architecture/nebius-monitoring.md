@@ -46,11 +46,51 @@ Observation freshness is explicit. A build concurrency limit observed from an
 active native build is shown only while fresh and unambiguous; missing evidence
 is unavailable, never a hardcoded node count or inferred zero capacity.
 
+## Monitor resource trends and Batch drilldown
+
+Monitor opens on the Batches list with a shared pool resource panel. The
+panel is scoped to one physical capacity owner, independently of the Batch
+filters. It polls the read-only `GET /api/v1/monitor/resource-trends`
+projection every 30 seconds in the foreground. The API offers 15-minute,
+1-hour and 24-hour windows with a bounded number of points. Below the
+resource panel, Monitor shows Batch, Trial, image and cleanup totals for the
+current access scope independently of list filters. Nonzero and unknown
+statuses are shown by default, and zero statuses can be revealed. The totals
+and expanded scheduling diagnostics share one adaptive summary query. Node
+placement details still load on demand.
+
+In the standalone Nebius primary and regional deployments, the native node
+observer measures CPU from Linux counter deltas and memory from
+`MemTotal - MemAvailable`. Disk shows utilization and free bytes of the fullest
+measured filesystem backing `/var/log/pods`. Free bytes exclude space reserved from
+workloads. Other filesystems and persistent volumes are outside that
+measurement. The capacity collector checks node identity and freshness
+before storing numeric measurements in its existing history. CPU and memory
+are weighted by measured capacity. Each metric reports its sample coverage
+and freshness. The response exposes aggregate measurements without node or
+workload identifiers. Missing samples break the line, and a pool scaled to
+zero can retain its historical chart. These measurements are
+diagnostic. Scheduling and autoscaling continue to use the capacity
+observation contract. Environments without a local observer and collector
+projection report unavailable measurements.
+
+Opening a Batch shows its measured resource usage and its paginated Trial
+list. `GET /api/v1/batches/{batch_id}/resource-usage/summary` uses the existing
+authorized execution accounting records. CPU time totals observed attempts.
+Memory and temporary disk report the largest per-Trial bound from sampled
+peaks, with sample coverage. Shared node and image build usage are excluded
+from Batch accounting. The existing full resource-usage endpoint serves
+detailed accounting.
+
+Legacy `/monitor?view=trials&batch_id=…` links open the Batch's Trial list
+with their filters and cursor. Unscoped Trial search links remain accessible,
+and the capacity deep link opens the Monitor page with diagnostics expanded.
+
 ## Trial and image pipeline drilldown
 
-Monitor and Batch detail display stage cards by default. Trial lists show one
-main stage, safe waiting reason, region and elapsed stage time. An absent stage
-entry timestamp remains unknown. In particular, the mutable phase age of a
+The legacy Trial search view and Batch detail display scoped stage cards.
+Trial lists show one main stage, safe waiting reason, region and elapsed stage
+time. An absent stage entry timestamp remains unknown. In particular, the mutable phase age of a
 shared image is never used as an individual Trial's waiting time, and submission
 age is not a phase duration. The image list labels its own phase duration at the
 last refresh. Missing and stale observations are explicit.
@@ -77,13 +117,14 @@ into those Trials, and `batch_q` preserves batch-name scope when moving from a
 batch search to Trial details. Neither the list nor the aggregate reveals other
 teams' Trial counts or private native manifests.
 
-The existing Monitor 4-second and Batch 5-second adaptive queries carry the
-small summary. There is no added full summary poll. Image details use a shared
+The existing Trial search 4-second and Batch detail 5-second adaptive queries
+carry the small progress summary. The resource panel has its own slower query.
+Image details use a shared
 query key, explicit refresh and cursor pagination; obsolete scope/stage requests
 are aborted. Routine refresh keeps the current selection, row identities and
 scroll position. Lease reads project lifecycle columns and image reads project
 only phase/status fields; heavyweight diagnosis and build contracts stay out of
-the regular response. No new telemetry collector or history store is involved.
+the regular response. Pipeline progress uses existing lifecycle observations.
 
 Focused verification uses API/database fixtures, a build/failure/cache-reuse
 path and browser interactions. These checks do not replace the ordinary-member

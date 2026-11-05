@@ -164,6 +164,10 @@ function mockBatch(
   },
   cancelStatus = 200,
   platformAdmin = false,
+  usage: Record<string, unknown> = {
+    cpu_usage_usec: null, largest_trial_memory_peak_bound_bytes: null,
+    largest_trial_disk_peak_bound_bytes: null, sampled_trial_count: 0, trial_count: 0, last_observed_at: null,
+  },
 ): FetchMock {
   return vi
     .spyOn(globalThis, "fetch")
@@ -289,6 +293,21 @@ function mockBatch(
           }),
         );
       }
+      if (url.endsWith(`/api/v1/batches/${BATCH_ID}/resource-usage/summary`)) {
+        return Promise.resolve(new Response(JSON.stringify(usage), {
+          status: 200, headers: { "Content-Type": "application/json" },
+        }));
+      }
+      const request = new URL(url, "https://loom.test");
+      if (request.pathname === "/api/v1/trials" && request.searchParams.get("batch_id") === BATCH_ID) {
+        const items = request.searchParams.get("state") === "failed" ? [{
+          id: "failed-trial-id", task_id: "example/failed-task", state: "failed", submitted_at: "2026-06-19T20:23:00Z",
+          llm_calls_count: 0, failure_reason: "execution_failed", batch_id: BATCH_ID,
+        }] : [];
+        return Promise.resolve(new Response(JSON.stringify({ items, next_cursor: null }), {
+          status: 200, headers: { "Content-Type": "application/json" },
+        }));
+      }
       if (url.endsWith(`/api/v1/batches/${BATCH_ID}`)) {
         return Promise.resolve(
           new Response(JSON.stringify(body), {
@@ -301,16 +320,48 @@ function mockBatch(
     });
 }
 
-function renderBatchDetail(): void {
+function renderBatchDetail(query = ""): void {
   renderWithProviders(
     <Routes>
       <Route path="/batches/:batchId" element={<BatchDetail />} />
     </Routes>,
-    { route: `/batches/${BATCH_ID}` },
+    { route: `/batches/${BATCH_ID}${query}` },
   );
 }
 
 describe("BatchDetail run plan", () => {
+  it("shows measured batch totals and applies URL filters to the inline trials", async () => {
+    const fetchMock = mockBatch(BATCH_BODY, null, {}, null, 200, false, {
+      cpu_usage_usec: 3_600_000_000,
+      largest_trial_memory_peak_bound_bytes: 2 * 2 ** 30,
+      largest_trial_disk_peak_bound_bytes: null,
+      sampled_trial_count: 1,
+      trial_count: 2,
+      last_observed_at: "2026-06-19T20:23:00Z",
+    });
+    renderBatchDetail("?tab=trials&state=failed&image_id=shared-image");
+
+    expect(await screen.findByText("1 core-hours")).toBeInTheDocument();
+    expect(screen.getByText("2 GiB")).toBeInTheDocument();
+    expect(screen.getByText("Unavailable", { exact: true })).toBeInTheDocument();
+    expect(screen.getByText(/1 of 2 trials with samples/)).toBeInTheDocument();
+    const list = await screen.findByRole("table", { name: "Trials" });
+    expect(await within(list).findByRole("link", { name: "failed-t" })).toHaveAttribute("href", "/trials/failed-trial-id");
+    expect(screen.getByRole("combobox", { name: "Filter trials by state" })).toHaveValue("failed");
+    expect(fetchMock.mock.calls.some(([input]) => {
+      const request = new URL(String(input), "https://loom.test");
+      return request.pathname === "/api/v1/trials" && request.searchParams.get("batch_id") === BATCH_ID
+        && request.searchParams.get("state") === "failed" && request.searchParams.get("image_id") === "shared-image";
+    })).toBe(true);
+  });
+
+  it("shows missing batch measurements without reporting zero usage", async () => {
+    mockBatch();
+    renderBatchDetail();
+    expect(await screen.findByText("No execution resource samples yet.")).toBeInTheDocument();
+    expect(screen.queryByText("CPU time", { exact: true })).not.toBeInTheDocument();
+  });
+
   it("keeps polling after parent cancellation until children, output and cleanup converge", async () => {
     vi.useFakeTimers();
     vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
@@ -474,8 +525,8 @@ describe("BatchDetail run plan", () => {
     expect(screen.getByText("succeeded 18")).toBeInTheDocument();
     expect(screen.getByText("materializing 2")).toBeInTheDocument();
     expect(
-      screen.getByRole("link", { name: /Follow live capacity, retries, and scale-to-zero/i }),
-    ).toHaveAttribute("href", `/monitor?view=trials&batch_id=${BATCH_ID}`);
+      screen.getByRole("link", { name: /View shared pool capacity/i }),
+    ).toHaveAttribute("href", "/monitor?view=capacity");
   });
 
   it("shows Monitor stages while the stored trial state stays running", async () => {
@@ -676,7 +727,7 @@ describe("BatchDetail run plan", () => {
     mockBatch();
     renderBatchDetail();
 
-    expect(await screen.findByText("Owner")).toBeInTheDocument();
+    expect(await screen.findByText("Batch owner")).toBeInTheDocument();
     expect(screen.getByText("Ada / Dev")).toBeInTheDocument();
     expect(screen.getByText("Visibility")).toBeInTheDocument();
     expect(screen.getByText("team / pending_scan")).toBeInTheDocument();

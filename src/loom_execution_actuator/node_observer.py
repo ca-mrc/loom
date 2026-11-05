@@ -9,12 +9,15 @@ import re
 import subprocess
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from loom_execution_actuator.host_resource_usage import CpuCounters, capture_host_usage
 
 _LOG = logging.getLogger(__name__)
 _LIMIT = 700 * 1024
@@ -106,6 +109,7 @@ class NodeResourceObserver:
     def __init__(self, settings: ObserverSettings, core: Any) -> None:
         self.settings, self.core = settings, core
         self._cpu: dict[str, tuple[int, int]] = {}
+        self._host_cpu: CpuCounters | None = None
 
     def _request(self, pods: list[Any]) -> dict[str, Any]:
         selected: list[dict[str, Any]] = []
@@ -309,7 +313,18 @@ class NodeResourceObserver:
                 "producer_pod_name": self.settings.pod_name,
                 "producer_pod_uid": _uuid(self.settings.pod_uid),
                 "observed_at": captured.isoformat(), "summary": summary}
+        host_usage, self._host_cpu = capture_host_usage(
+            Path("/var/run/loom-node/cpu.stat"),
+            Path("/var/run/loom-node/meminfo"),
+            self.settings.pod_logs_root,
+            self._host_cpu,
+        )
+        body["host_usage"] = host_usage.model_dump(mode="json")
         serialized = json.dumps(body, separators=(",", ":"), allow_nan=False)
+        if len(serialized.encode()) > _LIMIT:
+            # Optional host telemetry cannot displace the existing Trial data.
+            del body["host_usage"]
+            serialized = json.dumps(body, separators=(",", ":"), allow_nan=False)
         if len(serialized.encode()) > _LIMIT:
             raise ObservationError("size")
         name = "node-" + node_uid

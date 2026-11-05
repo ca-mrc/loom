@@ -23,6 +23,7 @@ from loom_execution_capacity_collector.contracts import (
     NodePlacement,
     NodeTemplateSample,
     PodPendingCounts,
+    PoolResourceUsage,
     ResourceTotals,
 )
 
@@ -767,6 +768,13 @@ class InClusterKubernetesCapacityReader:
                 for node in nodes
             },
         )
+
+    async def capture_host_usage(
+        self, snapshot: KubernetesCapacitySnapshot, *, namespace: str,
+    ) -> PoolResourceUsage:
+        from loom_execution_capacity_collector.host_usage import capture_host_usage
+
+        return await capture_host_usage(self._core, snapshot, namespace=namespace)
 
     async def capture(
         self,

@@ -56,6 +56,7 @@ from loom_control_plane.task_image_materializations import (
     retry_task_image_materialization,
     task_image_materialization_payload,
 )
+from loom_execution_capacity_collector.contracts import PoolResourceUsage
 
 router = APIRouter(prefix="/admin")
 
@@ -233,6 +234,7 @@ class _ExecutionCapacityObservationPayload(BaseModel):
     active_nodes: int = Field(ge=0)
     node_states: dict[str, int] | None = None
     placement: dict[str, Any] | None = None
+    resource_usage: PoolResourceUsage | None = None
     provisioned_vcpu_millis: int = Field(ge=0)
     provisioned_memory_mib: int = Field(ge=0)
     provisioned_storage_mib: int = Field(ge=0)

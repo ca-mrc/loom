@@ -1219,6 +1219,8 @@ def _execution_documents(
                         if labels.get("kubernetes.io/metadata.name") == "loom":
                             labels["kubernetes.io/metadata.name"] = ns
             if doc["kind"] == "ConfigMap":
+                if filename == "nebius-capacity-collector.yaml" and resource_observations:
+                    doc["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_RESOURCE_OBSERVATION_NAMESPACE"] = ex + "-observations"
                 if filename == "nebius-capacity-collector.yaml":
                     doc["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME"] = (
                         EXECUTION_DISK_STORAGE_QUOTAS[config.get("execution_disk_type", "NETWORK_SSD")]
@@ -1360,7 +1362,10 @@ def _regional_documents(
         kind, name = doc["kind"], doc["metadata"]["name"]
         if doc["metadata"].get("labels", {}).get("app.kubernetes.io/name") == "loom-native-resource-observer":
             if kind == "RoleBinding" and name.endswith("-reader"):
-                doc["subjects"] = [{"kind": "User", "apiGroup": "rbac.authorization.k8s.io", "name": identities["actuator"]}]
+                doc["subjects"] = [
+                    {"kind": "User", "apiGroup": "rbac.authorization.k8s.io", "name": identities[role]}
+                    for role in ("actuator", "collector")
+                ]
             remote.append(doc)
             continue
         if kind in {"Deployment", "CronJob", "ConfigMap"} or (

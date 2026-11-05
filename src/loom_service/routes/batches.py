@@ -61,12 +61,13 @@ from loom.models.networking import (
     hosted_http_egress,
     resolve_effective_network_policy,
 )
+from loom.models.resource_usage import TrialResourceUsageReport, aggregate_resource_usage
 from loom.models.task import TaskConfig
 from loom.models.types import ModelSpec
 from loom.pipeline.keys import canonical_digest
 from loom.provider_connection_routes import ProviderConnectionRouting
 from loom.request_params import sanitize_request_extras
-from loom.resource_usage_store import resource_usage_response
+from loom.resource_usage_store import resource_usage_response, row_to_report
 from loom.security.redaction import redact_mapping, redact_text
 from loom.service_execution_backend import (
     NEBIUS_BACKEND,
@@ -2765,6 +2766,95 @@ async def get_batch_resource_usage(
     response["termination_failures"] = await execution_failure_groups(s, batch_id=batch_id)
     response["trials_with_telemetry"] = len({row.trial_id for row in rows})
     return response
+
+
+class BatchResourceUsageSummary(BaseModel):
+    cpu_usage_usec: int | None
+    largest_trial_memory_peak_bound_bytes: int | None
+    largest_trial_disk_peak_bound_bytes: int | None
+    sampled_trial_count: int
+    trial_count: int
+    last_observed_at: datetime | None
+
+
+@router.get("/batches/{batch_id}/resource-usage/summary")
+async def get_batch_resource_usage_summary(
+    sc: SessionAndCtx,
+    batch_id: UUID,
+) -> BatchResourceUsageSummary:
+    """Return Batch measurements without transferring execution records."""
+    s, ctx = sc
+    require_scope(ctx, "read:own")
+    batch = await s.get(Batch, batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail="batch not found")
+    require_team_or_admin(ctx, batch.team_id)
+    cpu_totals: list[int] = []
+    memory_bounds: list[int] = []
+    disk_bounds: list[int] = []
+    sampled_trial_count = 0
+    last_observed_at: datetime | None = None
+
+    def collect(reports: list[TrialResourceUsageReport]) -> None:
+        nonlocal sampled_trial_count, last_observed_at
+        usage = aggregate_resource_usage(reports)
+        cpu = usage["cpu_usage_usec"]
+        memory = usage["memory_sampled_max_sum_bytes"]
+        disk = usage["pod_ephemeral_storage_sampled_max_sum_bytes"]
+        if isinstance(cpu, int):
+            cpu_totals.append(cpu)
+        if isinstance(memory, int):
+            memory_bounds.append(memory)
+        if isinstance(disk, int):
+            disk_bounds.append(disk)
+        observations = [
+            report.last_observed_at
+            for report in reports
+            if (
+                report.counters.ephemeral_storage_sampled_max_bytes is not None
+                if report.container_role == "pod"
+                else report.counters.cpu_usage_usec is not None
+                or report.counters.memory_sampled_max_bytes is not None
+            )
+        ]
+        if observations:
+            sampled_trial_count += 1
+            latest = max(observations)
+            if last_observed_at is None or latest > last_observed_at:
+                last_observed_at = latest
+
+    samples = await s.stream_scalars(
+        select(TrialResourceUsage)
+        .join(Trial, Trial.id == TrialResourceUsage.trial_id)
+        .where(Trial.batch_id == batch_id)
+        .order_by(TrialResourceUsage.trial_id)
+        .execution_options(yield_per=256)
+    )
+    trial_id: UUID | None = None
+    reports: list[TrialResourceUsageReport] = []
+    try:
+        async for row in samples:
+            if reports and row.trial_id != trial_id:
+                collect(reports)
+                reports.clear()
+            trial_id = row.trial_id
+            reports.append(row_to_report(row))
+        if reports:
+            collect(reports)
+    finally:
+        await samples.close()
+    trial_count = await s.scalar(
+        select(func.count()).select_from(Trial).where(Trial.batch_id == batch_id)
+    )
+
+    return BatchResourceUsageSummary(
+        cpu_usage_usec=sum(cpu_totals) if cpu_totals else None,
+        largest_trial_memory_peak_bound_bytes=max(memory_bounds, default=None),
+        largest_trial_disk_peak_bound_bytes=max(disk_bounds, default=None),
+        sampled_trial_count=sampled_trial_count,
+        trial_count=trial_count or 0,
+        last_observed_at=last_observed_at,
+    )
 
 
 @router.get("/batches/{batch_id}/debug", response_model=wire.DebugEvidence, response_model_exclude_unset=True)

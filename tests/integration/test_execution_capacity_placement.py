@@ -6,15 +6,20 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import httpx
 import pytest
+from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from loom.admin_secret import AdminSecretVerifier
 from loom.db.schema import ExecutionCapacityObservation, ServiceExecutionLease, Trial
 from loom_control_plane.execution_capacity import (
     ExecutionProvisioningBlockedError,
     create_execution_capacity_observation,
 )
+from loom_execution_capacity_collector.contracts import CapacityPlacement
+from loom_service.routes import monitor
 from tests.execution_placement_fixtures import placement_fixture
 from tests.integration.test_service_execution_leases import (
     _cleanup_service_execution_test_rows,  # noqa: F401 -- shared fixture
@@ -23,7 +28,7 @@ from tests.integration.test_service_execution_leases import (
 )
 
 
-async def _record(session, target_id, now, placement):
+async def _record(session, target_id, now, placement, *, resource_usage=None):
     old = (
         await session.execute(
             select(ExecutionCapacityObservation)
@@ -34,7 +39,9 @@ async def _record(session, target_id, now, placement):
     ).scalar_one()
     names = inspect.signature(create_execution_capacity_observation).parameters
     payload = {key: deepcopy(value) for key, value in old.observation_json.items() if key in names}
-    payload.update(observed_at=now, source_version=str(uuid4()), placement=placement)
+    payload.update(
+        observed_at=now, source_version=str(uuid4()), placement=placement, resource_usage=resource_usage,
+    )
     for key, suffix in (
         ("nodes", "nodes"),
         ("vcpu", "vcpu_millis"),
@@ -207,5 +214,68 @@ async def test_native_usage_floor_sums_distinct_pools_when_account_usage_lags(po
                 await _reserve(
                     session, trial_id=first[0], target=first[1], now=now + timedelta(seconds=2)
                 )
+    finally:
+        await engine.dispose()
+
+
+async def test_monitor_resource_trends_read_retained_capacity_samples(postgres_url: str) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    measured_at = now - timedelta(seconds=45)
+    app = FastAPI()
+    app.state.session_factory = sessions
+    admin_token = "loom_admin_" + "n" * 64
+    app.state.admin_secret_verifier = AdminSecretVerifier.from_token(admin_token)
+    app.include_router(monitor.router, prefix="/api/v1")
+    try:
+        async with sessions.begin() as session:
+            _, target = await _seed_ready_trial(session, now=now - timedelta(minutes=20))
+            placement = placement_fixture(target_id=target.target_id)
+            measurement = {
+                "sampled_at": measured_at.isoformat(),
+                "covered_nodes": 1,
+                "ready_nodes": 1,
+            }
+            resource_usage = {
+                "ready_nodes": 1,
+                "cpu": {**measurement, "used": 4, "total": 16},
+                "memory": {**measurement, "used": 16 * 1024**3, "total": 64 * 1024**3},
+                "disk": {**measurement, "used": 75 * 1024**3, "total": 100 * 1024**3},
+            }
+            retained, _ = await _record(
+                session, target.target_id, now - timedelta(seconds=30), placement, resource_usage=resource_usage,
+            )
+            assert retained.observation_json["placement"] == CapacityPlacement.model_validate(
+                placement
+            ).model_dump(mode="json")
+            assert "resource_usage" not in retained.observation_json["placement"]
+            assert retained.observation_json["resource_usage"]["ready_nodes"] == 1
+        path = "/api/v1/monitor/resource-trends"
+        auth = {"Authorization": "Bearer " + admin_token}
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://capacity.test",
+        ) as client:
+            assert (await client.get(path)).status_code == 401
+            assert (await client.get(path, headers=auth, params={"target_id": "unknown"})).status_code == 404
+            response = await client.get(path, headers=auth, params={"target_id": target.target_id})
+            assert response.status_code == 200, response.text
+            assert response.headers["Cache-Control"] == "no-store"
+            result = response.json()
+            assert result["target_id"] == target.target_id
+            assert all(result["metrics"][key]["status"] == "live" for key in ("cpu", "memory", "disk"))
+            disk = result["metrics"]["disk"]
+            assert disk["points"] == [{"timestamp": measured_at.isoformat(), "value": 75.0}]
+            assert disk["latest"] == {"used": 75 * 1024**3, "total": 100 * 1024**3}
+
+            async with sessions.begin() as session:
+                await _record(session, target.target_id, now - timedelta(seconds=10), placement,
+                              resource_usage={"ready_nodes": 0})
+            response = await client.get(path, headers=auth, params={"target_id": target.target_id})
+            assert response.status_code == 200, response.text
+            stopped = response.json()["metrics"]["disk"]
+            assert stopped["status"] == "stale"
+            assert stopped["ready_nodes"] == stopped["covered_nodes"] == 0
+            assert stopped["points"] == disk["points"]
     finally:
         await engine.dispose()

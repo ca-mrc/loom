@@ -8,7 +8,7 @@ import { TrialProgressPill, TrialProgressTimeline } from "../components/TrialPro
  * non-terminal; pauses cleanly once done.
  */
 import { useQuery } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { Suspense, useRef, useState } from "react";
 import { Link, useParams, useLocation } from "react-router-dom";
 
 import { api } from "../api";
@@ -16,7 +16,6 @@ import type { components } from "../api/schema";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import { DebugEvidenceCard } from "../components/DebugEvidenceCard";
-import { DiagnosisCard } from "../components/DiagnosisCard";
 import { DownloadButton } from "../components/DownloadButton";
 import { ExecutionSelectionSection } from "../components/ExecutionSelectionSection";
 import ErrorState from "../components/ErrorState";
@@ -30,6 +29,7 @@ import { useTrialEventStream } from "../hooks/useTrialEventStream";
 import { agentLabel } from "../lib/agentLabel";
 import { formatLocalDateTime } from "../lib/dateTime";
 import { humanizeFailureReason } from "../lib/humanizeFailureReason";
+import { lazyRoute } from "../lib/lazyRoute";
 import { modelLabel } from "../lib/modelLabel";
 import { networkPolicyLabel } from "../lib/networkPolicy";
 import { ownershipLabel } from "../lib/ownership";
@@ -44,6 +44,8 @@ import {
 
 type TrajEvent = components["schemas"]["TrajectoryEvent"];
 type TrialArtifact = components["schemas"]["TrialDetail"]["artifacts"][number];
+
+const DiagnosisCard = lazyRoute(async () => ({ default: (await import("../components/DiagnosisCard")).DiagnosisCard }));
 
 const ACTIVE_TRIAL_STATES = new Set([
   "queued",
@@ -734,6 +736,8 @@ function Trajectory({ trialId, terminal }: { trialId: string; terminal: boolean 
 export default function TrialDetail(): JSX.Element {
   const location = useLocation();
   const monitorReturn = location.state?.monitorReturn || "/monitor?view=trials";
+  const batchReturn: string | undefined = location.state?.batchReturn;
+  const backToTrials = batchReturn ?? monitorReturn;
   const { trialId } = useParams<{ trialId: string }>();
 
   const polling = useAdaptivePolling({
@@ -773,15 +777,16 @@ export default function TrialDetail(): JSX.Element {
     <div className="stack-y-6">
       <div className="flex items-center justify-between gap-4">
         <Link
-          to={monitorReturn}
-          title="Return to the trial monitor table."
+          to={backToTrials}
+          state={batchReturn ? { monitorReturn } : undefined}
+          title={batchReturn ? "Return to the filtered batch trials." : "Return to the trial monitor table."}
           className="text-xs font-medium text-slate-500 hover:text-slate-700"
         >
-          ← All trials
+          {batchReturn ? "← Back to batch trials" : "← All trials"}
         </Link>
         <Link
           to={`/trials/compare?a=${trialId}`}
-          state={{ monitorReturn }}
+          state={{ monitorReturn: backToTrials }}
           title="Start a side-by-side comparison using this trial."
           className="text-xs font-medium text-slate-500 hover:text-slate-700"
         >
@@ -790,7 +795,7 @@ export default function TrialDetail(): JSX.Element {
       </div>
       <nav aria-label="Trial context" className="flex flex-wrap gap-2 text-sm">
         <Link to={monitorReturn} className="text-accent">Monitor</Link>
-        {parentBatchId ? <><span>→</span><Link to={`/batches/${parentBatchId}`} state={{ monitorReturn }} className="text-accent">{parentBatch.data?.name || `Batch ${parentBatchId.slice(0, 8)}`}</Link></> : null}
+        {parentBatchId ? <><span>→</span><Link to={batchReturn ?? `/batches/${parentBatchId}`} state={{ monitorReturn }} className="text-accent">{parentBatch.data?.name || `Batch ${parentBatchId.slice(0, 8)}`}</Link></> : null}
         <span>→ {trial.data.task_id}</span>
       </nav>
       <nav aria-label="Trial sections" className="flex flex-wrap gap-4 text-sm text-accent">
@@ -803,7 +808,9 @@ export default function TrialDetail(): JSX.Element {
       <TrialProgressTimeline progress={trial.data.progress} />
       <TaskImagePreparationCard preparations={trial.data.task_environment_preparation} />
       <MaterializationCard trial={trial.data} />
-      <DiagnosisCard diagnosis={trial.data.diagnosis} />
+      {trial.data.diagnosis ? <Suspense fallback={<LoadingState label="Loading diagnosis…" />}>
+        <DiagnosisCard diagnosis={trial.data.diagnosis} />
+      </Suspense> : null}
       <details><summary className="cursor-pointer text-sm font-medium">Raw debug evidence</summary><DebugEvidenceCard evidence={trial.data.debug_evidence} /></details>
       </section>
     </div>

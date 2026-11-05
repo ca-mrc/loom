@@ -28,6 +28,7 @@ from loom_service.monitor_filters import (
     resolve_monitor_team_filter,
 )
 from loom_service.monitor_placement import load_placement
+from loom_service.monitor_resource_trends import TrendWindow, load_resource_trends
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.service_execution_status import (
     SERVICE_EXECUTION_LIFECYCLE_STAGES,
@@ -582,6 +583,22 @@ async def get_monitor_summary(
         "resources": resources,
         "service_execution": service_execution,
     }
+
+
+@router.get("/monitor/resource-trends", response_model=wire.MonitorResourceTrends)
+async def get_monitor_resource_trends(
+    response: Response,
+    sc: SessionAndCtx,
+    window: Annotated[TrendWindow, Query()] = "1h",
+    target_id: Annotated[str | None, Query(min_length=1, max_length=120)] = None,
+) -> wire.MonitorResourceTrends:
+    session, ctx = sc
+    require_scope(ctx, "read:own")
+    response.headers["Cache-Control"] = "no-store"
+    result = await load_resource_trends(session, window=window, target_id=target_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="resource pool not found")
+    return result
 
 
 @router.get("/monitor/placement", response_model=wire.MonitorPlacement, response_model_exclude_unset=True)

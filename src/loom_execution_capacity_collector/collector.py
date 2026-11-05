@@ -16,6 +16,7 @@ from loom_execution_capacity_collector.contracts import (
     KubernetesCapacitySnapshot,
     NodeStateCounts,
     NodeTemplateSample,
+    PoolResourceUsage,
     ProviderCapacitySnapshot,
     ResourceTotals,
 )
@@ -43,6 +44,28 @@ async def _with_node_io(provider: Any, snapshot: KubernetesCapacitySnapshot) -> 
         node.model_copy(update={"io_stall_window": windows.get(node.uid)})
         for node in snapshot.nodes
     ]})
+
+
+async def _with_observational_metrics(
+    provider: Any,
+    kubernetes: InClusterKubernetesCapacityReader,
+    snapshot: KubernetesCapacitySnapshot,
+    *,
+    namespace: str | None,
+) -> tuple[KubernetesCapacitySnapshot, PoolResourceUsage | None]:
+    if namespace is None:
+        return await _with_node_io(provider, snapshot), None
+
+    async def host_usage() -> PoolResourceUsage:
+        try:
+            return await kubernetes.capture_host_usage(snapshot, namespace=namespace)
+        except Exception:
+            # Usage is not a capacity input. Preserve the trusted inventory if
+            # optional sampling or aggregation becomes unavailable.
+            return PoolResourceUsage(ready_nodes=snapshot.ready_nodes)
+
+    with_io, usage = await asyncio.gather(_with_node_io(provider, snapshot), host_usage())
+    return with_io, usage
 
 
 def _matching_samples(
@@ -150,7 +173,9 @@ async def collect_capacity_observation(
                 target_scope=policy.target_scope,
             ),
         )
-        kubernetes_snapshot = await _with_node_io(provider, kubernetes_snapshot)
+        kubernetes_snapshot, resource_usage = await _with_observational_metrics(
+            provider, kubernetes, kubernetes_snapshot, namespace=settings.resource_observation_namespace,
+        )
         # Nebius quota usage can lag node-group inventory while autoscaling. Use
         # the complete node-group snapshot as a conservative floor so the
         # observation never overstates headroom during that convergence window.
@@ -279,6 +304,7 @@ async def collect_capacity_observation(
             image_pull_backoff_jobs=kubernetes_snapshot.image_pull_backoff_jobs,
             pending_reasons=kubernetes_snapshot.pending_reasons,
             placement=placement,
+            resource_usage=resource_usage,
         )
         return await control_plane.publish(observation)
     finally:

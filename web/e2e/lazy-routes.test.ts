@@ -69,28 +69,40 @@ test("a rejected route module requires reload and a fresh document recovers", as
 });
 
 for (const scenario of [
-  { path: "/monitor", heading: "Monitor", deferred: "src/pages/MonitorCapacityDetails.tsx", trigger: "Nodes, scheduling and capacity diagnostics", ready: "Concurrent tasks" },
+  { path: "/monitor", heading: "Monitor", deferred: "src/pages/MonitorCapacityDetails.tsx", trigger: "Expand capacity", ready: "Concurrent tasks" },
   { path: "/batches/new", heading: "New batch", deferred: "src/pages/NewBatchAdvancedFields.tsx", trigger: "Advanced trial settings", ready: "Environment" },
 ]) {
   test(`${scenario.path} defers collapsed content until expanded`, async ({ page, apiHarness, browserHarness }) => {
     const chunk = manifest()[scenario.deferred].file;
     const requests = new Set<string>();
     page.on("request", request => requests.add(new URL(request.url()).pathname));
-    await apiHarness.install({ role: "user" });
+    const fixture = await apiHarness.install({ role: "user" });
     await page.goto(`${browserHarness.baseURL}${scenario.path}`);
     await expect(page.getByRole("heading", { name: scenario.heading, exact: true })).toBeVisible();
-    const summary = page.locator("summary").filter({ hasText: scenario.trigger });
-    await expect(summary).toBeVisible();
+    const trigger = scenario.path === "/monitor"
+      ? page.getByRole("button", { name: scenario.trigger, exact: true })
+      : page.locator("summary").filter({ hasText: scenario.trigger });
+    await expect(trigger).toBeVisible();
+    const summaryReads = () => fixture.ledger.filter(entry => entry.method === "GET" && entry.path === "/api/v1/monitor/summary?view=batches").length;
+    if (scenario.path === "/monitor") {
+      await expect(page.getByRole("region", { name: "Monitor totals" })).toBeVisible();
+      await expect.poll(summaryReads).toBe(1);
+      await expect(trigger).toHaveAttribute("aria-expanded", "false");
+    }
     expect(requests.has(`${browserHarness.routePrefix}/${chunk}`)).toBe(false);
     await expect(page.getByText(scenario.ready, { exact: true })).toHaveCount(0);
-    await summary.click();
+    await trigger.click();
     await expect(page.getByText(scenario.ready, { exact: true })).toBeVisible();
     expect(requests.has(`${browserHarness.routePrefix}/${chunk}`)).toBe(true);
+    if (scenario.path === "/monitor") {
+      await expect(page.getByRole("button", { name: "Collapse capacity", exact: true })).toHaveAttribute("aria-expanded", "true");
+      expect(summaryReads()).toBe(1);
+    }
     if (scenario.path === "/batches/new") {
       const timeout = page.getByRole("spinbutton", { name: "Agent timeout override (s)" });
       await timeout.fill("120");
-      await summary.click();
-      await summary.click();
+      await trigger.click();
+      await trigger.click();
       await expect(timeout).toHaveValue("120");
     }
   });

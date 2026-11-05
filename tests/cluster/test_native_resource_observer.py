@@ -14,6 +14,7 @@ import pytest
 from loom.nebius_resource_observer_render import NAME, observation_namespace, observer_documents
 from loom_execution_actuator.resource_observations import read_resource_observation
 from loom_execution_actuator.resource_usage import pod_samples
+from loom_execution_capacity_collector.contracts import NodeHostUsage
 from tests.cluster.test_nebius_shared_ingress import _run
 from tests.integration.test_execution_actuator_k3s import (
     _build_image,
@@ -208,6 +209,13 @@ def test_rendered_node_observer_collects_real_cri_and_storage_with_restricted_re
 
         snapshots.append(_wait(usable, seconds=90, reason="real CPU/memory/rootfs/log/Pod storage snapshot unavailable"))
         snapshots.append(_wait(usable, seconds=45, reason="second original-timestamp resource sample unavailable"))
+        host = NodeHostUsage.model_validate(read_resource_observation(
+            reader, node_name=node_name, namespace=namespace, execution_namespace=execution,
+            expected_node_uid=node_uid, host_usage_only=True,
+        ))
+        assert host.cpu is not None and host.cpu.total >= 1
+        assert host.memory is not None and host.memory.total >= _MIB
+        assert host.disk is not None and host.disk.total >= _MIB
         first, last = [next(p for p in s["pods"] if p["podRef"]["uid"] == measured.metadata.uid) for s in snapshots]
         before, after = [next(c for c in p["containers"] if c["name"] == "execution") for p in (first, last)]
         assert after["cpu"]["usageCoreNanoSeconds"] > before["cpu"]["usageCoreNanoSeconds"] > 0
