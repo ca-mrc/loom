@@ -427,17 +427,17 @@ default     = 200.0
 
 # ─── Per-request retry on transient upstream failures ───
 # Retry classification + budget live in `loom_llm_gateway/retry.py`.
-# Defaults are sized to ride out a rolling LLM-gateway / upstream
-# restart window: 5 attempts with up to 8s backoff each,
-# capped at a 60s wall-clock budget. Agent timeouts on TaskConfig are
-# 30min default; keeping the budget at 60s leaves ample headroom for
-# the rest of the agent run.
+# The Gateway is the sole transport retry owner for gateway-bound Terminus.
+# Three total attempts share one 600s wall-clock budget, including the initial
+# response/body and every backoff. The separate 200s upstream phase timeout and
+# signed agent deadline still cap each attempt. Explicit smaller budgets remain
+# hard limits; the previous first-attempt exemption no longer applies.
 
 [service_config.llm_retry_max_attempts]
 used_by     = ["llm-gateway"]
 python_type = "int"
-default     = 5
-description = "Maximum attempts per upstream LLM request, including the initial call. A value of 1 disables retries. The default covers transient failures during a typical Kubernetes Gateway rolling restart."
+default     = 3
+description = "Maximum total attempts per logical upstream LLM request, including the initial call. A value of 1 disables retries. Gateway-bound Terminus clients do not add SDK or Harbor transport retries."
 
 [service_config.llm_retry_base_backoff_sec]
 used_by     = ["llm-gateway"]
@@ -460,8 +460,8 @@ description = "Per-attempt backoff ceiling. It bounds exponential growth while l
 [service_config.llm_retry_budget_sec]
 used_by     = ["llm-gateway"]
 python_type = "float"
-default     = 60.0
-description = "Total wall-clock retry budget per request. Retries stop when cumulative wait plus elapsed time exceeds this value, even if attempts remain. The default is below TaskConfig.agent.timeout_sec."
+default     = 600.0
+description = "Total wall-clock budget for the initial attempt, response-body reads, later attempts and backoff/Retry-After. Explicit smaller values are not extended. The upstream per-phase timeout and signed agent deadline also apply."
 
 [service_config.connection_queue_max_wait_sec]
 used_by     = ["llm-gateway"]

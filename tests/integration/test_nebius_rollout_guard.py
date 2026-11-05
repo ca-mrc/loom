@@ -353,10 +353,15 @@ def test_periodic_read_only_probe_tracks_busy_idle_and_held_guard(isolated_migra
                 await execution._reserve(session, trial_id=trial_id, target=target, now=datetime.now(UTC))
                 # Capture the exact query emitted by the operator transport.
                 queries = []
-                idle_snapshot(SimpleNamespace(run=lambda *args: queries.append(args[-1]) or json.dumps({
-                    'locked': False, 'active': {'trials': 0, 'executions': 0, 'builds': 0, 'build_cleanup': 0},
-                })), 'platform')
-                sql = queries[0].split('; ')[2]
+
+                def run(*args):
+                    queries.append(args[-1])
+                    return 'true' if 'pg_catalog.pg_attribute' in args[-1] else json.dumps({
+                        'locked': False, 'active': {'trials': 0, 'executions': 0, 'builds': 0, 'build_cleanup': 0},
+                    })
+
+                idle_snapshot(SimpleNamespace(run=run), 'platform')
+                sql = queries[-1].split('; ')[2]
                 busy = await session.scalar(text(sql))
                 assert busy['active']['executions'] == 1
                 assert busy['locked'] is False

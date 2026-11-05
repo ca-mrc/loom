@@ -35,6 +35,7 @@ from loom.agent.terminus2.model_switch import (
 )
 from loom.agent.terminus2.native_artifacts import HARBOR_ARTIFACT_NAMES, prepare_subagent_archive
 from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA, LOOM_BRIDGE_REVISION
+from loom.agent.terminus2.retry_policy import install_gateway_retry_policy
 from loom.agent.terminus2.task_metadata import harbor_mcp_documents
 from loom.attempt_deadline import AttemptDeadline, AttemptDeadlineExceededError
 from loom.driver.base import Driver
@@ -1094,6 +1095,9 @@ class LoomTerminus2Runtime:
             self._terminus_run_attempt_id = recovery.get("agent_run_attempt_id")
         else:
             redact_agent_llm_kwargs(agent)
+
+        if self.direct_provider is None:
+            install_gateway_retry_policy(agent)
 
         if self.direct_ledger is not None and self.direct_provider is not None:
             self.direct_ledger.install(agent, step_id=step_id, trajectory=trajectory)

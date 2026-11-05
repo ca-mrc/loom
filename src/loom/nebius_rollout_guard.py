@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 LOCK_KEY = 731946021
 
 
-# Shared by the read-only rollout check and atomic guard acquisition.
+# Historical pool/recovery templates support schemas before the stored column.
 ACTIVITY_SQL = """
         SELECT
           (SELECT count(*) FROM trials WHERE state IN ('claimed','running')) AS trials,
@@ -32,6 +32,22 @@ ACTIVITY_SQL = """
             WHERE native_build IS NOT NULL
               AND native_build->>'capacity_released_at' IS NULL) AS build_cleanup
     """
+
+CLEANUP_PROJECTION_SQL = """SELECT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_attribute
+    WHERE attrelid = 'public.task_image_materialization_attempts'::regclass
+      AND attname = 'native_capacity_released_at' AND NOT attisdropped
+)"""
+
+
+def activity_sql(*, has_cleanup_projection: bool) -> str:
+    """Use the stored projection only when this database actually provides it."""
+    if type(has_cleanup_projection) is not bool:
+        raise ValueError("invalid cleanup projection capability")
+    return ACTIVITY_SQL.replace(
+        "native_build->>'capacity_released_at'", "native_capacity_released_at",
+    ) if has_cleanup_projection else ACTIVITY_SQL
+
 
 async def admission_open(session: AsyncSession) -> bool:
     locked = await session.scalar(text(
@@ -50,7 +66,10 @@ async def acquire(session: AsyncSession, *, owner: str, candidate: str) -> dict[
         return {"status": "skipped_locked", "reason": "deployment_or_recovery_in_progress"}
     # Count reservations before Pods exist, result processing after Pods stop,
     # and native build cleanup even if the materialization is already ready.
-    counts = dict((await session.execute(text(ACTIVITY_SQL))).mappings().one())
+    has_cleanup_projection = await session.scalar(text(CLEANUP_PROJECTION_SQL))
+    counts = dict((await session.execute(text(activity_sql(
+        has_cleanup_projection=has_cleanup_projection,
+    )))).mappings().one())
     if any(counts.values()):
         return {"status": "skipped_busy", "active": counts}
     await session.execute(text("""

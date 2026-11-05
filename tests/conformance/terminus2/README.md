@@ -15,7 +15,9 @@ there is no optional-import skip in this lane.
   Deliberate prompt, command and sampling drift must be rejected. A separate
   case uses the real Harbor/LiteLLM constructors to check teacher options,
   Gateway credential reuse and trajectory-metadata redaction without issuing
-  model requests.
+  model requests. A real Harbor/LiteLLM/OpenAI MockTransport regression also
+  confirms a Gateway 504 produces one client send rather than 27, while the
+  global Harbor retry defaults remain untouched.
 - [`terminus_continuation_probe.py`](../../support/terminus_continuation_probe.py)
   verifies Loom's explicit continuation extension, cancellation, concurrent
   instance isolation and trajectory size limits with the real Harbor loop.

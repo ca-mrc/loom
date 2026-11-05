@@ -390,7 +390,8 @@ OpenAI-compatible dispatch bypass LiteLLM so:
 
 | Failure                                | Response                              |
 |----------------------------------------|---------------------------------------|
-| Upstream timeout (>200s)               | 504, failed-attempt `llm_calls` row inserted with zero tokens and `provider_extras._loom_failure_category=upstream_timeout` |
+| Upstream transport/idle-read timeout after bounded retries | 504, failed-attempt `llm_calls` row inserted with zero tokens and `provider_extras._loom_failure_category=upstream_timeout` |
+| Complete request budget exhausted (initial attempt, body reads, admission or backoff) | 504, `gateway_retry_budget_exhausted`; does not rotate/suppress a physical provider |
 | Upstream non-2xx                       | Forwarded or surfaced with a redacted excerpt; failed-attempt `llm_calls` row inserted with zero tokens and `provider_extras._loom_failure_category=upstream_http_4xx` or `upstream_http_5xx` |
 | LiteLLM adapter exception or malformed upstream response | 502 with sanitized diagnostic text; failed-attempt `llm_calls` row inserted with `provider_extras._loom_failure_category=upstream_transport`; provider API keys and `Authorization: Bearer` values are redacted before logs or responses |
 | Ordinary OpenAI Chat facade or Responses HTTP-success body fails JSON decoding or required-shape validation | 502; failed-attempt `llm_calls` row with `upstream_invalid_response`, the upstream HTTP status, and missing usage |
@@ -399,6 +400,16 @@ OpenAI-compatible dispatch bypass LiteLLM so:
 | Bearer invalid / over RPM              | 401 / 429; no upstream call          |
 | `stream=true`                          | Allowed for OpenAI Responses, OpenAI Chat provider-facade, and Anthropic provider-facade calls; other v1 dialect paths reject it where final usage cannot be attributed |
 | Model not in team allowlist            | 403; no upstream call                 |
+
+The Gateway's retry defaults are three total attempts inside one 600-second
+wall-clock budget; explicit smaller budgets apply to the initial send too.
+The existing 200-second upstream phase limit and signed attempt deadline still
+apply. Gateway-bound Terminus disables its SDK and Harbor transport retries,
+including teacher/summary delegates, so these limits are not multiplied.
+Local admission 429s remain terminal after their existing queue/fence checks;
+only upstream 429 responses participate in this transport retry loop. See
+[Terminus retry ownership](terminus2-runtime.md) and
+[pool failover](../integrations/provider-onboarding.md#request-level-rotation-and-timeout-failover).
 
 A failed call still produces an `llm_calls` row when the upstream
 was contacted or the provider client attempted transport. The row

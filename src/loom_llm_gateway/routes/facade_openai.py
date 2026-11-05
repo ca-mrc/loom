@@ -224,7 +224,6 @@ async def openai_chat_facade(
                 provider_connection_id=connection_id,
             ),
             response_retryable=pool_audit.response_retryable if pool_audit else None,
-            respect_retry_after=pool_audit is not None,
         )
         upstream_response = outcome.response
     except AttemptDeadlineReachedError as exc:
@@ -239,9 +238,9 @@ async def openai_chat_facade(
             )
         raise_deadline_http_exception(exc)
     except PoolMemberSwitchedError as switched:
-        # The timed-out attempt keeps its receipt and pool attribution, but it
-        # must not occupy the correlated call identity. Harbor's retry of this
-        # same turn records the successful call under that identity.
+        # Gateway attempts are exhausted. Keep their receipts/attribution but
+        # leave the correlated identity available to an explicit caller retry.
+        # Successful same-request pool retries never enter this terminal branch.
         timeout_correlation = {
             key: value
             for key, value in correlation.items()

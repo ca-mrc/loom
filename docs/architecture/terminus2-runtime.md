@@ -341,6 +341,30 @@ internal logs retain only the low-cardinality reason and never the token.
 | Worker-to-Gateway timeout or disconnect before the deadline | Transport exception | Existing transport taxonomy; see #1749 | Policy-dependent |
 | Any response or exception after the deadline latch | Not allowed to replace the terminal cause | `agent_timeout` | No, unless explicitly configured |
 
+Gateway-bound Terminus has one transport retry owner: the LLM Gateway
+([#2805](https://github.com/ca-mrc/loom/issues/2805)). The adapter disables
+OpenAI/LiteLLM retries and Harbor's generic model-call/query retry wrappers on
+each gateway-bound instance, including student, teacher and summary delegates.
+Harbor's parsing, context recovery and task strategies remain in place;
+direct-provider execution keeps its existing retry behavior. This prevents the
+SDK × Harbor × query nesting from multiplying one failed turn into 27 sends.
+
+The Gateway defaults to three total upstream attempts sharing a 600-second
+wall-clock budget. The initial attempt, response-body reads, later attempts,
+backoff and `Retry-After` all consume that budget. The existing 200-second
+upstream per-phase limit and signed agent deadline remain additional bounds.
+Deterministic authentication/parameter errors return immediately; transient
+transport errors, timeouts and 429/5xx responses use the bounded retry policy.
+Request-pool timeout/504 failover also stays inside that same attempt count
+and budget: each retry re-enters atomic pool admission and reloads the selected
+member's URL, credential and model fence. A one-attempt configuration still
+returns the initial failure after recording the binding rotation.
+An explicit smaller `LOOM_GW_LLM_RETRY_BUDGET_SEC` remains smaller: for example,
+60 now limits the complete request to 60 seconds, including its first attempt;
+it is no longer a retry-only budget with an exempt initial call. This setting
+change affects newly started Gateway processes and new controller instances;
+it does not rewrite in-flight agent state.
+
 Internal bearer reasons are restricted to `missing`, `malformed`,
 `invalid_signature`, `expired`, and `valid`. Classifiers consume the structured
 HTTP codes above rather than matching human-readable response strings.

@@ -669,17 +669,19 @@ async def _reserve_service_candidate(
     raise ExecutionProvisioningBlockedError("execution_target_unavailable", retry_after_seconds=15)
 
 
-def verifier_candidates(pool_id: str) -> Select[tuple[ServiceExecutionLease, Trial]]:
+def verifier_candidates(
+    pool_id: str | None, *, lock: bool = True, exclude_child_id: UUID | None = None,
+) -> Select[tuple[ServiceExecutionLease, Trial]]:
     """One eligibility predicate for local reservation and global proposal."""
     child = aliased(ServiceExecutionLease)
     retries = sql_cast(func.coalesce(
         Trial.result["verifier_execution"]["retries"].astext, "0"), Integer)
-    return (
+    query = (
         select(ServiceExecutionLease, Trial)
         .join(Trial, Trial.id == ServiceExecutionLease.trial_id)
         .where(
             ServiceExecutionLease.execution_role == "attempt",
-            ServiceExecutionLease.selected_pool_id == pool_id,
+            *([ServiceExecutionLease.selected_pool_id == pool_id] if pool_id is not None else []),
             ServiceExecutionLease.output_commit_state == "committed",
             ServiceExecutionLease.finalized_at.is_not(None),
             ServiceExecutionLease.cleanup_state == "complete",
@@ -695,12 +697,13 @@ def verifier_candidates(pool_id: str) -> Select[tuple[ServiceExecutionLease, Tri
             ~exists().where(
                 child.parent_lease_id == ServiceExecutionLease.id,
                 child.execution_role == "verifier",
+                *([child.id != exclude_child_id] if exclude_child_id is not None else []),
                 or_(child.verifier_retry >= retries, child.deleted_at.is_(None)),
             ),
         )
         .order_by(ServiceExecutionLease.deleted_at, ServiceExecutionLease.id)
-        .with_for_update(of=Trial, skip_locked=True)
     )
+    return query.with_for_update(of=Trial, skip_locked=True) if lock else query
 
 
 async def reserve_next_verifier_executions(
@@ -737,6 +740,15 @@ async def reserve_next_verifier_executions(
                     placement_policy=placement_policy,
                 ))
         except (ExecutionProvisioningBlockedError, ServiceExecutionConflict) as exc:
+            if isinstance(exc, ExecutionProvisioningBlockedError) and exc.capacity_wait is not None:
+                from loom_control_plane.execution_capacity_wait import (
+                    remember_verifier_capacity_wait,
+                )
+
+                await remember_verifier_capacity_wait(
+                    session, trial_id=trial.id, context=exc.capacity_wait,
+                    reason=exc.reason, now=current_time,
+                )
             # Typed provisioning waits retain their handoff; other conflicts
             # keep the existing bounded recovery window.
             waiting_since = _handoff_pending_since(trial) or parent.deleted_at

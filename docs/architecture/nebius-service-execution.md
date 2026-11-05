@@ -991,6 +991,22 @@ each transaction; the global capacity lock, budget checks, idempotency and
 output/cleanup prerequisites remain authoritative. Global-pool selection never
 enters this local reservation writer.
 
+Completed separate-mode attempts whose output is committed and sandbox cleanup
+is complete receive verifier priority in shared capacity ordering. A rejected
+verifier renews the existing Trial capacity-wait hint with its exact parent,
+current retry, runtime and source inputs. Its age starts at the parent's cleanup
+time, or that retry's later `pending_since`, and survives repeated capacity
+denials. The oldest valid verifier head per target precedes new attempt/build
+waiting heads; a verifier's first admission uses that same durable parent age.
+Existing authorizations, cleanup-pending resources, provider quotas, node shape,
+create-rate and budget checks remain charged normally. A finite grading backlog
+can therefore drain before new agents take newly released slots, without adding
+a concurrency split or reserved verifier node pool. Ordinary attempts retain
+the dispatcher's interleaved opportunities when capacity remains or no verifier
+head is eligible. Cancellation, changed parent/retry/source/target, expiry or a
+real child reservation removes the old hint's protection. Global-pool workload
+ordering remains on its registered-pool path.
+
 `execution_command_concurrency` is a deployment-owned integer from 1 through 8
 (default 1), rendered as `LOOM_EXECUTION_ACTUATOR_COMMAND_CONCURRENCY` for primary
 and regional actuators. Values above 1 enable bounded parallel command delivery

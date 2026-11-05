@@ -735,7 +735,7 @@ async def test_real_upstream_timeout_rotates_key_and_closes_previous_socket(
                 if ": " in line
             }
             payload = json.loads(await reader.readexactly(int(headers["content-length"])))
-            observed.append((headers["authorization"], payload))
+            observed.append((headers["authorization"], headers["x-request-id"], payload))
             if headers["authorization"] == "Bearer test-credential-0":
                 eof = asyncio.create_task(reader.read())
                 unblocked = asyncio.create_task(release.wait())
@@ -744,6 +744,8 @@ async def test_real_upstream_timeout_rotates_key_and_closes_previous_socket(
                     assert eof.result() == b""
                     disconnected.set()
                 return
+            # The fallback response cannot hide a still-open timed-out socket.
+            await asyncio.wait_for(disconnected.wait(), 1)
             body = json.dumps(
                 {
                     "model": "student",
@@ -811,32 +813,34 @@ async def test_real_upstream_timeout_rotates_key_and_closes_previous_socket(
                     headers={"Authorization": "Bearer " + p["jwt"]},
                     json=payload,
                 )
-                assert response.status_code == 504, response.text
+                # The Gateway owns the retry: one caller HTTP request rotates
+                # the timed-out member and returns the spare's successful body.
+                assert response.status_code == 200, response.text
+                assert response.json()["choices"][0]["message"]["content"] == "spare succeeded"
                 await asyncio.wait_for(disconnected.wait(), 1)
-                spare = await client.post(
-                    base + "/openai/v1/chat/completions",
-                    headers={"Authorization": "Bearer " + p["jwt"]},
-                    json=payload,
-                )
-                assert spare.status_code == 200, spare.text
                 async with asyncio.timeout(3):
                     while True:
                         rows = await receipts(p)
                         if len(rows) == 2 and all(r.gateway_outcome == "completed" for r in rows):
                             break
                         await asyncio.sleep(0.01)
-                assert [key for key, _ in observed] == [
+                assert [key for key, _, _ in observed] == [
                     "Bearer test-credential-0",
                     "Bearer test-credential-1",
                 ]
-                assert [body for _, body in observed] == [payload, payload]
-                assert rows[0].request_id != rows[1].request_id
+                assert [body for _, _, body in observed] == [payload, payload]
+                assert [receipt_id for _, receipt_id, _ in observed] == [str(r.id) for r in rows]
+                assert rows[0].request_id == rows[1].request_id
+                assert [r.dispatch_ordinal for r in rows] == [1, 2]
+                assert [r.attempt for r in rows] == [1, 2]
+                assert [r.gateway_http_status for r in rows] == [200, 200]
                 assert [r.provider_connection_id for r in rows] == p["ids"][:2]
                 assert [r.provider_outcome for r in rows] == [
                     "transport_error",
                     "response_received",
                 ]
                 assert rows[0].failover_reason == "upstream_timeout"
+                assert rows[0].provider_http_status is None
                 assert rows[1].provider_http_status == 200
                 async with p["sessions"]() as session:
                     calls = list(
@@ -848,9 +852,17 @@ async def test_real_upstream_timeout_rotates_key_and_closes_previous_socket(
                             )
                         ).all()
                     )
-                assert len(calls) == 2
-                assert calls[0].provider_extras["_loom_request_pool"]["possible_duplicate_inference"]
-                assert calls[1].attempt == 1
+                # One successful logical request produces one usage/cost row;
+                # the timed-out provider's unknown inference is receipt-only.
+                assert len(calls) == 1
+                call = calls[0]
+                assert call.attempt == 2
+                assert (call.input_tokens, call.output_tokens) == (2, 1)
+                assert call.rate_card_hash != "failed-upstream"
+                assert float(call.cost_usd) == pytest.approx(0.00004)
+                pool_meta = call.provider_extras["_loom_request_pool"]
+                assert pool_meta["provider_connection_id"] == str(p["ids"][1])
+                assert pool_meta["possible_duplicate_inference"] is True
                 assert app.state.drain.in_flight == 0
                 assert p["sessions"].kw["bind"].pool.checkedout() == 0
     finally:

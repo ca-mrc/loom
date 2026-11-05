@@ -111,6 +111,7 @@ These differences remain under #2390; passing conformance does not erase them:
 | `enable_summarize=False` | Enable the upstream default only after forced-summary tests prove prompt/history behavior, unambiguous main/summary Gateway-call joins, auxiliary artifact delivery and export. |
 | Recording enabled | Required native artifact capture; follows the current upstream recording default. |
 | Current-user probes, UTF-8 locale fallback, tmux 1.x paste locking | Local patch supports existing task images. Remove each part when selected upstream covers it and the corresponding compatibility tests pass; never silently drop a failing patch. |
+| Gateway transport retry ownership | Per-instance SDK/Harbor transport retries are disabled so the Gateway owns the total attempt/budget policy. Direct-provider mode keeps Harbor defaults. Remove when upstream provides an equivalent per-instance option; the built-image real-SDK failure probe must retain one Gateway request per failed turn. |
 | Instance-local tmux recovery | Recreates a session once without replaying dispatched keys and reports changed shell state. Remove when upstream provides equivalent loss handling and no-replay guarantees. This fault path is outside ordinary-path parity. |
 | `continue_until_timeout` | Explicit Loom task extension with separate real-loop tests; not upstream-default behavior. |
 | Multi-model routing | Explicit extension coupled to private Harbor methods. Existing routing tests must pass on upgrades; outside the single-model differential contract. |

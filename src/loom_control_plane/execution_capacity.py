@@ -567,7 +567,7 @@ async def reserve_execution_provisioning(
         # Carry only the already validated Pod envelope across the scheduler's
         # savepoint rollback. It is not a lease or a cost reservation.
         context = None
-        if existing is None and lease.execution_role == "attempt":
+        if existing is None and lease.execution_role in {"attempt", "verifier"}:
             from loom_control_plane.execution_capacity_wait import execution_target_fingerprint
 
             context = {"target_id": target.id, "pool_id": target.logical_pool_id,
@@ -576,6 +576,9 @@ async def reserve_execution_provisioning(
                        "runtime_contract_sha256": lease.runtime_contract_sha256,
                        "image_materialization_id": (lease.runtime_contract_json or {}).get("task_image_materialization_id"),
                        "task_revision_sha256": (lease.runtime_contract_json or {}).get("task_revision_sha256")}
+            if lease.execution_role == "verifier":
+                context.update(execution_role="verifier", parent_lease_id=str(lease.parent_lease_id),
+                               verifier_retry=lease.verifier_retry)
         raise ExecutionProvisioningBlockedError(exc.reason, exc.retry_after_seconds, context) from exc
     if existing is not None:
         return existing
@@ -724,12 +727,19 @@ async def admit_capacity_resources(
         preview_trial_id=preview_trial_id, preview_target_id=target.id, preview_resources=resources,
         preview_runtime_sha256=preview_runtime_sha256,
     )
-    # Both kinds of incoming demand yield only to older renewable waiting
-    # heads. A new claim has no inherited queue age. Real authority stays first.
+    # Ordinary incoming demand yields to older renewable heads. A verifier
+    # inherits its released-parent age within the completed-work priority tier.
     order = build_order or execution_order or (current_time, demand_id)
-    waiting = [row for row in waiting
-               if (row.first_waited_at, f"task-image-wait:{row.materialization_id}:{row.lease_epoch}") < order]
-    execution_waiting = [row for row in execution_waiting if row.order < order]
+    incoming_lease = await session.get(ServiceExecutionLease, exclude_lease_id) if exclude_lease_id else None
+    incoming_verifier = incoming_lease is not None and incoming_lease.execution_role == "verifier"
+    # Finished, released work gets grading capacity before new attempts/builds.
+    # Real authorizations remain charged before either waiting tier.
+    waiting = [row for row in waiting if not incoming_verifier
+               and (row.first_waited_at, f"task-image-wait:{row.materialization_id}:{row.lease_epoch}") < order]
+    execution_waiting = [row for row in execution_waiting if (
+        (row.execution_role == "verifier" and not incoming_verifier)
+        or ((row.execution_role == "verifier") == incoming_verifier and row.order < order)
+    )]
 
     def native_demands(target_ids: frozenset[str], *, include_waits: bool = True) -> list[tuple[str, ResourceTotals]]:
         return [

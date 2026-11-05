@@ -15,7 +15,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 ROOT = Path(__file__).resolve().parents[2]
 if __package__ in {None, ""}:
@@ -24,7 +24,7 @@ if __package__ in {None, ""}:
 from scripts.ops.deploy_nebius_platform import DeploymentError, Kubectl, deploy  # noqa: E402
 from scripts.ops.nebius_rollout_reporting import emit_result, explanation  # noqa: E402
 
-from loom.nebius_rollout_guard import ACTIVITY_SQL  # noqa: E402
+from loom.nebius_rollout_guard import CLEANUP_PROJECTION_SQL, activity_sql  # noqa: E402
 from loom.repository_identity import (  # noqa: E402
     REPOSITORY_ID,
     REPOSITORY_NAMES,
@@ -202,11 +202,17 @@ def deployment_decision(config: dict, current: str, candidate: str) -> dict:
 
 def idle_snapshot(kube: Kubectl, namespace: str) -> dict:
     """Inspect idle conditions without pausing dispatch or needing a healthy service."""
-    query = ("BEGIN READ ONLY; SET LOCAL statement_timeout='10s'; SELECT json_build_object("
-             "'locked', EXISTS (SELECT 1 FROM nebius_rollout_guard), 'active', row_to_json(activity)) "
-             "FROM (" + ACTIVITY_SQL + ") activity; ROLLBACK;")
-    result = json.loads(kube.run("exec", "-n", namespace, "statefulset/loom-postgres", "--", "psql",
-                                "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query))
+    def read_only(query: str) -> Any:
+        query = "BEGIN READ ONLY; SET LOCAL statement_timeout='10s'; " + query + "; ROLLBACK;"
+        return json.loads(kube.run("exec", "-n", namespace, "statefulset/loom-postgres", "--", "psql",
+                                  "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query))
+
+    has_cleanup_projection = read_only("SELECT to_json(capability) FROM (" + CLEANUP_PROJECTION_SQL + ") metadata(capability)")
+    if type(has_cleanup_projection) is not bool:
+        raise DeploymentError("invalid idle snapshot", reason_code="invalid_idle_snapshot")
+    result = read_only("SELECT json_build_object("
+                      "'locked', EXISTS (SELECT 1 FROM nebius_rollout_guard), 'active', row_to_json(activity)) "
+                      "FROM (" + activity_sql(has_cleanup_projection=has_cleanup_projection) + ") activity")
     if (type(result.get("locked")) is not bool or not isinstance(result.get("active"), dict)
             or set(result["active"]) != {"trials", "executions", "builds", "build_cleanup"}
             or any(type(value) is not int or value < 0 for value in result["active"].values())):
