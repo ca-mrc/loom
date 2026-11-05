@@ -67,6 +67,8 @@ def _api(supply, monkeypatch, records, status=409):
 
         def request(self, method, path, body=None, *, missing_ok=False):
             self.calls.append((method, path))
+            if method == "GET" and path.startswith("/actions/workflows/"):
+                return {"total_count": len(records), "workflow_runs": [self.run(record) for record in records]}
             if method == "GET" and path.startswith("/actions/runners/"):
                 return None
             if method == "GET" and path.startswith("/actions/runs/"):

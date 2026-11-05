@@ -443,6 +443,38 @@ def failed_start(record: dict[str, Any], worker: dict[str, Any] | None,
     return None
 
 
+def workflow_history(api: API, workflow: str, since: float, now: float) -> list[dict[str, Any]]:
+    """Partition filtered history before GitHub's 1,000-result search ceiling."""
+    pending = [(int(since), int(now))]
+    found: dict[int, dict[str, Any]] = {}
+    while pending:
+        lower, upper = pending.pop()
+        dates = [datetime.fromtimestamp(value, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                 for value in (lower, upper)]
+        path = "/actions/workflows/" + workflow + "/runs?created=" + urllib.parse.quote("..".join(dates), safe="")
+        first = api.request("GET", path + "&per_page=100&page=1")
+        total = first.get("total_count")
+        if type(total) is not int or total < 0:
+            raise SupplyError("workflow history has an invalid result count")
+        if total > 1000:
+            if upper - lower <= 1:
+                raise SupplyError("workflow history exceeds search limit within one second")
+            midpoint = (lower + upper) // 2
+            pending.extend([(midpoint, upper), (lower, midpoint)])
+            continue
+        rows = {}
+        for page in range(1, max(1, (total + 99) // 100) + 1):
+            payload = first if page == 1 else api.request("GET", path + f"&per_page=100&page={page}")
+            if payload.get("total_count") != total:
+                raise SupplyError("workflow history changed during pagination; retry next pass")
+            for run in payload["workflow_runs"]:
+                rows[run["id"]] = run
+        if len(rows) != total:
+            raise SupplyError("workflow history pagination is incomplete; retry next pass")
+        found.update(rows)
+    return list(found.values())
+
+
 def reconcile(config: dict[str, Any], root: Path, api: API, execute: bool) -> dict[str, Any]:
     now = time.time()
     runners = api.pages("/actions/runners", "runners")
@@ -460,9 +492,7 @@ def reconcile(config: dict[str, Any], root: Path, api: API, execute: bool) -> di
     for workflow in sorted(workflows):
         earliest = min(row["created_at"] for row in records.values()
                        if row.get("workflow_path", config["worker_workflow"]) == workflow)
-        since = datetime.fromtimestamp(earliest - 60, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        runs.extend(api.pages("/actions/workflows/" + workflow + "/runs?created=>="
-                              + urllib.parse.quote(since, safe=""), "workflow_runs"))
+        runs.extend(workflow_history(api, workflow, earliest - 60, now))
     expected_titles = {run_title(slot, row["nonce"]) for slot, row in records.items()}
     by_title = {}
     for run in runs:
@@ -497,7 +527,9 @@ def reconcile(config: dict[str, Any], root: Path, api: API, execute: bool) -> di
     if not execute:
         return plan
     retiring = set()
-    for slot, record in list(records.items()):
+    # Retire the oldest expired requests first so a budget-limited pass makes
+    # the next history scan smaller, without discarding any unresolved record.
+    for slot, record in sorted(records.items(), key=lambda item: item[1]["created_at"]):
         worker = inventory.get(record["runner_id"])
         run = resolved[slot]
         if run:

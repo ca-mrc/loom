@@ -69,6 +69,12 @@ class NativeAPI:
     def request(self, method, path, body=None, *, missing_ok=False):
         self.budget -= 1
         self.calls.append((method, path))
+        if method == "GET" and path.startswith("/actions/workflows/"):
+            if self.fail_run_inventory:
+                raise self.supply.SupplyError("run inventory unavailable")
+            for run in self.runs.values():
+                run.setdefault("run_attempt", 1)
+            return {"total_count": len(self.runs), "workflow_runs": list(self.runs.values())}
         if path.startswith("/actions/runners/") and method == "GET":
             runner_id = int(path.rsplit("/", 1)[1])
             return self.fresh_runners.get(runner_id, self.runners.get(runner_id))
@@ -286,7 +292,7 @@ def test_partial_paginated_lookup_cannot_retire_an_absent_request(tmp_path, monk
         def request(self, method, path, *args, **kwargs):
             if method == "GET" and path.startswith("/actions/workflows/"):
                 if path.endswith("page=1"):
-                    return {"workflow_runs": [{"id": i, "display_title": f"other-{i}", "status": "completed"}
+                    return {"total_count": 200, "workflow_runs": [{"id": i, "display_title": f"other-{i}", "status": "completed"}
                                                for i in range(100)]}
                 raise supply.SupplyHTTPError(method, path, 502)
             return super().request(method, path, *args, **kwargs)
@@ -358,7 +364,7 @@ def test_controller_cli_replaces_stale_request_through_http_api(tmp_path, monkey
                 graph = b"jobs:\n  plan:\n    runs-on: self-hosted\n"
                 self.reply(200, {"content": base64.b64encode(graph).decode()})
             elif parsed.path == "/actions/workflows/ci-retry.yml/runs":
-                self.reply(200, {"workflow_runs": []})
+                self.reply(200, {"total_count": 0, "workflow_runs": []})
             elif parsed.path == "/actions/secrets/public-key":
                 self.reply(200, {"key_id": "test-key", "key": public_key})
             else:
@@ -490,3 +496,109 @@ def test_capacity_job_read_failure_cannot_become_startup_expiry(tmp_path, monkey
         supply.reconcile(CONFIG, tmp_path, api, execute=True)
     assert supply.load_json(tmp_path / "slot-00/worker.json", {}) == original
     assert not any(method in {"DELETE", "POST"} for method, _ in api.calls)
+
+
+class CappedHistoryAPI(NativeAPI):
+    """GitHub reports full count but returns at most 1,000 filtered matches."""
+    def __init__(self, supply, *, own_index=None, same_second=False):
+        super().__init__(supply)
+        self.budget = 100
+        self.returned_ids = set()
+        self.history_queries = []
+        for index in range(2500):
+            run_id = 10000 + index
+            self.runs[run_id] = {"id": run_id, "status": "completed", "run_attempt": 1,
+                                 "display_title": supply.run_title(0, "0" * 32) if index == own_index else "unrelated retry",
+                                 "created_seconds": 10 if same_second else index}
+
+    def pages(self, path, key):
+        if path.startswith("/actions/workflows/"):
+            return self.supply.API.pages(self, path, key)
+        return super().pages(path, key)
+
+    def request(self, method, path, *args, **kwargs):
+        import urllib.parse
+        if method == "GET" and path.startswith("/actions/workflows/"):
+            if self.budget <= 0:
+                raise self.supply.SupplyError("supply API budget exhausted; resume next reconciliation")
+            self.budget -= 1
+            self.calls.append((method, path))
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+            created = query["created"][0]
+            dates = created.removeprefix(">=").split("..")
+            bounds = [self.supply.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+                      for value in dates]
+            lower, upper = bounds if len(bounds) == 2 else (bounds[0], float("inf"))
+            page = int(query["page"][0])
+            selected = sorted((row for row in self.runs.values() if lower <= row["created_seconds"] <= upper),
+                              key=lambda row: row["created_seconds"], reverse=True)
+            returned = selected[:1000][(page - 1) * 100:page * 100]
+            self.returned_ids.update(row["id"] for row in returned)
+            self.history_queries.append((lower, upper, page, len(selected)))
+            return {"total_count": len(selected), "workflow_runs": returned}
+        if method == "DELETE":
+            assert len(self.returned_ids) == 2500, "absence cannot authorize retirement before all partitions are read"
+        return super().request(method, path, *args, **kwargs)
+
+
+@pytest.mark.parametrize("own_index", [None, 0, 1250, 2499])
+def test_filtered_history_above_1000_finds_owned_run_or_proves_complete_absence(tmp_path, monkeypatch, own_index):
+    supply = supply_module(monkeypatch, now=4000)
+    worker(supply, tmp_path)
+    api = CappedHistoryAPI(supply, own_index=own_index)
+    plan = supply.reconcile(CONFIG, tmp_path, api, execute=True)
+    assert plan["retired_slots"] == plan["created_slots"] == [0]
+    receipt = supply.load_json(next((tmp_path / "history").glob("*/retired.json")), {})
+    assert receipt.get("run_id") == (None if own_index is None else 10000 + own_index)
+    assert len(api.returned_ids) == 2500
+    assert any(count > 1000 for _, _, _, count in api.history_queries)
+    assert max(page for _, _, page, _ in api.history_queries) <= 10
+    assert api.budget > 0
+
+
+def test_history_partition_budget_exhaustion_preserves_uncertain_request(tmp_path, monkeypatch):
+    supply = supply_module(monkeypatch, now=4000)
+    original = worker(supply, tmp_path)
+    api = CappedHistoryAPI(supply)
+    api.budget = 8
+    with pytest.raises(supply.SupplyError, match="budget exhausted"):
+        supply.reconcile(CONFIG, tmp_path, api, execute=True)
+    assert supply.load_json(tmp_path / "slot-00/worker.json", {}) == original
+    assert not any(method in {"DELETE", "POST"} for method, _ in api.calls)
+
+
+def test_unsplittable_overfull_history_cannot_prove_absence(tmp_path, monkeypatch):
+    supply = supply_module(monkeypatch, now=4000)
+    original = worker(supply, tmp_path)
+    api = CappedHistoryAPI(supply, same_second=True)
+    with pytest.raises(supply.SupplyError, match="search limit within one second"):
+        supply.reconcile(CONFIG, tmp_path, api, execute=True)
+    assert supply.load_json(tmp_path / "slot-00/worker.json", {}) == original
+    assert not any(method in {"DELETE", "POST"} for method, _ in api.calls)
+
+
+def test_incomplete_history_count_cannot_prove_absence(tmp_path, monkeypatch):
+    supply = supply_module(monkeypatch)
+    original = worker(supply, tmp_path)
+
+    class API(NativeAPI):
+        def request(self, method, path, *args, **kwargs):
+            if method == "GET" and path.startswith("/actions/workflows/"):
+                return {"total_count": 2, "workflow_runs": [{"id": 1, "display_title": "other"}]}
+            return super().request(method, path, *args, **kwargs)
+
+    api = API(supply)
+    with pytest.raises(supply.SupplyError, match="pagination is incomplete"):
+        supply.reconcile(CONFIG, tmp_path, api, execute=True)
+    assert supply.load_json(tmp_path / "slot-00/worker.json", {}) == original
+    assert not any(method in {"DELETE", "POST"} for method, _ in api.calls)
+
+
+def test_exactly_1000_same_second_runs_are_complete_in_ten_pages(tmp_path, monkeypatch):
+    supply = supply_module(monkeypatch, now=4000)
+    api = CappedHistoryAPI(supply, same_second=True)
+    api.runs = dict(list(api.runs.items())[:1000])
+    history = supply.workflow_history(api, "ci-retry.yml", 0, 20)
+    assert len(history) == 1000
+    assert len(api.history_queries) == 10
+    assert api.budget == 90

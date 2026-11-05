@@ -117,8 +117,13 @@ removes only that request's secret after runner deregistration and terminal dono
 readback.
 
 Dispatch uncertainty is persisted before POST and never blindly retried. On the
-next pass the controller queries the original workflow with complete pagination
-and the exact slot/request title; a recorded run id also receives direct readback.
+next pass the controller queries the original workflow and the exact slot/request
+title. GitHub limits filtered workflow-run searches to 1,000 results, so the
+controller partitions the full outstanding-request lifetime into bounded
+created-time ranges until each range fits that ceiling, then verifies complete
+pagination against its reported count. Ranges share their split boundary and
+results are deduplicated by native run id, preserving boundary coverage. API-budget exhaustion, changing/incomplete
+pages and an unsplittable overfull range stop the pass before retirement; a recorded run id also receives direct readback.
 An API failure is not proof of absence. An unready request with no observed run
 gets five minutes of dispatch-visibility grace; an observed donor that never
 brings its runner online gets fifteen minutes after its owned `capacity` job
