@@ -258,6 +258,9 @@ class HarborConformanceTests(unittest.IsolatedAsyncioTestCase):
                 "top_p": 0.8,
             },
         )
+        # Compare the same effective gateway-client transport policy. Native
+        # Harbor alone retains its own retry defaults; this is a Loom adapter option.
+        bridge.install_gateway_retry_policy(baseline)
         await baseline.setup(None)
         baseline_error = None
         try:
@@ -437,6 +440,82 @@ class HarborConformanceTests(unittest.IsolatedAsyncioTestCase):
         pair[3].commands[0] = ("different command", {})
         with self.assertRaises(AssertionError):
             self.assert_equivalent(pair)
+
+
+class GatewayRetryOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    """Exercise the production adapter, Harbor wrappers and real SDK offline."""
+
+    async def test_gateway_504_is_not_retried_by_harbor_or_sdk(self):
+        await self._exercise_gateway_failure(teacher=False)
+
+    async def test_teacher_504_is_not_retried_by_harbor_or_sdk(self):
+        await self._exercise_gateway_failure(teacher=True)
+
+    async def test_gateway_admission_429_is_not_retried_by_sdk(self):
+        await self._exercise_gateway_failure(teacher=False, status=429)
+
+    async def test_gateway_authentication_failure_is_not_retried(self):
+        await self._exercise_gateway_failure(teacher=False, status=401)
+
+    async def _exercise_gateway_failure(self, *, teacher, status=504):
+        import httpx
+        from harbor.llms.lite_llm import LiteLLM
+        from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
+        from tenacity import wait_none
+
+        arrivals = []
+
+        def response(request):
+            arrivals.append(json.loads(request.content))
+            return httpx.Response(status, request=request, json={
+                "error": {"message": "synthetic Gateway failure", "type": "qualification"},
+            })
+
+        def transport(**kwargs):
+            return httpx.AsyncClient(transport=httpx.MockTransport(response), trust_env=False,
+                                     timeout=kwargs["timeout_sec"])
+
+        class Agent(Terminus2):
+            async def setup(self, environment):
+                self._session = Session()
+
+        driver = FakeDriver()
+        await driver.start()
+        try:
+            with (
+                patch.object(bridge, "_import_terminus2", return_value=(Agent, AgentContext)),
+                patch("loom.llm_sdk_clients.create_model_http_client", transport),
+                patch("openai._base_client.BaseClient._calculate_retry_timeout", return_value=0),
+                patch.object(Terminus2._query_llm.retry, "wait", wait_none()),
+                patch.object(LiteLLM.call.retry, "wait", wait_none()),
+            ):
+                options = {}
+                if teacher:
+                    from loom.models.trial import MultiModelSwitchSpec
+                    options = {
+                        "multi_model": MultiModelSwitchSpec(
+                            enabled=True, policy="beta_mixture", beta=1.0,
+                            secondary_model=ModelSpec(provider="openai", name="gpt-4o-mini"),
+                        ),
+                        "model_switch_plan": {
+                            "mix_mode": "beta_mixture", "beta": 1.0, "seed": "retry-qualification",
+                        },
+                    }
+                runtime = bridge.LoomTerminus2Runtime(
+                    model=ModelSpec(provider="openai", name="gpt-4o"), team_id=str(uuid4()),
+                    trial_id=uuid4(), cp_client=CP(ScriptedLLM([])),
+                    gateway_url="http://gateway", max_turns=1, **options,
+                )
+                with self.assertRaises(AgentError):
+                    await runtime.run(instruction="Exercise a failed model turn.", env=driver,
+                                      trajectory=Events(), mcp=[], skills_dir=None, step_id="agent")
+            self.assertEqual(len(arrivals), 1, "one gateway response must not become 27 SDK sends")
+            self.assertEqual(arrivals[0]["model"], "gpt-4o-mini" if teacher else "gpt-4o")
+            self.assertEqual(Terminus2._query_llm.retry.stop.max_attempt_number, 3)
+            self.assertEqual(LiteLLM.call.retry.stop.max_attempt_number, 3)
+        finally:
+            await driver.stop()
+            await GLOBAL_LOGGING_WORKER.stop()
 
 
 if __name__ == "__main__":

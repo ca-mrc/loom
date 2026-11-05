@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 import pytest
@@ -19,16 +18,16 @@ harbor = pytest.importorskip("harbor")
 
 
 @pytest.mark.asyncio
-async def test_loom_harbor_environment_exec_delegates_to_driver() -> None:
+async def test_loom_harbor_environment_exec_delegates_to_driver(tmp_path: Path) -> None:
     seen: list[str] = []
 
-    async def handler(cmd: str, user, cwd, env) -> ExecResult:
+    def handler(cmd: str, user, cwd, env) -> ExecResult:
         seen.append(cmd)
-        return ExecResult(return_code=0, stdout=b"ok", stderr=b"")
+        return ExecResult(return_code=0, stdout=b"ok", stderr=b"", duration_sec=0)
 
     driver = FakeDriver(exec_handler=handler)
     await driver.start()
-    logs = make_trial_paths(__import__("pathlib").Path(tempfile.mkdtemp()))
+    logs = make_trial_paths(tmp_path)
     env = LoomHarborEnvironment.create(
         driver=driver,
         trial_paths=logs,

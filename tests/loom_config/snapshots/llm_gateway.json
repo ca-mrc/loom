@@ -71,7 +71,7 @@
   },
   "llm_retry_budget_sec": {
     "annotation": "<class 'float'>",
-    "default": "60.0",
+    "default": "600.0",
     "required": false
   },
   "llm_retry_jitter_sec": {
@@ -81,7 +81,7 @@
   },
   "llm_retry_max_attempts": {
     "annotation": "<class 'int'>",
-    "default": "5",
+    "default": "3",
     "required": false
   },
   "llm_retry_max_backoff_sec": {

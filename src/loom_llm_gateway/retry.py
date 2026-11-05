@@ -21,7 +21,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import httpx
 
@@ -39,10 +39,26 @@ from loom_llm_gateway.metrics import (
 )
 
 logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
 
 
 class RetryBudgetExceededError(httpx.TimeoutException):
     """A retry exhausted the gateway budget, not the provider's timeout."""
+
+
+async def _within_budget(
+    operation: Callable[[], Awaitable[_T]], *, remaining: float,
+) -> _T:
+    if remaining <= 0:
+        raise RetryBudgetExceededError("gateway retry budget exhausted")
+    timeout = asyncio.timeout(remaining)
+    try:
+        async with timeout:
+            return await operation()
+    except TimeoutError:
+        if timeout.expired():
+            raise RetryBudgetExceededError("gateway retry budget exhausted") from None
+        raise
 
 
 @dataclass(frozen=True)
@@ -70,7 +86,7 @@ async def send_with_retry(
     deadline: GatewayAttemptDeadline | None = None,
     dispatch_audit: DispatchAudit | None = None,
     response_retryable: Callable[[httpx.Response], bool] | None = None,
-    respect_retry_after: bool = False,
+    respect_retry_after: bool = True,
 ) -> RetryOutcome:
     """Run `send()` with retry on transient failures.
 
@@ -100,36 +116,50 @@ async def send_with_retry(
     for attempt in range(1, max_attempts + 1):
         last_exc = None
 
-        async def bounded_send(current_attempt: int = attempt) -> httpx.Response:
-            # The initial request retains the configured upstream timeout:
-            # valid slow generations must not be cut off by the retry budget.
-            # Only subsequent sends consume its remaining wall-clock budget.
-            if current_attempt == 1:
-                return await send()
+        async def dispatch(current_attempt: int = attempt) -> httpx.Response:
             remaining = budget - (now() - started)
             if remaining <= 0:
                 raise RetryBudgetExceededError("gateway retry budget exhausted")
-            timeout = asyncio.timeout(remaining)
+            admission_timeout = asyncio.timeout(remaining)
+
+            async def bounded_send() -> httpx.Response:
+                # Once admission finishes, let the inner timer report budget
+                # exhaustion through the audit's transport-error boundary.
+                # An outer cancellation here would falsely report a client stop.
+                admission_timeout.reschedule(None)
+                return await _within_budget(send, remaining=budget - (now() - started))
+
             try:
-                async with timeout:
-                    response = await send()
+                async with admission_timeout:
+                    if dispatch_audit is not None:
+                        return await dispatch_audit.send(
+                            bounded_send, deadline=deadline, attempt=current_attempt,
+                        )
+                    return (await bounded_send() if deadline is None
+                            else await deadline.run(bounded_send))
             except TimeoutError:
-                if timeout.expired():
+                if admission_timeout.expired():
                     raise RetryBudgetExceededError("gateway retry budget exhausted") from None
                 raise
-            return response
+
+        async def bounded_sleep(
+            delay: float, *, status: int = 0, current_attempt: int = attempt,
+        ) -> None:
+            async def wait() -> None:
+                if deadline is None:
+                    await sleep(delay)
+                else:
+                    await deadline.sleep(delay, sleep=sleep)
+            try:
+                await _within_budget(wait, remaining=budget - (now() - started))
+            except RetryBudgetExceededError:
+                _record_budget_exceeded(dialect, current_attempt, status=status)
+                raise
 
         try:
-            if dispatch_audit is not None:
-                response = await dispatch_audit.send(
-                    bounded_send,
-                    deadline=deadline,
-                    attempt=attempt,
-                )
-            else:
-                response = (
-                    await bounded_send() if deadline is None else await deadline.run(bounded_send)
-                )
+            # Admission and complete response-body reads share the budget;
+            # audit settlement preserves an already received/billable response.
+            response = await dispatch()
         except RetryBudgetExceededError:
             _record_budget_exceeded(dialect, attempt, status=0)
             raise
@@ -156,10 +186,7 @@ async def send_with_retry(
                 exc,
                 wait_for,
             )
-            if deadline is None:
-                await sleep(wait_for)
-            else:
-                await deadline.sleep(wait_for, sleep=sleep)
+            await bounded_sleep(wait_for)
             continue
 
         last_response = response
@@ -211,10 +238,7 @@ async def send_with_retry(
             status,
             wait_for,
         )
-        if deadline is None:
-            await sleep(wait_for)
-        else:
-            await deadline.sleep(wait_for, sleep=sleep)
+        await bounded_sleep(wait_for, status=status)
 
     # Loop exit without return: shouldn't happen given the bounds, but
     # defensive — re-raise the last exception or return the last response.

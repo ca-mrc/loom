@@ -47,8 +47,8 @@ from loom_llm_gateway.routes._facade_common import (
 logger = logging.getLogger(__name__)
 
 
-class PoolMemberSwitchedError(Exception):
-    """The trial binding moved after an upstream timeout; do not send again."""
+class PoolMemberSwitchedError(httpx.TimeoutException):
+    """Retry through fresh pool admission under the Gateway attempt/budget limit."""
 
     def __init__(self, reason: str) -> None:
         self.reason = reason
@@ -371,8 +371,9 @@ class PoolDispatchAudit(DispatchAudit):
         return None
 
     def response_retryable(self, response: httpx.Response) -> bool:
-        # Same-member retries only. A real upstream timeout switches the binding
-        # and returns 504 instead of starting another generation here.
+        # Ordinary response retries keep the current member. Timeout/504
+        # exceptions rotate the binding, then re-enter fresh atomic admission
+        # through the same Gateway retry count and wall-clock budget.
         return response.status_code in {408, 429, 500, 502, 503}
 
     async def _switch_after_timeout(self, reason: str) -> None:

@@ -1,4 +1,4 @@
-"""Renewable queued execution heads; these records grant no create authority."""
+"""Renewable execution heads; these records grant no create authority."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from sqlalchemy import (
     literal,
     or_,
     select,
+    update,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,11 +42,17 @@ from loom_execution_capacity_collector.contracts import ResourceTotals
 
 def execution_wait_fingerprint(row: Any) -> str:
     """Invalidate cached demand when its source inputs or queue identity change."""
-    return canonical_digest({key: row[key] for key in (
+    inputs = {key: row[key] for key in (
         "task_id", "task_checksum", "task_config", "task_source_provenance",
         "legacy_separate_verifier_checksum", "trial_config", "batch_runtime_profile",
         "attempt_count", "execution_route_generation", "execution_route_pool_name", "requires_caps",
-    )})
+    )}
+    if row.get("verifier_parent_id") is not None:
+        inputs["verifier"] = {key: str(row[key]) for key in (
+            "verifier_parent_id", "verifier_parent_generation", "verifier_parent_runtime_sha256",
+        )}
+        inputs["verifier"]["handoff"] = row["verifier_handoff"]
+    return canonical_digest(inputs)
 
 
 def execution_target_fingerprint(target: ServiceExecutionTarget) -> str:
@@ -70,9 +77,14 @@ class ExecutionCapacityWait:
     target_id: str
     resources: ResourceTotals
     first_waited_at: datetime
+    execution_role: str = "attempt"
+    parent_lease_id: UUID | None = None
+    verifier_retry: int = 0
 
     @property
     def demand_id(self) -> str:
+        if self.execution_role == "verifier":
+            return f"verifier-wait:{self.parent_lease_id}:{self.verifier_retry}"
         return f"execution-wait:{self.trial_id}"
 
     @property
@@ -110,14 +122,62 @@ def _candidate_rows(exclude_lease_id: UUID | None = None) -> Select[Any]:
         ))
 
 
+def _verifier_candidate_rows(exclude_child_id: UUID | None = None) -> Select[Any]:
+    # Share the scheduler's exact pending-parent/retry/cancellation predicate.
+    # This read holds no new Trial lock inside capacity admission.
+    from loom_control_plane.service_execution_scheduler import verifier_candidates
+
+    return (verifier_candidates(None, lock=False, exclude_child_id=exclude_child_id)
+        .join(Task, Task.id == Trial.task_id).join(Batch, Batch.id == Trial.batch_id)
+        .with_only_columns(
+            Trial.id, Trial.task_id, Trial.attempt_count, Trial.execution_route_generation,
+            Trial.execution_route_pool_name, Trial.requires_caps, Trial.next_attempt_at,
+            Trial.scheduling_observation, Task.checksum.label("task_checksum"),
+            Task.config.label("task_config"), Task.source_provenance.label("task_source_provenance"),
+            Task.legacy_separate_verifier_checksum, Trial.config.label("trial_config"),
+            Batch.service_execution_runtime_profile.label("batch_runtime_profile"),
+            Trial.result["verifier_execution"].label("verifier_handoff"),
+            ServiceExecutionLease.id.label("verifier_parent_id"),
+            ServiceExecutionLease.resource_generation.label("verifier_parent_generation"),
+            ServiceExecutionLease.runtime_contract_sha256.label("verifier_parent_runtime_sha256"),
+            ServiceExecutionLease.deleted_at.label("verifier_deleted_at"),
+        ))
+
+
+def _verifier_wait_start(row: Any) -> datetime:
+    handoff = row["verifier_handoff"]
+    deleted_at: datetime = row["verifier_deleted_at"]
+    # A retry's pending_since belongs to that retry; the original parent starts
+    # waiting only after its sandbox is actually released.
+    try:
+        pending = _time(handoff["pending_since"]) if handoff.get("pending_since") else deleted_at
+    except (TypeError, ValueError):
+        pending = deleted_at
+    return max(pending, deleted_at)
+
+
+def _verifier_identity(row: Any) -> tuple[UUID, int]:
+    return row["verifier_parent_id"], row["verifier_handoff"].get("retries", 0)
+
+
 async def _eligible(session: AsyncSession, row: Any, payload: Any, now: datetime) -> ExecutionCapacityWait | None:
     try:
         if not isinstance(payload, dict) or payload.get("input_fingerprint") != execution_wait_fingerprint(row):
             return None
+        if payload.get("execution_role", "attempt") not in {"attempt", "verifier"}:
+            return None
         first, renewed, expiry = (_time(payload[key]) for key in ("first_waited_at", "renewed_at", "expires_at"))
+        verifier = payload.get("execution_role") == "verifier"
+        if verifier:
+            parent_id, retry = _verifier_identity(row)
+            if (payload.get("parent_lease_id") != str(parent_id)
+                    or payload.get("verifier_retry") != retry or first != _verifier_wait_start(row)):
+                return None
+        elif row.get("verifier_parent_id") is not None:
+            return None
         if (not first <= renewed < expiry <= renewed + timedelta(seconds=WAIT_LEASE_SECONDS)
                 or renewed > now + timedelta(seconds=60) or expiry <= now
-                or _time(payload["retry_at"]) != row["next_attempt_at"]):
+                or (not verifier and _time(payload["retry_at"]) != row["next_attempt_at"])):
             return None
         target_id, pool_id = payload["target_id"], payload["pool_id"]
         if not isinstance(target_id, str) or not isinstance(pool_id, str):
@@ -153,7 +213,9 @@ async def _eligible(session: AsyncSession, row: Any, payload: Any, now: datetime
             return None
         if not await _realizable(session, target_id=target_id, pool_id=pool_id, resources=resources, now=now):
             return None
-        return ExecutionCapacityWait(row["id"], target_id, resources, first)
+        return ExecutionCapacityWait(row["id"], target_id, resources, first,
+            execution_role="verifier" if verifier else "attempt",
+            parent_lease_id=parent_id if verifier else None, verifier_retry=retry if verifier else 0)
     except (KeyError, TypeError, ValueError, OverflowError):
         # Historical observations and malformed disposable hints cannot reserve
         # resources. The normal scheduler remains responsible for validation.
@@ -185,6 +247,15 @@ async def read_execution_capacity_waits(
                     and isinstance(payload, dict)
                     and payload.get("runtime_contract_sha256") == claiming.runtime_contract_sha256):
                 own_order = wait.order
+
+        if claiming.execution_role == "verifier":
+            row = (await session.execute(_verifier_candidate_rows(claiming.id).where(
+                Trial.id == claiming.trial_id,
+                ServiceExecutionLease.id == claiming.parent_lease_id,
+            ))).mappings().one_or_none()
+            if row is not None:
+                parent_id, retry = _verifier_identity(row)
+                own_order = (_verifier_wait_start(row), f"verifier-wait:{parent_id}:{retry}")
 
     if claiming is None and preview_trial_id is not None:
         row = (await session.execute(_candidate_rows().where(Trial.id == preview_trial_id))).mappings().one_or_none()
@@ -261,6 +332,70 @@ async def read_execution_capacity_waits(
         finally:
             # Do not fetch younger pages once this target's head is known.
             await result.close()
+    # A verifier hint is compiled by a real rejected reservation, not inferred
+    # from backlog counts. Read its lightweight age index first, just as for
+    # attempts above: a large grading backlog must not cause rich per-Trial
+    # validation for every younger hint while the capacity lock is held.
+    verifier_heads: dict[str, ExecutionCapacityWait] = {}
+    verifier_filters = [
+        Trial.state.in_(("claimed", "running")), Trial.cancellation_requested_at.is_(None),
+        Trial.result["verifier_execution"]["state"].astext == "pending",
+        hint["execution_role"].astext == "verifier",
+        func.jsonb_typeof(hint["target_id"]) == "string", target.is_not(None),
+        or_(expiry.is_(None), expiry > now),
+        *([Trial.id != claiming.trial_id] if claiming is not None else []),
+        *([Trial.id != preview_trial_id] if claiming is None and preview_trial_id is not None else []),
+    ]
+    verifier_targets = (await session.scalars(select(target).where(
+        *verifier_filters,
+    ).distinct().order_by(target))).all()
+    for target_id in verifier_targets:
+        # The validated hint's age includes the current retry's pending_since;
+        # the original parent's deleted_at alone would order retries too early.
+        query = select(Trial.id, cast(first, Text).label("order_at"),
+            *(hint[key].astext.label(key) for key in ("first_waited_at", "renewed_at", "expires_at")),
+        ).where(*verifier_filters, target == target_id).order_by(
+            order_time, hint["parent_lease_id"].astext, hint["verifier_retry"].astext, Trial.id,
+        )
+        result = await session.stream(query.execution_options(yield_per=100))
+        try:
+            async for page in result.mappings().partitions(100):
+                plausible = []
+                for item in page:
+                    try:
+                        waited, renewed, expires = (_time(item[key]) for key in (
+                            "first_waited_at", "renewed_at", "expires_at"))
+                        if (waited <= renewed < expires <= renewed + timedelta(seconds=WAIT_LEASE_SECONDS)
+                                and renewed <= now + timedelta(seconds=60) and expires > now):
+                            plausible.append(item["id"])
+                    except (KeyError, TypeError, ValueError, OverflowError):
+                        continue
+                rows = (await session.execute(_verifier_candidate_rows().where(
+                    Trial.id.in_(plausible),
+                ))).mappings().all() if plausible else []
+                contexts = {row["id"]: row for row in rows}
+                finished = False
+                for item in page:
+                    row = contexts.get(item["id"])
+                    if row is None:
+                        continue
+                    payload = (row["scheduling_observation"] or {}).get("capacity_wait")
+                    wait = await _eligible(session, row, payload, now)
+                    if wait is None:
+                        continue
+                    previous = verifier_heads.get(wait.target_id)
+                    if previous is None or wait.order < previous.order:
+                        verifier_heads[wait.target_id] = wait
+                    # Compare the whole null-first prefix for ISO timestamps
+                    # accepted by Python but not PostgreSQL before stopping.
+                    if item["order_at"] is not None:
+                        finished = True
+                        break
+                if finished:
+                    break
+        finally:
+            await result.close()
+    heads.update(verifier_heads)
     return list(heads.values()), own_order
 
 
@@ -330,7 +465,8 @@ async def wake_ready_rate_heads(
         if head.target_id not in eligible:
             continue
         group, policy = eligible[head.target_id]
-        older = sum(item.target_id in group.target_ids and item.order < head.order for item in heads)
+        older = sum(item.target_id in group.target_ids and (
+            item.execution_role == "verifier" or item.order < head.order) for item in heads if item != head)
         older += sum(item.target_id in group.target_ids and (
             item.first_waited_at, f"task-image-wait:{item.materialization_id}:{item.lease_epoch}"
         ) < head.order for item in native_waits)
@@ -389,3 +525,26 @@ async def remember_execution_capacity_wait(
         payload["first_waited_at"] = prior["first_waited_at"]
     observation["capacity_wait"] = payload
     return observation
+
+
+async def remember_verifier_capacity_wait(
+    session: AsyncSession, *, trial_id: UUID, context: dict[str, Any], reason: str, now: datetime,
+) -> None:
+    """Renew a rejected verifier's frozen demand after its savepoint rolls back."""
+    from loom_control_plane.execution_capacity import _CAPACITY_ADMISSION_LOCK
+
+    if context.get("execution_role") != "verifier":
+        return
+    await session.execute(_CAPACITY_ADMISSION_LOCK)
+    row = (await session.execute(_verifier_candidate_rows().where(Trial.id == trial_id))).mappings().one_or_none()
+    if row is None:
+        return
+    payload = {**context, "input_fingerprint": execution_wait_fingerprint(row),
+               "first_waited_at": _verifier_wait_start(row).isoformat(),
+               "renewed_at": now.isoformat(),
+               "expires_at": (now + timedelta(seconds=WAIT_LEASE_SECONDS)).isoformat()}
+    if await _eligible(session, row, payload, now) is None:
+        return
+    await session.execute(update(Trial).where(Trial.id == trial_id).values(
+        scheduling_observation={"reason": reason, "observed_at": now.isoformat(), "capacity_wait": payload},
+    ))

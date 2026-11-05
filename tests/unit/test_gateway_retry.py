@@ -428,16 +428,23 @@ async def test_retry_send_cannot_run_past_the_remaining_retry_budget() -> None:
 
 
 @pytest.mark.asyncio
-async def test_initial_slow_success_is_not_cut_off_by_the_retry_budget() -> None:
+async def test_initial_attempt_is_bounded_by_the_total_retry_budget() -> None:
     settings = _StubSettings(llm_retry_budget_sec=0.01)
+    cancelled = False
 
     async def send() -> httpx.Response:
-        await asyncio.sleep(0.03)
-        return _resp(200)
+        nonlocal cancelled
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled = True
+        raise AssertionError("unreachable")
 
-    outcome = await send_with_retry(send, settings=settings, dialect="test")
-    assert outcome.response.status_code == 200
-    assert outcome.attempt == 1
+    with pytest.raises(httpx.TimeoutException, match="gateway retry budget exhausted"):
+        await asyncio.wait_for(
+            send_with_retry(send, settings=settings, dialect="test"), timeout=0.2,
+        )
+    assert cancelled
 
 
 @pytest.mark.asyncio
@@ -477,3 +484,125 @@ async def test_received_success_is_not_discarded_after_retry_budget_clock_observ
     result = await send_with_retry(send, settings=settings, dialect="test", now=lambda: clock[0])
     assert result.response.status_code == 200
     assert result.attempt == 2
+
+
+@pytest.mark.asyncio
+async def test_continuous_response_body_is_bounded_by_total_budget() -> None:
+    class SlowBody(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            while True:
+                await asyncio.sleep(0.005)
+                yield b"still producing body bytes\n"
+
+        async def aclose(self):
+            self.closed = True
+
+    body = SlowBody()
+    calls = 0
+
+    def respond(request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, request=request, stream=body)
+
+    settings = _StubSettings(llm_retry_budget_sec=0.025)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond), timeout=0.01) as client:
+        with pytest.raises(httpx.TimeoutException, match="gateway retry budget exhausted"):
+            await asyncio.wait_for(send_with_retry(
+                lambda: client.post("http://upstream"), settings=settings, dialect="test",
+            ), timeout=0.3)
+    assert calls == 1
+    assert body.closed
+
+
+@pytest.mark.asyncio
+async def test_backoff_cannot_run_past_total_budget() -> None:
+    settings = _StubSettings(llm_retry_budget_sec=0.025, llm_retry_base_backoff_sec=0.005)
+    calls = 0
+    cancelled = False
+
+    async def send():
+        nonlocal calls
+        calls += 1
+        return _resp(503)
+
+    async def blocked_sleep(_delay):
+        nonlocal cancelled
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled = True
+
+    with pytest.raises(httpx.TimeoutException, match="gateway retry budget exhausted"):
+        await asyncio.wait_for(send_with_retry(
+            send, settings=settings, dialect="test", sleep=blocked_sleep,
+        ), timeout=0.3)
+    assert calls == 1
+    assert cancelled
+
+
+@pytest.mark.asyncio
+async def test_retry_after_cannot_extend_explicit_total_budget() -> None:
+    settings = _StubSettings(llm_retry_budget_sec=1, llm_retry_base_backoff_sec=0)
+    calls = 0
+    sleeps = []
+
+    async def send():
+        nonlocal calls
+        calls += 1
+        return httpx.Response(429, headers={"Retry-After": "2"},
+                              request=httpx.Request("POST", "http://upstream"))
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    result = await send_with_retry(send, settings=settings, dialect="test", sleep=sleep)
+    assert result.response.status_code == 429
+    assert calls == 1
+    assert sleeps == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_admission_cannot_exceed_total_budget() -> None:
+    settings = _StubSettings(llm_retry_budget_sec=0.01)
+    calls = 0
+
+    class WaitingAudit:
+        async def send(self, send, **kwargs):
+            await asyncio.Event().wait()
+            return await send()
+
+    async def send():
+        nonlocal calls
+        calls += 1
+        return _resp(200)
+
+    with pytest.raises(httpx.TimeoutException, match="gateway retry budget exhausted"):
+        await asyncio.wait_for(send_with_retry(
+            send, settings=settings, dialect="test", dispatch_audit=WaitingAudit(),
+        ), timeout=0.2)
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_local_admission_429_is_not_an_upstream_retry() -> None:
+    from fastapi import HTTPException
+
+    settings = _StubSettings()
+    calls = 0
+
+    class LimitedAudit:
+        async def send(self, send, **kwargs):
+            nonlocal calls
+            calls += 1
+            raise HTTPException(429, "provider_request_pool_unavailable")
+
+    async def send():
+        raise AssertionError("admission must not contact the provider")
+
+    with pytest.raises(HTTPException) as error:
+        await send_with_retry(send, settings=settings, dialect="test", dispatch_audit=LimitedAudit())
+    assert error.value.status_code == 429
+    assert calls == 1

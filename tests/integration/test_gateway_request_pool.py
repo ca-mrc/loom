@@ -468,6 +468,7 @@ async def test_pool_timeout_preserves_only_safe_transport_phase(
     pool_setup: dict, caplog: pytest.LogCaptureFixture, error_type, phase: str,
 ) -> None:
     p = pool_setup
+    p["settings"].llm_retry_max_attempts = 1  # Isolate one-attempt rotation/observation.
     secret = "private-timeout-endpoint-and-credential"
 
     async def timeout(request):
@@ -522,6 +523,7 @@ async def test_timeout_moves_binding_before_504_and_the_spare_keeps_history(
     pool_setup: dict,
 ) -> None:
     p = pool_setup
+    p["settings"].llm_retry_max_attempts = 1  # Isolate one-attempt rotation/observation.
 
     async def fail_first(request):
         if request.url.host == "provider-0.example.test":
@@ -739,6 +741,7 @@ async def test_one_timeout_returns_504_and_moves_the_binding(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     p = pool_setup
+    p["settings"].llm_retry_max_attempts = 1  # Isolate one-attempt rotation/observation.
     caplog.set_level("INFO")
 
     async def timeout(request):
@@ -763,6 +766,7 @@ async def test_one_timeout_returns_504_and_moves_the_binding(
 
 async def test_timeout_spare_skips_keys_in_the_same_quota_group(pool_setup: dict) -> None:
     p = pool_setup
+    p["settings"].llm_retry_max_attempts = 1  # Isolate one-attempt rotation/observation.
     async with p["sessions"]() as session:
         pool = await session.get(ProviderRequestPool, p["root"])
         pool.next_member = 1
@@ -788,6 +792,7 @@ async def test_timeout_keeps_the_binding_when_only_same_quota_group_keys_remain(
     pool_setup: dict,
 ) -> None:
     p = pool_setup
+    p["settings"].llm_retry_max_attempts = 1  # Isolate one-attempt rotation/observation.
     async with p["sessions"]() as session:
         pool = await session.get(ProviderRequestPool, p["root"])
         pool.next_member = 1
@@ -880,6 +885,7 @@ async def test_correlated_student_teacher_student_history_survives_timeout(
     pool_setup: dict,
 ) -> None:
     p = pool_setup
+    p["settings"].llm_retry_max_attempts = 1  # Isolate one-attempt rotation/observation.
     async with p["sessions"]() as session:
         session.add(
             ModelSwitchPlan(
@@ -1163,6 +1169,7 @@ async def test_timeout_burst_suppresses_the_member_for_the_next_assignment(
     pool_setup: dict,
 ) -> None:
     p = pool_setup
+    p["settings"].llm_retry_max_attempts = 1  # Isolate one-attempt rotation/observation.
     async with p["sessions"]() as session:
         pool = await session.get(ProviderRequestPool, p["root"])
         pool.timeout_burst_count = 1
@@ -1335,3 +1342,52 @@ async def test_open_admitted_receipt_with_a_future_deadline_holds_the_slot(
     assert response.status_code == 429, response.text
     assert response.json()["detail"] == "provider_connection_concurrency_limited"
     assert not p["captures"]["requests"]
+
+
+async def test_gateway_retries_rotated_member_in_the_same_request(pool_setup: dict) -> None:
+    p = pool_setup
+
+    async def timeout_first_member(request):
+        if request.url.host == "provider-0.example.test":
+            raise httpx.ReadTimeout("synthetic provider read timeout")
+
+    p["captures"]["handler"] = timeout_first_member
+    response = await post(p)
+    assert response.status_code == 200, response.text
+    sent = p["captures"]["requests"]
+    assert [request.url.host for request in sent] == [
+        "provider-0.example.test", "provider-1.example.test",
+    ]
+    assert [request.headers["Authorization"] for request in sent] == [
+        "Bearer test-credential-0", "Bearer test-credential-1",
+    ]
+    assert json.loads(sent[0].content)["messages"] == json.loads(sent[1].content)["messages"]
+    rows = await receipts(p)
+    assert [row.attempt for row in rows] == [1, 2]
+    assert [row.provider_outcome for row in rows] == ["transport_error", "response_received"]
+    assert [row.provider_connection_id for row in rows] == p["ids"][:2]
+    async with p["sessions"]() as session:
+        call = await session.scalar(select(LlmCall).where(LlmCall.trial_id == p["trial_id"]))
+    assert call.attempt == 2
+    assert call.input_tokens == 100
+    assert float(call.cost_usd) == pytest.approx(0.002)
+    assert call.provider_extras["_loom_request_pool"]["provider_connection_id"] == str(p["ids"][1])
+    assert call.provider_extras["_loom_request_pool"]["possible_duplicate_inference"] is True
+
+
+async def test_gateway_pool_failover_uses_the_same_total_attempt_limit(pool_setup: dict) -> None:
+    p = pool_setup
+
+    async def always_timeout(request):
+        raise httpx.ReadTimeout("synthetic provider read timeout")
+
+    p["captures"]["handler"] = always_timeout
+    response = await post(p)
+    assert response.status_code == 504, response.text
+    assert len(p["captures"]["requests"]) == p["settings"].llm_retry_max_attempts == 3
+    rows = await receipts(p)
+    assert [row.attempt for row in rows] == [1, 2, 3]
+    assert all(row.provider_outcome == "transport_error" for row in rows)
+    async with p["sessions"]() as session:
+        call = await session.scalar(select(LlmCall).where(LlmCall.trial_id == p["trial_id"]))
+    assert call.attempt == 3

@@ -217,20 +217,26 @@ receipt. If the unlocked binding hint disappears, the untouched transaction is
 rolled back and selection restarts with the exclusive lock, without a lock
 upgrade or cursor change on ordinary sticky reuse.
 
-The binding moves only when that member produces no body within the
-upstream timeout, or returns HTTP 504. The gateway writes the new binding
-before it returns 504, and that request does not start another upstream send.
-The harness retry of the same turn uses the spare and gets a fresh 60-second
-budget. Other statuses stay on the bound member. A 429 may retry that same
-member inside the existing 60-second gateway budget and honors Retry-After.
-A second key in the same quota group is not a spare.
+The binding moves when a member hits the configured upstream read/transport
+timeout or returns HTTP 504. The Gateway records that outcome and binding
+rotation, then may retry the same logical request through fresh atomic
+admission. Each retry reloads the selected member's URL, credential and model
+fence; it does not resend through a captured old route. Other statuses stay on
+the bound member. Upstream 429 responses honor `Retry-After` inside the same
+budget. A second key in the same quota group is not a spare.
 
-The retry budget includes the duration of subsequent sends, not just their
-backoff and start time. Expiry cancels the retry and is reported as
-`gateway_retry_budget_exhausted`; it does not suppress the physical provider
-or rotate the sticky binding. The initial send retains the configured upstream
-timeout so a valid slow generation is not cut off by the retry budget. Every
-send is also bounded by the trial's signed deadline.
+The Gateway owns transport retries for gateway-bound Terminus, including pool
+failover: three total attempts share a 600-second wall-clock budget by default.
+The initial send, response-body reads, later sends and backoff all count;
+rotating a member never creates a fresh budget. Explicit smaller budgets remain
+hard limits, including the initial attempt. Expiry is reported as
+`gateway_retry_budget_exhausted`; it does not suppress a physical provider or
+rotate the binding. The upstream phase limit and the trial's signed deadline
+are additional bounds. Already received responses retain their usage/cost
+settlement even if a later bookkeeping clock observation is past the budget.
+A one-attempt configuration records rotation then returns the initial failure.
+Local admission 429s remain terminal after the existing queue/fence check; they
+are not upstream responses and the SDK/Harbor layer does not retry them.
 
 `attempt_timeout_sec` remains stored and defaults to 20. The gateway does not
 use it as the send cutoff. A pooled send waits for the upstream timeout,
