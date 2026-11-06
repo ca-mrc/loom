@@ -23,7 +23,6 @@ from loom.db.schema import (
     ArtifactUploadFile,
     ArtifactUploadSession,
     Batch,
-    EpisodeCheckpoint,
     ExecutionAdmissionReservation,
     ExecutionCostReservation,
     ExecutionProvisioningAuthorization,
@@ -33,7 +32,6 @@ from loom.db.schema import (
     ServiceExecutionLease,
     ServiceExecutionTarget,
     TeamQuota,
-    TerminusAgentExecution,
     Trial,
 )
 from loom.execution_contract import (
@@ -656,7 +654,10 @@ async def _bind_verifier_execution_route(
 async def model_retry_policy(
     session: AsyncSession, *, trial: Trial, reason: str | None,
 ) -> RetryPolicy | None:
-    """Caller holds the Trial lock; no terminal Trial may become live again."""
+    """Recheck mutable retry policy under the Trial lock, including for actuators.
+
+    CP separately qualifies checkpoint safety when committing the archive.
+    """
     if (reason not in MODEL_RETRY_REASONS or trial.cancellation_requested_at is not None
             or trial.cancellation_retained_at is not None
             or trial.state in _TERMINAL_TRIAL_STATES):
@@ -669,12 +670,7 @@ async def model_retry_policy(
     if (ceiling is None or consumed >= min(policy.max_attempts, ceiling)
             or RetryReason(reason) not in policy.retry_on):
         return None
-    # A multi-model progress marker is not a Harbor resume checkpoint. Retain
-    # that evidence; a fresh Trial is required once such a trajectory exists.
-    checkpoint = await session.scalar(select(EpisodeCheckpoint.id)
-        .join(TerminusAgentExecution, TerminusAgentExecution.id == EpisodeCheckpoint.execution_id)
-        .where(TerminusAgentExecution.trial_id == trial.id).limit(1))
-    return policy if checkpoint is None else None
+    return policy
 
 
 async def reserve_trial_execution(
@@ -763,6 +759,9 @@ async def reserve_trial_execution(
             raise ServiceExecutionConflict("previous execution cleanup is not complete")
         retry = (trial.result or {}).get("native_retry")
         if isinstance(retry, dict):
+            # The committed archive records CP's checkpoint-safety decision.
+            # Checkpoint writers lock the Trial and reject materializing/queued
+            # states; the old execution is fenced before this reservation.
             if (previous_lease is None or retry.get("lease_id") != str(previous_lease.id)
                     or retry.get("attempt") != trial.attempt_count
                     or previous_lease.materialization_state != "committed"
@@ -2721,7 +2720,12 @@ async def _committed_result_finalization_payload(
         trial = await session.get(Trial, lease.trial_id, with_for_update=True)
         if trial is None or trial.attempt_count != lease.attempt:
             raise ServiceExecutionConflict("committed execution no longer owns the trial attempt")
-        if await model_retry_policy(session, trial=trial, reason=model_failure) is not None:
+        # The restricted actuator finalizes this source, but cannot read
+        # Harbor checkpoint state. CP owns the policy/checkpoint decision at
+        # canonical archive commit; this marker is only a retry candidate.
+        if (trial.state not in _TERMINAL_TRIAL_STATES
+                and trial.cancellation_requested_at is None
+                and trial.cancellation_retained_at is None):
             return {
                 "trial_state": "materializing",
                 "result": {**result, "native_retry": {

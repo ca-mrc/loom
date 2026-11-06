@@ -45,8 +45,10 @@ from loom.db.schema import (
     ArtifactUploadSession,
     Batch,
     DataLifecycleAuthority,
+    EpisodeCheckpoint,
     LlmCall,
     ServiceExecutionLease,
+    TerminusAgentExecution,
     Trial,
     TrialEvent,
 )
@@ -1624,6 +1626,16 @@ class ServiceExecutionMaterializer:
                     and lease.execution_role == "attempt" and isinstance(retry, dict)
                     and retry.get("lease_id") == str(lease.id) and retry.get("attempt") == lease.attempt):
                 retry_policy = await model_retry_policy(session, trial=trial, reason=retry.get("reason"))
+                if retry_policy is not None:
+                    # A multi-model progress marker is not a Harbor resume
+                    # checkpoint. CP owns this decision; restricted actuators
+                    # rely on the committed archive when reserving a successor.
+                    checkpoint = await session.scalar(select(EpisodeCheckpoint.id)
+                        .join(TerminusAgentExecution,
+                              TerminusAgentExecution.id == EpisodeCheckpoint.execution_id)
+                        .where(TerminusAgentExecution.trial_id == trial.id).limit(1))
+                    if checkpoint is not None:
+                        retry_policy = None
                 if trial.batch_id is not None:
                     parent_state = await session.scalar(select(Batch.state)
                         .where(Batch.id == trial.batch_id).with_for_update(key_share=True))
