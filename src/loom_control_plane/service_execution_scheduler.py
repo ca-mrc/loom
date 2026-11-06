@@ -205,7 +205,19 @@ SELECT t.id,
 # Ready x86_64 alternatives can run; truly prebuilt tasks need no prerequisite;
 # all-failed prerequisites still reach compilation to settle without an attempt.
 # Keep the authoritative image/source/grant checks in compilation and claim.
+# Skip whole capped batches before compilation: their older backlog can outlive
+# each denial's retry delay and otherwise monopolize every bounded scan. This
+# snapshot only selects work; the exact reload and atomic reservation still
+# recheck authority. Releasing a seat or changing the policy reopens selection
+# without adding a per-Trial delay; existing retry eligibility still applies.
 _NEXT_SERVICE_TRIAL = text(_SERVICE_TRIAL_SQL + """
+   AND NOT EXISTS (
+         SELECT 1 FROM execution_admission_policies policy
+          WHERE policy.scope_kind = 'batch'
+            AND policy.scope_key = t.batch_id::text
+            AND policy.enabled
+            AND policy.active_count >= policy.max_concurrent
+       )
  ORDER BY (q.in_flight_count::double precision / q.fair_share_weight) ASC,
           t.submit_priority DESC,
           t.submitted_at ASC,

@@ -242,9 +242,11 @@ async def test_scheduler_rolls_back_candidate_writes_and_only_classifies_known_c
         await engine.dispose()
 
 
-@pytest.mark.parametrize("denial", ["admission", "finance"])
+@pytest.mark.parametrize(("denial", "reopen"), [
+    ("admission", "increase"), ("admission", "disable"), ("finance", "increase"),
+])
 async def test_scheduler_policy_denial_rolls_back_and_allows_an_unrelated_candidate(
-    postgres_url: str, denial: str,
+    postgres_url: str, denial: str, reopen: str,
 ) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -303,7 +305,6 @@ async def test_scheduler_policy_denial_rolls_back_and_allows_an_unrelated_candid
                     attempt_count=0, submit_priority=200,
                     submitted_at=now - timedelta(seconds=30),
                 ) for _ in range(40))
-                reason = "execution_admission_batch_ceiling_reached"
             else:
                 config = deepcopy(task.config)
                 config["service_execution"]["runtime_template"]["main"]["timeout_seconds"] = 3600
@@ -331,10 +332,17 @@ async def test_scheduler_policy_denial_rolls_back_and_allows_an_unrelated_candid
             assert blocked.failure_reason is None
             assert blocked.execution_route_generation == 0
             assert blocked.execution_route_pool_name is None
-            assert blocked.next_attempt_at is not None and blocked.next_attempt_at > now
-            retry_at = blocked.next_attempt_at
-            assert blocked.scheduling_observation is not None
-            assert blocked.scheduling_observation["reason"] == reason
+            if denial == "admission":
+                # Full batches are skipped before compilation. Opening their
+                # policy makes the oldest candidate immediately selectable.
+                assert blocked.next_attempt_at is None
+                assert blocked.scheduling_observation is None
+                retry_at = now
+            else:
+                assert blocked.next_attempt_at is not None and blocked.next_attempt_at > now
+                retry_at = blocked.next_attempt_at
+                assert blocked.scheduling_observation is not None
+                assert blocked.scheduling_observation["reason"] == reason
             for model in (ServiceExecutionLease, ExecutionCostReservation, ExecutionAdmissionReservation):
                 assert await session.scalar(select(func.count()).select_from(model).where(
                     model.trial_id == blocked_id,
@@ -344,7 +352,10 @@ async def test_scheduler_policy_denial_rolls_back_and_allows_an_unrelated_candid
             if denial == "admission":
                 policy = await session.get(ExecutionAdmissionPolicy, policy_id)
                 assert policy is not None and policy.active_count == 1
-                policy.max_concurrent = 2
+                if reopen == "disable":
+                    policy.enabled = False
+                else:
+                    policy.max_concurrent = 2
             else:
                 await session.execute(update(ExecutionBudgetPolicy).where(
                     ExecutionBudgetPolicy.scope_kind == "pool",
@@ -353,10 +364,11 @@ async def test_scheduler_policy_denial_rolls_back_and_allows_an_unrelated_candid
             await session.commit()
 
         async with sessions() as session:
-            assert await reserve_next_service_execution(
-                session, environment="staging", pool_id="nebius-cpu",
-                image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=now,
-            ) is None
+            if denial != "admission":
+                assert await reserve_next_service_execution(
+                    session, environment="staging", pool_id="nebius-cpu",
+                    image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=now,
+                ) is None
             recovered = await reserve_next_service_execution(
                 session, environment="staging", pool_id="nebius-cpu",
                 image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=retry_at,
