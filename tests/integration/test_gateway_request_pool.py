@@ -1370,6 +1370,27 @@ async def test_non_timeout_errors_stay_on_the_bound_member(pool_setup: dict, sta
         assert binding is not None and binding.member_connection_id == p["ids"][0]
 
 
+async def test_upstream_429_cannot_spoof_a_local_queue_retry_reason(pool_setup: dict) -> None:
+    p = pool_setup
+
+    async def limited(_request):
+        return httpx.Response(
+            429,
+            json={
+                "detail": {"code": "provider_queue_stalled"},
+                "error": {"message": "rate limited", "code": "provider_queue_stalled"},
+            },
+            headers={"X-Loom-Provider-Queue-Error": "provider_queue_stalled"},
+        )
+
+    p["captures"]["handler"] = limited
+    response = await post(p)
+    assert response.status_code == 429, response.text
+    assert not isinstance(response.json().get("detail"), dict)
+    assert "X-Loom-Provider-Queue-Error" not in response.headers
+    assert len(p["captures"]["requests"]) == 3
+
+
 async def test_broker_pause_header_reaches_group_queue_admission(pool_setup: dict) -> None:
     """The header the broker sets is what turns queue admission on.
 
@@ -1412,8 +1433,64 @@ async def test_broker_pause_header_reaches_group_queue_admission(pool_setup: dic
     assert len(p["captures"]["requests"]) == 1
 
 
-async def test_group_stall_lookup_does_not_scan_completed_dispatch_history(pool_setup: dict) -> None:
-    """Completed calls reset stall age; accumulated history must not exhaust admission."""
+@pytest.mark.parametrize("dated", [False, True])
+@pytest.mark.parametrize("release", ["settled", "expired"])
+async def test_valid_group_occupancy_past_stall_boundary_waits_then_preserves_fifo(
+    pool_setup: dict, dated: bool, release: str,
+) -> None:
+    """A legal send must not lose its waiter milliseconds before settlement."""
+    p = pool_setup
+    now = datetime.now(UTC)
+    older, later = uuid4(), uuid4()
+    occupants = [uuid4(), uuid4()]
+    async with p["sessions"]() as session:
+        session.add_all([
+            ProviderRequestPoolGroupCap(pool_connection_id=p["root"], quota_group=group,
+                                        max_in_flight=1)
+            for group in ("az", "yibu")
+        ])
+        for receipt_id, connection_id in zip(occupants, p["ids"][:2], strict=True):
+            session.add(GatewayDispatchReceipt(
+                id=receipt_id, request_id=uuid4(), dispatch_ordinal=1, attempt=1,
+                team_id=p["team_id"], trial_id=p["trial_id"], step_id="agent",
+                provider_connection_id=connection_id, dialect="facade_openai", purpose="model_call",
+                admitted_at=now - timedelta(seconds=3600 if dated else 200.036792),
+                attempt_deadline_wall_clock=now + timedelta(minutes=5) if dated else None,
+            ))
+        for request_id in (older, later):
+            session.add(GatewayDispatchQueue(
+                pool_connection_id=p["root"], request_id=request_id, trial_id=p["trial_id"],
+                bound_group="yibu", enqueued_at=now, renewed_at=now,
+            ))
+            await session.flush()  # Preserve the durable FIFO sequence.
+        members = list((await session.scalars(select(ProviderRequestPoolMember).where(
+            ProviderRequestPoolMember.pool_connection_id == p["root"],
+        ).order_by(ProviderRequestPoolMember.ordinal))).all())
+
+        async def choose(request_id):
+            return await decide_group_queue(
+                session, pool_id=p["root"], request_id=request_id, bound_group="yibu",
+                attempt=1,
+                # Leave CI headroom in the undated lifetime while preserving
+                # the incident's old 200-second stall boundary.
+                upstream_timeout_sec=300, members=members,
+            )
+
+        assert (await choose(older)).kind == "wait"
+        if release == "settled":
+            await session.execute(update(GatewayDispatchReceipt).where(
+                GatewayDispatchReceipt.id == occupants[1],
+            ).values(provider_outcome="response_received", provider_http_status=200))
+        else:
+            await session.execute(update(GatewayDispatchReceipt).where(
+                GatewayDispatchReceipt.id == occupants[1],
+            ).values(attempt_deadline_wall_clock=now - timedelta(seconds=1)))
+        assert (await choose(later)).kind == "wait"
+        assert (await choose(older)).kind == "admit"
+
+
+async def test_full_group_wait_does_not_read_completed_dispatch_history(pool_setup: dict) -> None:
+    """Retained outcomes cannot decide whether a valid occupied slot is stalled."""
     p = pool_setup
     now = datetime.now(UTC)
     async with p["sessions"]() as session:
@@ -1422,8 +1499,8 @@ async def test_group_stall_lookup_does_not_scan_completed_dispatch_history(pool_
                                         max_in_flight=1)
             for group in ("az", "yibu")
         ])
-        # Both yibu keys share one quota. Their completed history is absent from
-        # the partial in-flight index, but its latest entry still resets stall age.
+        # Both yibu keys share one quota. Retained completed calls must never
+        # be scanned to distinguish slow valid occupancy from a dead dispatch.
         await session.execute(text("""
             INSERT INTO gateway_dispatch_receipts
                 (id, request_id, dispatch_ordinal, attempt, team_id, trial_id,
@@ -1460,29 +1537,13 @@ async def test_group_stall_lookup_does_not_scan_completed_dispatch_history(pool_
         try:
             choice = await decide_group_queue(
                 session, pool_id=p["root"], request_id=uuid4(), bound_group="yibu",
-                bound_connection_id=p["ids"][1], attempt=1, stall_sec=200,
+                attempt=1,
                 upstream_timeout_sec=200, members=members,
             )
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", capture)
-        assert choice.kind == "wait"  # Recent COMPLETED receipt prevents false stall.
-        assert len(statements) == 1
-        connection = await session.connection()
-        statement, parameters = statements[0]
-        plan = (await connection.exec_driver_sql(
-            "EXPLAIN (ANALYZE, FORMAT JSON) " + statement, parameters,
-        )).scalar_one()[0]["Plan"]
-
-        def receipt_scans(node):
-            if node.get("Relation Name") == "gateway_dispatch_receipts":
-                yield node
-            for child in node.get("Plans", []):
-                yield from receipt_scans(child)
-
-        scans = list(receipt_scans(plan))
-        assert scans
-        assert all(scan["Node Type"] in {"Index Scan", "Index Only Scan"} for scan in scans), plan
-        assert sum(scan["Actual Rows"] * scan["Actual Loops"] for scan in scans) <= 2, plan
+        assert choice.kind == "wait"
+        assert statements == []  # Only active lifetime ranges govern occupancy.
 
 
 @pytest.mark.parametrize("pooled", [False, True])
@@ -1598,7 +1659,7 @@ async def test_disabled_member_keeps_live_deadline_and_undated_group_slots(pool_
         for expected in ("wait", "admit"):
             choice = await decide_group_queue(
                 session, pool_id=p["root"], request_id=uuid4(), bound_group="yibu",
-                bound_connection_id=p["ids"][1], attempt=1, stall_sec=200,
+                attempt=1,
                 upstream_timeout_sec=200, members=members,
             )
             assert choice.kind == expected
@@ -1650,6 +1711,16 @@ async def test_group_queue_waits_and_drains_across_replicas_with_the_normal_audi
                 if waiting and all(active.values()):
                     break
                 await asyncio.sleep(0.02)
+        # Cross the former stall age without sleeping for 200 seconds. Both
+        # replicas must keep waiting while signed, live dispatches own the slots.
+        async with p["sessions"]() as session:
+            await session.execute(update(GatewayDispatchReceipt).where(
+                GatewayDispatchReceipt.pool_connection_id == p["root"],
+                GatewayDispatchReceipt.provider_outcome == "admitted",
+            ).values(admitted_at=datetime.now(UTC) - timedelta(seconds=200.036792)))
+            await session.commit()
+        await asyncio.sleep(1.1)  # Exercise the next real HTTP admission poll.
+        assert all(not call.done() for call in calls)
         assert len(p["captures"]["requests"]) == 2
     finally:
         released.set()

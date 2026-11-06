@@ -7,7 +7,6 @@ the admission transaction ends. Waiting happens in a later transaction.
 
 from __future__ import annotations
 
-from collections import defaultdict
 from datetime import timedelta
 from uuid import UUID, uuid4
 
@@ -17,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import (
     GatewayDispatchQueue,
-    GatewayDispatchReceipt,
     ProviderRequestPoolGroupCap,
     ProviderRequestPoolMember,
 )
@@ -32,13 +30,11 @@ async def decide_group_queue(
     pool_id: UUID,
     request_id: UUID,
     bound_group: str,
-    bound_connection_id: UUID,
     attempt: int,
-    stall_sec: float,
     upstream_timeout_sec: float,
     members: list[ProviderRequestPoolMember],
 ) -> AdmissionChoice:
-    """Choose admit, overflow, wait, or stall. Does not insert a receipt."""
+    """Choose admit, overflow, or bounded wait. Does not insert a receipt."""
 
     acquired = await session.scalar(
         text("SELECT pg_try_advisory_xact_lock(hashtext('loom-pool-queue'), hashtext(:pool_id))"),
@@ -48,9 +44,7 @@ async def decide_group_queue(
         raise PoolAdmissionBusyError
     ordered = [member for member in members if member.enabled]
     groups: list[str] = []
-    members_by_group: dict[str, list[UUID]] = defaultdict(list)
     for member in ordered:
-        members_by_group[member.quota_group].append(member.connection_id)
         if member.quota_group not in groups:
             groups.append(member.quota_group)
     caps = {
@@ -107,40 +101,13 @@ async def decide_group_queue(
     views = [
         GroupView(group, caps[group], counts.get(group, 0), oldest.get(group)) for group in groups
     ]
-    choice = choose_admission(
-        bound_group=bound_group, groups=views, request_id=request_id,
-        front=attempt > 1, idle_sec=0, stall_sec=stall_sec,
-    )
-    # Stall age matters only for a full group with no overflow. Free slots and
-    # FIFO ordering never need historical receipts on their admission path.
-    if choice.kind != "wait" or counts.get(bound_group, 0) < caps[bound_group]:
-        return choice
-    connection_ids = members_by_group.get(bound_group, [bound_connection_id])
-    # One indexed extremum per physical connection. MAX with an IN predicate
-    # can scan every completed receipt for a multi-key quota group, even when
-    # (provider_connection_id, admitted_at) is indexed. The partial in-flight
-    # index cannot answer this query: completed calls also reset stall age.
-    latest_by_member = union_all(*(
-        select(func.max(GatewayDispatchReceipt.admitted_at).label("latest_admission")).where(
-            GatewayDispatchReceipt.provider_connection_id == connection_id,
-        )
-        for connection_id in connection_ids
-    )).subquery()
-    last_admitted = await session.scalar(
-        select(func.max(latest_by_member.c.latest_admission))
-    )
-    if last_admitted is not None:
-        idle_sec = max(0.0, (now - last_admitted).total_seconds())
-    else:
-        mine = next((row for row in waiters if row.request_id == request_id), None)
-        idle_sec = max(0.0, (now - mine.enqueued_at).total_seconds()) if mine is not None else 0.0
+    # These counts already exclude settled and expired occupancy. A full group
+    # is waiting on valid dispatches, even if no new call was admitted recently.
+    # Last-admission age races legitimate long reads and is not proof of a stall.
+    # Waiting is bounded by the request budget, signed deadline and cancellation.
     return choose_admission(
-        bound_group=bound_group,
-        groups=views,
-        request_id=request_id,
+        bound_group=bound_group, groups=views, request_id=request_id,
         front=attempt > 1,
-        idle_sec=idle_sec,
-        stall_sec=stall_sec,
     )
 
 

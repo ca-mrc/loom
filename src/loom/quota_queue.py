@@ -49,14 +49,14 @@ def choose_admission(
     groups: Sequence[GroupView],
     request_id: UUID,
     front: bool,
-    idle_sec: float,
-    stall_sec: float,
 ) -> AdmissionChoice:
     """Pick a free slot without letting a new call pass a live waiter.
 
     Overflow names a later group that has room and nobody waiting. The trial
-    binding is not an input and is not changed here. A full group that has
-    admitted nobody for ``stall_sec`` stalls instead of waiting forever.
+    binding is not an input and is not changed here. ``in_flight`` contains
+    only dispatches that still occupy capacity under their authorized lifetime.
+    Their admission age cannot distinguish a slow generation from a dead one;
+    a full group waits until a slot is released or the caller reaches its bound.
     """
 
     ordered = list(groups)
@@ -76,8 +76,6 @@ def choose_admission(
             continue
         if group.in_flight < group.cap:
             return AdmissionChoice("overflow", group.name)
-    if idle_sec >= stall_sec:
-        return AdmissionChoice("stall", bound.name)
     return AdmissionChoice("wait", bound.name)
 
 
