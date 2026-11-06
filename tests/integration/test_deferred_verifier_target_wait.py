@@ -3,12 +3,14 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import (
+    ExecutionAdmissionPolicy,
     ExecutionAdmissionReservation,
     ExecutionCostReservation,
     ServiceExecutionClass,
@@ -19,7 +21,10 @@ from loom.db.schema import (
 )
 from loom.execution_contract import ExecutionTargetV1
 from loom_control_plane import service_execution_scheduler as scheduler
-from loom_control_plane.service_execution import set_execution_target_health
+from loom_control_plane.service_execution import (
+    record_execution_event,
+    set_execution_target_health,
+)
 from tests.integration import test_service_execution_leases as fixtures
 from tests.integration.test_service_execution_image_readiness import (
     TASK_IMAGE,
@@ -173,6 +178,107 @@ async def test_old_independent_handoff_waits_for_health_then_reserves_exactly_on
         assert await session.scalar(select(func.count()).select_from(ExecutionAdmissionReservation).where(
             ExecutionAdmissionReservation.owner_id == children[0].id,
         )) == 1
+
+
+async def test_old_handoff_waits_for_batch_admission_then_reserves_exactly_once(
+    independent_handoff, caplog: pytest.LogCaptureFixture,
+):
+    h = independent_handoff
+    caplog.set_level("INFO", logger="loom_control_plane.service_execution_scheduler")
+    policy_id = uuid4()
+    try:
+        async with h.sessions() as session:
+            await set_execution_target_health(
+                session, target_id=h.target.target_id, desired_state="active",
+                observed_state="ready", health_status="healthy", observed_at=h.now,
+            )
+            trial = await session.get(Trial, h.trial_id)
+            parent_reservation = (await session.scalars(
+                select(ExecutionAdmissionReservation).where(
+                    ExecutionAdmissionReservation.owner_id == h.parent.id,
+                )
+            )).one()
+            # The committed/deleted parent has released its seat. A different
+            # live attempt in the same batch, rather than the parent, fills it.
+            assert parent_reservation.state == "released"
+            competitor = Trial(
+                id=uuid4(), team_id=trial.team_id, task_id=trial.task_id,
+                config=trial.config, requires_caps=trial.requires_caps,
+                state="queued", attempt_count=0, batch_id=trial.batch_id,
+            )
+            session.add(competitor)
+            policy = ExecutionAdmissionPolicy(
+                id=policy_id, scope_kind="batch", scope_key=str(trial.batch_id),
+                max_concurrent=1, enabled=True, reason="deferred verifier admission wait test",
+            )
+            session.add(policy)
+            occupant = await fixtures._reserve(
+                session, trial_id=competitor.id, target=h.target, now=h.now,
+            )
+            await session.commit()
+            await session.refresh(policy)
+            assert (policy.max_concurrent, policy.active_count) == (1, 1)
+
+        assert h.now - h.parent.deleted_at > scheduler.VERIFIER_HANDOFF_TIMEOUT
+        for _ in range(2):
+            caplog.clear()
+            assert await _reserve(h) == []
+            assert any(getattr(record, "reason", None) == "execution_admission_batch_ceiling_reached"
+                       for record in caplog.records)
+            async with h.sessions() as session:
+                trial = await session.get(Trial, h.trial_id)
+                assert trial.state == "running"
+                assert trial.failure_reason is None
+                assert trial.result["verifier_execution"]["state"] == "pending"
+                parent = await session.get(ServiceExecutionLease, h.parent.id)
+                assert parent.output_commit_state == "committed"
+                assert parent.output_manifest_sha256 == h.parent.output_manifest_sha256
+                policy = await session.get(ExecutionAdmissionPolicy, policy_id)
+                assert (policy.max_concurrent, policy.active_count) == (1, 1)
+            await _assert_no_verifier_reservation(h)
+
+        async with h.sessions() as session:
+            # Use the normal terminal event and its DB trigger; never adjust
+            # the policy ceiling or write reservation/counter state directly.
+            await record_execution_event(
+                session, lease_id=occupant.id, generation=1, ordinal=1,
+                event_kind="failed", payload={"failure_reason": "test_terminal"},
+                observed_at=h.now + timedelta(seconds=1),
+            )
+            await session.commit()
+            policy = await session.get(ExecutionAdmissionPolicy, policy_id)
+            assert (policy.max_concurrent, policy.active_count) == (1, 0)
+            reservation = (await session.scalars(
+                select(ExecutionAdmissionReservation).where(
+                    ExecutionAdmissionReservation.owner_id == occupant.id,
+                )
+            )).one()
+            assert reservation.state == "released"
+
+        children = [child for result in await asyncio.gather(_reserve(h), _reserve(h))
+                    for child in result]
+        assert len(children) == 1
+        assert children[0].parent_lease_id == h.parent.id
+        assert children[0].execution_role == "verifier"
+        assert await _reserve(h) == []
+        async with h.sessions() as session:
+            policy = await session.get(ExecutionAdmissionPolicy, policy_id)
+            assert (policy.max_concurrent, policy.active_count) == (1, 1)
+            assert await session.scalar(select(func.count()).select_from(ServiceExecutionLease).where(
+                ServiceExecutionLease.parent_lease_id == h.parent.id,
+            )) == 1
+            assert await session.scalar(select(func.count()).select_from(ExecutionCostReservation).where(
+                ExecutionCostReservation.lease_id == children[0].id,
+            )) == 1
+            assert await session.scalar(select(func.count()).select_from(ExecutionAdmissionReservation).where(
+                ExecutionAdmissionReservation.owner_id == children[0].id,
+                ExecutionAdmissionReservation.state == "active",
+            )) == 1
+    finally:
+        async with h.sessions() as session, session.begin():
+            await session.execute(delete(ExecutionAdmissionPolicy).where(
+                ExecutionAdmissionPolicy.id == policy_id,
+            ))
 
 
 @pytest.mark.parametrize("invalid", ["disabled", "class_disabled", "region", "residency"])

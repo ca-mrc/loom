@@ -1657,10 +1657,14 @@ canonical publication completes. Failure paths:
   never-started cancellation or qualified release must finish before another
   child is eligible. The original agent remains committed and the Trial stays
   running until grading succeeds or the verifier retry budget is exhausted.
-- If a child cannot be reserved within 30 minutes of the handoff becoming
-  pending (the parent's `deleted_at`, or the retry's `pending_since`), or hits
-  a permanent error, the trial fails with `verifier_unavailable`. So does a
-  verifier failure once retries are exhausted, or after cancellation.
+- Typed provisioning or admission/paid-execution policy waits retain the
+  committed handoff while capacity or an existing concurrency/budget ceiling
+  blocks the child. They do not expire after 30 minutes or relax those limits;
+  the normal scheduler can reserve the child when the wait clears.
+- Other reservation conflicts fail with `verifier_unavailable` after 30 minutes
+  from the handoff becoming pending (the parent's `deleted_at`, or the retry's
+  `pending_since`). Permanent errors, exhausted verifier retries and
+  cancellation retain their existing terminal behavior.
 - The agent is never re-run.
 
 Trial detail exposes `execution_phases`: agent, awaiting verifier and one

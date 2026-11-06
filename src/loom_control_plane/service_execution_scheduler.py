@@ -804,10 +804,10 @@ async def reserve_next_verifier_executions(
                     session, trial_id=trial.id, context=exc.capacity_wait,
                     reason=exc.reason, now=current_time,
                 )
-            # Typed provisioning waits retain their handoff; other conflicts
-            # keep the existing bounded recovery window.
+            # Typed capacity and policy waits retain their handoff; other
+            # conflicts keep the existing bounded recovery window.
             waiting_since = _handoff_pending_since(trial) or parent.deleted_at
-            if (not isinstance(exc, ExecutionProvisioningBlockedError)
+            if (not isinstance(exc, (ExecutionProvisioningBlockedError, ServiceExecutionPolicyBlockedError))
                     and waiting_since is not None
                     and current_time - waiting_since >= VERIFIER_HANDOFF_TIMEOUT):
                 _fail_verifier_handoff(trial, reason=getattr(exc, "reason", None) or str(exc),
