@@ -20,6 +20,14 @@ first live request hits an upstream timeout. A sentinel model name
 that isn't a real provider model forces the proxy to try to route,
 which is what actually matters.
 
+Some relays (new-api / one-api style, e.g. `az-gateway-loom-testing`) choose
+an upstream channel from the model name before they look at the endpoint, so
+any unknown model gets `model_not_found` (often as a 503 "No available
+channel") on every path. The sentinel can never settle such an upstream. When
+the sentinel probe reports `model_not_found`, the probe is repeated once with
+the model of the request being served, still capped at one output token
+(#2054).
+
 Reference: docs/architecture/responses-api.md
 """
 
@@ -120,6 +128,7 @@ async def probe_responses_api(
     *,
     upstream_url: str,
     api_key: str,
+    model: str | None = None,
     client: httpx.AsyncClient | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
     deadline: GatewayAttemptDeadline | None = None,
@@ -132,36 +141,74 @@ async def probe_responses_api(
     honours the connection's egress proxy, DNS resolution set, and
     connection reuse. Test callers pass `transport=httpx.MockTransport(...)`
     to intercept probe traffic alongside their upstream mocks.
+
+    `model` is the model of the request being served. It is used only when
+    the upstream answers the sentinel with `model_not_found`.
     """
     if client is None:
         async with httpx.AsyncClient(
             timeout=_PROBE_TIMEOUT_SEC,
             transport=transport,
         ) as owned_client:
-            return await _run_probe(
-                owned_client,
-                upstream_url,
-                api_key,
-                deadline=deadline,
-                dispatch_audit=dispatch_audit,
+            return await _probe(
+                owned_client, upstream_url, api_key, model,
+                deadline=deadline, dispatch_audit=dispatch_audit,
             )
-    return await _run_probe(
-        client,
-        upstream_url,
-        api_key,
-        deadline=deadline,
-        dispatch_audit=dispatch_audit,
+    return await _probe(
+        client, upstream_url, api_key, model,
+        deadline=deadline, dispatch_audit=dispatch_audit,
     )
+
+
+async def _probe(
+    client: httpx.AsyncClient,
+    upstream_url: str,
+    api_key: str,
+    model: str | None,
+    *,
+    deadline: GatewayAttemptDeadline | None,
+    dispatch_audit: DispatchAudit | None,
+) -> ProbeOutcome:
+    outcome, response = await _run_probe(
+        client, upstream_url, api_key, _PROBE_MODEL_SENTINEL,
+        deadline=deadline, dispatch_audit=dispatch_audit,
+    )
+    if (
+        response is None
+        or not model
+        or model == _PROBE_MODEL_SENTINEL
+        or _error_code(response) != "model_not_found"
+    ):
+        return outcome
+    # The upstream routes by model before it looks at the endpoint, so only
+    # a model it serves can reach its Responses handler.
+    outcome, _ = await _run_probe(
+        client, upstream_url, api_key, model,
+        deadline=deadline, dispatch_audit=dispatch_audit,
+    )
+    return outcome
+
+
+def _error_code(response: httpx.Response) -> str | None:
+    """`error.code` from an OpenAI-shaped error body, if there is one."""
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    error = body.get("error") if isinstance(body, dict) else None
+    code = error.get("code") if isinstance(error, dict) else None
+    return code if isinstance(code, str) else None
 
 
 async def _run_probe(
     client: httpx.AsyncClient,
     upstream_url: str,
     api_key: str,
+    model: str,
     *,
     deadline: GatewayAttemptDeadline | None = None,
     dispatch_audit: DispatchAudit | None = None,
-) -> ProbeOutcome:
+) -> tuple[ProbeOutcome, httpx.Response | None]:
     try:
         timeout: float | httpx.Timeout = _PROBE_TIMEOUT_SEC
         if deadline is not None:
@@ -171,7 +218,7 @@ async def _run_probe(
             return await client.post(
                 upstream_url,
                 json={
-                    "model": _PROBE_MODEL_SENTINEL,
+                    "model": model,
                     "input": "loom-probe",
                     "max_output_tokens": 1,
                 },
@@ -199,23 +246,23 @@ async def _run_probe(
             supported=None,
             error_detail=f"transport_{reason.lower()}",
             transient=True,
-        )
+        ), None
     verdict = classify_probe_status(response.status_code)
     if verdict is True:
-        return ProbeOutcome(supported=True, error_detail=None)
+        return ProbeOutcome(supported=True, error_detail=None), response
     if verdict is False:
         return ProbeOutcome(
             supported=False,
             error_detail=f"upstream_{response.status_code}",
-        )
+        ), response
     if response.status_code >= 500:
         return ProbeOutcome(
             supported=None,
             error_detail=f"upstream_{response.status_code}",
             transient=True,
-        )
+        ), response
     # Ambiguous 4xx.
     return ProbeOutcome(
         supported=None,
         error_detail=f"ambiguous_{response.status_code}",
-    )
+    ), response
