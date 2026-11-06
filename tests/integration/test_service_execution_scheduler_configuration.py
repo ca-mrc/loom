@@ -293,6 +293,16 @@ async def test_scheduler_policy_denial_rolls_back_and_allows_an_unrelated_candid
                     ),
                 ))
                 await _reserve(session, trial_id=occupied_id, target=target, now=now)
+                # A backlog larger than one bounded scan must not hide another
+                # batch. In production, the denial delay can expire before the
+                # scheduler finishes scanning this capped backlog.
+                session.add_all(Trial(
+                    id=uuid4(), team_id=team_id, batch_id=blocked.batch_id,
+                    task_id=blocked.task_id, config=deepcopy(blocked.config),
+                    requires_caps=deepcopy(blocked.requires_caps), state="queued",
+                    attempt_count=0, submit_priority=200,
+                    submitted_at=now - timedelta(seconds=30),
+                ) for _ in range(40))
                 reason = "execution_admission_batch_ceiling_reached"
             else:
                 config = deepcopy(task.config)
