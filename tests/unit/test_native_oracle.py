@@ -4,6 +4,9 @@ controller, with no model, and only Oracle's sandbox sees `solution/`."""
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
@@ -484,3 +487,38 @@ async def test_oracle_solution_environment_reaches_only_solver_exec(tmp_path: Pa
     assert calls[0][1] == {'MODE': 'strict', 'LITERAL': 'a; b'}
     assert calls[1][1] is None
     assert 'LITERAL' not in (tmp_path / 'out/trajectory.jsonl').read_text()
+
+
+_SELF_CONTAINED_SUMMARY = """import csv, json, os
+totals = {}
+for row in csv.DictReader(open("data/items.csv")):
+    totals[row["sku"]] = totals.get(row["sku"], 0) + int(row["quantity"]) * int(row["unit_price"])
+os.makedirs("reports", exist_ok=True)
+json.dump(totals, open("reports/totals.json", "w"))
+"""
+
+
+@pytest.mark.parametrize(
+    ("makes_reports_dir", "reproduced"), [(True, 1.0), (False, 0.0)],
+)
+def test_workspace_verifier_reruns_summary_from_task_input_only(
+    tmp_path: Path, makes_reports_dir: bool, reproduced: float,
+) -> None:
+    # The verifier re-runs summarize.py next to data/items.csv alone, so the
+    # instruction must tell the agent to create reports/ itself; a script that
+    # relied on a hand-made reports/ scored `reproduced: 0` on staging (#2054).
+    root, _ = _workspace_fixture(tmp_path)
+    assert "creates reports/ itself" in (root / "instruction.md").read_text()
+    script = _SELF_CONTAINED_SUMMARY
+    if not makes_reports_dir:
+        script = script.replace('os.makedirs("reports", exist_ok=True)\n', "")
+    (root / "summarize.py").write_text(script)
+    (root / "reports").mkdir()
+    subprocess.run([sys.executable, "summarize.py"], cwd=root, check=True)
+
+    output = tmp_path / "verifier" / "reward.json"
+    subprocess.run(
+        ["sh", "verifier/check.sh"], cwd=root, check=True,
+        env={**os.environ, "LOOM_VERIFIER_OUTPUT": str(output)},
+    )
+    assert json.loads(output.read_text())["rewards"] == {"report": 1.0, "reproduced": reproduced}

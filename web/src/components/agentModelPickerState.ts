@@ -1,22 +1,14 @@
 import { type AgentVersionEntry, type ModelEntry, type ProviderConnectionEntry } from "../api";
 import { type AgentReadinessLike } from "../lib/agentReadiness";
-export type ModelSource = "api" | "local-server" | "hf";
-
-export type HFExecution = "local-vllm" | "inference-api";
 
 export interface AgentModelValue {
   agentName: string;
   agentVersion?: string;
-  source: ModelSource;
   modelProvider: string;
   modelName: string;
   providerConnectionId?: string;
   providerConnectionName?: string;
   manualModel?: boolean;
-  /** Required when source = "local-server". Name of an operator-configured server. */
-  localServer?: string;
-  /** Required when source = "hf". local-vllm (default) spawns vLLM; inference-api hits HF. */
-  hfExecution?: HFExecution;
   /** New Batch hides the default model runner unless the user opts into a specific agent. */
   useSpecificAgent?: boolean;
 }
@@ -58,16 +50,8 @@ export const SELECT_CLS =
 
 export const CUSTOM_MODEL_KEY = "__custom__";
 
-// Hosted submissions use Provider Connections only (#2054). The other
-// ModelSource values remain so older saved selections still type-check.
-export const ALL_SOURCES: ModelSource[] = ["api"];
-
 export function modelKey(m: ModelEntry): string {
   return `${m.provider}|${m.name}|${m.provider_connection_id ?? ""}`;
-}
-
-export function sourceLabel(s: ModelSource): string {
-  return s === "api" ? "Provider API" : s === "hf" ? "HuggingFace" : "Local server";
 }
 
 export function preflightOptionSuffix(m: ModelEntry): string {
@@ -96,13 +80,11 @@ export function findAgent<T extends { name: string; aliases?: string[] }>(
   return items?.find((a) => a.name === name || (a.aliases ?? []).includes(name));
 }
 
-export function firstSource(agent: AgentEntry | undefined): ModelSource {
-  return ALL_SOURCES.find((source) => agent?.supported_model_sources.includes(source)) ?? "api";
-}
-
 export function supportsModelSelection(agent: AgentEntry, value: AgentModelValue): boolean {
   if (!agent.needs_model) return true;
-  if (!agent.supported_model_sources.includes(value.source)) return false;
+  // Hosted models come only from Provider Connections (`api`); the
+  // HuggingFace and local-server sources are retired (#2054).
+  if (!agent.supported_model_sources.includes("api")) return false;
   if (!value.modelProvider) return true;
   return agent.supported_providers.includes("*") || agent.supported_providers.includes(value.modelProvider);
 }

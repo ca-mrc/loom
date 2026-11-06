@@ -343,7 +343,7 @@ def _first_chat_choice(chat_body: dict[str, Any]) -> dict[str, Any]:
     return choice
 
 
-def _chat_usage_to_responses_usage(value: Any) -> dict[str, int]:
+def _chat_usage_to_responses_usage(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     input_tokens = _int_or_zero(value.get("prompt_tokens"))
@@ -351,10 +351,36 @@ def _chat_usage_to_responses_usage(value: Any) -> dict[str, int]:
     total_tokens = _int_or_zero(value.get("total_tokens"))
     if total_tokens == 0:
         total_tokens = input_tokens + output_tokens
-    return {
+    usage: dict[str, Any] = {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": total_tokens,
+    }
+    # Keep the token details Responses usage has a place for. Without the
+    # cached count, pricing cannot tell cache reads from fresh input and every
+    # translated call was `price_unknown` (`missing_cache_usage`), although
+    # the same model priced fine through Chat (#2054).
+    for chat_key, responses_key, fields in (
+        ("prompt_tokens_details", "input_tokens_details", ("cached_tokens", "audio_tokens")),
+        ("completion_tokens_details", "output_tokens_details", ("reasoning_tokens", "audio_tokens")),
+    ):
+        details = _token_counts(value.get(chat_key), fields)
+        if details:
+            usage[responses_key] = details
+    return usage
+
+
+def _token_counts(value: Any, fields: tuple[str, ...]) -> dict[str, int]:
+    """Only real non-negative counts: Codex parses these as integers, and an
+    absent count must stay unknown rather than become zero."""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        field: value[field]
+        for field in fields
+        if isinstance(value.get(field), int)
+        and not isinstance(value[field], bool)
+        and value[field] >= 0
     }
 
 
