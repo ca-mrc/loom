@@ -55,6 +55,7 @@ from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.models.verifier import VerifierResult
 from loom.mutable_paths import validate_task_workdir
+from loom.provider_queue_error import PROVIDER_QUEUE_STALLED
 from loom.service_execution_oracle import (
     ORACLE_SOLUTION_PATHS,
     oracle_usage,
@@ -1170,6 +1171,15 @@ def _model_transport_failure(exc: BaseException) -> str | None:
         detail = body.get("detail", body) if isinstance(body, dict) else None
         if isinstance(detail, dict) and detail.get("code") == "agent_timeout":
             return None
+        # The Gateway wraps vendor failures in a detail string rather than
+        # forwarding their structured codes. Only its own typed queue error
+        # qualifies; a generic vendor 429 or matching error prose does not.
+        if (
+            exc.status_code == 429
+            and isinstance(detail, dict)
+            and detail.get("code") == PROVIDER_QUEUE_STALLED
+        ):
+            return "gateway_error"
         return "gateway_error" if 500 <= exc.status_code <= 599 else None
     if isinstance(exc, APITimeoutError):
         return "gateway_error"

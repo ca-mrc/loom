@@ -421,6 +421,13 @@ def test_phase_entrypoint_retains_sanitized_typed_failure(tmp_path, monkeypatch,
 @pytest.mark.parametrize(("kind", "phase", "reason"), [
     ("service_unavailable", "terminus-2", "gateway_error"),
     ("litellm_503", "terminus-2", "gateway_error"),
+    ("pool_stalled", "terminus-2", "gateway_error"),
+    ("rate_limit", "terminus-2", None),
+    ("untrusted_stall_text", "terminus-2", None),
+    ("other_pool_error", "terminus-2", None),
+    ("untrusted_stall_header", "terminus-2", None),
+    ("pool_stalled_403", "terminus-2", None),
+    ("pool_stalled", "verify-sandbox", None),
     ("disconnect", "terminus-2", "provider_transport_disconnect"),
     ("timeout", "terminus-2", "gateway_error"),
     ("auth", "terminus-2", None),
@@ -446,9 +453,29 @@ def test_phase_entrypoint_only_records_typed_agent_transport_failure(tmp_path, m
     monkeypatch.setattr("sys.argv", ["sandbox-task", phase, "--workspace", str(tmp_path)])
     request = httpx.Request("POST", "https://gateway.example/v1/chat/completions")
     response = httpx.Response(503, request=request)
+    rate_limit_response = httpx.Response(429, request=request)
     failures = {
         "service_unavailable": openai.InternalServerError("Bearer private-step-token", response=response, body={}),
         "litellm_503": litellm.ServiceUnavailableError("503", llm_provider="openai", model="glm-5.3", response=response),
+        "pool_stalled": openai.RateLimitError(
+            "429", response=rate_limit_response, body={"detail": {"code": "provider_queue_stalled"}},
+        ),
+        "rate_limit": litellm.RateLimitError("429", llm_provider="openai", model="glm-5.3", response=rate_limit_response),
+        "untrusted_stall_text": litellm.RateLimitError(
+            "provider_queue_stalled", llm_provider="openai", model="glm-5.3", response=rate_limit_response,
+        ),
+        "other_pool_error": openai.RateLimitError(
+            "429", response=rate_limit_response, body={"detail": {"code": "provider_request_pool_unavailable"}},
+        ),
+        "untrusted_stall_header": openai.RateLimitError(
+            "429", response=httpx.Response(429, request=request, headers={
+                "X-Loom-Provider-Queue-Error": "provider_queue_stalled",
+            }), body={},
+        ),
+        "pool_stalled_403": openai.PermissionDeniedError(
+            "denied", response=httpx.Response(403, request=request),
+            body={"detail": {"code": "provider_queue_stalled"}},
+        ),
         "disconnect": openai.APIConnectionError(request=request),
         "timeout": openai.APITimeoutError(request=request),
         "auth": openai.AuthenticationError("unauthorized", response=httpx.Response(401, request=request), body={}),

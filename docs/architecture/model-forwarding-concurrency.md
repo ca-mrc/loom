@@ -85,10 +85,12 @@ go test -race ./cmd/loom-execution-runtime
 ```
 
 Docker integration tests require the declared images and disposable PostgreSQL;
-SDK tests use the installed dependency versions: application LiteLLM 1.92.2;
-the cached pinned-source Harbor fixture has Harbor 0.24.0, LiteLLM 1.106.4 and
-OpenAI 2.54.0. These are verified fixture versions, not a dependency lock for the
-next candidate image; publication/deployment must read back its actual versions.
+SDK tests use the project lock: LiteLLM 1.106.2 and OpenAI 2.54.0. The isolated
+Harbor runtime pins the same pair in `deploy/harbor-runtime-requirements.txt` to
+preserve structured Gateway admission errors. Earlier concurrency qualification
+used application LiteLLM 1.92.2 and a cached Harbor 0.24.0 / LiteLLM 1.106.4 /
+OpenAI 2.54.0 fixture; those historical measurements are not the next image's
+version identity. Publication/deployment must read back its actual versions.
 Native SDK verification
 also covers 1001 held requests, actual student/teacher/student and summary calls,
 serializable options/trajectories, default versus explicit-zero retries,
@@ -112,8 +114,13 @@ While it is off, admission does not read the cap, the queue, or pause credit.
 
 When it is on, a full group sends that one call to the next group that has a
 free slot and nobody waiting. The trial binding stays put. Waiters are strictly
-oldest-first under one pool lock. A group that admits nobody for `stall_sec`
-returns HTTP 429 `provider_queue_stalled`. Queue time is `gateway_dispatch_queue_credit`:
+oldest-first under one pool lock. Valid dispatches keep their slots until they
+settle or expire; admission age alone never establishes a stalled group. A full
+group with no overflow keeps waiting within the request and signed deadline.
+The stored `stall_sec` remains configuration-compatible but no longer cuts off
+valid occupancy. Legacy typed `provider_queue_stalled` errors remain eligible
+for the hosted controller's bounded infrastructure retry, without treating
+arbitrary 429s as task-independent failures. Queue time is `gateway_dispatch_queue_credit`:
 Postgres adds the committed rows with `clock_timestamp()`, and an open row stops
 15 seconds after its last renewal, the same moment a crashed waiter is expired.
 A failed or forbidden read adds no credit. The lease's `deadline_at` is the outer bound, set once

@@ -20,8 +20,6 @@ def _choice(**overrides: object):
         groups=(_group("loom-runs"), _group("yibu-shared")),
         request_id=uuid4(),
         front=False,
-        idle_sec=0,
-        stall_sec=200,
     )
     values.update(overrides)
     return choose_admission(**values)  # type: ignore[arg-type]
@@ -56,12 +54,11 @@ def test_older_waiter_keeps_a_freed_slot() -> None:
     assert _choice(groups=groups, request_id=older).kind == "admit"
 
 
-def test_idle_full_group_stalls() -> None:
+def test_full_groups_wait_for_valid_occupancy_to_release() -> None:
     choice = _choice(
         groups=(_group("loom-runs", in_flight=1), _group("yibu-shared", in_flight=1)),
-        idle_sec=200,
     )
-    assert choice.kind == "stall"
+    assert choice.kind == "wait"
 
 
 def test_pause_credit_caps_committed_spans() -> None:
