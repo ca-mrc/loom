@@ -318,6 +318,40 @@ async def test_facade_forwards_with_decrypted_key_and_records_llm_call(
     assert row["provider_extras"]["_loom_pricing_source"] == "operator-supplied"
 
 
+async def test_facade_read_override_preserves_other_phases_and_model_parameters(facade_setup):
+    import json
+    from datetime import timedelta
+
+    app, _jwt, team_id, trial_id, conn_id, captures = facade_setup
+    app.state.settings.upstream_timeout_sec = 0.2
+    app.state.settings.upstream_read_timeout_sec = 0.25
+    jwt = mint_step_jwt(
+        team_id=team_id,
+        trial_id=trial_id,
+        step_id="step-1",
+        ttl_sec=360,
+        signing_key=app.state.settings.step_jwt_signing_key.get_secret_value(),
+        provider_connection_id=conn_id,
+        provider_connection_id_bound=True,
+        attempt_deadline_wall_clock=datetime.now(UTC) + timedelta(seconds=30),
+    )
+    body = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "offline fixture"}],
+        "reasoning_effort": "high",
+        "temperature": 0.2,
+        "top_p": 0.85,
+        "max_completion_tokens": 1234,
+    }
+    response = await _post(app, jwt, body=body)
+    assert response.status_code == 200, response.text
+    upstream, = captures["requests"]
+    assert upstream.extensions["timeout"] == {
+        "connect": 0.2, "read": 0.25, "write": 0.2, "pool": 0.2,
+    }
+    assert json.loads(upstream.content) == body
+
+
 async def test_anthropic_connection_can_use_verified_chat_route(facade_setup):
     from loom.db.schema import ProviderConnection
 

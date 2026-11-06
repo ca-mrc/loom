@@ -131,3 +131,26 @@ A failed or forbidden read adds no credit. The lease's `deadline_at` is the oute
 at admission to the working budget plus `max_pause_sec`. The phase deadline
 moves forward only by committed credit, and a failed poll leaves it where it was.
 
+
+
+## Provider read-inactivity budget
+
+Native provider routes can set `LOOM_GW_UPSTREAM_READ_TIMEOUT_SEC` independently
+of `LOOM_GW_UPSTREAM_TIMEOUT_SEC`. An unset read override inherits the existing
+transport timeout, including explicit smaller deployments. Connect, write and
+local pool checkout keep their previous limits. Every phase remains fenced by
+the signed attempt deadline and the Gateway's unchanged 600-second, three-attempt
+logical request budget. The override is a read-inactivity limit, not a hard
+per-attempt wall-clock allowance.
+
+The Nebius renderer explicitly starts with a 250-second read limit while the
+other phases remain 200 seconds. This bounded transport canary preserves model,
+reasoning and sampling parameters. Compare SDK completion, retries, task
+throughput and cost under equivalent token workloads before increasing batch
+concurrency. Longer reads can avoid restarting valid long reasoning but leave
+less budget for another route when a provider stalls. Turning client streaming
+on alone does not change the currently buffered upstream facade.
+
+Legacy undated dispatch occupancy and abandoned-dispatch reconciliation use
+at least the longer read limit plus their existing grace interval, so a read
+allowed by the new policy is not expired at the old transport limit.

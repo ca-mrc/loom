@@ -2014,6 +2014,12 @@ def _build_platform(
                 "readOnly": True,
             })
         if component == "gateway":
+            # The generation read wait is independent of connection,
+            # write and pool checkout. The existing 600s/3-attempt budget stays
+            # unchanged; this deployment starts the bounded 250s read canary.
+            pod["containers"][0]["env"].extend(_env({
+                "LOOM_GW_UPSTREAM_READ_TIMEOUT_SEC": 250,
+            }))
             pod["dnsConfig"] = _connection_dns_config()
             pod["terminationGracePeriodSeconds"] = 300
             if "task_egress" in config:

@@ -552,7 +552,10 @@ def audit_for_request(
     state.pause_capable = _broker_pause_header(request)
     settings = getattr(request.app.state, "settings", None)
     if settings is not None:
-        state.upstream_timeout_sec = float(settings.upstream_timeout_sec)
+        state.upstream_timeout_sec = max(
+            float(settings.upstream_timeout_sec),
+            float(getattr(settings, "upstream_read_timeout_sec", None) or 0.0),
+        )
         state.connection_queue_max_wait_sec = float(
             getattr(
                 settings,

@@ -115,13 +115,17 @@ class GatewayAttemptDeadline:
     def cap_seconds(self, configured_seconds: float) -> float:
         return min(max(0.0, float(configured_seconds)), self.require_remaining())
 
-    def httpx_timeout(self, configured_seconds: float) -> httpx.Timeout:
-        """Cap every httpx phase, not only the aggregate request timeout."""
-        cap = self.cap_seconds(configured_seconds)
+    def httpx_timeout(
+        self, configured_seconds: float, *, read_seconds: float | None = None,
+    ) -> httpx.Timeout:
+        """Fence each transport phase, including an independent model read wait."""
+        remaining = self.require_remaining()
+        cap = min(max(0.0, float(configured_seconds)), remaining)
+        read_cap = cap if read_seconds is None else min(max(0.0, read_seconds), remaining)
         return httpx.Timeout(
             timeout=cap,
             connect=cap,
-            read=cap,
+            read=read_cap,
             write=cap,
             pool=cap,
         )
@@ -236,11 +240,22 @@ def enforce_request_attempt_deadline(request: Request) -> None:
         raise_deadline_http_exception(exc)
 
 
-def upstream_timeout(request: Request, configured_seconds: float) -> float | httpx.Timeout:
+def upstream_timeout(
+    request: Request, configured_seconds: float, *, read_ceiling: float | None = None,
+) -> float | httpx.Timeout:
     deadline = request_attempt_deadline(request)
-    if deadline is None:
-        return configured_seconds
-    return deadline.httpx_timeout(configured_seconds)
+    app = request.scope.get("app")
+    settings = getattr(getattr(app, "state", None), "settings", None)
+    read_seconds = getattr(settings, "upstream_read_timeout_sec", None)
+    if read_ceiling is not None:
+        read_seconds = min(
+            configured_seconds if read_seconds is None else read_seconds, read_ceiling,
+        )
+    if deadline is not None:
+        return deadline.httpx_timeout(configured_seconds, read_seconds=read_seconds)
+    if read_seconds is not None:
+        return httpx.Timeout(configured_seconds, read=read_seconds)
+    return configured_seconds
 
 
 def deadline_http_exception() -> HTTPException:

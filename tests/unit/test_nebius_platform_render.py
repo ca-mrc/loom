@@ -804,6 +804,10 @@ def test_rendered_application_settings_and_startup_factories_accept_signed_profi
                 assert settings.service_execution_scheduler_enabled
                 assert settings.service_execution_source_bucket == config["buckets"]["source"]
             else:
+                assert settings.upstream_timeout_sec == 200
+                assert settings.upstream_read_timeout_sec == 250
+                assert settings.llm_retry_budget_sec == 600
+                assert settings.llm_retry_max_attempts == 3
                 # The hosted `local-server` route is retired (#2054).
                 assert not any(row["name"].startswith("LOOM_GW_LOCAL_") for row in deployment[
                     "spec"]["template"]["spec"]["containers"][0]["env"])

@@ -114,6 +114,19 @@ statement execution;
 these fields locate the failed boundary without establishing a physical cause.
 The existing one-second audit budget and durable unknown outcomes still apply.
 
+When no request-pool member can be selected, a member that is otherwise
+currently authorized, enabled, credential-valid, and compatible with every
+admitted model but temporarily cooling down makes admission return
+`503 / detail.code=provider_request_pool_cooling_down`, with `Retry-After: 1`.
+This local pre-dispatch response creates no receipt, sends no provider request,
+and does not wait for or bypass suppression. Existing typed SDK 5xx handling
+also lets older frozen runtimes use their remaining Trial retry allowance;
+there is no new retry layer, attempt allowance, or deadline extension. Expired
+cooldowns re-enter ordinary eligibility on the next request. If no member would
+be eligible after its cooldown, the existing `429 / provider_request_pool_unavailable`
+remains fail closed. Real provider or quota 429 responses retain their existing
+meaning; their error bodies cannot manufacture this local typed response.
+
 An enabled quota-group queue counts in-flight receipts only for its pool's
 physical connections. A full group waits while valid dispatches own its slots;
 last-admission age is not evidence that a provider is stalled. A slow legal

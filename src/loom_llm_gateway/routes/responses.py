@@ -745,7 +745,9 @@ async def _dispatch_execution_attempt_responses(
                 upstream_url,
                 json=payload,
                 headers=headers,
-                timeout=upstream_timeout(request, configured_timeout),
+                timeout=upstream_timeout(
+                    request, configured_timeout, read_ceiling=float(grant.timeout_seconds),
+                ),
                 follow_redirects=False,
             )
 
