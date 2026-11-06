@@ -14,12 +14,14 @@ import pytest
 from loom.agent.terminus2.runtime import (
     LoomTerminus2Runtime,
     _harbor_model_name,
+    _harbor_model_timeout_sec,
     _install_tmux_session_alive_guard,
     _openai_gateway_base,
 )
 from loom.attempt_deadline import AttemptDeadline, AttemptDeadlineExceededError
 from loom.driver.fake import FakeDriver
 from loom.errors import AgentError
+from loom.llm_sdk_clients import ModelSDKClients
 from loom.models.types import ModelSpec
 from loom.trajectory.storage import FakeObjectStore
 from loom.trajectory.writer import TrajectoryWriter
@@ -177,6 +179,49 @@ async def test_single_model_forwards_generation_params_without_reserved_override
         "temperature": 0.2, "max_tokens": 4096,
         "extra_body": {"top_k": 20}, "api_key": "token-1",
     }]
+    assert "timeout" not in kwargs_seen[0]
+
+
+@pytest.mark.asyncio
+async def test_harbor_timeout_follows_remaining_attempt_deadline(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    kwargs_seen: list[dict[str, object]] = []
+    sdk_timeouts: list[float] = []
+    _patch_harbor(monkeypatch, tokens_seen=[], llm_kwargs_seen=kwargs_seen)
+
+    class _CaptureClients(ModelSDKClients):
+        def __init__(self, *, timeout_sec: float) -> None:
+            sdk_timeouts.append(timeout_sec)
+            super().__init__(timeout_sec=timeout_sec)
+
+    monkeypatch.setattr("loom.agent.terminus2.runtime.ModelSDKClients", _CaptureClients)
+    clock = [0.0]
+    runtime = LoomTerminus2Runtime(
+        model=ModelSpec(provider="openai", name="glm-5.2"), team_id=str(uuid4()),
+        trial_id=uuid4(), cp_client=_AttemptTokenCP(), gateway_url="http://127.0.0.1:9000",
+    )
+    runtime.begin_attempt(
+        AttemptDeadline.after(29970.0, clock=lambda: clock[0], wall_clock=lambda: 0.0),
+    )
+    driver = FakeDriver()
+    await driver.start()
+    async with TrajectoryWriter(
+        local_path=tmp_path / "events.jsonl", store=FakeObjectStore(),
+        bucket="test", key="events.jsonl", min_part_bytes=0,
+    ) as trajectory:
+        await runtime.run(
+            instruction="task", env=driver, trajectory=trajectory,
+            mcp=[], skills_dir=None, step_id="agent",
+        )
+    assert sdk_timeouts == [29970.0]
+    assert kwargs_seen[0]["timeout"] == 29970.0
+    assert kwargs_seen[0]["api_key"] == "deadline-token"
+
+
+def test_harbor_model_timeout_without_deadline_keeps_legacy_transport() -> None:
+    assert _harbor_model_timeout_sec(None) == 120.0
 
 
 @pytest.mark.asyncio

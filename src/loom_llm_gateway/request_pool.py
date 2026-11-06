@@ -170,7 +170,7 @@ class PoolDispatchAudit(DispatchAudit):
         self.possible_duplicate_inference = False
         self._keys: list[str] = []
         self.queue_enabled = False
-        self.stall_sec = 200.0
+        self.stall_sec = 86400.0
         self.max_pause_sec = 0.0
         self._queue_members: list[ProviderRequestPoolMember] = []
         self._queue_now = datetime.now(UTC)

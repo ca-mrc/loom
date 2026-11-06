@@ -363,7 +363,9 @@ Gateway-bound Terminus has one transport retry owner: the LLM Gateway
 ([#2805](https://github.com/ca-mrc/loom/issues/2805)). The adapter disables
 OpenAI/LiteLLM retries and Harbor's generic model-call/query retry wrappers on
 each gateway-bound instance, including student, teacher and summary delegates.
-Harbor's parsing, context recovery and task strategies remain in place;
+It injects LiteLLM `timeout` and the attempt-owned SDK HTTP timeout from
+the remaining attempt deadline so Harbor does not abort a queued call at its
+600-second HTTP default. Harbor's parsing, context recovery and task strategies remain in place;
 direct-provider execution keeps its existing retry behavior. This prevents the
 SDK × Harbor × query nesting from multiplying one failed turn into 27 sends.
 

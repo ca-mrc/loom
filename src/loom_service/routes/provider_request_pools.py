@@ -52,7 +52,7 @@ class RequestPoolConfig(BaseModel):
     timeout_window_sec: float = Field(default=60, gt=0, le=3600, allow_inf_nan=False)
     queue_enabled: bool | None = None
     group_caps: dict[str, int] | None = None
-    stall_sec: float | None = Field(default=None, gt=0, le=3600, allow_inf_nan=False)
+    stall_sec: float | None = Field(default=None, gt=0, le=86400, allow_inf_nan=False)
     max_pause_sec: float | None = Field(default=None, ge=0, le=86400, allow_inf_nan=False)
     config_version: int | None = Field(default=None, ge=1)
 
