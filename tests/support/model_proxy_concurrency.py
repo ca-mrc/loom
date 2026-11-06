@@ -83,7 +83,7 @@ def error_category(error):
 def client_snapshot(start):
  return {**{key:CLIENT[key]-start[key] for key in ('connected','sent','completed')},'errors':{key:value-start['errors'].get(key,0) for key,value in CLIENT['errors'].items() if value>start['errors'].get(key,0)}}
 
-async def request(cid,path=None,authority=None,capture=False):
+async def request(cid,path=None,authority=None,capture=False,uri_override=None):
  writer=None;outcome=None
  try:
   reader,writer=await asyncio.open_connection('127.0.0.1',CFG.get('front_port',30443),ssl=CLIENT_SSL if INGRESS else None,server_hostname='provider.example.test' if INGRESS else None)
@@ -98,6 +98,7 @@ async def request(cid,path=None,authority=None,capture=False):
    await writer.start_tls(CLIENT_SSL,server_hostname='provider.example.test',ssl_handshake_timeout=20)
   path=path or '/hold/'+cid
   uri='/openai/v1/chat/completions' if INGRESS else path if TLS else 'http://'+target+path
+  if uri_override is not None:uri=uri_override
   outer='' if TLS or INGRESS else f'x-loom-connection-id: {cid}\r\n'
   if INGRESS:
    outer+=('x-fixture-hold: 1\r\n' if path.startswith('/hold/') else '')
@@ -269,6 +270,21 @@ async def readiness():
     except (OSError,TimeoutError):await asyncio.sleep(.05)
  except TimeoutError:raise RuntimeError('native proxy listener/admin readiness failed before concurrency wave') from None
 
+async def model_deadline_probe():
+ RELEASE.clear();start=STATE['arrived']
+ model=asyncio.create_task(request(CIDS[0]))
+ controls=[asyncio.create_task(request(CIDS[0],uri_override=path)) for path in ('/api/v1/health','/internal/service-execution/input-manifest')]
+ assert await wait_for(lambda:STATE['arrived']==start+3),'deadline probe did not reach upstream'
+ await asyncio.sleep(.3)
+ survived=not model.done();RELEASE.set()
+ result={'model_survived_control_timeout':survived,'model_status':await model,'control_statuses':await asyncio.gather(*controls)}
+ assert await wait_for(lambda:STATE['active']==0),'deadline probe leaked upstream'
+ RELEASE.clear();start=STATE['arrived'];cancelled=asyncio.create_task(request(CIDS[0]))
+ assert await wait_for(lambda:STATE['arrived']==start+1),'cancel probe did not reach upstream'
+ cancelled.cancel();await asyncio.gather(cancelled,return_exceptions=True)
+ result['cancel_reached_upstream']=await wait_for(lambda:STATE['active']==0)
+ return result
+
 async def main():
  server_ssl=None
  if TLS:
@@ -277,6 +293,8 @@ async def main():
  async with server:
   await readiness()
   result={'scheme':CFG['scheme'],'baseline':CFG['baseline'],'client_file_descriptor_limits':list(CLIENT_FD_LIMITS)}
+  if CFG.get('deadline_probe'):
+   result.update(await model_deadline_probe());print(json.dumps(result),flush=True);return
   if CFG.get('client_protocol')=='h2':
    result.update(await h2_wave());result['active_at_end']=STATE['active'];result['header_leaks']=STATE['header_leaks'];result['auth_errors']=STATE['auth_errors'];result['status_request_counts']=dict(STATE['status_requests']);print(json.dumps(result),flush=True);return
   result['same_cid']=await wave([CIDS[0]],cancel=not CFG['baseline'])
@@ -450,7 +468,10 @@ def _envoy_bootstrap(scheme: str, *, baseline: bool) -> dict[str, Any]:
     return config
 
 
-def native_ingress_case(config: dict[str, Any], *, protocol: str, renderer_env: dict[str, str]) -> dict[str, Any]:
+def native_ingress_case(
+    config: dict[str, Any], *, protocol: str, renderer_env: dict[str, str],
+    deadline_probe: bool = False,
+) -> dict[str, Any]:
     """Actual rendered Traefik TLS passthrough → Caddy → H1 model upstream.
 
     Only local addresses/certificate paths and discovery/issuance are adapted:
@@ -477,6 +498,17 @@ def native_ingress_case(config: dict[str, Any], *, protocol: str, renderer_env: 
     routes = public["routes"][0]["handle"][-1]["routes"]
     model = next(route for route in routes if any("/openai/v1/chat/completions" in match.get("path", []) for match in route.get("match", [])))
     model["handle"][0]["upstreams"] = [{"dial": "127.0.0.1:19090"}]
+    if deadline_probe:
+        # Scale only existing finite read timers; do not manufacture or remove
+        # the model route's policy. Exercise a 300-second production cutoff in
+        # milliseconds, including still-bounded API and broker controls.
+        for route in routes:
+            for handler in route.get("handle", []):
+                if handler.get("handler") != "reverse_proxy" or "transport" not in handler:
+                    continue
+                handler["upstreams"] = [{"dial": "127.0.0.1:19090"}]
+                if "read_timeout" in handler["transport"]:
+                    handler["transport"]["read_timeout"] = "100ms"
     # The retained shared ingress foundation owns only the primary region;
     # regional model routing belongs to the separately rendered Caddy config.
     foundation_config = dict(config)
@@ -502,7 +534,8 @@ def native_ingress_case(config: dict[str, Any], *, protocol: str, renderer_env: 
         (directory / "traefik-routes.yaml").write_text(json.dumps(dynamic))
         (directory / "runner.py").write_text(_RUNNER)
         (directory / "scenario.json").write_text(json.dumps({"connection_ids": CONNECTION_IDS, "requests": 1200,
-            "scheme": "https", "baseline": False, "hop": "ingress", "front_port": 8444, "client_protocol": protocol}))
+            "scheme": "https", "baseline": False, "hop": "ingress", "front_port": 8444,
+            "client_protocol": protocol, "deadline_probe": deadline_probe}))
         vendor = directory / "vendor"
         vendor.mkdir()
         paths = json.loads(_run([sys.executable, "-c", "import json,h2,hpack,hyperframe; from pathlib import Path; print(json.dumps([str(Path(m.__file__).parent) for m in (h2,hpack,hyperframe)]))"], env=renderer_env))
