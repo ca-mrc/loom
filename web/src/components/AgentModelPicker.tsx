@@ -3,14 +3,11 @@ import { Link } from "react-router-dom";
 import { agentReadinessMessage, agentServiceModeReady } from "../lib/agentReadiness";
 import { Button } from "./Button";
 import { Input } from "./Input";
-import { Tabs } from "./Tabs";
 import {
   AgentModelPickerProps,
   CUSTOM_MODEL_KEY,
   findAgent,
-  firstSource,
   modelKey,
-  ModelSource,
   preflightOptionSuffix,
   providerNamespace,
   SELECT_CLS,
@@ -21,8 +18,6 @@ import { useAgentModelPicker } from "./useAgentModelPicker";
 export {
   type AgentModelPickerProps,
   type AgentModelValue,
-  type HFExecution,
-  type ModelSource,
 } from "./agentModelPickerState";
 export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
   const {
@@ -53,9 +48,6 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
     selectedAgentReady,
     supportsAgentVersion,
     needsModel,
-    sourceTabItems,
-    activeSource,
-    availableSources,
   } = useAgentModelPicker(props);
   const selectedVersion = selectedAgent?.versions?.find(
     (version) => version.agent_version === value.agentVersion,
@@ -266,24 +258,6 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
     </div>
   );
 
-  const selectSource = (source: ModelSource): void => {
-    onChange({
-      ...value,
-      source,
-      modelProvider: "",
-      modelName: "",
-      providerConnectionId: undefined,
-      providerConnectionName: undefined,
-      manualModel: false,
-    });
-  };
-
-  const renderSourcePanel = (source: ModelSource): JSX.Element | null => {
-    // Hosted submissions use Provider Connections only; the HuggingFace and
-    // local-server sources are retired (#2054).
-    return source === "api" ? renderCatalogPanel() : null;
-  };
-
   const showAgentSelector = !specificAgentToggle || value.useSpecificAgent === true;
 
   const chooseAgent = (agentName: string): void => {
@@ -299,22 +273,15 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
     }
     if (!agentServiceModeReady(next)) return;
     const keepModel = specificAgentToggle && supportsModelSelection(next, value);
-    const nextSource =
-      next.needs_model && next.supported_model_sources.includes(value.source)
-        ? value.source
-        : firstSource(next);
     onChange({
       ...value,
       agentName: next.name,
       agentVersion: undefined,
-      source: next.needs_model ? nextSource : value.source,
       modelProvider: keepModel ? value.modelProvider : "",
       modelName: keepModel ? value.modelName : "",
       providerConnectionId: keepModel ? value.providerConnectionId : undefined,
       providerConnectionName: keepModel ? value.providerConnectionName : undefined,
       manualModel: keepModel ? value.manualModel : false,
-      hfExecution: value.hfExecution ?? "local-vllm",
-      localServer: keepModel ? value.localServer : undefined,
       useSpecificAgent: specificAgentToggle ? true : value.useSpecificAgent,
     });
     setCustomMode(false);
@@ -335,13 +302,7 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
       ...value,
       agentName: next?.name ?? defaultAgentName,
       agentVersion: undefined,
-      source: next?.needs_model
-        ? next.supported_model_sources.includes(value.source)
-          ? value.source
-          : firstSource(next)
-        : value.source,
       useSpecificAgent: false,
-      hfExecution: value.hfExecution ?? "local-vllm",
     });
   };
 
@@ -454,22 +415,7 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
       ) : null}
 
       {!selectedAgentReady ? null : needsModel ? (
-        <div className="stack-y-3">
-          <Tabs
-            items={sourceTabItems}
-            value={activeSource}
-            onValueChange={selectSource}
-            ariaLabel="Model source"
-            hideTabList={availableSources.length <= 1}
-            className="stack-y-3"
-            tabListClassName="inline-flex max-w-full flex-wrap gap-1 rounded-lg border border-slate-200 bg-slate-50 p-0.5"
-            tabClassName={({ selected }) =>
-              "shrink-0 whitespace-nowrap rounded-md px-3 py-1 text-xs font-medium transition-colors " +
-              (selected ? "bg-white text-slate-900 shadow-xs" : "text-slate-600 hover:text-slate-900")
-            }
-            renderPanel={renderSourcePanel}
-          />
-        </div>
+        renderCatalogPanel()
       ) : (
         <p className="text-xs text-slate-500">
           The <code className="rounded bg-slate-100 px-1 py-0.5 font-mono">{selectedAgent?.display_name ?? value.agentName}</code> agent
