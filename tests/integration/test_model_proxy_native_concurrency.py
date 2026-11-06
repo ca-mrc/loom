@@ -101,3 +101,15 @@ def test_native_ingress_preserves_model_concurrency_across_connections(regional_
     assert result["upstream_statuses"] == [429, 500] and result["recovery"] == 200, result
     assert result["status_request_counts"] == {"429": 1, "500": 1}, result
     assert result["active_at_end"] == result["header_leaks"] == result["auth_errors"] == 0, result
+
+
+@pytest.mark.timeout(180)
+def test_native_ingress_model_wait_outlives_control_read_timeout_and_cancels(
+    regional_inputs, renderer_environment,
+):
+    result = native_ingress_case(
+        regional_inputs[0], protocol="h1", renderer_env=renderer_environment, deadline_probe=True,
+    )
+    assert result["model_status"] == 200 and result["model_survived_control_timeout"], result
+    assert result["control_statuses"] == [504, 504], result
+    assert result["cancel_reached_upstream"], result

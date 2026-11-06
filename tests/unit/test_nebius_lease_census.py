@@ -39,7 +39,7 @@ def test_census_program_is_read_only_and_uses_the_rollout_predicate() -> None:
     assert "DELETE " not in _CENSUS_PROGRAM
 
 
-@pytest.mark.parametrize('schema_head', ['0175', '0176', '0177', '0178', '0179', '0180', '0181', '0182', '0183', '0184', '0185', '0186', '0187', '0188', '0189', '0190', '0191', '0192', '0193', '0194'])
+@pytest.mark.parametrize('schema_head', ['0175', '0176', '0177', '0178', '0179', '0180', '0181', '0182', '0183', '0184', '0185', '0186', '0187', '0188', '0189', '0190', '0191', '0192', '0193', '0194', '0195'])
 def test_validate_remote_accepts_exact_identity_and_command_state(schema_head: str) -> None:
     result = _remote(schema_head=schema_head)
     result["leases"][0]["commands"] = [{"state": "dead_letter"}]
@@ -51,7 +51,7 @@ def test_validate_remote_accepts_exact_identity_and_command_state(schema_head: s
     [
         {"read_only": False},
         {"schema_head": "0174"},
-        {"schema_head": "0195"},
+        {"schema_head": "0196"},
         {"schema_head": "0199"},
         {"active_count": 2},
         {"leases": []},
@@ -63,7 +63,7 @@ def test_validate_remote_rejects_unqualified_census(overrides: dict[str, object]
         _validate_remote(_remote(**overrides))
 
 
-@pytest.mark.parametrize('schema_head', ['0186', '0187', '0188', '0189', '0190', '0191', '0192', '0193', '0194'])
+@pytest.mark.parametrize('schema_head', ['0186', '0187', '0188', '0189', '0190', '0191', '0192', '0193', '0194', '0195'])
 def test_normal_census_entry_keeps_bound_target_and_remote_columns(monkeypatch, schema_head):
     config = {'namespace': 'loom-nebius-platform', 'execution_namespace': 'loom-execution'}
     verified = []

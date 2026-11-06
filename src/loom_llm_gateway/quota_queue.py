@@ -12,7 +12,7 @@ from datetime import timedelta
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import and_, func, or_, select, text, union_all, update
+from sqlalchemy import func, literal, select, text, union_all, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import (
@@ -22,6 +22,7 @@ from loom.db.schema import (
     ProviderRequestPoolMember,
 )
 from loom.quota_queue import QUEUE_WAITER_DEAD_AFTER, AdmissionChoice, GroupView, choose_admission
+from loom_llm_gateway.dispatch_capacity import active_dispatch_count
 
 
 async def decide_group_queue(
@@ -65,31 +66,22 @@ async def decide_group_queue(
     if now is None:
         raise HTTPException(status_code=503, detail="provider_queue_clock_unavailable")
     stale_after = now - timedelta(seconds=upstream_timeout_sec + 5.0)
+    # Disabled members still occupy their group's quota while an admitted
+    # generation is live. Each physical member uses two indexed lifetime ranges.
+    member_counts = union_all(*(
+        select(
+            literal(member.quota_group).label("quota_group"),
+            active_dispatch_count(member.connection_id, now=now, stale_after=stale_after)
+            .label("in_flight"),
+        )
+        for member in members
+    )).subquery()
     counts = {
         group: int(count or 0)
         for group, count in (
             await session.execute(
-                select(ProviderRequestPoolMember.quota_group, func.count())
-                .join(
-                    GatewayDispatchReceipt,
-                    GatewayDispatchReceipt.provider_connection_id
-                    == ProviderRequestPoolMember.connection_id,
-                )
-                .where(
-                    ProviderRequestPoolMember.pool_connection_id == pool_id,
-                    GatewayDispatchReceipt.provider_connection_id.in_(
-                        [member.connection_id for member in members]
-                    ),
-                    GatewayDispatchReceipt.provider_outcome == "admitted",
-                    or_(
-                        GatewayDispatchReceipt.attempt_deadline_wall_clock > now,
-                        and_(
-                            GatewayDispatchReceipt.attempt_deadline_wall_clock.is_(None),
-                            GatewayDispatchReceipt.admitted_at > stale_after,
-                        ),
-                    ),
-                )
-                .group_by(ProviderRequestPoolMember.quota_group)
+                select(member_counts.c.quota_group, func.sum(member_counts.c.in_flight))
+                .group_by(member_counts.c.quota_group)
             )
         ).all()
     }
