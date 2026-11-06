@@ -21,7 +21,7 @@ from uuid import UUID, uuid4
 
 from anyio import CancelScope
 from fastapi import HTTPException, Request
-from sqlalchemy import and_, func, insert, or_, select, text, update
+from sqlalchemy import insert, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -29,6 +29,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from loom.auth import AuthContext
 from loom.db.schema import GatewayDispatchReceipt, ProviderConnection
 from loom_llm_gateway.attempt_deadline import AttemptDeadlineReachedError, GatewayAttemptDeadline
+from loom_llm_gateway.dispatch_capacity import active_dispatch_count
 from loom_llm_gateway.metrics import (
     CONNECTION_QUEUE_LIMITED_TOTAL,
     CONNECTION_QUEUE_WAIT_SECONDS,
@@ -285,19 +286,7 @@ class DispatchAudit:
         now = datetime.now(UTC)
         stale_after = now - timedelta(seconds=self.state.upstream_timeout_sec + 5.0)
         open_count = await session.scalar(
-            select(func.count())
-            .select_from(GatewayDispatchReceipt)
-            .where(
-                GatewayDispatchReceipt.provider_connection_id == connection_id,
-                GatewayDispatchReceipt.provider_outcome == "admitted",
-                or_(
-                    GatewayDispatchReceipt.attempt_deadline_wall_clock > now,
-                    and_(
-                        GatewayDispatchReceipt.attempt_deadline_wall_clock.is_(None),
-                        GatewayDispatchReceipt.admitted_at > stale_after,
-                    ),
-                ),
-            )
+            select(active_dispatch_count(connection_id, now=now, stale_after=stale_after))
         )
         if int(open_count or 0) >= int(cap):
             raise ConnectionAtCapacityError(connection_id)

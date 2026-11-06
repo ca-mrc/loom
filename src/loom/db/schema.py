@@ -8201,6 +8201,12 @@ class GatewayDispatchReceipt(Base):
         Index("gateway_receipt_pending_idx", "provider_outcome", "admitted_at"),
         Index("gateway_receipt_connection_history_idx", "provider_connection_id", "admitted_at"),
         Index(
+            "gateway_receipt_admitted_deadline_idx",
+            "provider_connection_id",
+            "attempt_deadline_wall_clock",
+            postgresql_where=text("provider_outcome = 'admitted'"),
+        ),
+        Index(
             "gateway_receipt_admitted_connection_idx",
             "provider_connection_id",
             "admitted_at",

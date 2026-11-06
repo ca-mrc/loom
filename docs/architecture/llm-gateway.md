@@ -119,10 +119,14 @@ physical connections. It reads stall history only when the bound group is full
 and no overflow slot is available. Each member's latest admission uses the
 all-outcome `(provider_connection_id, admitted_at)` index; completed calls reset
 stall age too. Per-member indexed extrema keep this lookup bounded when several
-keys share a quota group. The separate partial index for open dispatches remains
-in use for capacity accounting. Migration `0194` installs the history index;
-queue admission must not depend on scanning retained dispatch history within
-the one-second audit budget.
+keys share a quota group. Capacity counts use disjoint per-connection ranges:
+future signed deadlines and recent admissions without a deadline. Partial
+indexes on connection/deadline (`0195`) and connection/admission time bound
+these reads even when expired `admitted` receipts retain unknown outcomes.
+The fixed outcome predicate remains indexable in generic prepared plans.
+Migration `0194` installs the separate history index. Neither capacity nor
+stall admission may scan retained dispatch history within the one-second audit
+budget; an old receipt with a future signed deadline still occupies its slot.
 
 The internal join is `trial_id / step_id / agent_attempt_id / step_jwt_id`.
 The worker supervisor creates a new opaque attempt UUID for each real agent

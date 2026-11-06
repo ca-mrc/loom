@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
 import httpx
 import pytest
+from psycopg import sql
 from sqlalchemy import delete, event, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -1387,9 +1389,20 @@ async def test_capacity_lookup_does_not_scan_expired_admitted_receipts(
     assert statements
     async with engine.connect() as connection:
         for statement, parameters in statements:
-            plan = (await connection.exec_driver_sql(
+            plans = [(await connection.exec_driver_sql(
                 "EXPLAIN (ANALYZE, FORMAT JSON) " + statement, parameters,
-            )).scalar_one()[0]["Plan"]
+            )).scalar_one()[0]["Plan"]]
+            # Production psycopg eventually prepares repeated admission queries.
+            # Generic plans must retain the same bounded scans as custom plans.
+            names = list(dict.fromkeys(re.findall(r"%\((\w+)\)s", statement)))
+            prepared = re.sub(r"%\((\w+)\)s", lambda m, names=names: f"${names.index(m[1]) + 1}", statement)
+            await connection.exec_driver_sql("PREPARE capacity_probe AS " + prepared)
+            await connection.exec_driver_sql("SET LOCAL plan_cache_mode='force_generic_plan'")
+            explain = sql.SQL("EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE capacity_probe({})").format(
+                sql.SQL(",").join(sql.Literal(parameters[name]) for name in names),
+            )
+            plans.append((await connection.exec_driver_sql(explain.as_string())).scalar_one()[0]["Plan"])
+            await connection.exec_driver_sql("DEALLOCATE capacity_probe")
 
             def receipt_scans(node):
                 if node.get("Relation Name") == "gateway_dispatch_receipts":
@@ -1397,11 +1410,54 @@ async def test_capacity_lookup_does_not_scan_expired_admitted_receipts(
                 for child in node.get("Plans", []):
                     yield from receipt_scans(child)
 
-            scans = list(receipt_scans(plan))
-            assert scans, plan
-            visited = sum((scan["Actual Rows"] + scan.get("Rows Removed by Filter", 0))
-                          * scan["Actual Loops"] for scan in scans)
-            assert visited <= 4, plan
+            for plan in plans:
+                scans = list(receipt_scans(plan))
+                assert scans, plan
+                visited = sum((scan["Actual Rows"] + scan.get("Rows Removed by Filter", 0))
+                              * scan["Actual Loops"] for scan in scans)
+                assert visited <= 4, plan
+
+
+async def test_disabled_member_keeps_live_deadline_and_undated_group_slots(pool_setup: dict) -> None:
+    p = pool_setup
+    now = datetime.now(UTC)
+    async with p["sessions"]() as session:
+        session.add_all([
+            ProviderRequestPoolGroupCap(pool_connection_id=p["root"], quota_group=group,
+                                        max_in_flight=2)
+            for group in ("az", "yibu")
+        ])
+        await session.execute(update(ProviderRequestPoolMember).where(
+            ProviderRequestPoolMember.pool_connection_id == p["root"],
+            ProviderRequestPoolMember.connection_id == p["ids"][2],
+        ).values(enabled=False))
+        fresh = uuid4()
+        for receipt_id, admitted_at, deadline in [
+            (uuid4(), now - timedelta(days=1), now + timedelta(minutes=5)),
+            (fresh, now, None),
+            (uuid4(), now, now - timedelta(seconds=1)),
+            (uuid4(), now - timedelta(days=1), None),
+        ]:
+            session.add(GatewayDispatchReceipt(
+                id=receipt_id, request_id=uuid4(), dispatch_ordinal=1, attempt=1,
+                team_id=p["team_id"], trial_id=p["trial_id"], step_id="agent",
+                provider_connection_id=p["ids"][2], dialect="facade_openai", purpose="model_call",
+                admitted_at=admitted_at, attempt_deadline_wall_clock=deadline,
+            ))
+        await session.flush()
+        members = list((await session.scalars(select(ProviderRequestPoolMember).where(
+            ProviderRequestPoolMember.pool_connection_id == p["root"],
+        ).order_by(ProviderRequestPoolMember.ordinal))).all())
+        for expected in ("wait", "admit"):
+            choice = await decide_group_queue(
+                session, pool_id=p["root"], request_id=uuid4(), bound_group="yibu",
+                bound_connection_id=p["ids"][1], attempt=1, stall_sec=200,
+                upstream_timeout_sec=200, members=members,
+            )
+            assert choice.kind == expected
+            await session.execute(update(GatewayDispatchReceipt).where(
+                GatewayDispatchReceipt.id == fresh,
+            ).values(provider_outcome="response_received"))
 
 
 async def test_group_queue_waits_and_drains_across_replicas_with_the_normal_audit_budget(
