@@ -262,6 +262,12 @@ the scheduler continues its scan of at most 32 candidates. Reservation identity
 conflicts and price-snapshot mismatches still propagate as errors. A parent that
 became terminal after selection rejects the new reservation under the parent row
 lock, without preventing admission of an unrelated candidate.
+Retries also retain their validated target binding when regional placement
+preference changes. Trying another target rolls back that alternative and lets
+the scheduler reach the bound target. If it cannot admit the retry, the candidate
+waits without blocking later queued work. This does not authorize cross-target
+reselection or convert route identity, requirements, pool, or class drift into
+an admission wait.
 Capacity-wait projections also exclude terminal parents, so undelivered child
 cancellation cannot retain their former place ahead of eligible work.
 

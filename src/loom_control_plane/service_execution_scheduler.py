@@ -57,6 +57,7 @@ from loom_control_plane.service_execution import (
     ServiceExecutionConflict,
     ServiceExecutionParentTerminalError,
     ServiceExecutionPolicyBlockedError,
+    ServiceExecutionTargetBoundError,
     committed_handoff_files,
     mark_verifier_unavailable,
     reserve_trial_execution,
@@ -684,6 +685,14 @@ async def _reserve_service_candidate(
                     },
                 ))
                 return lease
+        except ServiceExecutionTargetBoundError:
+            # A retry keeps its validated route. Placement ordering may try
+            # another target first; roll back and reach the bound target, or
+            # defer this candidate so later queued work can still progress.
+            if policy_blocked is None:
+                policy_blocked = ServiceExecutionPolicyBlockedError(
+                    "execution_route_target_bound", scope_kind="target",
+                )
         except ServiceExecutionPolicyBlockedError as exc:
             if exc.scope_kind not in {"target", "region"}:
                 raise

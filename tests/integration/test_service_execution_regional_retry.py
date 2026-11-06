@@ -45,6 +45,7 @@ from tests.support.execution_image_admission import IMAGE_ADMISSION_KEYRING
         "eligible",
         "started",
         "other_failure",
+        "bound_retry",
         "wrong_environment",
         "wrong_residency",
         "requirements_drift",
@@ -77,7 +78,7 @@ async def test_regional_retry_rebinds_only_after_unstarted_infra_cleanup(
                         }
                     ),
                 )
-                _, secondary = await fixtures._seed_ready_trial(session, now=now)
+                next_trial_id, secondary = await fixtures._seed_ready_trial(session, now=now)
             await _observe(session, primary, now + timedelta(seconds=1), quota=2)
             await _observe(session, secondary, now + timedelta(seconds=1), quota=2)
             first = await reserve_next_service_execution(
@@ -168,7 +169,7 @@ async def test_regional_retry_rebinds_only_after_unstarted_infra_cleanup(
             trial = await session.get(Trial, trial_id)
             assert trial.execution_route_json == original_route
         assert kube.create_count == 1 and len(kube.jobs) == 1
-        if boundary == "other_failure":
+        if boundary in {"other_failure", "bound_retry"}:
             async with sessions() as session:
                 current = await session.get(ServiceExecutionLease, first.id)
                 current.error_code = "evicted"
@@ -195,8 +196,20 @@ async def test_regional_retry_rebinds_only_after_unstarted_infra_cleanup(
                     health_status="healthy",
                     observed_at=after_cleanup,
                 )
-            await _observe(session, primary, after_cleanup, quota=0)
+            await _observe(session, primary, after_cleanup, quota=2 if boundary == "bound_retry" else 0)
             await _observe(session, secondary, after_cleanup, quota=2)
+            if boundary == "bound_retry":
+                # Placement preference can change between attempts. It must
+                # still reach the original target without rebinding the route.
+                for target, role in ((primary, "secondary"), (secondary, "primary")):
+                    row = await session.get(ServiceExecutionTarget, target.target_id)
+                    row.spec_json = {**row.spec_json, "health_role": role}
+            if boundary == "other_failure":
+                # A bound retry waiting for its region must not strand a later
+                # unrelated trial that can use the other available region.
+                await fixtures._configure_scheduler_trial(session, trial_id=next_trial_id, now=after_cleanup)
+                next_trial = await session.get(Trial, next_trial_id)
+                next_trial.submitted_at = after_cleanup
             if boundary == "wrong_environment":
                 row = await session.get(ServiceExecutionTarget, secondary.target_id)
                 row.environment = "production"
@@ -225,16 +238,22 @@ async def test_regional_retry_rebinds_only_after_unstarted_infra_cleanup(
                 await session.rollback()
                 recovered = None
             elif boundary == "other_failure":
-                with pytest.raises(ServiceExecutionConflict, match="different execution authority"):
-                    await reserve_next_service_execution(
-                        session,
-                        environment="staging",
-                        pool_id="nebius-cpu",
-                        image_admission_keyring=IMAGE_ADMISSION_KEYRING,
-                        now=after_cleanup + timedelta(seconds=1),
-                    )
-                await session.rollback()
-                recovered = None
+                recovered = await reserve_next_service_execution(
+                    session,
+                    environment="staging",
+                    pool_id="nebius-cpu",
+                    image_admission_keyring=IMAGE_ADMISSION_KEYRING,
+                    now=after_cleanup + timedelta(seconds=1),
+                )
+                assert recovered is not None and recovered.trial_id == next_trial_id
+                assert recovered.target_id == secondary.target_id
+                trial = await session.get(Trial, trial_id)
+                assert trial.state == "queued" and trial.next_attempt_at > after_cleanup
+                assert trial.execution_route_json == original_route and trial.attempt_count == 1
+                assert await session.scalar(select(func.count()).select_from(ServiceExecutionLease)
+                    .where(ServiceExecutionLease.trial_id == trial_id)) == 1
+                await session.commit()
+                return
             else:
                 recovered = await reserve_next_service_execution(
                     session,
@@ -244,6 +263,14 @@ async def test_regional_retry_rebinds_only_after_unstarted_infra_cleanup(
                     now=after_cleanup + timedelta(seconds=1),
                 )
                 await session.commit()
+            if boundary == "bound_retry":
+                assert recovered is not None and recovered.target_id == primary.target_id
+                assert recovered.attempt == 2
+                trial = await session.get(Trial, trial_id)
+                assert trial.execution_route_json == original_route
+                assert await session.scalar(select(func.count()).select_from(ServiceExecutionLease)
+                    .where(ServiceExecutionLease.trial_id == trial_id)) == 2
+                return
             if boundary != "eligible":
                 assert recovered is None
                 trial = await session.get(Trial, trial_id)

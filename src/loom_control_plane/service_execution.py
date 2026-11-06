@@ -157,6 +157,10 @@ class ServiceExecutionConflict(ServiceExecutionError):  # noqa: N818 - contract 
     pass
 
 
+class ServiceExecutionTargetBoundError(ServiceExecutionConflict):
+    """A valid route binds this attempt to another target in the same authority."""
+
+
 class ServiceExecutionPolicyBlockedError(ServiceExecutionConflict):
     """A candidate must wait for admission or paid-execution policy to allow it."""
 
@@ -488,7 +492,7 @@ def _bind_kubernetes_execution_route(
         if decision.selected_target_id == target.id:
             return decision, decision_digest
         if not allow_target_reselection:
-            raise ServiceExecutionConflict("trial is routed to a different execution authority")
+            raise ServiceExecutionTargetBoundError("trial is routed to a different execution authority")
 
     decision = ExecutionRoutingDecisionV1(
         generation=trial.execution_route_generation + 1,
