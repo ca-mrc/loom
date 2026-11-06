@@ -13,7 +13,7 @@ def _allow_current_cancellation_columns(url: str) -> None:
     """Let the current models insert on a database pinned at 0186.
 
     These tests stay at 0186 so the warm-fit column is absent. The drain
-    columns are nullable and unused on that path.
+    columns and the queue pause deadline are nullable and unused on that path.
     """
 
     engine = create_engine(url)
@@ -37,6 +37,26 @@ def _allow_current_cancellation_columns(url: str) -> None:
             connection.execute(text(
                 "ALTER TABLE trials ADD COLUMN IF NOT EXISTS "
                 "admission_pause_releases INTEGER NOT NULL DEFAULT 0"
+            ))
+            connection.execute(text(
+                "ALTER TABLE execution_leases ADD COLUMN IF NOT EXISTS "
+                "working_deadline_at TIMESTAMPTZ"
+            ))
+            connection.execute(text(
+                "ALTER TABLE provider_request_pools "
+                "ADD COLUMN IF NOT EXISTS queue_enabled BOOLEAN NOT NULL DEFAULT false"
+            ))
+            connection.execute(text(
+                "ALTER TABLE provider_request_pools "
+                "ADD COLUMN IF NOT EXISTS stall_sec DOUBLE PRECISION NOT NULL DEFAULT 200"
+            ))
+            connection.execute(text(
+                "ALTER TABLE provider_request_pools "
+                "ADD COLUMN IF NOT EXISTS max_pause_sec DOUBLE PRECISION NOT NULL DEFAULT 7200"
+            ))
+            connection.execute(text(
+                "ALTER TABLE provider_request_pools "
+                "ADD COLUMN IF NOT EXISTS config_version BIGINT NOT NULL DEFAULT 1"
             ))
     finally:
         engine.dispose()

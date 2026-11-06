@@ -26,6 +26,7 @@ from loom.db.schema import (
     ProviderModelCache,
     ProviderRequestPool,
     ProviderRequestPoolBinding,
+    ProviderRequestPoolGroupCap,
     ProviderRequestPoolMember,
     Secret,
     ServiceExecutionLease,
@@ -235,13 +236,17 @@ async def post(
     replica: int = 0,
     jwt: str | None = None,
     path: str = "/openai/v1/chat/completions",
+    headers: dict[str, str] | None = None,
 ) -> httpx.Response:
+    request_headers = {"Authorization": "Bearer " + (jwt or p["jwt"])}
+    if headers:
+        request_headers.update(headers)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=p["apps"][replica]), base_url="http://gateway.test"
     ) as client:
         return await client.post(
             path,
-            headers={"Authorization": "Bearer " + (jwt or p["jwt"])},
+            headers=request_headers,
             json=body
             or {"model": "student", "messages": [{"role": "user", "content": "first observation"}]},
         )
@@ -1212,6 +1217,48 @@ async def test_non_timeout_errors_stay_on_the_bound_member(pool_setup: dict, sta
     async with p["sessions"]() as session:
         binding = await session.get(ProviderRequestPoolBinding, (p["root"], p["trial_id"]))
         assert binding is not None and binding.member_connection_id == p["ids"][0]
+
+
+async def test_broker_pause_header_reaches_group_queue_admission(pool_setup: dict) -> None:
+    """The header the broker sets is what turns queue admission on.
+
+    A pool with the queue enabled still uses today's path until the
+    authenticated request carries exactly ``X-Loom-Pause-Capable: 1``.
+    Missing caps then fail closed inside group admission, which is how this
+    test shows the queue path ran. With caps, the same header admits.
+    """
+
+    p = pool_setup
+    async with p["sessions"]() as session:
+        pool = await session.get(ProviderRequestPool, p["root"])
+        assert pool is not None
+        pool.queue_enabled = True
+        await session.commit()
+    paused = {"X-Loom-Pause-Capable": "1"}
+    response = await post(p, headers=paused)
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == "provider_queue_unconfigured"
+    assert p["captures"]["requests"] == []
+
+    for value in (None, "true", "1 "):
+        p["captures"]["requests"].clear()
+        extra = None if value is None else {"X-Loom-Pause-Capable": value}
+        response = await post(p, headers=extra)
+        assert response.status_code == 200, (value, response.text)
+        assert len(p["captures"]["requests"]) == 1
+
+    async with p["sessions"]() as session:
+        session.add(ProviderRequestPoolGroupCap(
+            pool_connection_id=p["root"], quota_group="az", max_in_flight=1,
+        ))
+        session.add(ProviderRequestPoolGroupCap(
+            pool_connection_id=p["root"], quota_group="yibu", max_in_flight=1,
+        ))
+        await session.commit()
+    p["captures"]["requests"].clear()
+    response = await post(p, headers=paused)
+    assert response.status_code == 200, response.text
+    assert len(p["captures"]["requests"]) == 1
 
 
 async def test_in_flight_cap_is_shared_by_gateway_replicas(pool_setup: dict) -> None:

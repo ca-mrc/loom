@@ -124,6 +124,7 @@ class _RequestAudit:
     session_factory: async_sessionmaker[AsyncSession] | None = None
     upstream_timeout_sec: float = 200.0
     connection_queue_max_wait_sec: float = 120.0
+    pause_capable: bool = False
 
 
 class ConnectionAtCapacityError(Exception):
@@ -132,6 +133,22 @@ class ConnectionAtCapacityError(Exception):
     def __init__(self, connection_id: UUID) -> None:
         self.connection_id = connection_id
         super().__init__(connection_id)
+
+
+class GroupQueuedError(Exception):
+    """The bound quota group has no slot this attempt may take."""
+
+    def __init__(self, group: str) -> None:
+        self.group = group
+        super().__init__(group)
+
+
+class QueueStalledError(Exception):
+    """The group has admitted nobody for a full stall interval."""
+
+    def __init__(self, group: str) -> None:
+        self.group = group
+        super().__init__(group)
 
 
 class DispatchAudit:
@@ -211,7 +228,7 @@ class DispatchAudit:
                     phase = "commit"
                     await _database_await(session.commit(), operation="admission", phase=phase)
                     phase = "session_exit"
-        except ConnectionAtCapacityError:
+        except (ConnectionAtCapacityError, GroupQueuedError, QueueStalledError):
             raise
         except HTTPException:
             # A routing policy may decline admission before any provider I/O.
@@ -508,6 +525,18 @@ class DispatchAuditUnavailableError(RuntimeError):
     """Admission failed closed before provider I/O; contains no driver details."""
 
 
+def _broker_pause_header(request: Request) -> bool:
+    """True only for the exact header the hosted broker writes.
+
+    A scope with no headers, which older audit fixtures use, is not capable.
+    """
+
+    raw = request.scope.get("headers")
+    if not raw:
+        return False
+    return any(name.lower() == b"x-loom-pause-capable" and value == b"1" for name, value in raw)
+
+
 def audit_for_request(
     request: Request,
     ctx: AuthContext,
@@ -519,6 +548,10 @@ def audit_for_request(
     if not isinstance(state, _RequestAudit):
         raise RuntimeError("invalid dispatch audit request state")
     state.session_factory = request.app.state.session_factory
+    # The hosted broker deletes any agent-supplied copy and sets this only
+    # when that runtime follows a moved deadline. Exact "1" keeps every other
+    # caller, including an old runtime, on today's admission path.
+    state.pause_capable = _broker_pause_header(request)
     settings = getattr(request.app.state, "settings", None)
     if settings is not None:
         state.upstream_timeout_sec = float(settings.upstream_timeout_sec)

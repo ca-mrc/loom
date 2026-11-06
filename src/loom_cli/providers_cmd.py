@@ -746,6 +746,51 @@ def _pool(args: argparse.Namespace) -> int:
                 if error is not None:
                     return error
                 response = client.delete(path, headers=headers)
+            elif args.queue is not None:
+                headers, error = _optional_admin_actor_headers(args)
+                if error is not None:
+                    return error
+                current = assert_2xx(client.get(path), action="read provider request pool")
+                payload = {
+                    "required_models": current["required_models"],
+                    "equivalent_models": True,
+                    "members": [
+                        {
+                            "connection_id": member["connection_id"],
+                            "quota_group": member["quota_group"],
+                            "enabled": member["enabled"],
+                        }
+                        for member in current["members"]
+                    ],
+                    "attempt_timeout_sec": current["attempt_timeout_sec"],
+                    "cooldown_sec": current["cooldown_sec"],
+                    "timeout_burst_count": current["timeout_burst_count"],
+                    "timeout_window_sec": current["timeout_window_sec"],
+                    "queue_enabled": args.queue == "enable",
+                    "stall_sec": args.stall_sec if args.stall_sec is not None else current.get("stall_sec", 200),
+                    "max_pause_sec": (
+                        args.max_pause_sec
+                        if args.max_pause_sec is not None
+                        else current.get("max_pause_sec", 7200)
+                    ),
+                    "config_version": (
+                        args.expect_version
+                        if args.expect_version is not None
+                        else current.get("config_version")
+                    ),
+                }
+                caps = dict(current.get("group_caps") or {})
+                for item in args.group_cap or []:
+                    group, separator, raw_cap = str(item).partition("=")
+                    if not separator or not group or not raw_cap.isdigit():
+                        raise ValueError("group cap must look like quota-group=10")
+                    caps[group] = int(raw_cap)
+                if args.queue == "enable":
+                    missing = sorted({member["quota_group"] for member in payload["members"]} - set(caps))
+                    if missing:
+                        raise ValueError("missing group caps: " + ", ".join(missing))
+                payload["group_caps"] = caps
+                response = client.put(path, json=payload, headers=headers)
             else:
                 response = client.get(path)
             result = assert_2xx(response, action="manage provider request pool")
@@ -770,6 +815,20 @@ def dispatch(argv: list[str]) -> int:
     pool_action = pool.add_mutually_exclusive_group()
     pool_action.add_argument("--config", help="JSON file containing member IDs and pool settings.")
     pool_action.add_argument("--disable", action="store_true", help="Disable rotation; retain its configuration.")
+    pool_action.add_argument(
+        "--queue",
+        choices=["enable", "disable"],
+        help="Enable or disable the experimental quota-group queue.",
+    )
+    pool.add_argument(
+        "--group-cap",
+        action="append",
+        default=[],
+        help="Quota group cap, as name=count. Required for every group when enabling.",
+    )
+    pool.add_argument("--stall-sec", type=float, default=None)
+    pool.add_argument("--max-pause-sec", type=float, default=None)
+    pool.add_argument("--expect-version", type=int, default=None)
     pool.add_argument("--admin-actor", default=None)
     pool.set_defaults(handler=_pool)
 

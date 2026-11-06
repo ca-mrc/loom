@@ -593,8 +593,9 @@ async def test_global_verifier_guard_rejects_foreign_parent_and_retains_history(
         # outbox contract. Once verifier history exists it cannot be discarded.
         await asyncio.to_thread(command.downgrade, config, "0178")
         await asyncio.to_thread(command.upgrade, config, "0179")
-        # Current models select the drain columns. This check stays on 0179,
-        # so add the nullable columns without moving the Alembic revision.
+        # Current models select the drain columns and working_deadline_at.
+        # This check stays on 0179, so add the nullable columns without
+        # moving the Alembic revision.
         await asyncio.to_thread(allow_current_cancellation_columns, url)
         selected = await PoolExecutionSelector(outbox=case.outbox).select_next()
         for change in ("parent", "runtime"):

@@ -303,6 +303,13 @@ def _grant(db: psycopg.Connection[Any], selection: DevelopmentSchemaSelection) -
             # 0183 adds the per-request rotation cursor and failed-member cooldown.
             db.execute('GRANT SELECT,UPDATE ON public.provider_request_pools, '
                 'public.provider_request_pool_members TO loom_gateway')
+            db.execute('GRANT SELECT ON public.provider_request_pool_group_caps TO loom_gateway')
+            db.execute('GRANT SELECT,INSERT,UPDATE ON public.gateway_dispatch_queue TO loom_gateway')
+            db.execute('GRANT USAGE, SELECT ON SEQUENCE gateway_dispatch_queue_seq TO loom_gateway')
+            db.execute(
+                'GRANT EXECUTE ON FUNCTION gateway_dispatch_queue_credit(uuid, double precision) '
+                'TO loom_gateway, loom_service, loom_control_plane'
+            )
             db.execute('GRANT SELECT,INSERT,UPDATE ON public.provider_request_pool_bindings, '
                 'public.provider_connection_timeout_health TO loom_gateway')
             db.execute('GRANT SELECT,INSERT ON public.provider_connection_timeout_observations '

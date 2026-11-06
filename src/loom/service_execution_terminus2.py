@@ -118,6 +118,27 @@ class LeaseGatewayClient:
         )
         return _ProxyTokenGrant()
 
+    async def read_phase_deadline(self) -> datetime | None:
+        """Read the broker's current agent deadline. A failure leaves it unchanged."""
+
+        if not self._control_token:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=5, trust_env=False) as client:
+                response = await client.get(
+                    self.gateway_url + "/internal/loom/terminus/phase-deadline",
+                    headers={"X-Loom-Terminus-Control": self._control_token},
+                )
+                response.raise_for_status()
+                body = response.json()
+            raw = str(body["deadline"]).replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(raw)
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            return None
+        if parsed.tzinfo is None:
+            return None
+        return parsed
+
     async def _post_control(
         self,
         path: str,
@@ -201,7 +222,9 @@ class LeaseGatewayClient:
             self._last_ledger_error_log_at = now
             logger.warning(
                 "terminus_ledger_get_failed trial_id=%s phase=%s elapsed_ms=%.3f",
-                self.trial_id, phase, max(0.0, now - started) * 1000,
+                self.trial_id,
+                phase,
+                max(0.0, now - started) * 1000,
             )
         error_type = LedgerReadUnavailableError if retryable else AgentError
         return error_type(f"Terminus ledger GET failed phase={phase}")
@@ -226,12 +249,22 @@ class LeaseGatewayClient:
         except httpx.TransportError as exc:
             # Defer only observation transport failures, never invalid identity
             # or fencing responses. Do not persist requests or response bodies.
-            phase = next((name for kind, name in (
-                (httpx.ReadTimeout, "read_timeout"), (httpx.ConnectTimeout, "connect_timeout"),
-                (httpx.PoolTimeout, "pool_timeout"), (httpx.WriteTimeout, "write_timeout"),
-                (httpx.ReadError, "read_error"), (httpx.ConnectError, "connect_error"),
-                (httpx.ProtocolError, "protocol_error"),
-            ) if isinstance(exc, kind)), "transport_error")
+            phase = next(
+                (
+                    name
+                    for kind, name in (
+                        (httpx.ReadTimeout, "read_timeout"),
+                        (httpx.ConnectTimeout, "connect_timeout"),
+                        (httpx.PoolTimeout, "pool_timeout"),
+                        (httpx.WriteTimeout, "write_timeout"),
+                        (httpx.ReadError, "read_error"),
+                        (httpx.ConnectError, "connect_error"),
+                        (httpx.ProtocolError, "protocol_error"),
+                    )
+                    if isinstance(exc, kind)
+                ),
+                "transport_error",
+            )
             raise self._ledger_error(phase, started, retryable=True) from None
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in {502, 503, 504}:
@@ -424,20 +457,32 @@ async def run_terminus2(
         local_artifact_sink=retain_native_artifacts,
     )
     runtime.begin_attempt(deadline)
-    async with asyncio.timeout(deadline.require_remaining()):
-        deps = await driver.exec(
-            "command -v bash >/dev/null && command -v tmux >/dev/null "
-            "&& command -v asciinema >/dev/null",
-            timeout_sec=min(15.0, deadline.require_remaining()),
-        )
-        if deps.return_code != 0:
-            raise AgentError(TASK_IMAGE_TOOLS_REQUIRED)
-        # Do not call runtime.setup: the old worker method installs OS packages.
-        await runtime.run(
-            instruction=instruction,
-            env=protected_driver,
-            trajectory=cast("TrajectoryWriter", trajectory),
-            mcp=task_config.environment.mcp_servers,
-            skills_dir=task_config.environment.skills_dir,
-            step_id="agent",
-        )
+
+    async def _follow_phase_deadline(timeout_handle: asyncio.Timeout) -> None:
+        while True:
+            await asyncio.sleep(5)
+            observed = await cp_client.read_phase_deadline()
+            if observed is not None and deadline.extend_to(observed.timestamp()):
+                timeout_handle.reschedule(deadline.monotonic_deadline)
+
+    async with asyncio.timeout(deadline.require_remaining()) as timeout_handle:
+        follower = asyncio.create_task(_follow_phase_deadline(timeout_handle))
+        try:
+            deps = await driver.exec(
+                "command -v bash >/dev/null && command -v tmux >/dev/null "
+                "&& command -v asciinema >/dev/null",
+                timeout_sec=min(15.0, deadline.require_remaining()),
+            )
+            if deps.return_code != 0:
+                raise AgentError(TASK_IMAGE_TOOLS_REQUIRED)
+            # Do not call runtime.setup: the old worker method installs OS packages.
+            await runtime.run(
+                instruction=instruction,
+                env=protected_driver,
+                trajectory=cast("TrajectoryWriter", trajectory),
+                mcp=task_config.environment.mcp_servers,
+                skills_dir=task_config.environment.skills_dir,
+                step_id="agent",
+            )
+        finally:
+            follower.cancel()

@@ -56,6 +56,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "initialize workload broker:", err)
 		os.Exit(2)
 	}
+	broker.followQueueDeadline = true
+	p.Main.DeadlineUpdates = broker.ensurePhaseUpdates()
 	if err := hardenRuntimeIdentity(); err != nil {
 		fmt.Fprintln(os.Stderr, "harden workload broker identity:", err)
 		os.Exit(2)

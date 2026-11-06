@@ -45,6 +45,8 @@ type phase struct {
 	TimeoutSeconds             int64             `json:"timeout_seconds"`
 	FinalizationTimeoutSeconds int64             `json:"finalization_timeout_seconds,omitempty"`
 	Environment                map[string]string `json:"environment"`
+	// DeadlineUpdates receives later phase deadlines. Nil keeps a fixed timeout.
+	DeadlineUpdates <-chan time.Time `json:"-"`
 }
 
 type probe struct {

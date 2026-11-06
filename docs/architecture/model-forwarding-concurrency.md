@@ -103,3 +103,20 @@ Developer results do not establish production capacity or live provider timeout
 failover. Deployment acceptance must read back the installed candidate, actual
 pool members, same-request physical-key retry receipts, durable accounting,
 canonical Trial outputs, and workload cleanup.
+
+## Quota-group queue
+
+A request pool can opt into one in-flight cap per quota group. The switch is
+`queue_enabled` and stays off until an operator sets a cap for every group.
+While it is off, admission does not read the cap, the queue, or pause credit.
+
+When it is on, a full group sends that one call to the next group that has a
+free slot and nobody waiting. The trial binding stays put. Waiters are strictly
+oldest-first under one pool lock. A group that admits nobody for `stall_sec`
+returns HTTP 429 `provider_queue_stalled`. Queue time is `gateway_dispatch_queue_credit`:
+Postgres adds the committed rows with `clock_timestamp()`, and an open row stops
+15 seconds after its last renewal, the same moment a crashed waiter is expired.
+A failed or forbidden read adds no credit. The lease's `deadline_at` is the outer bound, set once
+at admission to the working budget plus `max_pause_sec`. The phase deadline
+moves forward only by committed credit, and a failed poll leaves it where it was.
+

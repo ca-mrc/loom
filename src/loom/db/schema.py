@@ -4481,6 +4481,9 @@ class ServiceExecutionLease(Base):
     kubernetes_resource_version: Mapped[str | None] = mapped_column(Text)
     node_name: Mapped[str | None] = mapped_column(Text)
     deadline_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    # Base budget. deadline_at is this plus the pause ceiling. NULL means the
+    # lease was created with the queue off and must not be extended.
+    working_deadline_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     pod_scheduled_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     pod_started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     pod_terminated_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
@@ -8748,6 +8751,10 @@ class ProviderRequestPool(Base):
             "timeout_burst_count > 0 AND timeout_window_sec > 0",
             name="provider_request_pool_timeout_burst_check",
         ),
+        CheckConstraint(
+            "stall_sec > 0 AND max_pause_sec >= 0 AND config_version > 0",
+            name="provider_request_pool_queue_check",
+        ),
     )
     connection_id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("provider_connections.id", ondelete="CASCADE"),
@@ -8760,6 +8767,20 @@ class ProviderRequestPool(Base):
     cooldown_sec: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("30"))
     timeout_burst_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("3"))
     timeout_window_sec: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("60"))
+    # Off until an operator sets a cap for every quota group. Admission does
+    # not read these columns while queue_enabled is false.
+    queue_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    stall_sec: Mapped[float] = mapped_column(
+        Float, nullable=False, default=200.0, server_default=text("200")
+    )
+    max_pause_sec: Mapped[float] = mapped_column(
+        Float, nullable=False, default=7200.0, server_default=text("7200")
+    )
+    config_version: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=1, server_default=text("1")
+    )
 
 
 class ProviderRequestPoolMember(Base):
@@ -8782,6 +8803,74 @@ class ProviderRequestPoolMember(Base):
     quota_group: Mapped[str] = mapped_column(Text, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     cooldown_until: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class ProviderRequestPoolGroupCap(Base):
+    """One in-flight cap for every member that shares a quota group."""
+
+    __tablename__ = "provider_request_pool_group_caps"
+    __table_args__ = (
+        CheckConstraint(
+            "max_in_flight BETWEEN 1 AND 1000",
+            name="provider_request_pool_group_cap_check",
+        ),
+    )
+    pool_connection_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("provider_request_pools.connection_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    quota_group: Mapped[str] = mapped_column(Text, primary_key=True)
+    max_in_flight: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class GatewayDispatchQueue(Base):
+    """One waiter. Queue time is the database clock between these timestamps."""
+
+    __tablename__ = "gateway_dispatch_queue"
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IS NULL OR outcome IN ("
+            "'admitted','overflow_admitted','stalled','cancelled','expired')",
+            name="gateway_dispatch_queue_outcome_check",
+        ),
+        CheckConstraint(
+            "(closed_at IS NULL) = (outcome IS NULL)",
+            name="gateway_dispatch_queue_closed_check",
+        ),
+        Index(
+            "gateway_dispatch_queue_open_idx",
+            "pool_connection_id",
+            "seq",
+            postgresql_where=text("closed_at IS NULL"),
+        ),
+        Index("gateway_dispatch_queue_trial_idx", "trial_id", "enqueued_at"),
+    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    seq: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("nextval('gateway_dispatch_queue_seq')")
+    )
+    pool_connection_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("provider_request_pools.connection_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    bound_group: Mapped[str] = mapped_column(Text, nullable=False)
+    request_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    trial_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("trials.id", ondelete="CASCADE"), nullable=True
+    )
+    enqueued_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("clock_timestamp()")
+    )
+    renewed_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("clock_timestamp()")
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    outcome: Mapped[str | None] = mapped_column(Text)
+    admitted_group: Mapped[str | None] = mapped_column(Text)
+    admitted_connection_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    receipt_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
 
 
 class ProviderRequestPoolBinding(Base):

@@ -667,6 +667,7 @@ async def reserve_trial_execution(
     deadline_at: datetime,
     now: datetime | None = None,
     pool_handoff_id: UUID | None = None,
+    working_deadline_at: datetime | None = None,
 ) -> ServiceExecutionLease:
     """Atomically reserve a trial and append its durable create command."""
 
@@ -955,6 +956,7 @@ async def reserve_trial_execution(
         job_name=job_name,
         execution_unit_key=execution_unit_key,
         deadline_at=deadline_at,
+        working_deadline_at=working_deadline_at,
     )
     try:
         await reserve_execution_admission(

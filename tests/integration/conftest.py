@@ -691,10 +691,10 @@ def isolated_migration_postgres_url(migration_template_postgres_url: str) -> Ite
 
 
 def allow_current_cancellation_columns(postgres_url: str) -> None:
-    """Add drain and admission-pause columns without moving the Alembic revision.
+    """Add drain, admission-pause, and queue columns without moving Alembic.
 
-    Historical tests that stay below 0189 or 0191 and then use the current
-    trial or batch models need these columns. Both migrations add them with
+    Historical tests that stay below 0189, 0191, or 0193 and then use the
+    current models need these columns. The migrations add them with
     ``IF NOT EXISTS``, so a later upgrade through them still succeeds.
     """
     url = make_url(postgres_url).set(drivername="postgresql+psycopg").render_as_string(hide_password=False)
@@ -720,6 +720,51 @@ def allow_current_cancellation_columns(postgres_url: str) -> None:
                 "ALTER TABLE trials ADD COLUMN IF NOT EXISTS "
                 "admission_pause_releases INTEGER NOT NULL DEFAULT 0"
             ))
+            # Current lease models select working_deadline_at on every read.
+            # Pre-lease revisions have no table; later 0193 still uses IF NOT EXISTS.
+            connection.execute(text("""
+                DO $$ BEGIN
+                    IF to_regclass('execution_leases') IS NOT NULL THEN
+                        ALTER TABLE execution_leases
+                            ADD COLUMN IF NOT EXISTS working_deadline_at TIMESTAMPTZ;
+                    END IF;
+                END $$
+            """))
+    finally:
+        engine.dispose()
+
+
+def allow_current_queue_columns(postgres_url: str) -> None:
+    """Add the quota-group queue columns without moving the Alembic revision.
+
+    Current lease and pool models select these columns on every read. Migration
+    0193 adds them with ``IF NOT EXISTS``, so a later upgrade still succeeds.
+    """
+
+    url = make_url(postgres_url).set(drivername="postgresql+psycopg").render_as_string(hide_password=False)
+    engine = create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("""
+                DO $$ BEGIN
+                    IF to_regclass('execution_leases') IS NOT NULL THEN
+                        ALTER TABLE execution_leases
+                            ADD COLUMN IF NOT EXISTS working_deadline_at TIMESTAMPTZ;
+                    END IF;
+                END $$
+            """))
+            # The pool table itself arrives at 0183; pre-pool revisions have none.
+            connection.execute(text("""
+                DO $$ BEGIN
+                    IF to_regclass('provider_request_pools') IS NOT NULL THEN
+                        ALTER TABLE provider_request_pools
+                            ADD COLUMN IF NOT EXISTS queue_enabled BOOLEAN NOT NULL DEFAULT false,
+                            ADD COLUMN IF NOT EXISTS stall_sec DOUBLE PRECISION NOT NULL DEFAULT 200,
+                            ADD COLUMN IF NOT EXISTS max_pause_sec DOUBLE PRECISION NOT NULL DEFAULT 7200,
+                            ADD COLUMN IF NOT EXISTS config_version BIGINT NOT NULL DEFAULT 1;
+                    END IF;
+                END $$
+            """))
     finally:
         engine.dispose()
 
@@ -750,6 +795,8 @@ def retain_pool_schema(
     # by those tests, so add them without changing the pinned Alembic version.
     if include_current_columns and revision not in {"0191", "0192"}:
         allow_current_cancellation_columns(url)
+    if include_current_columns:
+        allow_current_queue_columns(url)
 
 
 @pytest.fixture

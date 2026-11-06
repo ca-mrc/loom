@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -231,6 +232,59 @@ func runPlan(
 	return result, nil
 }
 
+func openPhaseContext(
+	parent context.Context, timeout time.Duration, updates <-chan time.Time,
+) (context.Context, context.CancelFunc, time.Time, func() time.Time) {
+	deadline := time.Now().Add(timeout)
+	if updates == nil {
+		ctx, cancel := context.WithTimeout(parent, timeout)
+		if actual, ok := ctx.Deadline(); ok {
+			deadline = actual
+		}
+		return ctx, cancel, deadline, func() time.Time { return deadline }
+	}
+	ctx, cancel := context.WithCancelCause(parent)
+	var mu sync.Mutex
+	current := deadline
+	timer := time.NewTimer(time.Until(current))
+	go func() {
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				cancel(context.DeadlineExceeded)
+				return
+			case next, ok := <-updates:
+				if !ok {
+					return
+				}
+				mu.Lock()
+				if !next.After(current) {
+					mu.Unlock()
+					continue
+				}
+				current = next
+				remaining := time.Until(current)
+				mu.Unlock()
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(remaining)
+			}
+		}
+	}()
+	return ctx, func() { cancel(context.Canceled) }, deadline, func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return current
+	}
+}
+
 func runPhase(
 	parent context.Context,
 	item phase,
@@ -241,9 +295,10 @@ func runPhase(
 	trustedEnvironment map[string]string,
 	phaseBoundary ...func(string, time.Time),
 ) (phaseEvidence, error) {
-	phaseCtx, cancel := context.WithTimeout(parent, time.Duration(item.TimeoutSeconds)*time.Second)
+	phaseCtx, cancel, deadline, currentDeadline := openPhaseContext(
+		parent, time.Duration(item.TimeoutSeconds)*time.Second, item.DeadlineUpdates,
+	)
 	defer cancel()
-	deadline, _ := phaseCtx.Deadline()
 	for _, boundary := range phaseBoundary {
 		boundary(item.Role, deadline)
 		defer boundary(item.Role, time.Time{})
@@ -344,7 +399,8 @@ func runPhase(
 	evidence := phaseEvidence{
 		verifierReportPrepared: reportPrepared,
 		Role:                   item.Role, Ordinal: ordinal, StartedAt: started, FinishedAt: finished,
-		ExitCode: 0, TimedOut: errors.Is(phaseCtx.Err(), context.DeadlineExceeded) || !finished.Before(deadline),
+		// A moved deadline cancels with DeadlineExceeded as the cause, not Err().
+		ExitCode: 0, TimedOut: errors.Is(context.Cause(phaseCtx), context.DeadlineExceeded) || !finished.Before(currentDeadline()),
 		Stdout: stdout.evidence(filepath.Base(stdoutPath)), Stderr: stderr.evidence(filepath.Base(stderrPath)),
 	}
 	if err != nil {

@@ -34,20 +34,25 @@ type workloadIdentity struct {
 }
 
 type workloadBroker struct {
-	phaseContext  context.Context
-	phaseCancel   context.CancelFunc
-	podTokenFile  string
-	root          *url.URL
-	identity      workloadIdentity
-	client        *http.Client
-	mu            sync.Mutex
-	tokenRefresh  chan struct{}
-	token         string
-	expires       time.Time
-	phaseDeadline time.Time
-	phaseBound    bool
-	phaseRole     string
-	terminusToken string
+	phaseContext        context.Context
+	phaseCancel         context.CancelFunc
+	podTokenFile        string
+	root                *url.URL
+	identity            workloadIdentity
+	client              *http.Client
+	mu                  sync.Mutex
+	tokenRefresh        chan struct{}
+	token               string
+	expires             time.Time
+	phaseDeadline       time.Time
+	phaseBound          bool
+	phaseRole           string
+	phaseTimer          *time.Timer
+	phaseCancelCause    context.CancelCauseFunc
+	phaseUpdates        chan time.Time
+	pauseGeneration     int64
+	followQueueDeadline bool
+	terminusToken       string
 }
 
 type tokenRequest struct {
@@ -264,12 +269,106 @@ func (b *workloadBroker) setPhase(role string, deadline time.Time) {
 	if b.phaseCancel != nil {
 		b.phaseCancel()
 	}
-	b.phaseContext, b.phaseCancel = context.WithDeadline(context.Background(), deadline)
+	if b.phaseTimer != nil {
+		b.phaseTimer.Stop()
+		b.phaseTimer = nil
+	}
+	ctx, cancelCause := context.WithCancelCause(context.Background())
+	b.phaseContext = ctx
+	b.phaseCancelCause = cancelCause
+	b.phaseCancel = func() { cancelCause(context.Canceled) }
+	if !deadline.IsZero() {
+		b.phaseTimer = time.AfterFunc(time.Until(deadline), func() {
+			cancelCause(context.DeadlineExceeded)
+		})
+	}
 	b.phaseDeadline = deadline
 	b.phaseBound = true
 	b.phaseRole = role
 	b.token = ""
 	b.expires = time.Time{}
+	b.pauseGeneration++
+	generation := b.pauseGeneration
+	if b.followQueueDeadline && role == "agent" && !deadline.IsZero() && b.root != nil {
+		go b.pollEffectiveDeadline(generation)
+	}
+}
+
+// extendPhaseDeadline moves the agent phase later without cancelling in-flight calls.
+func (b *workloadBroker) extendPhaseDeadline(deadline time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.phaseBound || b.phaseCancelCause == nil || !deadline.After(b.phaseDeadline) {
+		return
+	}
+	b.phaseDeadline = deadline
+	if b.phaseTimer != nil {
+		b.phaseTimer.Stop()
+	}
+	cancelCause := b.phaseCancelCause
+	b.phaseTimer = time.AfterFunc(time.Until(deadline), func() {
+		cancelCause(context.DeadlineExceeded)
+	})
+	b.token = ""
+	b.expires = time.Time{}
+	if b.phaseUpdates == nil {
+		return
+	}
+	select {
+	case b.phaseUpdates <- deadline:
+	default:
+		select {
+		case <-b.phaseUpdates:
+		default:
+		}
+		select {
+		case b.phaseUpdates <- deadline:
+		default:
+		}
+	}
+}
+
+func (b *workloadBroker) ensurePhaseUpdates() chan time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.phaseUpdates == nil {
+		b.phaseUpdates = make(chan time.Time, 1)
+	}
+	return b.phaseUpdates
+}
+
+func (b *workloadBroker) pollEffectiveDeadline(generation int64) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		b.mu.Lock()
+		current := generation == b.pauseGeneration && b.phaseRole == "agent"
+		ctx := b.phaseContext
+		b.mu.Unlock()
+		if !current || ctx == nil {
+			return
+		}
+		var body struct {
+			Deadline string `json:"deadline"`
+		}
+		requestCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		err := b.doJSON(requestCtx, http.MethodGet, b.endpoint("/effective-deadline"), struct{}{}, nil, &body)
+		cancel()
+		if err == nil {
+			parsed, parseErr := time.Parse(time.RFC3339Nano, body.Deadline)
+			if parseErr != nil {
+				parsed, parseErr = time.Parse(time.RFC3339, body.Deadline)
+			}
+			if parseErr == nil {
+				b.extendPhaseDeadline(parsed)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func (b *workloadBroker) currentPhaseRole() string {
@@ -439,9 +538,14 @@ func (b *workloadBroker) startProxy(ctx context.Context, modelLifetime ...contex
 			upstream.Header = request.Header.Clone()
 			upstream.Header.Set("Authorization", "Bearer "+token)
 			upstream.Header.Del("Connection")
+			upstream.Header.Del("X-Loom-Pause-Capable")
+			if b.followQueueDeadline {
+				upstream.Header.Set("X-Loom-Pause-Capable", "1")
+			}
 			response, requestErr := gatewayClient.Do(upstream)
 			if requestErr != nil {
-				if errors.Is(requestContext.Err(), context.DeadlineExceeded) {
+				if errors.Is(requestContext.Err(), context.DeadlineExceeded) ||
+					errors.Is(context.Cause(requestContext), context.DeadlineExceeded) {
 					http.Error(writer, "execution phase deadline reached", http.StatusGatewayTimeout)
 					return
 				}
@@ -497,12 +601,30 @@ func (w modelStreamWriter) Write(body []byte) (int, error) {
 }
 
 func (b *workloadBroker) serveTerminusControl(writer http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodPost || request.URL.RawQuery != "" ||
+	if request.URL.RawQuery != "" ||
 		b.identity.ExecutionRole != "attempt" ||
 		subtle.ConstantTimeCompare(
 			[]byte(request.Header.Get("X-Loom-Terminus-Control")),
 			[]byte(b.terminusToken),
 		) != 1 {
+		http.Error(writer, "terminus control route unavailable", http.StatusForbidden)
+		return
+	}
+	if request.Method == http.MethodGet && request.URL.Path == "/internal/loom/terminus/phase-deadline" {
+		b.mu.Lock()
+		deadline, phaseBound, phaseRole := b.phaseDeadline, b.phaseBound, b.phaseRole
+		b.mu.Unlock()
+		if !phaseBound || phaseRole != "agent" || !deadline.After(time.Now()) {
+			http.Error(writer, "terminus control requires an active agent phase", http.StatusForbidden)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(map[string]string{
+			"deadline": deadline.UTC().Format(time.RFC3339Nano),
+		})
+		return
+	}
+	if request.Method != http.MethodPost {
 		http.Error(writer, "terminus control route unavailable", http.StatusForbidden)
 		return
 	}
