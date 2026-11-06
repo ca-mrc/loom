@@ -11,13 +11,20 @@ Input is JSON Lines produced by the read-only, minimal projection in ``QUERY``,
 one attempt per line. The projection never exports the attempt's stored
 ConfigMap, claim, command text or other Job fields: only identifiers, a task
 digest, the build exit code, whether the build was instrumented, the frozen
-Job's emptyDir limits and per-container storage requests, and the already
-bounded ``boundary_usage`` object.
+Job's emptyDir limits and per-container storage requests, each phase's start
+and finish times, the already bounded ``boundary_usage`` object and the
+observer rows (with each counted snapshot's own times).
 
 Output compares each self-reported boundary reading with those budgets. Nothing
 here is a Pod total, a peak or a measurement of unobserved time: unavailable
 readings stay unavailable, never zero, and the two volumes are always reported
 separately because their readings come from separate traversals.
+
+Observer coverage is stated per phase from the retained snapshot times: how
+many snapshots fell inside each phase's window and the gaps at its start, end
+and between snapshots. Sampling is best effort, so an attempt with no observer
+row, or no usable snapshot, is reported as unobserved (failed builds included);
+the sampled rows are never presented as the whole cohort.
 """
 from __future__ import annotations
 
@@ -27,6 +34,8 @@ import os
 import re
 import sys
 from collections import Counter
+from datetime import datetime
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -62,14 +71,21 @@ SELECT json_build_object(
       FROM jsonb_array_elements(COALESCE(s.pod -> 'initContainers', '[]')) c),
   'container_storage_requests', (SELECT jsonb_agg(c #>> '{resources,requests,ephemeral-storage}')
       FROM jsonb_array_elements(COALESCE(s.pod -> 'containers', '[]')) c),
+  'phase_times', (SELECT jsonb_agg(jsonb_build_object('name', p ->> 'name',
+      'started_at', COALESCE(p #>> '{state,running,startedAt}', p #>> '{state,terminated,startedAt}'),
+      'finished_at', p #>> '{state,terminated,finishedAt}'))
+      FROM jsonb_array_elements(COALESCE(s.native -> 'phases', '[]')) p
+      WHERE p ->> 'name' IN ('prepare', 'build', 'publish')),
   'boundary_usage', s.native -> 'boundary_usage',
   'observer_usage', (SELECT json_agg(json_build_object(
-      'pod_uid', u.pod_uid, 'node_name', u.node_name, 'lease_epoch', u.lease_epoch, 'source', u.source,
+      'pod_uid', u.pod_uid, 'node_name', u.node_name, 'node_uid', u.node_uid, 'lease_epoch', u.lease_epoch,
+      'source', u.source,
       'first_observed_at', u.first_observed_at, 'last_observed_at', u.last_observed_at,
       'snapshots', u.snapshots, 'storage_complete', u.storage_complete, 'storage_unknown', u.storage_unknown,
       'unavailable', u.unavailable, 'last_unavailable_code', u.last_unavailable_code,
       'unknown_codes', u.unknown_codes, 'ephemeral_storage_max_bytes', u.ephemeral_storage_max_bytes,
-      'ephemeral_storage_max_at', u.ephemeral_storage_max_at, 'containers', u.containers) ORDER BY u.first_observed_at)
+      'ephemeral_storage_max_at', u.ephemeral_storage_max_at, 'containers', u.containers,
+      'samples', u.samples, 'samples_dropped', u.samples_dropped) ORDER BY u.first_observed_at)
       FROM task_image_build_resource_usage u WHERE u.attempt_id = s.id))
 FROM spec s
 ORDER BY s.created_at
@@ -78,11 +94,13 @@ EXPORT_FIELDS = frozenset({
     "attempt_id", "materialization_id", "attempt_number", "lease_epoch", "created_at", "task_digest",
     "task_checksum", "preparation_revision", "cpu_arch", "materialization_state", "failure_reason", "target_id",
     "pod_uid", "node_name", "build_exit_code", "instrumented", "volume_size_limits", "cache_configured",
-    "init_storage_requests", "container_storage_requests", "boundary_usage", "observer_usage",
+    "init_storage_requests", "container_storage_requests", "phase_times", "boundary_usage", "observer_usage",
 })
-_OBSERVER_FIELDS = ("pod_uid", "node_name", "lease_epoch", "source", "first_observed_at", "last_observed_at",
-                    "snapshots", "storage_complete", "storage_unknown", "unavailable", "last_unavailable_code",
-                    "unknown_codes", "ephemeral_storage_max_bytes", "ephemeral_storage_max_at", "containers")
+_OBSERVER_FIELDS = ("pod_uid", "node_name", "node_uid", "lease_epoch", "source", "first_observed_at",
+                    "last_observed_at", "snapshots", "storage_complete", "storage_unknown", "unavailable",
+                    "last_unavailable_code", "unknown_codes", "ephemeral_storage_max_bytes",
+                    "ephemeral_storage_max_at", "containers", "samples_dropped")
+_PHASES = ("prepare", "build", "publish")
 
 _VOLUMES = {"scratch": "builder-tmp", "build": "build"}
 _LIMITED_VOLUMES = ("build", "builder-tmp", "prepare-tmp", "publish-tmp")
@@ -94,6 +112,61 @@ _QUANTITY = re.compile(r"(\d+)(Ki|Mi|Gi|Ti|K|M|G|)")
 def _kib(quantity: Any) -> int | None:
     match = _QUANTITY.fullmatch(quantity) if isinstance(quantity, str) else None
     return round(int(match[1]) * _UNITS[match[2]]) if match else None
+
+
+def _when(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.utcoffset() is not None else None
+
+
+def _seconds(later: datetime, earlier: datetime) -> float:
+    return round((later - earlier).total_seconds(), 1)
+
+
+def phase_coverage(phase_times: Any, observer_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per phase: snapshots inside its window and the gaps at its start, end and between snapshots.
+
+    A phase with no snapshot in its window is ``unobserved``; one without a
+    recorded start is ``window_unknown``. A still-running phase has no end gap.
+    """
+    snapshots: list[tuple[datetime, bool]] = []
+    truncated = False
+    for row in observer_rows:
+        truncated = truncated or bool(row.get("samples_dropped"))
+        for sample in row.get("samples") or []:
+            at = _when(sample.get("at")) if isinstance(sample, dict) else None
+            if at is not None:
+                snapshots.append((at, type(sample.get("storage_bytes")) is int))
+    snapshots.sort()
+    windows = {p.get("name"): p for p in phase_times or [] if isinstance(p, dict)}
+    result: dict[str, Any] = {}
+    for name in _PHASES:
+        window = windows.get(name)
+        if window is None:
+            continue  # the phase never started (or the Pod was never seen)
+        start, end = _when(window.get("started_at")), _when(window.get("finished_at"))
+        if start is None:
+            result[name] = {"status": "window_unknown"}
+            continue
+        inside = [(at, complete) for at, complete in snapshots if at >= start and (end is None or at <= end)]
+        times = [at for at, _ in inside]
+        edges = [start, *times, *([end] if end is not None else [])]
+        result[name] = {
+            "status": "observed" if inside else "unobserved",
+            "duration_seconds": _seconds(end, start) if end is not None else None,
+            "snapshots": len(inside), "storage_complete": sum(complete for _, complete in inside),
+            "start_gap_seconds": _seconds(times[0], start) if times else None,
+            "end_gap_seconds": _seconds(end, times[-1]) if times and end is not None else None,
+            "max_gap_seconds": max((_seconds(b, a) for a, b in pairwise(edges)),
+                                   default=None) if len(edges) > 1 else None,
+            "retained_times_truncated": truncated,
+        }
+    return result
 
 
 def _requests(values: Any) -> list[int | None]:
@@ -121,9 +194,14 @@ def attempt_report(row: dict[str, Any]) -> dict[str, Any]:
     raw_observer = row.get("observer_usage")
     observer_rows: list[Any] = raw_observer if isinstance(raw_observer, list) else []
     result["observer"] = []
-    for sample in observer_rows:
-        if not isinstance(sample, dict):
-            continue
+    usable_rows = [sample for sample in observer_rows if isinstance(sample, dict)]
+    snapshots = sum(s["snapshots"] for s in usable_rows if type(s.get("snapshots")) is int)
+    complete = sum(s["storage_complete"] for s in usable_rows if type(s.get("storage_complete")) is int)
+    # Best-effort sampling: no row or no usable snapshot is unobserved, never "small".
+    result["observer_status"] = ("no_observer_row" if not usable_rows else "no_usable_snapshot" if not snapshots
+                                 else "storage_unknown_only" if not complete else "sampled")
+    result["phase_coverage"] = phase_coverage(row.get("phase_times"), usable_rows)
+    for sample in usable_rows:
         entry = {key: sample.get(key) for key in _OBSERVER_FIELDS}
         maximum = entry["ephemeral_storage_max_bytes"]
         # Compared only with the effective Pod request; unknown snapshots never enter the maximum.
@@ -222,6 +300,15 @@ def _observer_summary(attempts: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "note": ("Trusted node-observer samples: Pod ephemeral-storage when the helper produced a complete total, "
                  "otherwise counted as unknown. Sampled maxima, not peaks."),
+        "coverage_note": ("A complete storage sample for an attempt does not mean each phase was observed: "
+                          "see phase_coverage for snapshots per phase window and the start, end and "
+                          "inter-snapshot gaps."),
+        "attempts": len(attempts),
+        "attempts_by_observer_status": dict(Counter(a.get("observer_status") for a in attempts)),
+        "failed_attempts_without_complete_storage": sum(
+            (a.get("materialization_state") == "failed" or a.get("build_exit_code") not in (0, None))
+            and a.get("observer_status") != "sampled" for a in attempts),
+        "phases": _phase_summary(attempts),
         "attempts_with_samples": sum(bool(a.get("observer")) for a in attempts),
         "attempts_with_complete_storage": sum(
             any(s.get("storage_complete") for s in a.get("observer") or []) for a in attempts),
@@ -233,6 +320,22 @@ def _observer_summary(attempts: list[dict[str, Any]]) -> dict[str, Any]:
         "container_memory_max_bytes": _distribution(memory),
         "container_cpu_max_nanocores": _distribution(cpu),
     }
+
+
+def _phase_summary(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    result = {}
+    for name in _PHASES:
+        rows = [a["phase_coverage"][name] for a in attempts if name in (a.get("phase_coverage") or {})]
+        gaps = {key: [r[key] for r in rows if isinstance(r.get(key), int | float)]
+                for key in ("start_gap_seconds", "end_gap_seconds", "max_gap_seconds")}
+        result[name] = {
+            "attempts_with_phase": len(rows),
+            "by_status": dict(Counter(r["status"] for r in rows)),
+            "with_complete_storage": sum(bool(r.get("storage_complete")) for r in rows),
+            **{key: None if not values else {"max": max(values), "count": len(values)}
+               for key, values in gaps.items()},
+        }
+    return result
 
 
 def report(lines: list[str]) -> dict[str, Any]:

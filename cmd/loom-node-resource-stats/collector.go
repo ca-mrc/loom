@@ -202,6 +202,19 @@ func collect(ctx context.Context, req request, client statsRuntime, opts options
 			}
 			item.Containers = append(item.Containers, out)
 		}
+		if req.PodFilesystem == "skip" {
+			// No Pod total is claimed; the caller measures it in its own call.
+			diagnostics["pod_filesystem_skipped"] = true
+			for code := range diagnostics {
+				item.Diagnostics = append(item.Diagnostics, code)
+			}
+			sort.Strings(item.Diagnostics)
+			result.Pods = append(result.Pods, item)
+			if ctx.Err() != nil {
+				break
+			}
+			continue
+		}
 		disk, code := podDiskUsage(ctx, opts, req.Namespace, pod)
 		if code != "" {
 			diagnostics[code] = true

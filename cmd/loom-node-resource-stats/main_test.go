@@ -571,3 +571,34 @@ func TestCreationTimeMatchesKubeletJSONWhileStartedAtRemainsPrivate(t *testing.T
 		t.Fatal("original counter timestamp precision was changed")
 	}
 }
+
+func TestSkippedPodFilesystemKeepsCountersWithoutAnyWalk(t *testing.T) {
+	f := &fakeRuntime{started: time.Now().Add(-time.Minute), stamp: time.Now()}
+	opts := fixture(t)
+	opts.runtimeEndpoint = startFake(t, f)
+	// Unreadable roots would fail any walk; a skipped walk never opens them.
+	opts.kubeletPodsRoot = filepath.Join(t.TempDir(), "absent")
+	request := strings.TrimSuffix(requestJSON(f.started), "}") + `,"pod_filesystem":"skip"}`
+	var output bytes.Buffer
+	if got := run(context.Background(), opts, strings.NewReader(request), &output); got != 0 {
+		t.Fatalf("run=%d: %s", got, output.String())
+	}
+	var result summary
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	pod := result.Pods[0]
+	if pod.Ephemeral != nil || len(pod.Containers) != 1 || pod.Containers[0].CPU == nil || pod.Containers[0].Memory == nil {
+		t.Fatalf("counters lost or total invented: %s", output.String())
+	}
+	if strings.Join(pod.Diagnostics, ",") != "pod_filesystem_skipped" {
+		t.Fatalf("skipped walk not explicit: %v", pod.Diagnostics)
+	}
+	for _, value := range []string{`"pod_filesystem":"walk"`, `"pod_filesystem":""` + `,"x":1`} {
+		output.Reset()
+		bad := strings.TrimSuffix(requestJSON(f.started), "}") + "," + value + "}"
+		if got := run(context.Background(), opts, strings.NewReader(bad), &output); got == 0 {
+			t.Fatalf("invalid filesystem mode accepted: %s", value)
+		}
+	}
+}

@@ -131,7 +131,13 @@ def test_pods_rotate_each_cycle_so_one_tree_cannot_starve_others() -> None:
     pods = [build_pod(str(uuid4())) for _ in range(3)]
     observer = BuildResourceObserver(settings(), BuildCore(pods))
     firsts = []
-    observer._sample = lambda request, timeout: (firsts.append(request["pods"][0]["uid"]), helper_output(request))[1]
+
+    def sample(request, timeout):
+        if request.get("pod_filesystem") == "skip":
+            firsts.append(request["pods"][0]["uid"])
+        return helper_output(request, storage=request.get("pod_filesystem") != "skip")
+
+    observer._sample = sample
     for _ in range(3):
         observer.collect_once(now=NOW)
     assert firsts == [pod.metadata.uid for pod in pods]
@@ -177,3 +183,82 @@ def test_builder_loop_failures_are_contained_and_it_keeps_running(caplog) -> Non
     node_observer._run_builds(settings(), lambda: Failing([]), stop)
     assert stop.waits == 3
     assert caplog.text.count("Native build observer unavailable (identity)") == 3
+
+
+def _split(request, walks):
+    """Counters for the stats-only call; each single-Pod walk answered by ``walks``."""
+    if request.get("pod_filesystem") == "skip":
+        assert len(request["pods"]) > 1 or walks.get("single_ok")
+        return helper_output(request, storage=False, codes=["pod_filesystem_skipped"])
+    (pod,) = request["pods"]
+    outcome = walks[pod["uid"]]
+    if isinstance(outcome, Exception):
+        raise outcome
+    return helper_output(request, storage=outcome)
+
+
+def test_a_walk_at_the_helper_deadline_keeps_every_pods_counters_and_other_storage() -> None:
+    slow, ok = str(uuid4()), str(uuid4())
+    core = BuildCore([build_pod(slow), build_pod(ok)])
+    observer = BuildResourceObserver(settings(), core)
+    calls = []
+
+    def sample(request, timeout):
+        calls.append((request.get("pod_filesystem"), [p["uid"] for p in request["pods"]], timeout))
+        return _split(request, {slow: node_observer.HelperError("observation_deadline"), ok: True})
+
+    observer._sample = sample
+    observer.collect_once(now=NOW)
+    assert calls[0][0] == "skip" and len(calls[0][1]) == 2
+    assert [c[1] for c in calls[1:]] == [[slow], [ok]] and all(0 < c[2] <= 10 for c in calls[1:])
+    pods = {p["podRef"]["uid"]: p for p in json.loads(core.records[0]["data"]["snapshot.json"])["summary"]["pods"]}
+    assert pods[slow]["_diagnostic_codes"] == ["observation_deadline"] and "ephemeral-storage" not in pods[slow]
+    assert pods[slow]["containers"][0]["memory"]["usageBytes"] == 1234  # counters survive the failed walk
+    assert pods[ok]["ephemeral-storage"]["usedBytes"] == 4096 and "_diagnostic_codes" not in pods[ok]
+    assert pods[ok]["containers"][0]["cpu"]["usageNanoCores"] == 7
+
+
+def test_walk_calls_never_replace_the_counter_state() -> None:
+    uid = str(uuid4())
+    observer = BuildResourceObserver(settings(), BuildCore([build_pod(uid)]))
+    observer._sample = lambda request, timeout: _split(request, {uid: True, "single_ok": True})
+    observer.collect_once(now=NOW)
+    assert observer._cpu == {CID: (int(NOW.timestamp() * 10**9), 5)}
+
+
+def test_real_helper_deadline_and_timeout_leave_storage_unknown_with_counters(tmp_path, monkeypatch) -> None:
+    """Separate helper processes: one reports its own deadline, one is killed at the walk budget."""
+    import sys
+
+    first, hung, late = (str(uuid4()) for _ in range(3))
+    helper = tmp_path / "helper"
+    helper.write_text(f"""#!{sys.executable}
+import json, sys, time
+request = json.load(sys.stdin)
+now = {NOW.isoformat()!r}
+pods = []
+for pod in request["pods"]:
+    if request.get("pod_filesystem") != "skip":
+        if pod["uid"] == {first!r}:
+            print(json.dumps({{"error": "observation_deadline"}})); sys.exit(1)
+        if pod["uid"] == {hung!r}:
+            time.sleep(60)
+    pods.append({{"podRef": {{"uid": pod["uid"], "namespace": request["namespace"], "name": pod["name"]}},
+                 "containers": [{{"name": "build", "startTime": {(NOW - timedelta(seconds=62)).isoformat()!r},
+                                 "_started_at": {(NOW - timedelta(minutes=1)).isoformat()!r},
+                                 "_container_id": {CID!r},
+                                 "memory": {{"time": now, "usageBytes": 1234}}}}]}})
+print(json.dumps({{"pods": pods}}))
+""")
+    helper.chmod(0o755)
+    monkeypatch.setattr(BuildResourceObserver, "deadline_seconds", 6.0)
+    core = BuildCore([build_pod(first), build_pod(hung), build_pod(late)])
+    observer = BuildResourceObserver(settings(helper_path=str(helper)), core)
+    observer._order = lambda selected: selected
+    observer.collect_once(now=NOW)
+    pods = {p["podRef"]["uid"]: p for p in json.loads(core.records[0]["data"]["snapshot.json"])["summary"]["pods"]}
+    assert pods[first]["_diagnostic_codes"] == ["observation_deadline"]
+    assert pods[hung]["_diagnostic_codes"] == ["helper_timeout"]
+    assert pods[late]["_diagnostic_codes"] == ["storage_not_reached"]
+    assert all("ephemeral-storage" not in pod and pod["containers"][0]["memory"]["usageBytes"] == 1234
+               for pod in pods.values())

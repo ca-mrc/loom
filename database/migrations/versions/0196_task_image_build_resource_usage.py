@@ -38,14 +38,22 @@ def upgrade() -> None:
         sa.Column("ephemeral_storage_max_bytes", sa.BigInteger()),
         sa.Column("ephemeral_storage_max_at", postgresql.TIMESTAMP(timezone=True)),
         sa.Column("containers", postgresql.JSONB(), nullable=False, server_default=sa.text("'{}'::jsonb")),
+        sa.Column("samples", postgresql.JSONB(), nullable=False, server_default=sa.text("'[]'::jsonb")),
+        sa.Column("samples_dropped", sa.Integer(), nullable=False, server_default="0"),
         sa.UniqueConstraint("attempt_id", "pod_uid", name="uq_task_image_build_resource_usage_pod"),
         sa.CheckConstraint(
             "snapshots >= 0 AND storage_complete >= 0 AND storage_unknown >= 0 AND unavailable >= 0 "
-            "AND storage_complete + storage_unknown <= snapshots",
+            "AND samples_dropped >= 0 AND storage_complete + storage_unknown <= snapshots",
             name="ck_task_image_build_resource_usage_counts",
         ),
     )
 
 
 def downgrade() -> None:
+    # Dropping the attempt foreign key locks the parent table. Preserve the
+    # retained-authority downgrade contract: fail immediately on an ordinary
+    # reader or writer rather than queueing an exclusive lock in front of it.
+    op.execute("SET LOCAL lock_timeout = '5s'")
+    op.execute("LOCK TABLE task_image_materialization_attempts IN ACCESS EXCLUSIVE MODE NOWAIT")
+    op.execute("LOCK TABLE task_image_build_resource_usage IN ACCESS EXCLUSIVE MODE NOWAIT")
     op.drop_table("task_image_build_resource_usage")

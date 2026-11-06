@@ -29,6 +29,8 @@ _SELECTOR = "app.kubernetes.io/managed-by=loom-execution-actuator"
 # or replace the Trial snapshot. Storage stays complete-or-unknown per Pod.
 _BUILD_LABEL = ("app.kubernetes.io/component", "task-image-builder")
 _ID = re.compile(r"containerd://[a-f0-9]{8,128}\Z")
+# Time kept for the builder ConfigMap read and write after the last storage walk.
+_BUILD_PUBLISH_RESERVE = 4.0
 
 
 class ObserverSettings(BaseSettings):
@@ -72,6 +74,14 @@ class ObserverSettings(BaseSettings):
 
 class ObservationError(RuntimeError):
     """A fixed local reason, never a transport exception or host pathname."""
+
+
+class HelperError(ObservationError):
+    """The helper's own fixed failure code (for example ``observation_deadline``)."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__("helper")
+        self.code = code if re.fullmatch(r"[a-z_]{1,64}", code) else "helper_unavailable"
 
 
 def _uuid(value: Any) -> str:
@@ -192,18 +202,28 @@ class NodeResourceObserver:
                 input=payload, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 timeout=timeout, check=False,
             )
-            if result.returncode or len(result.stdout) > _LIMIT:
+            if len(result.stdout) > _LIMIT:
                 raise ObservationError("helper")
+            if result.returncode:
+                try:
+                    failure = json.loads(result.stdout)
+                except ValueError:
+                    failure = None
+                code = failure.get("error") if isinstance(failure, dict) else None
+                raise HelperError(code if isinstance(code, str) else "helper_unavailable")
             value = json.loads(result.stdout, object_pairs_hook=_json_object,
                                parse_constant=_invalid_number)
             if not isinstance(value, dict) or not isinstance(value.get("pods"), list):
                 raise ObservationError("payload")
             return value
-        except (OSError, subprocess.TimeoutExpired, ValueError):
+        except subprocess.TimeoutExpired:
+            raise HelperError("helper_timeout") from None
+        except (OSError, ValueError):
             raise ObservationError("helper") from None
 
     def _qualify(
-        self, summary: dict[str, Any], request: dict[str, Any], captured: datetime, completed: datetime
+        self, summary: dict[str, Any], request: dict[str, Any], captured: datetime, completed: datetime,
+        *, track_cpu: bool = True,
     ) -> None:
         expected = {pod["uid"]: pod for pod in request["pods"]}
         seen: set[str] = set()
@@ -293,11 +313,27 @@ class NodeResourceObserver:
                         del volume[key]
                 if _stamp(volume.get("time")) is None:
                     raise ObservationError("payload")
-        self._cpu = cpu
+        if track_cpu:
+            self._cpu = cpu
         for key in list(summary):
             if key != "pods":
                 del summary[key]
         summary["node"] = {"nodeName": self.settings.node_name}
+
+    def _qualified(self, request: dict[str, Any], timeout: float, captured: datetime, started: float,
+                   *, track_cpu: bool = True) -> dict[str, Any]:
+        summary = self._sample(request, timeout)
+        try:
+            completed = captured + timedelta(seconds=max(0, time.monotonic() - started))
+            self._qualify(summary, request, captured, completed, track_cpu=track_cpu)
+        except (KeyError, TypeError, AttributeError, ValueError):
+            raise ObservationError("payload") from None
+        return summary
+
+    def _summarize(self, request: dict[str, Any], captured: datetime, started: float, deadline: float,
+                   remaining: Any) -> dict[str, Any]:
+        """One helper call for the whole inventory (the Trial contract)."""
+        return self._qualified(request, remaining(10), captured, started)
 
     def collect_once(self, *, now: datetime | None = None) -> None:
         captured = now or datetime.now(UTC)
@@ -330,12 +366,7 @@ class NodeResourceObserver:
         if getattr(inventory.metadata, "_continue", None):
             raise ObservationError("size")
         request = self._request(inventory.items)
-        summary = self._sample(request, remaining(10))
-        try:
-            completed = captured + timedelta(seconds=max(0, time.monotonic() - started))
-            self._qualify(summary, request, captured, completed)
-        except (KeyError, TypeError, AttributeError, ValueError):
-            raise ObservationError("payload") from None
+        summary = self._summarize(request, captured, started, deadline, remaining)
         body: dict[str, Any] = {"schema_version": self.schema,
                 "node_name": self.settings.node_name, "node_uid": node_uid,
                 "producer_pod_name": self.settings.pod_name,
@@ -389,7 +420,7 @@ class BuildResourceObserver(NodeResourceObserver):
     schema = BUILD_SCHEMA
     config_map_prefix = BUILD_CONFIG_MAP_PREFIX
     include_host_usage = False
-    deadline_seconds = 20.0
+    deadline_seconds = 25.0
 
     def __init__(self, settings: ObserverSettings, core: Any) -> None:
         if settings.build_namespace is None:
@@ -413,6 +444,45 @@ class BuildResourceObserver(NodeResourceObserver):
         start = self._cycle % len(selected)
         self._cycle += 1
         return selected[start:] + selected[:start]
+
+    def _summarize(self, request: dict[str, Any], captured: datetime, started: float, deadline: float,
+                   remaining: Any) -> dict[str, Any]:
+        """Counters for every Pod first, then each Pod's storage walk in its own bounded call.
+
+        A walk that reaches the helper's deadline (or the cycle's) leaves that Pod's
+        storage unknown with a fixed reason; it never discards another Pod's
+        counters or storage. Pods are rotated, so a slow tree goes first only
+        once per inventory size.
+        """
+        summary = self._qualified({**request, "pod_filesystem": "skip"}, remaining(10), captured, started)
+        pods = {pod["podRef"]["uid"]: pod for pod in summary["pods"]}
+        for pod in pods.values():
+            pod.pop("ephemeral-storage", None)
+            pod.pop("_diagnostic_codes", None)
+        for requested in request["pods"]:
+            pod = pods.get(requested["uid"])
+            if pod is None:
+                continue
+            budget = min(10.0, deadline - time.monotonic() - _BUILD_PUBLISH_RESERVE)
+            if budget < 1:
+                pod["_diagnostic_codes"] = ["storage_not_reached"]
+                continue
+            try:
+                (walked,) = self._qualified({**request, "pods": [requested]}, budget, captured, started,
+                                            track_cpu=False)["pods"]
+            except HelperError as error:
+                pod["_diagnostic_codes"] = [error.code]
+                continue
+            except (ObservationError, ValueError):
+                pod["_diagnostic_codes"] = ["storage_unavailable"]
+                continue
+            if "ephemeral-storage" in walked:
+                pod["ephemeral-storage"] = walked["ephemeral-storage"]
+            elif walked.get("_diagnostic_codes"):
+                pod["_diagnostic_codes"] = walked["_diagnostic_codes"]
+            else:
+                pod["_diagnostic_codes"] = ["storage_unavailable"]
+        return summary
 
 
 def _run_builds(settings: ObserverSettings, make_core: Any, stop: Any) -> None:

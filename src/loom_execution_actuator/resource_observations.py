@@ -326,4 +326,7 @@ def read_resource_observation(
         "observed_at": snapshot["observed_at"],
         "max_age_seconds": max_age_seconds,
     }
+    if builds:
+        # The Node UID validated above, so a builder sample can be fenced by incarnation.
+        summary["_native_observation"]["node_uid"] = uid
     return summary

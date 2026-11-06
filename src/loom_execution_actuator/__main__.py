@@ -236,10 +236,11 @@ async def _run() -> None:
                     builder_settings, observations = settings.task_image_builder, settings.resource_observation_namespace
                     reader_api = build_kubernetes
 
-                    async def read_builds(node_name: str) -> dict[str, Any]:
+                    async def read_builds(node_name: str, *, expected_node_uid: str | None = None) -> dict[str, Any]:
                         return await reader_api.build_resource_summary(
                             node_name, observation_namespace=observations, build_namespace=builder_settings.namespace,
-                            max_age_seconds=settings.resource_observation_max_age_seconds)
+                            max_age_seconds=settings.resource_observation_max_age_seconds,
+                            expected_node_uid=expected_node_uid)
 
                     build_usage = BuildUsageSampler(sessions=sessions, namespace=builder_settings.namespace,
                                                     reader=read_builds)

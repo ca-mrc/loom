@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import stat
 from dataclasses import replace
 
@@ -45,6 +46,7 @@ def _export(job, native, *, task_id, exit_code):
             "cache_configured": any(v["name"] == "cache" for v in pod["volumes"]),
             "init_storage_requests": [c["resources"]["requests"].get("ephemeral-storage") for c in pod["initContainers"]],
             "container_storage_requests": [c["resources"]["requests"].get("ephemeral-storage") for c in pod["containers"]],
+            "phase_times": native.get("phase_times"),
             "boundary_usage": native.get("boundary_usage"), "observer_usage": native.get("observer_usage")}
 
 
@@ -162,12 +164,13 @@ def test_cli_summary_and_query(inputs, tmp_path, capsys) -> None:
         report_module.main([str(export), "--output", str(output)])
     assert report_module.main(["--print-query"]) == 0
     query = capsys.readouterr().out
-    assert query.lstrip().upper().startswith(("WITH", "SELECT")) and not any(
-        word in query.upper() for word in ("INSERT", "UPDATE", "DELETE", "ALTER", "DROP"))
+    assert query.lstrip().upper().startswith(("WITH", "SELECT")) and not re.search(
+        r"\b(INSERT|UPDATE|DELETE|ALTER|DROP|TRUNCATE|GRANT)\b", query.upper())
 
 
-def _observer(storage_max, *, complete, unknown, codes=None, memory=2_000_000):
-    return {"pod_uid": "pod-uid", "node_name": "node-a", "lease_epoch": 3, "source": "native_node_observer",
+def _observer(storage_max, *, complete, unknown, codes=None, memory=2_000_000, samples=None, dropped=0):
+    return {"pod_uid": "pod-uid", "node_name": "node-a", "node_uid": "11111111-1111-4111-8111-111111111111",
+            "lease_epoch": 3, "source": "native_node_observer", "samples": samples or [], "samples_dropped": dropped,
             "first_observed_at": "2026-11-05T20:00:00Z", "last_observed_at": "2026-11-05T20:05:00Z",
             "snapshots": complete + unknown, "storage_complete": complete, "storage_unknown": unknown,
             "unavailable": 1, "last_unavailable_code": "pod_not_in_snapshot", "unknown_codes": codes or {},
@@ -191,3 +194,60 @@ def test_observer_samples_are_reported_separately_and_unknown_never_counts(input
     assert observer["pod_storage_max_bytes"]["count"] == 1  # the unknown-only attempt contributes nothing
     assert observer["container_memory_max_bytes"]["count"] == 2
     assert "Not Pod totals" in result["summary"]["note"] and "not peaks" in observer["note"]
+
+
+def _at(seconds):
+    return f"2026-11-05T20:{seconds // 60:02d}:{seconds % 60:02d}+00:00"
+
+
+def _phases(prepare=(0, 20), build=(25, 400), publish=(405, None)):
+    return [{"name": name, "started_at": _at(window[0]),
+             "finished_at": None if window[1] is None else _at(window[1])}
+            for name, window in (("prepare", prepare), ("build", build), ("publish", publish)) if window]
+
+
+def test_phase_coverage_states_snapshots_and_gaps_per_phase_window(inputs) -> None:
+    # Snapshots every 30 s from 30 s: prepare (0-20 s) is never observed; build is, with explicit gaps.
+    samples = [{"at": _at(t), "storage_at": _at(t - 3) if t != 90 else None, "storage_bytes": None if t == 90 else 10}
+               for t in range(30, 450, 30)]
+    row = {**_row(inputs, instrument=False), "phase_times": _phases(),
+           "observer_usage": [_observer(10, complete=13, unknown=1, samples=samples)]}
+    attempt = _one(row)
+    coverage = attempt["phase_coverage"]
+    assert coverage["prepare"] == {"status": "unobserved", "duration_seconds": 20.0, "snapshots": 0,
+                                   "storage_complete": 0, "start_gap_seconds": None, "end_gap_seconds": None,
+                                   "max_gap_seconds": 20.0, "retained_times_truncated": False}
+    build = coverage["build"]
+    assert build["status"] == "observed" and build["snapshots"] == 13 and build["storage_complete"] == 12
+    assert (build["start_gap_seconds"], build["end_gap_seconds"], build["max_gap_seconds"]) == (5.0, 10.0, 30.0)
+    # Publish is still running: no end and no end gap, but its start gap is stated.
+    assert coverage["publish"]["end_gap_seconds"] is None and coverage["publish"]["start_gap_seconds"] == 15.0
+    assert attempt["observer_status"] == "sampled"
+
+
+def test_attempts_without_observer_data_are_unobserved_not_omitted(inputs) -> None:
+    short_failed = {**_row(inputs, instrument=False, exit_code=1), "phase_times": _phases(build=(25, 40), publish=None),
+                    "observer_usage": None}
+    unavailable_only = {**_row(inputs, instrument=False), "phase_times": _phases(),
+                        "observer_usage": [_observer(None, complete=0, unknown=0)]}
+    sampled = {**_row(inputs, instrument=False), "phase_times": _phases(),
+               "observer_usage": [_observer(10, complete=1, unknown=0,
+                                            samples=[{"at": _at(60), "storage_at": _at(58), "storage_bytes": 10}])]}
+    result = report_module.report([json.dumps(row) for row in (short_failed, unavailable_only, sampled)])
+    statuses = [a["observer_status"] for a in result["attempts"]]
+    assert statuses == ["no_observer_row", "no_usable_snapshot", "sampled"]
+    assert result["attempts"][0]["phase_coverage"]["build"]["status"] == "unobserved"
+    observer = result["summary"]["observer"]
+    assert observer["attempts"] == 3 and observer["attempts_by_observer_status"] == {
+        "no_observer_row": 1, "no_usable_snapshot": 1, "sampled": 1}
+    assert observer["failed_attempts_without_complete_storage"] == 1
+    assert observer["phases"]["build"]["by_status"] == {"unobserved": 2, "observed": 1}
+    assert observer["phases"]["prepare"]["by_status"] == {"unobserved": 3}
+    assert "does not mean each phase was observed" in observer["coverage_note"]
+
+
+def test_truncated_retained_times_are_flagged(inputs) -> None:
+    row = {**_row(inputs, instrument=False), "phase_times": _phases(),
+           "observer_usage": [_observer(10, complete=1, unknown=0, dropped=3,
+                                        samples=[{"at": _at(60), "storage_at": _at(58), "storage_bytes": 10}])]}
+    assert _one(row)["phase_coverage"]["build"]["retained_times_truncated"] is True

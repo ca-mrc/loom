@@ -63,7 +63,7 @@ from loom_execution_actuator.task_image_boundary_usage import (
     instrumented,
     observed_boundary_usage,
 )
-from loom_execution_actuator.task_image_build_usage import BuildUsageSampler, sample_safely
+from loom_execution_actuator.task_image_build_usage import BuildUsageSampler
 from loom_execution_actuator.task_image_renderer import render_task_image_job
 from loom_execution_actuator.task_image_settings import (
     NativeTaskImageSettings as NativeTaskImageSettings,
@@ -75,7 +75,6 @@ _SELECTOR = "app.kubernetes.io/managed-by=" + _MANAGER
 _LIVE = ("claimed", "running")
 _LOG = logging.getLogger(__name__)
 # Builder telemetry (#2750): attempts sampled per background round.
-_SAMPLES_PER_ROUND = 64
 # One admission pass may start several fitting builds; each still reserves
 # capacity in its own transaction before its Job is created.
 ADMISSIONS_PER_PASS = 32
@@ -202,13 +201,14 @@ class NativeBuildKubernetesApi:
         self._core, self._batch = client.CoreV1Api(self._api), client.BatchV1Api(self._api)
 
     async def build_resource_summary(self, node_name: str, *, observation_namespace: str, build_namespace: str,
-                                     max_age_seconds: float) -> dict[str, Any]:
+                                     max_age_seconds: float, expected_node_uid: str | None = None) -> dict[str, Any]:
         """The node's builder snapshot from the trusted observer; no kubelet access."""
         from loom_execution_actuator.resource_observations import read_resource_observation
 
         return await asyncio.to_thread(read_resource_observation, self._core, node_name=node_name,
                                        namespace=observation_namespace, execution_namespace=build_namespace,
-                                       max_age_seconds=max_age_seconds, builds=True)
+                                       max_age_seconds=max_age_seconds, builds=True,
+                                       expected_node_uid=expected_node_uid)
 
     async def close(self) -> None:
         await asyncio.to_thread(self._api.close)
@@ -698,11 +698,16 @@ class NativeTaskImageController:
         current = getattr(self, "_sampling", None)
         if getattr(self, "build_usage", None) is None or not attempt_ids or (current is not None and not current.done()):
             return
-        self._sampling = asyncio.create_task(self._sample_all(attempt_ids[:_SAMPLES_PER_ROUND]))
+        self._sampling = asyncio.create_task(self._sample_all(attempt_ids))
 
     async def _sample_all(self, attempt_ids: list[UUID]) -> None:
-        for attempt_id in attempt_ids:
-            outcome = await sample_safely(self.build_usage, attempt_id)
+        assert self.build_usage is not None
+        try:
+            outcomes = await self.build_usage.sample_round(attempt_ids)
+        except Exception:
+            _LOG.debug("Build resource sampling round failed")
+            return
+        for attempt_id, outcome in outcomes.items():
             if outcome is not None:
                 _LOG.debug("Build resource sample unavailable for attempt %s (%s)", attempt_id, outcome)
 

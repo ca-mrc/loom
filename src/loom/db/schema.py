@@ -2139,7 +2139,7 @@ class TaskImageBuildResourceUsage(Base):
         UniqueConstraint("attempt_id", "pod_uid", name="uq_task_image_build_resource_usage_pod"),
         CheckConstraint(
             "snapshots >= 0 AND storage_complete >= 0 AND storage_unknown >= 0 AND unavailable >= 0 "
-            "AND storage_complete + storage_unknown <= snapshots",
+            "AND samples_dropped >= 0 AND storage_complete + storage_unknown <= snapshots",
             name="ck_task_image_build_resource_usage_counts",
         ),
     )
@@ -2168,6 +2168,11 @@ class TaskImageBuildResourceUsage(Base):
     ephemeral_storage_max_bytes: Mapped[int | None] = mapped_column(BigInteger)
     ephemeral_storage_max_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     containers: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    # Each counted snapshot's own clocks (bounded, oldest first): the producer's
+    # snapshot time, the storage field's measurement time, and its total or None.
+    # The report derives phase coverage and gaps from these, never from counts.
+    samples: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    samples_dropped: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
 
 class TaskImageAttemptRetention(Base):

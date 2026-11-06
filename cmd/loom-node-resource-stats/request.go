@@ -13,6 +13,10 @@ type request struct {
 	SchemaVersion string       `json:"schema_version"`
 	Namespace     string       `json:"namespace"`
 	Pods          []podRequest `json:"pods"`
+	// "skip" returns container counters without walking Pod volumes or logs
+	// for an ephemeral total. Callers then bound each Pod's walk separately,
+	// so one slow tree cannot discard every Pod's CPU and memory.
+	PodFilesystem string `json:"pod_filesystem,omitempty"`
 }
 type podRequest struct {
 	UID        string             `json:"uid"`
@@ -50,7 +54,7 @@ func decodeRequest(input io.Reader) (request, string) {
 	if decoder.Decode(&req) != nil || decoder.Decode(new(any)) != io.EOF {
 		return req, "invalid_request"
 	}
-	if req.SchemaVersion != "loom.node-resource-request.v1" || !validLabel(req.Namespace) || req.Pods == nil || len(req.Pods) > 128 {
+	if req.SchemaVersion != "loom.node-resource-request.v1" || !validLabel(req.Namespace) || req.Pods == nil || len(req.Pods) > 128 || (req.PodFilesystem != "" && req.PodFilesystem != "skip") {
 		return req, "invalid_request"
 	}
 	pods := map[string]bool{}
