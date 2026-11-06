@@ -131,6 +131,7 @@ async def _resolve_responses_support(
     api_key: str,
     upstream: httpx.AsyncClient,
     request: Request,
+    model_name: str,
 ) -> bool:
     """Return True iff we should dispatch the incoming Responses request
     through the native passthrough; False if we should go straight into
@@ -153,6 +154,7 @@ async def _resolve_responses_support(
         api_key=api_key,
         upstream=upstream,
         request=request,
+        model_name=model_name,
     )
     if outcome is None or outcome.transient:
         return False
@@ -168,6 +170,7 @@ async def _probe_and_persist(
     api_key: str,
     upstream: httpx.AsyncClient,
     request: Request,
+    model_name: str,
 ) -> ProbeOutcome | None:
     """Probe the upstream and cache a conclusive result. Returns None while
     the connection is backing off from a transient failure.
@@ -183,6 +186,7 @@ async def _probe_and_persist(
         outcome = await probe_responses_api(
             upstream_url=f"{row.base_url.rstrip('/')}/responses",
             api_key=api_key,
+            model=model_name,
             client=upstream,
             deadline=request_attempt_deadline(request),
             dispatch_audit=request_dispatch_audit(
@@ -422,6 +426,7 @@ async def responses(
             api_key=api_key,
             upstream=upstream,
             request=request,
+            model_name=model_name,
         )
         if not supported:
             return await _dispatch_via_chat_translator(
@@ -671,6 +676,7 @@ async def _dispatch_execution_attempt_responses(
             api_key=api_key,
             upstream=upstream,
             request=request,
+            model_name=model_name,
         )
         native_confirmed = outcome is not None and outcome.supported is True
     if not native_confirmed:
