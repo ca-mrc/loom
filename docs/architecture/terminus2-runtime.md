@@ -217,6 +217,10 @@ bundle downloads retain the diagnostic files, and raw delivery
 Exception identity supplies detail separately from retry classification. For
 hosted Terminus, the trusted controller records typed SDK 5xx/timeouts as
 `gateway_error` and connection failures as `provider_transport_disconnect`.
+Gateway-generated HTTP 429 `provider_queue_stalled` also maps to `gateway_error`
+only with its structured `detail.code`. The Gateway wraps upstream error bodies
+in a detail string, so upstream codes cannot impersonate this local error.
+Other 429s and matching exception text do not qualify.
 The native runtime carries that reason in its committed result only for a failed
 agent attempt. Arbitrary exception text, deterministic 4xx, verifier failures,
 deadline cancellation and cleanup failures cannot enable this path. Older

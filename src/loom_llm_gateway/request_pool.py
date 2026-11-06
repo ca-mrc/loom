@@ -35,6 +35,7 @@ from loom.db.schema import (
     Trial,
 )
 from loom.provider_model_preflight import preflight_failure_kind
+from loom.provider_queue_error import PROVIDER_QUEUE_STALLED
 from loom_llm_gateway.attempt_deadline import GatewayAttemptDeadline
 from loom_llm_gateway.dispatch_audit import (
     ConnectionAtCapacityError,
@@ -646,9 +647,7 @@ class PoolDispatchAudit(DispatchAudit):
             pool_id=self.pool_id,
             request_id=self.state.request_id,
             bound_group=self.quota_group,
-            bound_connection_id=bound_connection,
             attempt=int(values["attempt"]),
-            stall_sec=self.stall_sec,
             upstream_timeout_sec=self.state.upstream_timeout_sec,
             members=self._queue_members,
         )
@@ -746,7 +745,7 @@ class PoolDispatchAudit(DispatchAudit):
                     await self._close_queue("stalled")
                     raise HTTPException(
                         status_code=429,
-                        detail="provider_queue_stalled",
+                        detail={"code": PROVIDER_QUEUE_STALLED},
                         headers={"Retry-After": "1"},
                     ) from None
                 except ConnectionAtCapacityError as saturated:

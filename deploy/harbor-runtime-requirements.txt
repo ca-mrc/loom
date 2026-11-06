@@ -1,3 +1,7 @@
 # Loom's native controller dependencies; Harbor installs its own base runtime.
 httpx>=0.27,<1.0
 pydantic>=2.11.7,<3.0
+# Preserve structured Gateway admission reasons through Harbor's LiteLLM adapter.
+# Keep these aligned with the verified project lock and real SDK boundary test.
+litellm==1.106.2
+openai==2.54.0

@@ -115,18 +115,22 @@ these fields locate the failed boundary without establishing a physical cause.
 The existing one-second audit budget and durable unknown outcomes still apply.
 
 An enabled quota-group queue counts in-flight receipts only for its pool's
-physical connections. It reads stall history only when the bound group is full
-and no overflow slot is available. Each member's latest admission uses the
-all-outcome `(provider_connection_id, admitted_at)` index; completed calls reset
-stall age too. Per-member indexed extrema keep this lookup bounded when several
-keys share a quota group. Capacity counts use disjoint per-connection ranges:
-future signed deadlines and recent admissions without a deadline. Partial
-indexes on connection/deadline (`0195`) and connection/admission time bound
-these reads even when expired `admitted` receipts retain unknown outcomes.
-The fixed outcome predicate remains indexable in generic prepared plans.
-Migration `0194` installs the separate history index. Neither capacity nor
-stall admission may scan retained dispatch history within the one-second audit
-budget; an old receipt with a future signed deadline still occupies its slot.
+physical connections. A full group waits while valid dispatches own its slots;
+last-admission age is not evidence that a provider is stalled. A slow legal
+response can outlive that age, and a read timeout can settle milliseconds after
+another admission poll. Queue selection therefore does not read completed
+receipt history or turn elapsed admission age into `provider_queue_stalled`.
+The stored `stall_sec` is retained for configuration compatibility, not used as
+a cutoff for valid occupancy. FIFO and overflow selection remain unchanged.
+
+Capacity counts use disjoint per-connection ranges: future signed deadlines and
+recent admissions without a deadline. Partial indexes on connection/deadline
+(`0195`) and connection/admission time bound these reads even when expired
+`admitted` receipts retain unknown outcomes. The fixed outcome predicate remains
+indexable in generic prepared plans. Settled or expired dispatches release their
+slots through the existing lifetime accounting; an old receipt with a future
+signed deadline still occupies its slot. Total request budgets, signed deadlines,
+cancellation and the existing committed queue-credit cap continue to bound work.
 
 Pool, trial-binding, and quota-queue control locks use nonblocking acquisition.
 Known lock conflicts roll back the admission transaction and wait with bounded
@@ -435,8 +439,15 @@ wall-clock budget; explicit smaller budgets apply to the initial send too.
 The existing 200-second upstream phase limit and signed attempt deadline still
 apply. Gateway-bound Terminus disables its SDK and Harbor transport retries,
 including teacher/summary delegates, so these limits are not multiplied.
-Local admission 429s remain terminal after their existing queue/fence checks;
-only upstream 429 responses participate in this transport retry loop. See
+Local admission 429s do not enter the Gateway transport retry loop. A trusted
+`provider_queue_stalled` response carries a structured `detail.code` so hosted
+Terminus can preserve it as `gateway_error` for the existing bounded, archived
+Trial retry. Other local admission 429s remain terminal. Upstream errors cannot
+supply that structured reason through the facade; only upstream 429 responses participate
+in the Gateway transport retry loop. LiteLLM 1.106.2 is the supported minimum
+for preserving the structured reason; the project lock and isolated Harbor
+runtime pin the verified SDK pair instead of inspecting discarded exception
+contexts. See
 [Terminus retry ownership](terminus2-runtime.md) and
 [pool failover](../integrations/provider-onboarding.md#request-level-rotation-and-timeout-failover).
 
