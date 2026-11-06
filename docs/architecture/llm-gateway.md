@@ -128,6 +128,14 @@ Migration `0194` installs the separate history index. Neither capacity nor
 stall admission may scan retained dispatch history within the one-second audit
 budget; an old receipt with a future signed deadline still occupies its slot.
 
+Pool, trial-binding, and quota-queue control locks use nonblocking acquisition.
+Known lock conflicts roll back the admission transaction and wait with bounded
+jitter outside the one-second audit budget. Each retry rechecks live pool,
+execution, model, and credential authority before committing a dispatch receipt.
+Database failures still fail closed within the audit budget. Lock waiting obeys
+the total request budget, signed attempt deadline, and cancellation; it does not
+earn provider queue credit unless the request has actually entered that queue.
+
 Regional model POST routes through public TLS do not inherit the control API's
 300-second socket read timeout: a valid gateway retry plus quota wait can exceed
 it before returning response headers. Gateway retry limits and the signed native

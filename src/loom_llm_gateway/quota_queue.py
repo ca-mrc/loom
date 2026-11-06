@@ -22,6 +22,7 @@ from loom.db.schema import (
     ProviderRequestPoolMember,
 )
 from loom.quota_queue import QUEUE_WAITER_DEAD_AFTER, AdmissionChoice, GroupView, choose_admission
+from loom_llm_gateway.dispatch_audit import PoolAdmissionBusyError
 from loom_llm_gateway.dispatch_capacity import active_dispatch_count
 
 
@@ -39,10 +40,12 @@ async def decide_group_queue(
 ) -> AdmissionChoice:
     """Choose admit, overflow, wait, or stall. Does not insert a receipt."""
 
-    await session.execute(
-        text("SELECT pg_advisory_xact_lock(hashtext('loom-pool-queue'), hashtext(:pool_id))"),
+    acquired = await session.scalar(
+        text("SELECT pg_try_advisory_xact_lock(hashtext('loom-pool-queue'), hashtext(:pool_id))"),
         {"pool_id": str(pool_id)},
     )
+    if not acquired:
+        raise PoolAdmissionBusyError
     ordered = [member for member in members if member.enabled]
     groups: list[str] = []
     members_by_group: dict[str, list[UUID]] = defaultdict(list)

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -18,6 +19,7 @@ import httpx
 from fastapi import HTTPException, Request
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import AuthContext
@@ -38,7 +40,9 @@ from loom_llm_gateway.dispatch_audit import (
     ConnectionAtCapacityError,
     DispatchAudit,
     GroupQueuedError,
+    PoolAdmissionBusyError,
     QueueStalledError,
+    _database_reason,
     request_dispatch_audit,
 )
 from loom_llm_gateway.execution_attempt_dispatch import (
@@ -262,16 +266,23 @@ class PoolDispatchAudit(DispatchAudit):
             is not None
         )
         while True:
-            pool = await session.scalar(
-                select(ProviderRequestPool)
-                .where(
-                    ProviderRequestPool.connection_id == self.pool_id,
+            try:
+                pool = await session.scalar(
+                    select(ProviderRequestPool)
+                    .where(
+                        ProviderRequestPool.connection_id == self.pool_id,
+                    )
+                    .with_for_update(read=shared, nowait=True)
                 )
-                .with_for_update(read=shared)
-            )
+                binding = await session.scalar(binding_query.with_for_update(nowait=True))
+            except SQLAlchemyError as exc:
+                if _database_reason(exc) != "lock_timeout":
+                    raise
+                # Only NOWAIT lock conflicts defer admission. The session exits
+                # and rolls back before any waiting or fresh policy checks.
+                raise PoolAdmissionBusyError from None
             if pool is None or not pool.enabled:
                 raise HTTPException(409, "request pool changed; retry the request")
-            binding = await session.scalar(binding_query.with_for_update())
             if not shared or binding is not None:
                 return pool, binding
             # A binding can disappear after the hint. Never upgrade SHARE to
@@ -694,38 +705,63 @@ class PoolDispatchAudit(DispatchAudit):
         deadline: GatewayAttemptDeadline | None,
         attempt: int,
     ) -> UUID:
-        started = time.monotonic()
+        capacity_started: float | None = None
+        limited_connection: UUID | None = None
+        queue_started: float | None = None
+        queue_renewed = 0.0
+        busy_delay = 0.05
         queued = False
-        while True:
-            try:
-                receipt_id = await self._admit(attempt)
-            except GroupQueuedError:
-                queued = True
-                await self._touch_queue_row()
+        try:
+            while True:
                 try:
-                    await asyncio.sleep(1.0)
-                except asyncio.CancelledError:
-                    await self._close_queue("cancelled")
-                    raise
-                self._credit_queue_wait(deadline, time.monotonic() - started)
-                if deadline is not None and deadline.remaining() <= 0:
-                    await self._close_queue("cancelled")
-                    deadline.require_remaining()
-                continue
-            except QueueStalledError:
-                await self._close_queue("stalled")
-                raise HTTPException(
-                    status_code=429,
-                    detail="provider_queue_stalled",
-                    headers={"Retry-After": "1"},
-                ) from None
-            except ConnectionAtCapacityError:
-                return await super()._admit_with_capacity(deadline, attempt)
-            except asyncio.CancelledError:
-                if queued:
-                    await self._close_queue("cancelled")
-                raise
-            return receipt_id
+                    receipt_id = await self._admit(attempt)
+                except (GroupQueuedError, PoolAdmissionBusyError) as exc:
+                    # A driver can finish with a lock conflict while cancellation
+                    # is being delivered. Never retry an abandoned request.
+                    task = asyncio.current_task()
+                    if task is not None and task.cancelling():
+                        raise asyncio.CancelledError from None
+                    capacity_wait = isinstance(exc, GroupQueuedError)
+                    if capacity_wait:
+                        queued = True
+                        busy_delay = 0.05
+                    if queued and (capacity_wait or time.monotonic() - queue_renewed >= 5.0):
+                        await self._touch_queue_row()
+                        queue_renewed = time.monotonic()
+                        if queue_started is None:
+                            queue_started = queue_renewed
+                    delay = 1.0 if capacity_wait else random.uniform(busy_delay * 0.8, busy_delay * 1.2)
+                    if not capacity_wait:
+                        busy_delay = min(1.0, busy_delay * 2)
+                    await asyncio.sleep(delay)
+                    # Control-lock contention alone is not provider queue credit.
+                    if queue_started is not None:
+                        self._credit_queue_wait(deadline, time.monotonic() - queue_started)
+                    if deadline is not None and deadline.remaining() <= 0:
+                        if queued:
+                            await self._close_queue("cancelled")
+                        deadline.require_remaining()
+                    continue
+                except QueueStalledError:
+                    await self._close_queue("stalled")
+                    raise HTTPException(
+                        status_code=429,
+                        detail="provider_queue_stalled",
+                        headers={"Retry-After": "1"},
+                    ) from None
+                except ConnectionAtCapacityError as saturated:
+                    limited_connection = saturated.connection_id
+                    if capacity_started is None:
+                        capacity_started = time.monotonic()
+                    await self._wait_for_connection_capacity(limited_connection, capacity_started, deadline)
+                    continue
+                if limited_connection is not None and capacity_started is not None:
+                    self._observe_queue(limited_connection, capacity_started, "admitted_after_wait")
+                return receipt_id
+        except asyncio.CancelledError:
+            if queued:
+                await self._close_queue("cancelled")
+            raise
 
     async def _touch_queue_row(self) -> None:
         if self.state.session_factory is None:

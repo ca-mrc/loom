@@ -42,6 +42,7 @@ from loom.security.secret_store import LocalEncryptedSecretStore
 from loom_llm_gateway import dispatch_audit
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
+from loom_llm_gateway.dispatch_audit import ConnectionAtCapacityError, PoolAdmissionBusyError
 from loom_llm_gateway.egress_client_pool import EgressClientPool
 from loom_llm_gateway.quota_queue import decide_group_queue
 from loom_llm_gateway.rate_card import RateCardCache
@@ -345,6 +346,152 @@ async def test_concurrent_first_assignments_preserve_round_robin(pool_setup: dic
         assert len(bindings) == 2
         assert {binding.member_connection_id for binding in bindings} == set(p["ids"][:2])
         assert (await session.get(ProviderRequestPool, p["root"])).next_member == 2
+
+
+@pytest.mark.parametrize("lock_kind", ["pool", "binding", "queue", "pool_then_capacity"])
+async def test_pool_control_lock_contention_waits_without_consuming_audit_budget(
+    pool_setup: dict, monkeypatch: pytest.MonkeyPatch, lock_kind: str,
+) -> None:
+    p = pool_setup
+    capacity_rejected = asyncio.Event()
+    occupied_receipt_id = uuid4()
+    if lock_kind == "pool_then_capacity":
+        p["settings"].connection_queue_max_wait_sec = 0.2
+        original_admit = PoolDispatchAudit._admit
+
+        async def observe_capacity(self, attempt):
+            try:
+                return await original_admit(self, attempt)
+            except ConnectionAtCapacityError:
+                capacity_rejected.set()
+                raise
+
+        monkeypatch.setattr(PoolDispatchAudit, "_admit", observe_capacity)
+        async with p["sessions"]() as session:
+            (await session.get(ProviderConnection, p["root"])).max_in_flight = 1
+            session.add(GatewayDispatchReceipt(
+                id=occupied_receipt_id, request_id=uuid4(), dispatch_ordinal=1, attempt=1,
+                team_id=p["team_id"], trial_id=p["trial_id"], step_id="agent",
+                provider_connection_id=p["root"], dialect="facade_openai", purpose="model_call",
+                provider_outcome="admitted", admitted_at=datetime.now(UTC),
+                attempt_deadline_wall_clock=datetime.now(UTC) + timedelta(minutes=1),
+            ))
+            await session.commit()
+    if lock_kind == "binding":
+        assert (await post(p)).status_code == 200
+    if lock_kind == "queue":
+        async with p["sessions"]() as session:
+            (await session.get(ProviderRequestPool, p["root"])).queue_enabled = True
+            session.add_all(ProviderRequestPoolGroupCap(
+                pool_connection_id=p["root"], quota_group=group, max_in_flight=1,
+            ) for group in ("az", "yibu"))
+            await session.commit()
+    monkeypatch.setattr(dispatch_audit, "_AUDIT_TIMEOUT_SECONDS", 0.2)
+    entered = asyncio.Event()
+    original = PoolDispatchAudit._lock_pool_binding
+
+    async def observe(self, session):
+        entered.set()
+        return await original(self, session)
+
+    monkeypatch.setattr(PoolDispatchAudit, "_lock_pool_binding", observe)
+    before = len(p["captures"]["requests"])
+    async with p["sessions"]() as holder:
+        if lock_kind == "queue":
+            await holder.execute(text(
+                "SELECT pg_advisory_xact_lock(hashtext('loom-pool-queue'), hashtext(:pool_id))",
+            ), {"pool_id": str(p["root"])})
+        elif lock_kind == "binding":
+            await holder.execute(select(ProviderRequestPoolBinding).where(
+                ProviderRequestPoolBinding.pool_connection_id == p["root"],
+                ProviderRequestPoolBinding.trial_id == p["trial_id"],
+            ).with_for_update())
+        else:
+            await holder.execute(select(ProviderRequestPool).where(
+                ProviderRequestPool.connection_id == p["root"],
+            ).with_for_update())
+        request = asyncio.create_task(post(p, headers={"X-Loom-Pause-Capable": "1"}))
+        try:
+            await asyncio.wait_for(entered.wait(), 3)
+            await asyncio.sleep(0.4)
+            completed_while_locked = request.done()
+            assert len(p["captures"]["requests"]) == before
+        finally:
+            await holder.rollback()
+            if lock_kind == "pool_then_capacity":
+                await asyncio.wait_for(capacity_rejected.wait(), 3)
+                async with p["sessions"]() as session:
+                    (await session.get(GatewayDispatchReceipt, occupied_receipt_id)).provider_outcome = "response_received"
+                    await session.commit()
+            response = await asyncio.wait_for(request, 5)
+    assert response.status_code == 200, response.text
+    assert not completed_while_locked
+    assert len(p["captures"]["requests"]) == before + 1
+
+
+@pytest.mark.parametrize("stop", ["deadline", "budget", "cancel", "cancel_during_lock", "disable"])
+async def test_pool_lock_wait_preserves_request_limits_and_fresh_authority(
+    pool_setup: dict, monkeypatch: pytest.MonkeyPatch, stop: str,
+) -> None:
+    p = pool_setup
+    monkeypatch.setattr(dispatch_audit, "_AUDIT_TIMEOUT_SECONDS", 0.2)
+    entered = asyncio.Event()
+    original = PoolDispatchAudit._admit
+
+    async def observe(self, attempt):
+        try:
+            return await original(self, attempt)
+        except PoolAdmissionBusyError:
+            # Observe the wait after the conflicting transaction has exited.
+            entered.set()
+            raise
+
+    monkeypatch.setattr(PoolDispatchAudit, "_admit", observe)
+    if stop == "cancel_during_lock":
+        lock_pool_binding = PoolDispatchAudit._lock_pool_binding
+
+        async def observe_lock(self, session):
+            entered.set()
+            return await lock_pool_binding(self, session)
+
+        monkeypatch.setattr(PoolDispatchAudit, "_lock_pool_binding", observe_lock)
+    if stop == "budget":
+        p["settings"].llm_retry_budget_sec = 0.3
+    jwt = p["token"](datetime.now(UTC) + timedelta(seconds=0.3)) if stop == "deadline" else None
+    async with p["sessions"]() as holder:
+        pool = await holder.scalar(select(ProviderRequestPool).where(
+            ProviderRequestPool.connection_id == p["root"],
+        ).with_for_update())
+        request = asyncio.create_task(post(p, jwt=jwt, headers={"X-Loom-Pause-Capable": "1"}))
+        try:
+            await asyncio.wait_for(entered.wait(), 3)
+            if stop in {"cancel", "cancel_during_lock"}:
+                request.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(asyncio.shield(request), 2)
+            else:
+                if stop == "disable":
+                    pool.enabled = False
+                    await holder.commit()
+                response = await asyncio.wait_for(request, 3)
+                expected = {
+                    "deadline": (504, "agent_timeout"),
+                    "budget": (504, "gateway retry budget exhausted"),
+                    "disable": (409, "request pool changed"),
+                }[stop]
+                assert response.status_code == expected[0], response.text
+                assert expected[1] in response.text
+        finally:
+            await holder.rollback()
+            if not request.done():
+                request.cancel()
+                await asyncio.gather(request, return_exceptions=True)
+    assert p["captures"]["requests"] == []
+    assert await receipts(p) == []
+    async with p["sessions"]() as session:
+        assert await session.scalar(select(func.count()).select_from(GatewayDispatchQueue).where(
+            GatewayDispatchQueue.trial_id == p["trial_id"],
+        )) == 0
 
 
 @pytest.mark.parametrize("change", ["disable", "member"])
@@ -1515,6 +1662,56 @@ async def test_group_queue_waits_and_drains_across_replicas_with_the_normal_audi
         ))).all())
     assert rows and all(row.closed_at is not None for row in rows)
     assert all(row.outcome in {"admitted", "overflow_admitted"} for row in rows)
+
+
+async def test_cancellation_during_queue_renewal_closes_the_durable_waiter(
+    pool_setup: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    p = pool_setup
+    async with p["sessions"]() as session:
+        (await session.get(ProviderRequestPool, p["root"])).queue_enabled = True
+        for group, connection_id in zip(("az", "yibu"), p["ids"][:2], strict=True):
+            session.add(ProviderRequestPoolGroupCap(
+                pool_connection_id=p["root"], quota_group=group, max_in_flight=1,
+            ))
+            session.add(GatewayDispatchReceipt(
+                request_id=uuid4(), dispatch_ordinal=1, attempt=1,
+                team_id=p["team_id"], trial_id=p["trial_id"], step_id="agent",
+                provider_connection_id=connection_id, dialect="facade_openai", purpose="model_call",
+                provider_outcome="admitted", admitted_at=datetime.now(UTC),
+                attempt_deadline_wall_clock=datetime.now(UTC) + timedelta(minutes=1),
+            ))
+        await session.commit()
+    entered = asyncio.Event()
+    original = PoolDispatchAudit._touch_queue_row
+    touches = 0
+
+    async def renew(self):
+        nonlocal touches
+        await original(self)
+        touches += 1
+        if touches == 2:
+            entered.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(PoolDispatchAudit, "_touch_queue_row", renew)
+    request = asyncio.create_task(post(p, headers={"X-Loom-Pause-Capable": "1"}))
+    try:
+        await asyncio.wait_for(entered.wait(), 4)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(request), 2)
+    finally:
+        if not request.done():
+            request.cancel()
+            await asyncio.gather(request, return_exceptions=True)
+    assert p["captures"]["requests"] == []
+    assert len(await receipts(p)) == 2
+    async with p["sessions"]() as session:
+        waiter = (await session.scalars(select(GatewayDispatchQueue).where(
+            GatewayDispatchQueue.trial_id == p["trial_id"],
+        ))).one()
+        assert waiter.outcome == "cancelled" and waiter.closed_at is not None
 
 
 async def test_in_flight_cap_is_shared_by_gateway_replicas(pool_setup: dict) -> None:

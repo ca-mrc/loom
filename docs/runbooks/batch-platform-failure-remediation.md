@@ -40,6 +40,13 @@ round-robin, configuration writers and a stale binding hint. This removes a
 reproducible serialization defect while preserving live admission checks and
 the one-second audit budget.
 
+Pool and binding row locks and the quota queue advisory lock now defer known
+conflicts outside the audit transaction. Every retry reloads authority; genuine
+database failures retain the one-second failure boundary. Lock contention alone
+does not grant provider queue credit. Check total request budgets and quota
+stall limits when restoring bulk load: waiting safely for a lock does not
+increase the provider's physical capacity.
+
 An audit commit acknowledgement can time out after PostgreSQL has committed
 the receipt. Provider I/O has not started in that path. The known receipt ID is
 retained for bounded `not_dispatched` cleanup and independent HTTP status

@@ -144,6 +144,10 @@ class GroupQueuedError(Exception):
         super().__init__(group)
 
 
+class PoolAdmissionBusyError(Exception):
+    """A pool control lock is busy; no admission transaction was committed."""
+
+
 class QueueStalledError(Exception):
     """The group has admitted nobody for a full stall interval."""
 
@@ -229,7 +233,7 @@ class DispatchAudit:
                     phase = "commit"
                     await _database_await(session.commit(), operation="admission", phase=phase)
                     phase = "session_exit"
-        except (ConnectionAtCapacityError, GroupQueuedError, QueueStalledError):
+        except (ConnectionAtCapacityError, GroupQueuedError, PoolAdmissionBusyError, QueueStalledError):
             raise
         except HTTPException:
             # A routing policy may decline admission before any provider I/O.
@@ -304,22 +308,27 @@ class DispatchAudit:
             except ConnectionAtCapacityError as saturated:
                 waited = True
                 limited_connection = saturated.connection_id
-                remaining = self.state.connection_queue_max_wait_sec - (time.monotonic() - started)
-                delay = min(random.uniform(0.25, 2.0), remaining)
-                if delay <= 0:
-                    self._observe_queue(saturated.connection_id, started, "queue_timeout")
-                    raise HTTPException(
-                        status_code=429,
-                        detail="provider_connection_concurrency_limited",
-                        headers={"Retry-After": "1"},
-                    ) from None
-                if deadline is not None and delay >= deadline.remaining():
-                    self._observe_queue(saturated.connection_id, started, "deadline")
-                    await deadline.sleep(delay)
-                await asyncio.sleep(delay)
+                await self._wait_for_connection_capacity(saturated.connection_id, started, deadline)
         if waited and limited_connection is not None:
             self._observe_queue(limited_connection, started, "admitted_after_wait")
         return receipt_id
+
+    async def _wait_for_connection_capacity(
+        self, connection_id: UUID, started: float, deadline: GatewayAttemptDeadline | None,
+    ) -> None:
+        remaining = self.state.connection_queue_max_wait_sec - (time.monotonic() - started)
+        delay = min(random.uniform(0.25, 2.0), remaining)
+        if delay <= 0:
+            self._observe_queue(connection_id, started, "queue_timeout")
+            raise HTTPException(
+                status_code=429,
+                detail="provider_connection_concurrency_limited",
+                headers={"Retry-After": "1"},
+            ) from None
+        if deadline is not None and delay >= deadline.remaining():
+            self._observe_queue(connection_id, started, "deadline")
+            await deadline.sleep(delay)
+        await asyncio.sleep(delay)
 
     def _observe_queue(self, connection_id: UUID, started: float, outcome: str) -> None:
         waited = max(0.0, time.monotonic() - started)
