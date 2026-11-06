@@ -11,6 +11,9 @@ from typing import Any, Never, cast
 from uuid import UUID
 
 _SCHEMA = "loom.native-resource-observation.v1"
+# Opt-in builder snapshots (#2750): same producer and checks, separate ConfigMap.
+BUILD_SCHEMA = "loom.native-build-resource-observation.v1"
+BUILD_CONFIG_MAP_PREFIX = "builds-node-"
 _OBSERVER = "loom-native-resource-observer"
 _MAX_BYTES = 700 * 1024
 _FUTURE_SKEW_SECONDS = 5
@@ -191,6 +194,7 @@ def read_resource_observation(
     timeout_seconds: float = 10,
     now: datetime | None = None,
     host_usage_only: bool = False,
+    builds: bool = False,
 ) -> dict[str, Any]:
     """GET the exact Node, its ConfigMap and the bound producer Pod.
 
@@ -237,13 +241,16 @@ def read_resource_observation(
         or (expected_node_uid is not None and uid != expected_node_uid)
     ):
         _fail("identity")
+    prefix, schema = ((BUILD_CONFIG_MAP_PREFIX, BUILD_SCHEMA) if builds else ("node-", _SCHEMA))
+    if builds and host_usage_only:
+        _fail("malformed")  # builder snapshots never carry host usage
     cm = core_api.read_namespaced_config_map(
-        name="node-" + uid,
+        name=prefix + uid,
         namespace=namespace,
         _request_timeout=remaining(),
     )
     if (
-        cm.metadata.name != "node-" + uid
+        cm.metadata.name != prefix + uid
         or cm.metadata.namespace != namespace
         or cm.metadata.deletion_timestamp is not None
         or not any(
@@ -268,7 +275,7 @@ def read_resource_observation(
         snapshot = json.loads(raw, object_pairs_hook=_object, parse_constant=_reject_constant)
     except (ValueError, TypeError, RecursionError, UnicodeError):
         _fail("malformed")
-    if not isinstance(snapshot, dict) or snapshot.get("schema_version") != _SCHEMA:
+    if not isinstance(snapshot, dict) or snapshot.get("schema_version") != schema:
         _fail("malformed")
     if snapshot.get("node_name") != node_name or snapshot.get("node_uid") != uid:
         _fail("identity")

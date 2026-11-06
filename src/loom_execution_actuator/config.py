@@ -21,6 +21,8 @@ class ExecutionActuatorSettings(BaseSettings):
         default=None, max_length=63, pattern=r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$",
     )
     resource_observation_max_age_seconds: float = Field(default=60, ge=15, le=120)
+    # Opt-in (#2750): sample builder snapshots from the same trusted observer.
+    build_resource_observations: bool = False
 
     @model_validator(mode="after")
     def _remote_kubernetes_complete(self) -> "ExecutionActuatorSettings":

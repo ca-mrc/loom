@@ -39,6 +39,7 @@ class FakeKube:
         self.builder_request_support = True
         self.builder_cache_budget_support = True
         self.builder_cache_policy_support = True
+        self.builder_boundary_usage_support = True
         self.warm_fit_support = True
         self.incompatible_cache_readers = 0
         self.management_owned_cache = 0
@@ -95,12 +96,14 @@ class FakeKube:
                 'builder_enabled': builder is not None, 'builder_request_support': self.builder_request_support,
                 'builder_cache_budget_support': self.builder_cache_budget_support,
                 'builder_cache_policy_support': self.builder_cache_policy_support,
+                'builder_boundary_usage_support': self.builder_boundary_usage_support,
                 'builder_configuration_source': self.builder_configuration_source,
                 'builder_resources': None if builder is None else {
                     'effective_cpu_request_millis': builder.get('cpu_request_millis') or builder['cpu_millis'],
                     'cache_total_mib': builder.get('cache_total_mib', 4096) if self.builder_cache_budget_support else None,
                     'cache_gc_policy': builder.get('cache_gc_policy', 'legacy-seven-day') if self.builder_cache_policy_support else None,
                     'reuse_task_cache_for_verifier': builder.get('reuse_task_cache_for_verifier', False) if self.builder_cache_policy_support else None,
+                    'record_boundary_usage': builder.get('record_boundary_usage', False) if self.builder_boundary_usage_support else None,
                     **{k: builder[k] for k in ('cpu_millis', 'memory_mib', 'ephemeral_storage_mib', 'namespace')},
                 }})
         if args[0] == 'patch':

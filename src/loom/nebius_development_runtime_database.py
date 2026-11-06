@@ -43,7 +43,13 @@ class DevelopmentRuntimeDatabaseError(RuntimeError):
     """No protected URL, password, token or arbitrary SQL diagnostic is exposed."""
 
 
-def _authority() -> tuple[dict[str, set[str]], dict[str, dict[str, set[str]]]]:
+# Actuator tables created after the retained foundation. The runtime installer
+# only runs on that foundation, where these tables do not exist; a schema
+# upgrade creates them and then regrants with ``include_newer=True``.
+_NEWER_THAN_RETAINED = frozenset({'task_image_build_resource_usage'})  # 0196 (#2750)
+
+
+def _authority(*, include_newer: bool = False) -> tuple[dict[str, set[str]], dict[str, dict[str, set[str]]]]:
     tables = {name: {'SELECT'} for name in ACTUATOR_TABLES}
     for name in _MUTABLE:
         tables[name].update(('INSERT', 'UPDATE', 'DELETE'))
@@ -63,6 +69,8 @@ def _authority() -> tuple[dict[str, set[str]], dict[str, dict[str, set[str]]]]:
         'task_bundle_sources': {'UPDATE': {'created_at'}},
         'team_quotas': {'SELECT': {'team_id', 'in_flight_count', 'max_attempts_ceiling'}, 'UPDATE': {'in_flight_count'}},
     })
+    if not include_newer:
+        tables = {name: privileges for name, privileges in tables.items() if name not in _NEWER_THAN_RETAINED}
     return tables, columns
 
 
@@ -92,7 +100,7 @@ def _grant(db: psycopg.Connection[Any]) -> None:
             sql.Identifier(*sequence.split('.'))))
 
 
-def _qualify(db: psycopg.Connection[Any], marker: str, token_hash: bytes) -> int:
+def _qualify(db: psycopg.Connection[Any], marker: str, token_hash: bytes, *, include_newer: bool = False) -> int:
     role = db.execute("SELECT oid,rolcanlogin,rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls,"
         "rolinherit,rolconnlimit,rolvaliduntil,rolconfig,shobj_description(oid,'pg_authid') "
         "FROM pg_roles WHERE rolname='loom_actuator'").fetchone()
@@ -120,7 +128,7 @@ def _qualify(db: psycopg.Connection[Any], marker: str, token_hash: bytes) -> int
                 ") x CROSS JOIN LATERAL aclexplode(x.acl) a "
                 "WHERE a.grantee IN (0,%s) AND a.is_grantable LIMIT 1", (oid,)).fetchone()):
         raise ValueError
-    tables, columns = _authority()
+    tables, columns = _authority(include_newer=include_newer)
     actual_tables = {(table, privilege) for table, privilege in db.execute(
         "SELECT c.relname,p FROM pg_class c CROSS JOIN unnest(%s::text[]) p "
         "WHERE c.relnamespace='public'::regnamespace AND c.relkind IN ('r','p','v','m','f') "

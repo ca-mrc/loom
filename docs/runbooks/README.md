@@ -23,6 +23,7 @@ Begin with the [operator runbook](operator-runbook.md). Use the architecture
 - [Accounting repair](nebius-accounting-repair.md): recover a previously committed Terminus export.
 - [Verifier archive recovery](nebius-verifier-archive-recovery.md): request one audited retry for the legacy failed-verifier projection defect.
 - [Cold-start diagnosis](nebius-cold-start.md): capacity and scale-from-zero evidence.
+- [Build storage baseline](nebius-build-storage-baseline.md): observer builder samples, boundary readings, private reporting and the two-node procedure (#2750).
 - [Execution security](nebius-execution-security.md): bounded isolation validation.
 - [Trial resource accounting](trial-resource-accounting.md): usage durability and capacity calibration.
 - [Native output observations](native-output-observations.md): upload timing, retry and cancellation boundaries.
