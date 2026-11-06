@@ -66,9 +66,14 @@ limits:
 """
 
 
+# The verifier re-runs summarize.py in a directory holding only data/items.csv,
+# so the instruction says the script must create reports/ itself. Without
+# that line, models that made reports/ by hand scored `reproduced: 0` (#2054).
 _WORKSPACE_INSTRUCTION = (
     b"Read data/items.csv, create summarize.py that aggregates quantity \xc3\x97 unit_price "
     b"by SKU, execute it, and write reports/totals.json with SKU keys and integer totals.\n"
+    b"summarize.py must work when run from a directory that contains only data/items.csv: "
+    b"it creates reports/ itself if it is missing.\n"
 )
 
 _ITEMS_CSV = b"""sku,quantity,unit_price

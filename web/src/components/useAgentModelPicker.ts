@@ -3,17 +3,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type ModelEntry, OPENAI_SHAPED_CONNECTION_TYPES } from "../api";
 import { queryKeys } from "../api/queryKeys";
 import { agentServiceModeReady } from "../lib/agentReadiness";
-import { type TabItem } from "./Tabs";
 import {
   AgentEntry,
   AgentModelPickerProps,
-  ALL_SOURCES,
   CUSTOM_MODEL_KEY,
   findAgent,
-  firstSource,
   modelKey,
-  ModelSource,
-  sourceLabel,
 } from "./agentModelPickerState";
 
 export function useAgentModelPicker({
@@ -90,16 +85,11 @@ export function useAgentModelPicker({
       if (current?.name === defaultAgent.name && agentServiceModeReady(current)) {
         return;
       }
-      const nextSource = defaultAgent.supported_model_sources.includes(value.source)
-        ? value.source
-        : firstSource(defaultAgent);
       onChange({
         ...value,
         agentName: defaultAgent.name,
         agentVersion: undefined,
-        source: defaultAgent.needs_model ? nextSource : value.source,
         useSpecificAgent: false,
-        hfExecution: value.hfExecution ?? "local-vllm",
       });
       return;
     }
@@ -112,13 +102,11 @@ export function useAgentModelPicker({
     if (!fallback) return;
     onChange({
       agentName: fallback.name,
-      source: firstSource(fallback),
       modelProvider: "",
       modelName: "",
       providerConnectionId: undefined,
       providerConnectionName: undefined,
       manualModel: false,
-      hfExecution: "local-vllm",
     });
   }, [agents.data, defaultAgent, specificAgentToggle, value, onChange]);
 
@@ -136,38 +124,6 @@ export function useAgentModelPicker({
   );
 
   const compatibilityAgent = selectedAgent ?? defaultAgent;
-
-  // Sources the SELECTED agent actually supports.
-  const availableSources: ModelSource[] = useMemo(() => {
-    if (!compatibilityAgent) return [];
-    const supported = new Set(compatibilityAgent.supported_model_sources);
-    return ALL_SOURCES.filter((s) => supported.has(s));
-  }, [compatibilityAgent]);
-
-  const activeSource = availableSources.includes(value.source)
-    ? value.source
-    : (availableSources[0] ?? value.source);
-
-  const sourceTabItems: readonly TabItem<ModelSource>[] = useMemo(() => {
-    const sources = availableSources.length > 0 ? availableSources : [activeSource];
-    return sources.map((source) => ({
-      value: source,
-      label: sourceLabel(source),
-      disabled,
-      title: `Use ${sourceLabel(source)} as the model source for this agent.`,
-    }));
-  }, [activeSource, availableSources, disabled]);
-
-  // When the agent switches, snap the source into the new agent's
-  // supported set. Avoids the picker rendering a tab the route would
-  // reject at submit time.
-  useEffect(() => {
-    if (!selectedAgent || !selectedAgent.needs_model) return;
-    if (availableSources.includes(value.source)) return;
-    const firstSrc = availableSources[0];
-    if (!firstSrc) return;
-    onChange({ ...value, source: firstSrc });
-  }, [selectedAgent, availableSources, value, onChange]);
 
   const connectionList = useMemo(
     () =>
@@ -273,7 +229,6 @@ export function useAgentModelPicker({
   useEffect(() => {
     if (
       needsModel &&
-      value.source === "api" &&
       value.modelProvider &&
       value.modelName &&
       models.data &&
@@ -281,13 +236,7 @@ export function useAgentModelPicker({
     ) {
       setCustomMode(true);
     }
-  }, [needsModel, value.source, value.modelProvider, value.modelName, models.data, inCatalog]);
-
-  // Switching source always resets the model picker fields; cached
-  // catalog selections shouldn't leak across tabs.
-  useEffect(() => {
-    setCustomMode(false);
-  }, [value.source]);
+  }, [needsModel, value.modelProvider, value.modelName, models.data, inCatalog]);
 
   const enterCustomMode = (): void => {
     setCustomMode(true);
@@ -350,8 +299,5 @@ export function useAgentModelPicker({
     selectedAgentReady,
     supportsAgentVersion,
     needsModel,
-    sourceTabItems,
-    activeSource,
-    availableSources,
   };
 }

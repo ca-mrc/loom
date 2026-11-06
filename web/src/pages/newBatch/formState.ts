@@ -11,10 +11,8 @@ export type BatchPurpose = "evaluation" | "trajectory_generation";
 
 const INITIAL_PICKER: AgentModelValue = {
   agentName: "",
-  source: "api",
   modelProvider: "",
   modelName: "",
-  hfExecution: "local-vllm",
 };
 
 export interface ComboRow {

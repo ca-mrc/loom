@@ -13,7 +13,6 @@ import type { FetchMock } from "../../test-utils/fetchMock";
 
 const INITIAL_VALUE: AgentModelValue = {
   agentName: "direct-completion",
-  source: "api",
   modelProvider: "",
   modelName: "",
 };

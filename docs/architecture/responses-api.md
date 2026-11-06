@@ -34,7 +34,9 @@ upstream is confirmed native.
 
 When the route is unavailable, Loom converts the Responses request to Chat
 Completions, calls `/chat/completions`, and converts the result back to a
-Responses-shaped body. A native request can also fall back when its response
+Responses-shaped body. The converted usage keeps the Chat call's cached,
+reasoning and audio token counts, so a translated call is priced the same way
+as a direct Chat call. A native request can also fall back when its response
 matches the compatibility classifier.
 
 ## Authentication and attribution
