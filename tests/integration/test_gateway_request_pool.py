@@ -1336,6 +1336,74 @@ async def test_group_stall_lookup_does_not_scan_completed_dispatch_history(pool_
         assert sum(scan["Actual Rows"] * scan["Actual Loops"] for scan in scans) <= 2, plan
 
 
+@pytest.mark.parametrize("pooled", [False, True])
+async def test_capacity_lookup_does_not_scan_expired_admitted_receipts(
+    pool_setup: dict, pooled: bool,
+) -> None:
+    """Unknown completion history must not turn a free slot into an audit timeout."""
+    p = pool_setup
+    now = datetime.now(UTC)
+    async with p["sessions"]() as session:
+        await session.execute(update(ProviderConnection).where(
+            ProviderConnection.id == p["root"],
+        ).values(max_in_flight=1))
+        if pooled:
+            await session.execute(update(ProviderRequestPool).where(
+                ProviderRequestPool.connection_id == p["root"],
+            ).values(queue_enabled=True))
+            session.add_all([
+                ProviderRequestPoolGroupCap(pool_connection_id=p["root"], quota_group=group,
+                                            max_in_flight=1)
+                for group in ("az", "yibu")
+            ])
+        await session.execute(text("""
+            INSERT INTO gateway_dispatch_receipts
+                (id, request_id, dispatch_ordinal, attempt, team_id, trial_id,
+                 step_id, provider_connection_id, dialect, purpose, admitted_at,
+                 attempt_deadline_wall_clock)
+            SELECT gen_random_uuid(), gen_random_uuid(), 1, 1, :team, :trial,
+                   'agent', :connection, 'facade_openai', 'model_call',
+                   :now - interval '1 day' - n * interval '1 second',
+                   CASE WHEN n % 2 = 0 THEN :now - interval '1 hour' ELSE NULL END
+              FROM generate_series(1, 6000) AS n
+        """), {"team": p["team_id"], "trial": p["trial_id"],
+                "connection": p["root"], "now": now})
+        await session.commit()
+        await session.execute(text("ANALYZE gateway_dispatch_receipts"))
+    statements = []
+    engine = p["sessions"].kw["bind"]
+
+    def capture(_conn, _cursor, statement, parameters, _context, _many):
+        if "count(" in statement and "gateway_dispatch_receipts" in statement:
+            statements.append((statement, parameters))
+
+    event.listen(engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        response = await post(p, headers={"X-Loom-Pause-Capable": "1"})
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", capture)
+    assert response.status_code == 200, response.text
+    assert len(p["captures"]["requests"]) == 1
+    assert statements
+    async with engine.connect() as connection:
+        for statement, parameters in statements:
+            plan = (await connection.exec_driver_sql(
+                "EXPLAIN (ANALYZE, FORMAT JSON) " + statement, parameters,
+            )).scalar_one()[0]["Plan"]
+
+            def receipt_scans(node):
+                if node.get("Relation Name") == "gateway_dispatch_receipts":
+                    yield node
+                for child in node.get("Plans", []):
+                    yield from receipt_scans(child)
+
+            scans = list(receipt_scans(plan))
+            assert scans, plan
+            visited = sum((scan["Actual Rows"] + scan.get("Rows Removed by Filter", 0))
+                          * scan["Actual Loops"] for scan in scans)
+            assert visited <= 4, plan
+
+
 async def test_group_queue_waits_and_drains_across_replicas_with_the_normal_audit_budget(
     pool_setup: dict, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
