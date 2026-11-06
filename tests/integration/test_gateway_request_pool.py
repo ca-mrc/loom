@@ -11,11 +11,12 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import delete, event, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.auth import mint_step_jwt
 from loom.db.schema import (
+    GatewayDispatchQueue,
     GatewayDispatchReceipt,
     LlmCall,
     LlmCallIntent,
@@ -40,6 +41,7 @@ from loom_llm_gateway import dispatch_audit
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.egress_client_pool import EgressClientPool
+from loom_llm_gateway.quota_queue import decide_group_queue
 from loom_llm_gateway.rate_card import RateCardCache
 from loom_llm_gateway.request_pool import PoolDispatchAudit
 from tests.integration.test_service_execution_leases import (
@@ -1259,6 +1261,136 @@ async def test_broker_pause_header_reaches_group_queue_admission(pool_setup: dic
     response = await post(p, headers=paused)
     assert response.status_code == 200, response.text
     assert len(p["captures"]["requests"]) == 1
+
+
+async def test_group_stall_lookup_does_not_scan_completed_dispatch_history(pool_setup: dict) -> None:
+    """Completed calls reset stall age; accumulated history must not exhaust admission."""
+    p = pool_setup
+    now = datetime.now(UTC)
+    async with p["sessions"]() as session:
+        session.add_all([
+            ProviderRequestPoolGroupCap(pool_connection_id=p["root"], quota_group=group,
+                                        max_in_flight=1)
+            for group in ("az", "yibu")
+        ])
+        # Both yibu keys share one quota. Their completed history is absent from
+        # the partial in-flight index, but its latest entry still resets stall age.
+        await session.execute(text("""
+            INSERT INTO gateway_dispatch_receipts
+                (id, request_id, dispatch_ordinal, attempt, team_id, trial_id,
+                 step_id, provider_connection_id, dialect, purpose, admitted_at,
+                 provider_outcome, gateway_outcome)
+            SELECT gen_random_uuid(), gen_random_uuid(), 1, 1, :team, :trial,
+                   'agent', CASE WHEN n % 2 = 0 THEN CAST(:second AS uuid)
+                                 ELSE CAST(:third AS uuid) END,
+                   'facade_openai', 'model_call', :now - n * interval '1 second',
+                   'response_received', 'completed'
+              FROM generate_series(1, 30000) AS n
+        """), {"team": p["team_id"], "trial": p["trial_id"], "second": p["ids"][1],
+                "third": p["ids"][2], "now": now})
+        session.add(GatewayDispatchReceipt(
+            id=uuid4(), request_id=uuid4(), dispatch_ordinal=1, attempt=1,
+            team_id=p["team_id"], trial_id=p["trial_id"], step_id="agent",
+            provider_connection_id=p["ids"][1], dialect="facade_openai", purpose="model_call",
+            admitted_at=now - timedelta(hours=1),
+            attempt_deadline_wall_clock=now + timedelta(minutes=5),
+        ))
+        await session.commit()
+        await session.execute(text("ANALYZE gateway_dispatch_receipts"))
+        members = list((await session.scalars(select(ProviderRequestPoolMember).where(
+            ProviderRequestPoolMember.pool_connection_id == p["root"],
+        ).order_by(ProviderRequestPoolMember.ordinal))).all())
+        statements = []
+        engine = p["sessions"].kw["bind"]
+
+        def capture(_conn, _cursor, statement, parameters, _context, _many):
+            if "max(gateway_dispatch_receipts.admitted_at)" in statement:
+                statements.append((statement, parameters))
+
+        event.listen(engine.sync_engine, "before_cursor_execute", capture)
+        try:
+            choice = await decide_group_queue(
+                session, pool_id=p["root"], request_id=uuid4(), bound_group="yibu",
+                bound_connection_id=p["ids"][1], attempt=1, stall_sec=200,
+                upstream_timeout_sec=200, members=members,
+            )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", capture)
+        assert choice.kind == "wait"  # Recent COMPLETED receipt prevents false stall.
+        assert len(statements) == 1
+        connection = await session.connection()
+        statement, parameters = statements[0]
+        plan = (await connection.exec_driver_sql(
+            "EXPLAIN (ANALYZE, FORMAT JSON) " + statement, parameters,
+        )).scalar_one()[0]["Plan"]
+
+        def receipt_scans(node):
+            if node.get("Relation Name") == "gateway_dispatch_receipts":
+                yield node
+            for child in node.get("Plans", []):
+                yield from receipt_scans(child)
+
+        scans = list(receipt_scans(plan))
+        assert scans
+        assert all(scan["Node Type"] in {"Index Scan", "Index Only Scan"} for scan in scans), plan
+        assert sum(scan["Actual Rows"] * scan["Actual Loops"] for scan in scans) <= 2, plan
+
+
+async def test_group_queue_waits_and_drains_across_replicas_with_the_normal_audit_budget(
+    pool_setup: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    p = pool_setup
+    monkeypatch.setattr(dispatch_audit, "_AUDIT_TIMEOUT_SECONDS", 1.0)
+    released = asyncio.Event()
+    active = {"az": 0, "yibu": 0}
+    maximum = dict(active)
+
+    async def block(request):
+        group = "az" if request.url.host == "provider-0.example.test" else "yibu"
+        active[group] += 1
+        maximum[group] = max(maximum[group], active[group])
+        try:
+            await released.wait()
+        finally:
+            active[group] -= 1
+
+    p["captures"]["handler"] = block
+    async with p["sessions"]() as session:
+        pool = await session.get(ProviderRequestPool, p["root"])
+        pool.queue_enabled = True
+        session.add_all([
+            ProviderRequestPoolGroupCap(pool_connection_id=p["root"], quota_group=group,
+                                        max_in_flight=1)
+            for group in active
+        ])
+        await session.commit()
+    trials = [p] + [await _another_pool_trial(p) for _ in range(3)]
+    calls = [asyncio.create_task(post(trial, replica=i % 2,
+                                    headers={"X-Loom-Pause-Capable": "1"}))
+             for i, trial in enumerate(trials)]
+    try:
+        async with asyncio.timeout(5):
+            while True:
+                async with p["sessions"]() as session:
+                    waiting = await session.scalar(select(func.count()).select_from(
+                        GatewayDispatchQueue,
+                    ).where(GatewayDispatchQueue.pool_connection_id == p["root"],
+                            GatewayDispatchQueue.closed_at.is_(None)))
+                if waiting and all(active.values()):
+                    break
+                await asyncio.sleep(0.02)
+        assert len(p["captures"]["requests"]) == 2
+    finally:
+        released.set()
+        responses = await asyncio.wait_for(asyncio.gather(*calls), 10)
+    assert [response.status_code for response in responses] == [200] * 4
+    assert maximum == {"az": 1, "yibu": 1}
+    async with p["sessions"]() as session:
+        rows = list((await session.scalars(select(GatewayDispatchQueue).where(
+            GatewayDispatchQueue.pool_connection_id == p["root"],
+        ))).all())
+    assert rows and all(row.closed_at is not None for row in rows)
+    assert all(row.outcome in {"admitted", "overflow_admitted"} for row in rows)
 
 
 async def test_in_flight_cap_is_shared_by_gateway_replicas(pool_setup: dict) -> None:

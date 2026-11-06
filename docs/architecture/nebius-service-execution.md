@@ -659,6 +659,23 @@ materializing. A terminal rerun uses a new Trial and its own image prerequisites
 Nonterminal retries still advance the attempt after cleanup, and exact event
 replay still returns its original event without projecting again. Transition/event admission also
 refreshes the locked lease so a cached generation cannot bypass revocation.
+For typed hosted model transport failures, the actuator keeps a retry candidate
+`materializing` while its failed attempt is archived. CP owns the policy and
+checkpoint decision; the actuator needs no checkpoint table grants. The archive
+transaction checks policy, attempt identity and cancellation before returning it to
+`queued` with bounded backoff. The lease finishes its normal finalize/delete
+path; reservation requires that predecessor's committed archive and completed
+cleanup, then rechecks mutable policy and team limits without reading checkpoint
+tables. Checkpoint writers lock the owning Trial and require an active attempt;
+they cannot append progress while it is materializing or queued. Admission pauses
+and parent cancellation still fence the new attempt.
+Each intermediate attempt retains its Artifact, canonical events and ATIF,
+with its trajectory index in Artifact metadata. It does not publish a second
+sequence starting at zero to the Trial-wide event stream. Terminal attempts
+publish that stream normally; no previous attempt's evidence is deleted.
+The Trial retains its last archived index during backoff so cancellation or
+retry exhaustion still leaves the standard trajectory downloads available.
+Reservation clears that projection before the successor becomes active.
 The published `0135` migration additionally rejects terminal-to-nonterminal
 Trial updates in PostgreSQL, including BEFORE-trigger rewrites. Metadata updates
 and terminal-to-terminal corrections remain permitted. The row-local invariant

@@ -107,6 +107,50 @@ func TestSandboxCleanupTimeoutIsRuntimeError(t *testing.T) {
 	}
 }
 
+func TestTypedAgentTransportFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name, marker, role, executionRole, cleanup, want string
+	}{
+		{"gateway", `{"failure_reason":"gateway_error"}`, "agent", "attempt", "", "gateway_error"},
+		{"disconnect", `{"failure_reason":"provider_transport_disconnect"}`, "agent", "attempt", "", "provider_transport_disconnect"},
+		{"unknown", `{"failure_reason":"task_error"}`, "agent", "attempt", "", ""},
+		{"stale", `{"failure_reason":"gateway_error"}`, "agent", "attempt", "", ""},
+		{"oversized", strings.Repeat(" ", 4096) + `{"failure_reason":"gateway_error"}`, "agent", "attempt", "", ""},
+		{"verifier", `{"failure_reason":"gateway_error"}`, "verifier", "verifier", "", ""},
+		{"setup", `{"failure_reason":"gateway_error"}`, "setup", "attempt", "", ""},
+		{"cleanup", `{"failure_reason":"gateway_error"}`, "agent", "attempt", `{"exception_type":"SandboxRPCError","exception_message":"sandbox stop_processes failed (HTTP 409; cleanup_timeout)"}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspace, output := t.TempDir(), t.TempDir()
+			agentDir := filepath.Join(workspace, ".loom", "agent")
+			if err := os.MkdirAll(agentDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(agentDir, "transport-failure.json"), []byte(tc.marker), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.cleanup != "" {
+				if err := os.WriteFile(filepath.Join(agentDir, "exception.json"), []byte(tc.cleanup), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			script := `printf '%s' "$LOOM_TEST_TRANSPORT_MARKER" > .loom/agent/transport-failure.json; exit 1`
+			if tc.name == "stale" {
+				script = "exit 1"
+			}
+			p := testPlan(workspace, phase{
+				Role: tc.role, Argv: []string{"/bin/sh", "-c", script}, WorkingDirectory: workspace, TimeoutSeconds: 5,
+				Environment: map[string]string{"LOOM_TEST_TRANSPORT_MARKER": tc.marker},
+			})
+			p.ExecutionRole = tc.executionRole
+			result, err := runPlan(context.Background(), p, workspace, output, nil)
+			if err == nil || result.FailureReason != tc.want || !result.PartialEvidence {
+				t.Fatalf("unexpected result: %#v err=%v", result, err)
+			}
+		})
+	}
+}
+
 func TestSandboxCleanupSnapshotIsRuntimeError(t *testing.T) {
 	workspace, output := t.TempDir(), t.TempDir()
 	message := "sandbox stop_processes failed (HTTP 409; cleanup_timeout; pid=31;ppid=1;state=D;uid=0;wchan=wait_on_bit;kill_errno=0;sigkill_pending=1)"

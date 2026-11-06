@@ -72,6 +72,36 @@ def test_runtime_plan_is_immutable_bounded_and_digest_pinned() -> None:
         )
 
 
+@pytest.mark.parametrize("reason", ["gateway_error", "provider_transport_disconnect"])
+@pytest.mark.parametrize(("status", "role"), [
+    ("task_error", "attempt"), ("task_error", "verifier"),
+    ("runtime_error", "attempt"), ("timed_out", "attempt"), ("cancelled", "attempt"),
+])
+def test_transport_failure_reason_only_allowed_for_failed_agent_attempt(reason, status, role):
+    from datetime import UTC, datetime
+
+    from loom.execution_runtime_contract import ExecutionRuntimeResultV1
+
+    plan = _plan()
+    now = datetime.now(UTC)
+    payload = {
+        **{key: getattr(plan, key) for key in (
+            "candidate_sha", "task_revision_sha256", "command_identity_sha256", "task_image_ref",
+            "runtime_image_ref", "runtime_binary_sha256", "execution_class_id",
+        )},
+        "schema_version": "loom.execution-runtime-result.v1",
+        "runtime_contract_sha256": "sha256:" + "d" * 64,
+        "execution_role": role, "container_roles": ["execution", "task-sandbox"],
+        "status": status, "started_at": now, "finished_at": now,
+        "phases": [], "partial_evidence": True, "failure_reason": reason,
+    }
+    if status == "task_error" and role == "attempt":
+        assert ExecutionRuntimeResultV1.model_validate(payload).failure_reason == reason
+    else:
+        with pytest.raises(ValidationError):
+            ExecutionRuntimeResultV1.model_validate(payload)
+
+
 @pytest.mark.parametrize("value", ["a" * 4096, "é" * 2048])
 def test_phase_environment_retains_utf8_value_bound(value: str) -> None:
     raw = _phase("agent").model_dump()

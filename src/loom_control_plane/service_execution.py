@@ -58,7 +58,7 @@ from loom.execution_runtime_contract import (
     validate_runtime_plan_requirements,
 )
 from loom.models.task import TaskConfig
-from loom.models.trial import TrialConfig
+from loom.models.trial import RetryPolicy, RetryReason, TrialConfig
 from loom.pipeline.keys import canonical_digest, canonical_uuid5
 from loom.task_image_materialization import (
     get_trial_task_image_execution_grant,
@@ -93,6 +93,7 @@ from loom_control_plane.service_execution_locks import lock_execution_trial
 _EXECUTION_UNIT_NAMESPACE = UUID("a2f6a80b-b27c-4ae1-b9a0-8c743edb0fa5")
 _TERMINAL_EVENT_KINDS = frozenset({"cancelled", "timed_out", "failed", "finalized", "deleted"})
 _TERMINAL_TRIAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
+MODEL_RETRY_REASONS = frozenset({"gateway_error", "provider_transport_disconnect"})
 _EVENT_TO_OBSERVED = {
     "created": "created",
     "started": "running",
@@ -650,6 +651,28 @@ async def _bind_verifier_execution_route(
     return decision, digest
 
 
+async def model_retry_policy(
+    session: AsyncSession, *, trial: Trial, reason: str | None,
+) -> RetryPolicy | None:
+    """Recheck mutable retry policy under the Trial lock, including for actuators.
+
+    CP separately qualifies checkpoint safety when committing the archive.
+    """
+    if (reason not in MODEL_RETRY_REASONS or trial.cancellation_requested_at is not None
+            or trial.cancellation_retained_at is not None
+            or trial.state in _TERMINAL_TRIAL_STATES):
+        return None
+    policy = RetryPolicy.model_validate(trial.config.get("retry", {}))
+    consumed = trial.attempt_count - trial.admission_pause_releases
+    ceiling = await session.scalar(select(TeamQuota.max_attempts_ceiling).where(
+        TeamQuota.team_id == trial.team_id,
+    ).with_for_update())
+    if (ceiling is None or consumed >= min(policy.max_attempts, ceiling)
+            or RetryReason(reason) not in policy.retry_on):
+        return None
+    return policy
+
+
 async def reserve_trial_execution(
     session: AsyncSession,
     *,
@@ -734,6 +757,22 @@ async def reserve_trial_execution(
         ).scalar_one_or_none()
         if previous_lease is not None and previous_lease.cleanup_state != "complete":
             raise ServiceExecutionConflict("previous execution cleanup is not complete")
+        retry = (trial.result or {}).get("native_retry")
+        if isinstance(retry, dict):
+            # The committed archive records CP's checkpoint-safety decision.
+            # Checkpoint writers lock the Trial and reject materializing/queued
+            # states; the old execution is fenced before this reservation.
+            if (previous_lease is None or retry.get("lease_id") != str(previous_lease.id)
+                    or retry.get("attempt") != trial.attempt_count
+                    or previous_lease.materialization_state != "committed"
+                    or trial.next_attempt_at is None or trial.next_attempt_at > current_time
+                    or await model_retry_policy(session, trial=trial, reason=retry.get("reason")) is None):
+                raise ServiceExecutionConflict("native model retry is not eligible")
+            trial.result = None
+            trial.trajectory_index = None
+            trial.failure_reason = None
+            trial.failure_message = None
+            trial.next_attempt_at = None
         attempt = trial.attempt_count + 1
     else:
         if parent_lease_id is None:
@@ -2674,6 +2713,27 @@ async def _committed_result_finalization_payload(
         "output_manifest_sha256": lease.output_manifest_sha256,
         "output_marker_sha256": lease.output_marker_sha256,
     }
+    model_failure = (runtime_result.failure_reason if runtime_result.status == "task_error"
+                     and lease.execution_role == "attempt"
+                     and runtime_result.failure_reason in MODEL_RETRY_REASONS else None)
+    if model_failure is not None:
+        trial = await session.get(Trial, lease.trial_id, with_for_update=True)
+        if trial is None or trial.attempt_count != lease.attempt:
+            raise ServiceExecutionConflict("committed execution no longer owns the trial attempt")
+        # The restricted actuator finalizes this source, but cannot read
+        # Harbor checkpoint state. CP owns the policy/checkpoint decision at
+        # canonical archive commit; this marker is only a retry candidate.
+        if (trial.state not in _TERMINAL_TRIAL_STATES
+                and trial.cancellation_requested_at is None
+                and trial.cancellation_retained_at is None):
+            return {
+                "trial_state": "materializing",
+                "result": {**result, "native_retry": {
+                    "lease_id": str(lease.id), "attempt": lease.attempt, "reason": model_failure,
+                }},
+                "failure_reason": model_failure,
+                "failure_message": f"service execution runtime reported {model_failure}",
+            }
     if runtime_result.status in {"succeeded", "timed_out"} and defers_verification(lease):
         trial = await session.get(Trial, lease.trial_id, with_for_update=True)
         if trial is None:
@@ -2724,8 +2784,8 @@ async def _committed_result_finalization_payload(
         failure_message = None
     else:
         trial_state = "cancelled" if runtime_result.status == "cancelled" else "failed"
-        failure_reason = runtime_result.status
-        failure_message = f"service execution runtime reported {runtime_result.status}"
+        failure_reason = model_failure or runtime_result.status
+        failure_message = f"service execution runtime reported {failure_reason}"
     return {
         "trial_state": trial_state,
         "result": result,

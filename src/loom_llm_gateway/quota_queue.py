@@ -12,7 +12,7 @@ from datetime import timedelta
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy import and_, func, or_, select, text, union_all, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import (
@@ -77,6 +77,9 @@ async def decide_group_queue(
                 )
                 .where(
                     ProviderRequestPoolMember.pool_connection_id == pool_id,
+                    GatewayDispatchReceipt.provider_connection_id.in_(
+                        [member.connection_id for member in members]
+                    ),
                     GatewayDispatchReceipt.provider_outcome == "admitted",
                     or_(
                         GatewayDispatchReceipt.attempt_deadline_wall_clock > now,
@@ -109,11 +112,27 @@ async def decide_group_queue(
     views = [
         GroupView(group, caps[group], counts.get(group, 0), oldest.get(group)) for group in groups
     ]
+    choice = choose_admission(
+        bound_group=bound_group, groups=views, request_id=request_id,
+        front=attempt > 1, idle_sec=0, stall_sec=stall_sec,
+    )
+    # Stall age matters only for a full group with no overflow. Free slots and
+    # FIFO ordering never need historical receipts on their admission path.
+    if choice.kind != "wait" or counts.get(bound_group, 0) < caps[bound_group]:
+        return choice
     connection_ids = members_by_group.get(bound_group, [bound_connection_id])
-    last_admitted = await session.scalar(
-        select(func.max(GatewayDispatchReceipt.admitted_at)).where(
-            GatewayDispatchReceipt.provider_connection_id.in_(connection_ids)
+    # One indexed extremum per physical connection. MAX with an IN predicate
+    # can scan every completed receipt for a multi-key quota group, even when
+    # (provider_connection_id, admitted_at) is indexed. The partial in-flight
+    # index cannot answer this query: completed calls also reset stall age.
+    latest_by_member = union_all(*(
+        select(func.max(GatewayDispatchReceipt.admitted_at).label("latest_admission")).where(
+            GatewayDispatchReceipt.provider_connection_id == connection_id,
         )
+        for connection_id in connection_ids
+    )).subquery()
+    last_admitted = await session.scalar(
+        select(func.max(latest_by_member.c.latest_admission))
     )
     if last_admitted is not None:
         idle_sec = max(0.0, (now - last_admitted).total_seconds())

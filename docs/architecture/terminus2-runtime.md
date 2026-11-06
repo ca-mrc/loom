@@ -214,11 +214,25 @@ phase's identity into the canonical `trial_error` event and
 bundle downloads retain the diagnostic files, and raw delivery
 `execution_result.json` retains the enriched Trial result.
 
-The existing `failure_reason`, terminal state and retry policy remain unchanged:
-exception identity supplies detail, not a second retry taxonomy or a claim that
-Harbor's verifier/orchestrator ran. Older results without these optional fields
-remain readable. Previously lost exception types cannot be reconstructed from
-an empty historical message.
+Exception identity supplies detail separately from retry classification. For
+hosted Terminus, the trusted controller records typed SDK 5xx/timeouts as
+`gateway_error` and connection failures as `provider_transport_disconnect`.
+The native runtime carries that reason in its committed result only for a failed
+agent attempt. Arbitrary exception text, deterministic 4xx, verifier failures,
+deadline cancellation and cleanup failures cannot enable this path. Older
+results without typed reasons remain readable; historical `task_error` results
+are not reclassified by matching their messages.
+
+The Control Plane applies the Trial's `retry_on`, attempt limit, team ceiling
+and backoff after the failed attempt's canonical archive commits. Physical
+cleanup must finish before a distinct attempt can start. Intermediate events
+stay in their immutable attempt archive; the final attempt supplies the
+Trial-wide event stream. The last archived trajectory remains accessible during
+backoff and is cleared from the current projection when a successor reserves.
+This restarts the task attempt,
+without adding another SDK/Harbor model-call retry loop. A multi-model progress
+marker still prohibits same-Trial replay because Harbor cannot resume it;
+that failure requires a new Trial through the supported rerun flow.
 
 ## Attempt deadline and step-credential lifecycle (#1748)
 

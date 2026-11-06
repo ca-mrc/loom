@@ -683,6 +683,59 @@ func TestSandboxAbortKeepsLedgerAvailableAndRejectsNewModelCalls(t *testing.T) {
 	}
 }
 
+func TestTerminusPhaseDeadlineRouteTracksOwnedAgentPhase(t *testing.T) {
+	broker := &workloadBroker{client: &http.Client{Timeout: time.Second},
+		identity: workloadIdentity{LeaseID: "bound-lease", Generation: 3, ExecutionRole: "attempt"}}
+	proxy, stop, err := broker.startProxy(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stop() }()
+	defer broker.setPhase("agent", time.Time{})
+	read := func(token, suffix string, wantStatus int, wantDeadline time.Time) {
+		t.Helper()
+		request, err := http.NewRequest(http.MethodGet, proxy+"/internal/loom/terminus/phase-deadline"+suffix, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("X-Loom-Terminus-Control", token)
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != wantStatus {
+			t.Fatalf("phase deadline: got HTTP %d, want %d", response.StatusCode, wantStatus)
+		}
+		if wantStatus == http.StatusOK {
+			var body struct {
+				Deadline time.Time `json:"deadline"`
+			}
+			if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if !body.Deadline.Equal(wantDeadline) {
+				t.Fatalf("phase deadline: got %s, want %s", body.Deadline, wantDeadline)
+			}
+		}
+	}
+	deadline := time.Now().Add(time.Minute)
+	broker.setPhase("agent", deadline)
+	read(broker.terminusToken, "", http.StatusOK, deadline)
+	extended := deadline.Add(time.Minute)
+	broker.extendPhaseDeadline(extended)
+	read(broker.terminusToken, "", http.StatusOK, extended)
+	read("wrong-token", "", http.StatusForbidden, time.Time{})
+	read(broker.terminusToken, "?trial_id=foreign", http.StatusForbidden, time.Time{})
+	broker.setPhase("verifier", deadline)
+	read(broker.terminusToken, "", http.StatusForbidden, time.Time{})
+	broker.setPhase("agent", time.Time{})
+	read(broker.terminusToken, "", http.StatusForbidden, time.Time{})
+	// A new agent phase must expose its own bound, never the previous extension.
+	broker.setPhase("agent", deadline)
+	read(broker.terminusToken, "", http.StatusOK, deadline)
+}
+
 func TestTerminusControlBindsPodIdentityAndRejectsCallerScope(t *testing.T) {
 	tokenFile := filepath.Join(t.TempDir(), "pod-token")
 	if err := os.WriteFile(tokenFile, []byte("pod-bound-token"), 0o600); err != nil {

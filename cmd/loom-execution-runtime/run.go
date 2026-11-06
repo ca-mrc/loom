@@ -183,6 +183,17 @@ func runPlan(
 			}
 			return result, context.Cause(ctx)
 		}
+		transportMarkerReady := false
+		if item.Role == "agent" {
+			// Input bundles and prior phases cannot supply classification for
+			// this invocation. Only a marker written during the phase counts.
+			root, openErr := os.OpenRoot(workspace)
+			if openErr == nil {
+				openErr = root.Remove(".loom/agent/transport-failure.json")
+				root.Close()
+			}
+			transportMarkerReady = openErr == nil || os.IsNotExist(openErr)
+		}
 		evidence, err := runPhase(
 			ctx, item, ordinal+1, workspace, outputRoot,
 			p.MaxLogBytesPerStream, time.Duration(p.TerminationGraceSec)*time.Second,
@@ -216,6 +227,9 @@ func runPlan(
 			if agentTimeout != nil && ctx.Err() == nil {
 				result.Status = "timed_out"
 				err = errors.Join(agentTimeout, err)
+			}
+			if result.Status == "task_error" && p.ExecutionRole == "attempt" && evidence.Role == "agent" && transportMarkerReady {
+				result.FailureReason = agentTransportFailure(workspace)
 			}
 			result.PartialEvidence = true
 			result.FinishedAt = time.Now().UTC()
@@ -427,6 +441,41 @@ func declaresVerifierReport(item phase) bool {
 var cleanupDiagnosticSuffix = regexp.MustCompile(
 	`^pid=[1-9][0-9]{0,9};ppid=[0-9]{1,10};state=[RSDTtXZPIUW];uid=[0-9]{1,10};wchan=[A-Za-z0-9_.]{1,64};kill_errno=[0-9]{1,3};sigkill_pending=[01](?:,pid=[1-9][0-9]{0,9};ppid=[0-9]{1,10};state=[RSDTtXZPIUW];uid=[0-9]{1,10};wchan=[A-Za-z0-9_.]{1,64};kill_errno=[0-9]{1,3};sigkill_pending=[01]){0,3}$`,
 )
+
+// The trusted Terminus controller writes this typed marker only after model
+// execution and finalization have unwound. Task sandbox files are separate.
+func agentTransportFailure(workspace string) string {
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		return ""
+	}
+	defer root.Close()
+	file, err := root.Open(".loom/agent/transport-failure.json")
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 4096 {
+		return ""
+	}
+	payload, err := io.ReadAll(io.LimitReader(file, 4097))
+	if err != nil || len(payload) > 4096 {
+		return ""
+	}
+	var marker struct {
+		FailureReason string `json:"failure_reason"`
+	}
+	if err := json.Unmarshal(payload, &marker); err != nil {
+		return ""
+	}
+	switch marker.FailureReason {
+	case "gateway_error", "provider_transport_disconnect":
+		return marker.FailureReason
+	default:
+		return ""
+	}
+}
 
 func sandboxCleanupFailure(workspace, role string) bool {
 	if role != "agent" && role != "verifier" {

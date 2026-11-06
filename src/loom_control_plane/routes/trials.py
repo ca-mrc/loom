@@ -22,6 +22,8 @@ from loom.db.schema import (
     ProviderConnection,
     Team,
     TeamQuota,
+    TerminusAgentExecution,
+    TerminusAgentRunAttempt,
     TrialTaskImageMaterialization,
 )
 from loom.db.schema import Task as TaskRow
@@ -937,6 +939,18 @@ async def post_episode_checkpoint(
             raise HTTPException(status_code=403, detail="trial belongs to another team")
         if trial_row.state not in {"claimed", "running"}:
             raise HTTPException(status_code=409, detail="trial_terminal")
+        # Bind the write to the same Trial whose state fence we hold. A
+        # different active Trial cannot authorize an archived execution.
+        execution = await session.get(TerminusAgentExecution, payload.execution_id)
+        attempt = await session.get(TerminusAgentRunAttempt, payload.run_attempt_id)
+        if (
+            execution is None
+            or execution.trial_id != trial_row.id
+            or attempt is None
+            or attempt.execution_id != execution.id
+            or attempt.state != "running"
+        ):
+            raise HTTPException(status_code=409, detail="terminus_execution_identity_invalid")
         attempt_deadline = payload.attempt_deadline_wall_clock
         if attempt_deadline is not None:
             if attempt_deadline.tzinfo is None or attempt_deadline.utcoffset() is None:

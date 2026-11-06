@@ -418,6 +418,67 @@ def test_phase_entrypoint_retains_sanitized_typed_failure(tmp_path, monkeypatch,
     assert json.loads(body)["exception_type"] == "ContextLengthExceededError"
 
 
+@pytest.mark.parametrize(("kind", "phase", "reason"), [
+    ("service_unavailable", "terminus-2", "gateway_error"),
+    ("litellm_503", "terminus-2", "gateway_error"),
+    ("disconnect", "terminus-2", "provider_transport_disconnect"),
+    ("timeout", "terminus-2", "gateway_error"),
+    ("auth", "terminus-2", None),
+    ("deadline", "terminus-2", None),
+    ("text", "terminus-2", None),
+    ("service_unavailable", "verify-sandbox", None),
+    ("cleanup", "terminus-2", None),
+    ("sdk_cleanup", "terminus-2", None),
+    ("control_timeout", "terminus-2", None),
+])
+def test_phase_entrypoint_only_records_typed_agent_transport_failure(tmp_path, monkeypatch, kind, phase, reason):
+    import httpx
+    import litellm
+    import openai
+    import tomli_w
+
+    from loom import service_execution_sandbox_task as module
+    from loom.errors import AgentError
+
+    task, trial, _ = _inputs()
+    (tmp_path / "task.toml").write_text(tomli_w.dumps(task.model_dump(mode="json", exclude_none=True)))
+    monkeypatch.setenv("LOOM_TASK_TRIAL_JSON", trial.model_dump_json())
+    monkeypatch.setattr("sys.argv", ["sandbox-task", phase, "--workspace", str(tmp_path)])
+    request = httpx.Request("POST", "https://gateway.example/v1/chat/completions")
+    response = httpx.Response(503, request=request)
+    failures = {
+        "service_unavailable": openai.InternalServerError("Bearer private-step-token", response=response, body={}),
+        "litellm_503": litellm.ServiceUnavailableError("503", llm_provider="openai", model="glm-5.3", response=response),
+        "disconnect": openai.APIConnectionError(request=request),
+        "timeout": openai.APITimeoutError(request=request),
+        "auth": openai.AuthenticationError("unauthorized", response=httpx.Response(401, request=request), body={}),
+        "deadline": openai.InternalServerError("expired", response=response, body={"detail": {"code": "agent_timeout"}}),
+        "text": RuntimeError("ServiceUnavailableError: HTTP 503"),
+        "cleanup": openai.InternalServerError("503", response=response, body={}),
+        "sdk_cleanup": openai.InternalServerError("503", response=response, body={}),
+        "control_timeout": httpx.ReadTimeout("checkpoint request timed out", request=request),
+    }
+
+    async def fail(*args):
+        try:
+            raise AgentError("") from failures[kind]
+        finally:
+            if kind == "cleanup":
+                raise RuntimeError("cleanup failed")
+            if kind == "sdk_cleanup":
+                raise openai.APIConnectionError(request=request)
+
+    monkeypatch.setattr(module, "run_agent" if phase == "terminus-2" else "run_verifier", fail)
+    expected_error = openai.APIConnectionError if kind == "sdk_cleanup" else RuntimeError if kind == "cleanup" else AgentError
+    with pytest.raises(expected_error):
+        module.main()
+    marker = tmp_path / ".loom/agent/transport-failure.json"
+    if reason is None:
+        assert not marker.exists()
+    else:
+        assert json.loads(marker.read_bytes()) == {"failure_reason": reason}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("signal_during_snapshot", [False, True])
 async def test_successful_agent_snapshot_crossing_deadline_still_hands_off(
