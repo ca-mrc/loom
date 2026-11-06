@@ -770,7 +770,7 @@ def _connection_dns_config() -> dict[str, Any]:
 def public_tls_config(config: dict[str, Any]) -> dict[str, Any]:
     """Native Caddy TLS automation with a valid manual certificate for migration."""
     host, ns = config["public_host"], config["namespace"]
-    api_proxy = {
+    api_proxy: dict[str, Any] = {
         "handler": "reverse_proxy",
         "upstreams": [{"dial": f"loom-service.{ns}.svc.cluster.local.:8090"}],
         "transport": {"protocol": "http", "dial_timeout": "3s", "read_timeout": "300s"},
@@ -874,6 +874,12 @@ def public_tls_config(config: dict[str, Any]) -> dict[str, Any]:
     if config.get("regional_execution_targets"):
         routes = result["apps"]["http"]["servers"]["public"]["routes"][0]["handle"][-1]["routes"]
         gateway = dict(api_proxy, upstreams=[{"dial": f"loom-llm-gateway.{ns}.svc.cluster.local.:9100"}])
+        # Model retries and credited quota waits can exceed the control API's
+        # socket read timer. The Gateway and signed execution phase own those
+        # deadlines; client/phase cancellation still closes the proxy request.
+        model_gateway = dict(gateway, transport={
+            key: value for key, value in gateway["transport"].items() if key != "read_timeout"
+        })
         routes[0:0] = [
             {
                 "match": [{"path": ["/internal/service-execution/*"]}],
@@ -896,7 +902,7 @@ def public_tls_config(config: dict[str, Any]) -> dict[str, Any]:
                         ],
                     }
                 ],
-                "handle": [gateway],
+                "handle": [model_gateway],
                 "terminal": True,
             },
             {

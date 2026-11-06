@@ -1156,6 +1156,9 @@ def test_regional_public_routes_preserve_exact_model_and_broker_boundaries(
     assert routes[0]["handle"][0]["upstreams"] == [
         {"dial": f"loom-llm-gateway.{config['namespace']}.svc.cluster.local.:9100"}
     ]
+    assert "read_timeout" not in routes[1]["handle"][0]["transport"]
+    for control in (routes[0], routes[3]):
+        assert control["handle"][0]["transport"]["read_timeout"] == "300s"
 
 
 @pytest.mark.parametrize(
@@ -1508,4 +1511,3 @@ def test_public_proxy_dns_retry_fits_existing_dial_budget(request, inputs_fixtur
         assert all(x["dial"].endswith((".svc.cluster.local.:8090", ".svc.cluster.local.:9100"))
                    for x in proxy["upstreams"])
         assert proxy["transport"]["dial_timeout"] == "3s"
-        assert proxy["transport"]["read_timeout"] == "300s"

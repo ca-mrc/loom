@@ -128,6 +128,13 @@ Migration `0194` installs the separate history index. Neither capacity nor
 stall admission may scan retained dispatch history within the one-second audit
 budget; an old receipt with a future signed deadline still occupies its slot.
 
+Regional model POST routes through public TLS do not inherit the control API's
+300-second socket read timeout: a valid gateway retry plus quota wait can exceed
+it before returning response headers. Gateway retry limits and the signed native
+execution phase own model deadlines; client or phase cancellation closes the
+upstream request. Public API and service-execution broker operations retain the
+300-second read timer, and every proxy retains its three-second dial timeout.
+
 The internal join is `trial_id / step_id / agent_attempt_id / step_jwt_id`.
 The worker supervisor creates a new opaque attempt UUID for each real agent
 retry; CP returns a new signed grant UUID (`jti`) for each mint. The worker
