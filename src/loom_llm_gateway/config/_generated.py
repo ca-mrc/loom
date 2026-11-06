@@ -59,6 +59,7 @@ class GatewaySettings(BaseSettings):
     storage_backend: str = "minio"
     task_egress_config_file: Path | None = None
     together_api_key: SecretStr | None = None
+    upstream_read_timeout_sec: float | None = None
     upstream_timeout_sec: float = 200.0
 
 

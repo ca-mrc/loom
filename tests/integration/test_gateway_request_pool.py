@@ -1962,3 +1962,141 @@ async def test_gateway_pool_failover_uses_the_same_total_attempt_limit(pool_setu
     async with p["sessions"]() as session:
         call = await session.scalar(select(LlmCall).where(LlmCall.trial_id == p["trial_id"]))
     assert call.attempt == 3
+
+
+async def _cool_all_members(p: dict, *, kind: str = "health") -> None:
+    now = datetime.now(UTC)
+    async with p["sessions"]() as session:
+        for connection_id in p["ids"]:
+            if kind == "health":
+                session.add(ProviderConnectionTimeoutHealth(
+                    connection_id=connection_id,
+                    suppression_started_at=now,
+                    suppressed_until=now + timedelta(seconds=30),
+                ))
+            else:
+                member = await session.get(ProviderRequestPoolMember, (p["root"], connection_id))
+                member.cooldown_until = now + timedelta(seconds=30)
+        await session.commit()
+
+
+@pytest.mark.parametrize("kind", ["health", "member"])
+async def test_all_eligible_members_cooling_down_return_temporary_503(
+    pool_setup: dict, kind: str,
+) -> None:
+    p = pool_setup
+    await _cool_all_members(p, kind=kind)
+    response = await post(p)
+    assert response.status_code == 503, response.text
+    assert response.json() == {"detail": {"code": "provider_request_pool_cooling_down"}}
+    assert response.headers["Retry-After"] == "1"
+    assert p["captures"]["requests"] == []
+    assert await receipts(p) == []
+    async with p["sessions"]() as session:
+        assert await session.get(ProviderRequestPoolBinding, (p["root"], p["trial_id"])) is None
+
+
+@pytest.mark.parametrize("invalidity", ["disabled", "credentials", "model", "preflight", "authorization"])
+async def test_cooldown_does_not_make_permanently_ineligible_members_retryable(
+    pool_setup: dict, invalidity: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    p = pool_setup
+    await _cool_all_members(p)
+    if invalidity == "authorization":
+        from fastapi import HTTPException
+
+        from loom_llm_gateway import request_pool
+
+        resolve = request_pool.resolve_facade_connection
+
+        async def denied_member(session, connection_id, *args, **kwargs):
+            if connection_id in p["ids"][1:]:
+                raise HTTPException(403, "member not shared with this team")
+            return await resolve(session, connection_id, *args, **kwargs)
+
+        monkeypatch.setattr(request_pool, "resolve_facade_connection", denied_member)
+    async with p["sessions"]() as session:
+        for connection_id in p["ids"]:
+            member = await session.get(ProviderRequestPoolMember, (p["root"], connection_id))
+            if invalidity == "disabled" or (invalidity == "authorization" and connection_id == p["root"]):
+                member.enabled = False
+            elif invalidity == "authorization":
+                pass  # The real member policy calls the denied authorization resolver.
+            elif invalidity == "credentials":
+                (await session.get(ProviderConnection, connection_id)).status = "invalid"
+            elif invalidity == "model":
+                (await session.get(ProviderConnection, connection_id)).allowed_models = ["student"]
+            else:
+                await session.execute(update(ProviderModelCache).where(
+                    ProviderModelCache.provider_connection_id == connection_id,
+                ).values(last_preflight_status="failed", last_preflight_error_code="model-not-found"))
+        await session.commit()
+    response = await post(p)
+    assert response.status_code == 429, response.text
+    assert response.json() == {"detail": "provider_request_pool_unavailable"}
+    assert p["captures"]["requests"] == []
+    assert await receipts(p) == []
+
+
+async def test_expired_cooldown_recovers_without_dispatching_to_suppressed_members(
+    pool_setup: dict,
+) -> None:
+    p = pool_setup
+    await _cool_all_members(p)
+    response = await post(p)
+    assert response.status_code == 503, response.text
+    async with p["sessions"]() as session:
+        health = await session.get(ProviderConnectionTimeoutHealth, p["ids"][1])
+        health.suppressed_until = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
+    response = await post(p)
+    assert response.status_code == 200, response.text
+    assert [r.url.host for r in p["captures"]["requests"]] == ["provider-1.example.test"]
+    assert len(await receipts(p)) == 1
+
+
+@pytest.mark.parametrize("sdk_path", ["openai", "litellm"])
+async def test_real_sdk_cooldown_503_reaches_frozen_runtime_retry_contract(
+    pool_setup: dict, monkeypatch: pytest.MonkeyPatch, sdk_path: str,
+) -> None:
+    # Keep model metadata and the real OpenAI/LiteLLM chain fully offline.
+    monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+    monkeypatch.setenv("LITELLM_TELEMETRY", "False")
+    import litellm
+    import openai
+
+    from loom.errors import AgentError
+    from loom.service_execution_sandbox_task import _model_transport_failure
+
+    p = pool_setup
+    await _cool_all_members(p)
+    sdk_requests = []
+    transport = httpx.ASGITransport(app=p["apps"][0])
+
+    async def dispatch(request):
+        sdk_requests.append(request)
+        return await transport.handle_async_request(request)
+
+    async with openai.AsyncOpenAI(
+        api_key=p["jwt"], base_url="http://gateway.test/openai/v1", max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(dispatch)),
+    ) as sdk:
+        with pytest.raises(openai.APIStatusError) as error:
+            if sdk_path == "openai":
+                await sdk.chat.completions.create(
+                    model="student", messages=[{"role": "user", "content": "offline fixture"}],
+                )
+            else:
+                await litellm.acompletion(
+                    model="openai/student", messages=[{"role": "user", "content": "offline fixture"}],
+                    client=sdk, num_retries=0, max_retries=0,
+                )
+    failure = AgentError("controlled model call failed")
+    failure.__cause__ = error.value
+    # 7fc/22a frozen runtimes already classify typed SDK 5xx as gateway_error;
+    # they do not recognize the former generic pool-unavailable 429.
+    assert _model_transport_failure(failure) == "gateway_error"
+    assert error.value.status_code == 503
+    assert len(sdk_requests) == 1
+    assert p["captures"]["requests"] == []
+    assert await receipts(p) == []

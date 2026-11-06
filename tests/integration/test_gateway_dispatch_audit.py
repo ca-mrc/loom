@@ -957,3 +957,38 @@ async def test_terminal_receipt_cancellation_drains_reader(
         release.set()
         await asyncio.gather(polling, return_exceptions=True)
         await asyncio.to_thread(exited.wait, 5)
+
+
+async def test_longer_read_does_not_expire_a_live_undated_connection_slot(audit_setup) -> None:
+    audit, request = audit_setup
+    factory = audit.state.session_factory
+    assert factory is not None
+    connection_id = uuid4()
+    async with factory() as session:
+        session.add(ProviderConnection(
+            id=connection_id, team_id=audit.ctx.team_id,
+            provider_type="openai-compatible", display_name="long-read-capacity",
+            base_url="https://provider.example.test/v1", upstream_host="provider.example.test",
+            encrypted_api_key_ref=f"loom://unused/{uuid4()}", created_by="test",
+            max_in_flight=1,
+        ))
+        await session.flush()
+        session.add(GatewayDispatchReceipt(
+            id=uuid4(), request_id=uuid4(), dispatch_ordinal=1, attempt=1,
+            team_id=audit.ctx.team_id, trial_id=audit.ctx.trial_id, step_id="main",
+            provider_connection_id=connection_id, dialect="openai", purpose="model_call",
+            admitted_at=datetime.now(UTC) - timedelta(seconds=220),
+            attempt_deadline_wall_clock=None,
+        ))
+        await session.commit()
+    request.app.state.settings = SimpleNamespace(
+        upstream_timeout_sec=200, upstream_read_timeout_sec=250,
+        connection_queue_max_wait_sec=0,
+    )
+    next_audit = audit_for_request(
+        request, replace(audit.ctx, attempt_deadline_wall_clock=None), "openai",
+        provider_connection_id=connection_id,
+    )
+    with pytest.raises(dispatch_audit.ConnectionAtCapacityError):
+        await next_audit._admit(1)
+    assert await _rows(next_audit) == []

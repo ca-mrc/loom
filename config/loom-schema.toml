@@ -425,6 +425,11 @@ used_by     = ["llm-gateway"]
 python_type = "float"
 default     = 200.0
 
+[service_config.upstream_read_timeout_sec]
+used_by     = ["llm-gateway"]
+python_type = "float"
+description = "Optional read-inactivity timeout for native provider HTTP requests. When unset, inherit upstream_timeout_sec. Does not extend the Gateway retry budget or signed attempt deadline."
+
 # ─── Per-request retry on transient upstream failures ───
 # Retry classification + budget live in `loom_llm_gateway/retry.py`.
 # The Gateway is the sole transport retry owner for gateway-bound Terminus.

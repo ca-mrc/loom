@@ -5,14 +5,22 @@ computed_fields are layered on here via subclass.
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
-from pydantic import computed_field
+from pydantic import computed_field, field_validator
 
 from loom_llm_gateway.config._generated import GatewaySettings as _BaseSettings
 
 
 class GatewaySettings(_BaseSettings):
+    @field_validator("upstream_read_timeout_sec")
+    @classmethod
+    def _bounded_read_timeout(cls, value: float | None) -> float | None:
+        if value is not None and (not math.isfinite(value) or value <= 0):
+            raise ValueError("upstream_read_timeout_sec must be positive and finite")
+        return value
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def db_engine_url(self) -> str:

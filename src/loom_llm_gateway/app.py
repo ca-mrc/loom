@@ -192,7 +192,10 @@ def create_app(settings: GatewaySettings) -> FastAPI:
         provider_dispatch_reconciler = asyncio.create_task(
             _reconcile_provider_dispatches(
                 app.state.session_factory,
-                upstream_timeout_seconds=float(settings.upstream_timeout_sec),
+                upstream_timeout_seconds=max(
+                    float(settings.upstream_timeout_sec),
+                    float(settings.upstream_read_timeout_sec or 0.0),
+                ),
             ),
             name="pipeline-provider-dispatch-reconciler",
         )

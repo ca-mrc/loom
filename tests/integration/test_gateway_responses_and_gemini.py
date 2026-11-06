@@ -701,6 +701,7 @@ async def test_execution_attempt_responses_uses_exactly_once_provider_ledger(
     postgres_url: str,
 ) -> None:
     app, _trial_jwt, team_id, _trial_id, connection_id, captures = gateway_with_provider_connection
+    app.state.settings.upstream_read_timeout_sec = 250
     engine = create_engine(postgres_url)
     seeded = _seed_execution_attempt(engine, app, team_id, connection_id)
     attempt_id, step_jwt = seeded.attempt_id, seeded.step_jwt
@@ -758,6 +759,9 @@ async def test_execution_attempt_responses_uses_exactly_once_provider_ledger(
         assert conflict.status_code == 409, conflict.text
         assert conflict.json()["detail"] == "provider_dispatch_request_id_conflict"
         assert len(captures["requests"]) == 1
+        assert captures["requests"][0].extensions["timeout"] == {
+            "connect": 30, "read": 30, "write": 30, "pool": 30,
+        }  # The per-call grant remains authoritative over the250s read override.
 
         with engine.connect() as connection:
             row = connection.execute(

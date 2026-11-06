@@ -369,10 +369,20 @@ the remaining attempt deadline so Harbor does not abort a queued call at its
 direct-provider execution keeps its existing retry behavior. This prevents the
 SDK × Harbor × query nesting from multiplying one failed turn into 27 sends.
 
+The timeout must reach Harbor's live per-call kwargs as well as the SDK client:
+LiteLLM's per-call value takes precedence over the client's default. Offline
+SDK-boundary coverage checks the emitted HTTPX phase limits and OpenAI timeout
+header, including an already-authorized quota-wait extension and a short remaining
+phase. These HTTP limits do not extend the signed phase or its finalization fence.
+An existing frozen execution keeps its original runtime image; deploying this
+adapter does not update that execution's SDK timeout in place.
+
 The Gateway defaults to three total upstream attempts sharing a 600-second
 wall-clock budget. The initial attempt, response-body reads, later attempts,
-backoff and `Retry-After` all consume that budget. The existing 200-second
-upstream per-phase limit and signed agent deadline remain additional bounds.
+backoff and `Retry-After` all consume that budget. The default 200-second
+upstream phase limit and signed agent deadline remain additional bounds.
+Native HTTP routes may independently override the read-inactivity limit; the
+Nebius renderer uses250seconds while preserving the total request budget.
 Deterministic authentication/parameter errors return immediately; transient
 transport errors, timeouts and 429/5xx responses use the bounded retry policy.
 Request-pool timeout/504 failover also stays inside that same attempt count

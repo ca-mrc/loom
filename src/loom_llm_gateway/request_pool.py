@@ -215,6 +215,20 @@ class PoolDispatchAudit(DispatchAudit):
             required,
         )
         if selected is None:
+            for member in members:
+                cooling_down = member.connection_id in suppressed or (
+                    member.cooldown_until is not None and member.cooldown_until > now
+                )
+                if cooling_down and await self._authorized_member(session, member, required):
+                    # This is a local, pre-dispatch capacity failure. A 5xx
+                    # preserves the existing typed SDK retry contract even in
+                    # frozen runtimes that cannot recognize a new 429 code.
+                    # Do not wait, bypass suppression, or add a retry owner.
+                    raise HTTPException(
+                        503,
+                        {"code": "provider_request_pool_cooling_down"},
+                        headers={"Retry-After": "1"},
+                    )
             raise HTTPException(
                 429,
                 "provider_request_pool_unavailable",
@@ -324,11 +338,20 @@ class PoolDispatchAudit(DispatchAudit):
         suppressed: set[UUID],
         required: set[str],
     ) -> tuple[ProviderConnection, str] | None:
-        if (
-            not member.enabled
-            or member.connection_id in suppressed
-            or (member.cooldown_until is not None and member.cooldown_until > now)
+        if member.connection_id in suppressed or (
+            member.cooldown_until is not None and member.cooldown_until > now
         ):
+            return None
+        return await self._authorized_member(session, member, required)
+
+    async def _authorized_member(
+        self,
+        session: AsyncSession,
+        member: ProviderRequestPoolMember,
+        required: set[str],
+    ) -> tuple[ProviderConnection, str] | None:
+        """Live eligibility independent of the temporary cooldown timer."""
+        if not member.enabled:
             return None
         assert self.ctx.team_id is not None
         try:
