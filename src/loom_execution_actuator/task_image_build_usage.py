@@ -47,6 +47,9 @@ _MAX_SAMPLES = 240  # two hours at the observer's 30 s schedule
 _SAMPLES_PER_ROUND = 64
 _SAMPLE_CONCURRENCY = 8
 _READ_CONCURRENCY = 4
+# A shared node read (three API GETs with their own 10 s budget) never holds a
+# reader slot longer than this, even if the underlying call never returns.
+_READ_SECONDS = 12.0
 _NODE_UID_ANNOTATION = "loom.openai.com/build-node-uid"
 _NODE_NAME_ANNOTATION = "loom.openai.com/build-node-name"
 _MAXIMA = {"cpu_nanocores": "cpu_max_nanocores", "memory_bytes": "memory_max_bytes",
@@ -61,6 +64,10 @@ class BuildSample:
     containers: dict[str, dict[str, int | None]] = field(default_factory=dict)
     node_uid: str | None = None
     storage_at: datetime | None = None
+    # When this Pod's storage walk finished: the total is measured over [storage_at, this].
+    storage_finished_at: datetime | None = None
+    # Each container's own CPU and memory measurement times (None when that field is unavailable).
+    counter_times: dict[str, dict[str, datetime | None]] = field(default_factory=dict)
 
 
 def _int(value: Any) -> int | None:
@@ -118,7 +125,11 @@ def project_build_pod(summary: dict[str, Any], *, namespace: str, pod_uid: str,
         total, unknown = None, ("storage_stale",)
     if total is None and not unknown:
         unknown = ("storage_unavailable",)
+    finished_at = _time(storage.get("_finished_at")) if isinstance(storage, dict) else None
+    if total is None or storage_at is None or finished_at is None or finished_at < storage_at:
+        finished_at = None
     containers: dict[str, dict[str, int | None]] = {}
+    counter_times: dict[str, dict[str, datetime | None]] = {}
     for row in pod.get("containers") or []:
         if not isinstance(row, dict) or row.get("name") not in CONTAINERS:
             continue
@@ -126,16 +137,23 @@ def project_build_pod(summary: dict[str, Any], *, namespace: str, pod_uid: str,
         rootfs, logs = row.get("rootfs") or {}, row.get("logs") or {}
         rootfs_bytes = _int(rootfs.get("usedBytes")) if _fresh(rootfs.get("time"), current, max_age) else None
         log_bytes = _int(logs.get("usedBytes")) if _fresh(logs.get("time"), current, max_age) else None
+        cpu_value = _int(cpu.get("usageNanoCores")) if _fresh(cpu.get("time"), current, max_age) else None
+        memory_value = _int(memory.get("usageBytes")) if _fresh(memory.get("time"), current, max_age) else None
+        counter_times[row["name"]] = {
+            "cpu_at": _time(cpu.get("time")) if cpu_value is not None else None,
+            "memory_at": _time(memory.get("time")) if memory_value is not None else None,
+        }
         containers[row["name"]] = {
-            "cpu_nanocores": _int(cpu.get("usageNanoCores")) if _fresh(cpu.get("time"), current, max_age) else None,
-            "memory_bytes": _int(memory.get("usageBytes")) if _fresh(memory.get("time"), current, max_age) else None,
+            "cpu_nanocores": cpu_value,
+            "memory_bytes": memory_value,
             # Only a same-snapshot pair is a container filesystem figure.
             "filesystem_bytes": rootfs_bytes + log_bytes
             if rootfs_bytes is not None and log_bytes is not None else None,
         }
     return BuildSample(snapshot_at=snapshot_at, storage_bytes=total,
                        unknown_codes=unknown if total is None else (), containers=containers,
-                       node_uid=node_uid, storage_at=storage_at if total is not None else None)
+                       node_uid=node_uid, storage_at=storage_at if total is not None else None,
+                       storage_finished_at=finished_at, counter_times=counter_times)
 
 
 def _merge_containers(current: dict[str, Any], sample: BuildSample) -> dict[str, Any]:
@@ -202,10 +220,17 @@ async def record_build_sample(
         row.unknown_codes = codes
     row.containers = _merge_containers(row.containers or {}, observation)
     samples = list(row.samples or [])
+    def stamp(value: datetime | None) -> str | None:
+        return value.isoformat() if value is not None else None
+
+    # Each signal keeps its own measurement time: coverage never attributes a
+    # reading to a phase by the snapshot's start.
     samples.append({"at": observation.snapshot_at.isoformat(),
-                    "storage_at": observation.storage_at.isoformat() if observation.storage_at else None,
+                    "storage_at": stamp(observation.storage_at),
+                    "storage_finished_at": stamp(observation.storage_finished_at),
                     "storage_bytes": observation.storage_bytes,
-                    "containers": sorted(observation.containers)})
+                    "counters": {name: {key: stamp(value) for key, value in times.items()}
+                                 for name, times in sorted(observation.counter_times.items())}})
     if len(samples) > _MAX_SAMPLES:
         # Keep the first and the most recent; the dropped count makes the gap explicit.
         row.samples_dropped += len(samples) - _MAX_SAMPLES
@@ -227,8 +252,9 @@ class BuildUsageSampler:
     """Fair, bounded rounds of builder-snapshot reads; one row update per sampled attempt."""
 
     def __init__(self, *, sessions: async_sessionmaker[AsyncSession], namespace: str,
-                 reader: Callable[..., Awaitable[dict[str, Any]]]) -> None:
+                 reader: Callable[..., Awaitable[dict[str, Any]]], read_seconds: float = _READ_SECONDS) -> None:
         self.sessions, self.namespace, self.reader = sessions, namespace, reader
+        self.read_seconds = read_seconds
         self._cache: dict[tuple[str, str | None], tuple[float, dict[str, Any] | None, str | None]] = {}
         self._reads: dict[tuple[str, str | None], asyncio.Task[tuple[dict[str, Any] | None, str | None]]] = {}
         self._read_slots = asyncio.Semaphore(_READ_CONCURRENCY)
@@ -236,11 +262,19 @@ class BuildUsageSampler:
 
     async def _read(self, key: tuple[str, str | None]) -> tuple[dict[str, Any] | None, str | None]:
         async with self._read_slots:
+            node_name, expected = key
+            read = asyncio.ensure_future(
+                self.reader(node_name, expected_node_uid=expected) if expected else self.reader(node_name))
             try:
-                node_name, expected = key
-                summary = await (self.reader(node_name, expected_node_uid=expected) if expected
-                                 else self.reader(node_name))
-                code = None
+                done, _ = await asyncio.wait({read}, timeout=self.read_seconds)
+                if not done:
+                    read.cancel()
+                    summary, code = None, "snapshot_read_timeout"
+                else:
+                    summary, code = read.result(), None
+            except asyncio.CancelledError:
+                read.cancel()
+                raise
             except Exception as error:  # a fixed diagnostic only; never a raw message
                 summary, code = None, resource_sample_diagnostic(error)
         now = time.monotonic()
@@ -266,6 +300,15 @@ class BuildUsageSampler:
             self._reads[key] = task
             task.add_done_callback(self._forget(key))
         return await asyncio.shield(task)
+
+    async def close(self) -> None:
+        """Cancel in-flight shared reads (controller shutdown)."""
+        reads = list(self._reads.values())
+        for task in reads:
+            task.cancel()
+        if reads:
+            await asyncio.gather(*reads, return_exceptions=True)
+        self._reads.clear()
 
     async def sample(self, attempt_id: UUID) -> None:
         async with self.sessions() as session:

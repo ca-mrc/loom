@@ -206,23 +206,58 @@ def _phases(prepare=(0, 20), build=(25, 400), publish=(405, None)):
             for name, window in (("prepare", prepare), ("build", build), ("publish", publish)) if window]
 
 
-def test_phase_coverage_states_snapshots_and_gaps_per_phase_window(inputs) -> None:
-    # Snapshots every 30 s from 30 s: prepare (0-20 s) is never observed; build is, with explicit gaps.
-    samples = [{"at": _at(t), "storage_at": _at(t - 3) if t != 90 else None, "storage_bytes": None if t == 90 else 10}
+def _snap(at, *, storage=(None, None, None), counters=None):
+    """One retained snapshot: storage (began, finished, bytes) and per-container (cpu_at, memory_at) seconds."""
+    began, finished, size = storage
+    return {"at": _at(at), "storage_at": None if began is None else _at(began),
+            "storage_finished_at": None if finished is None else _at(finished), "storage_bytes": size,
+            "counters": {name: {"cpu_at": None if cpu is None else _at(cpu),
+                                "memory_at": None if memory is None else _at(memory)}
+                         for name, (cpu, memory) in (counters or {}).items()}}
+
+
+def _coverage(inputs, samples, phases=None):
+    row = {**_row(inputs, instrument=False), "phase_times": phases or _phases(),
+           "observer_usage": [_observer(10, complete=len(samples), unknown=0, samples=samples)]}
+    return _one(row)["phase_coverage"]
+
+
+def test_storage_is_attributed_by_its_own_walk_time_not_the_snapshot_start(inputs) -> None:
+    # The snapshot starts during prepare (0-20 s); this Pod's walk runs during build (25-400 s).
+    coverage = _coverage(inputs, [_snap(15, storage=(30, 34, 10), counters={"prepare": (15, 15)})])
+    assert coverage["prepare"]["storage"]["status"] == "unobserved"
+    assert coverage["prepare"]["cpu"]["status"] == "observed"  # prepare's own counters at 15 s
+    assert coverage["build"]["storage"]["measurements"] == 1
+    assert coverage["build"]["storage"]["start_gap_seconds"] == 5.0
+
+
+def test_a_walk_crossing_a_phase_boundary_is_ambiguous_in_both_phases(inputs) -> None:
+    coverage = _coverage(inputs, [_snap(10, storage=(18, 28, 10))])  # prepare ends at 20 s, build starts at 25 s
+    for phase in ("prepare", "build"):
+        storage = coverage[phase]["storage"]
+        assert storage["status"] == "ambiguous_only" and storage["measurements"] == 0 and storage["ambiguous"] == 1
+
+
+def test_a_phase_with_snapshots_but_no_counters_is_unobserved_for_those_signals(inputs) -> None:
+    samples = [_snap(t, storage=(t, t + 2, 10), counters={"build": (None, t)}) for t in range(30, 400, 30)]
+    build = _coverage(inputs, samples)["build"]
+    assert build["storage"]["status"] == "observed" and build["memory"]["measurements"] == 13
+    assert build["cpu"] == {"status": "unobserved", "measurements": 0, "start_gap_seconds": None,
+                            "end_gap_seconds": None, "max_gap_seconds": 375.0}
+
+
+def test_gaps_are_stated_per_signal(inputs) -> None:
+    samples = [_snap(t, storage=(t + 1, t + 3, 10), counters={"build": (t, t), "publish": (t, t)})
                for t in range(30, 450, 30)]
-    row = {**_row(inputs, instrument=False), "phase_times": _phases(),
-           "observer_usage": [_observer(10, complete=13, unknown=1, samples=samples)]}
-    attempt = _one(row)
-    coverage = attempt["phase_coverage"]
-    assert coverage["prepare"] == {"status": "unobserved", "duration_seconds": 20.0, "snapshots": 0,
-                                   "storage_complete": 0, "start_gap_seconds": None, "end_gap_seconds": None,
-                                   "max_gap_seconds": 20.0, "retained_times_truncated": False}
+    coverage = _coverage(inputs, samples)
     build = coverage["build"]
-    assert build["status"] == "observed" and build["snapshots"] == 13 and build["storage_complete"] == 12
-    assert (build["start_gap_seconds"], build["end_gap_seconds"], build["max_gap_seconds"]) == (5.0, 10.0, 30.0)
+    assert (build["cpu"]["start_gap_seconds"], build["cpu"]["end_gap_seconds"], build["cpu"]["max_gap_seconds"]) \
+        == (5.0, 10.0, 30.0)
+    assert build["storage"]["measurements"] == 13 and build["storage"]["start_gap_seconds"] == 6.0
     # Publish is still running: no end and no end gap, but its start gap is stated.
-    assert coverage["publish"]["end_gap_seconds"] is None and coverage["publish"]["start_gap_seconds"] == 15.0
-    assert attempt["observer_status"] == "sampled"
+    publish = coverage["publish"]
+    assert publish["cpu"]["end_gap_seconds"] is None and publish["cpu"]["start_gap_seconds"] == 15.0
+    assert coverage["prepare"]["storage"]["status"] == "unobserved" and coverage["prepare"]["duration_seconds"] == 20.0
 
 
 def test_attempts_without_observer_data_are_unobserved_not_omitted(inputs) -> None:
@@ -232,22 +267,24 @@ def test_attempts_without_observer_data_are_unobserved_not_omitted(inputs) -> No
                         "observer_usage": [_observer(None, complete=0, unknown=0)]}
     sampled = {**_row(inputs, instrument=False), "phase_times": _phases(),
                "observer_usage": [_observer(10, complete=1, unknown=0,
-                                            samples=[{"at": _at(60), "storage_at": _at(58), "storage_bytes": 10}])]}
+                                            samples=[_snap(60, storage=(58, 61, 10))])]}
     result = report_module.report([json.dumps(row) for row in (short_failed, unavailable_only, sampled)])
     statuses = [a["observer_status"] for a in result["attempts"]]
     assert statuses == ["no_observer_row", "no_usable_snapshot", "sampled"]
-    assert result["attempts"][0]["phase_coverage"]["build"]["status"] == "unobserved"
+    assert all(result["attempts"][0]["phase_coverage"]["build"][signal]["status"] == "unobserved"
+               for signal in ("storage", "cpu", "memory"))
     observer = result["summary"]["observer"]
     assert observer["attempts"] == 3 and observer["attempts_by_observer_status"] == {
         "no_observer_row": 1, "no_usable_snapshot": 1, "sampled": 1}
     assert observer["failed_attempts_without_complete_storage"] == 1
-    assert observer["phases"]["build"]["by_status"] == {"unobserved": 2, "observed": 1}
-    assert observer["phases"]["prepare"]["by_status"] == {"unobserved": 3}
+    assert observer["phases"]["build"]["storage"]["by_status"] == {"unobserved": 2, "observed": 1}
+    assert observer["phases"]["prepare"]["storage"]["by_status"] == {"unobserved": 3}
+    assert observer["phases"]["build"]["cpu"]["by_status"] == {"unobserved": 3}
     assert "does not mean each phase was observed" in observer["coverage_note"]
 
 
 def test_truncated_retained_times_are_flagged(inputs) -> None:
     row = {**_row(inputs, instrument=False), "phase_times": _phases(),
            "observer_usage": [_observer(10, complete=1, unknown=0, dropped=3,
-                                        samples=[{"at": _at(60), "storage_at": _at(58), "storage_bytes": 10}])]}
+                                        samples=[_snap(60, storage=(58, 61, 10))])]}
     assert _one(row)["phase_coverage"]["build"]["retained_times_truncated"] is True

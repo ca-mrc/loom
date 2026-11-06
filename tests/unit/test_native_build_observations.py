@@ -226,3 +226,67 @@ def test_the_attempts_qualified_node_identity_is_used_and_a_different_name_is_re
     assert _expected_node_uid(native(), "node-1") == (True, NODE_UID)
     assert _expected_node_uid(native(name="node-2"), "node-1") == (False, NODE_UID)
     assert _expected_node_uid({"job": {"metadata": {}}}, "node-1") == (True, None)
+
+
+def test_each_signal_keeps_its_own_time_and_the_walk_end() -> None:
+    walked, ended, counted = NOW - timedelta(seconds=12), NOW - timedelta(seconds=4), NOW - timedelta(seconds=2)
+    summary = _summary("pod-1", storage_at=walked, field_at=counted)
+    summary["pods"][0]["ephemeral-storage"]["_finished_at"] = ended.isoformat()
+    sample = project_build_pod(summary, namespace=BUILD_NS, pod_uid="pod-1", now=NOW)
+    assert isinstance(sample, BuildSample)
+    assert (sample.storage_at, sample.storage_finished_at) == (walked, ended)
+    assert sample.counter_times["build"] == {"cpu_at": counted, "memory_at": counted}
+    assert sample.counter_times["publish"] == {"cpu_at": None, "memory_at": counted}
+    # An end before the start is not an interval.
+    summary["pods"][0]["ephemeral-storage"]["_finished_at"] = (walked - timedelta(seconds=1)).isoformat()
+    sample = project_build_pod(summary, namespace=BUILD_NS, pod_uid="pod-1", now=NOW)
+    assert isinstance(sample, BuildSample) and sample.storage_finished_at is None
+
+
+async def test_four_stuck_node_reads_release_their_slots_for_a_healthy_fifth_node() -> None:
+    import asyncio
+
+    from loom_execution_actuator.task_image_build_usage import BuildUsageSampler
+
+    stuck = {f"node-{i}" for i in range(4)}
+    cancelled: list = []
+
+    async def reader(node_name, **kwargs):
+        if node_name in stuck:
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                cancelled.append(node_name)
+                raise
+        return {"pods": [], "node": node_name}
+
+    sampler = BuildUsageSampler(sessions=None, namespace=BUILD_NS, reader=reader, read_seconds=0.2)
+    waiters = [asyncio.ensure_future(sampler._snapshot(node)) for node in sorted(stuck)]
+    await asyncio.sleep(0.01)
+    # All four slots are held by stuck reads; the fifth node still completes once they are bounded.
+    healthy = await asyncio.wait_for(sampler._snapshot("node-5"), timeout=2)
+    assert healthy == ({"pods": [], "node": "node-5"}, None)
+    assert await asyncio.gather(*waiters) == [(None, "snapshot_read_timeout")] * 4
+    assert sorted(cancelled) == sorted(stuck) and sampler._reads == {}
+
+
+async def test_closing_the_sampler_cancels_in_flight_reads() -> None:
+    import asyncio
+
+    from loom_execution_actuator.task_image_build_usage import BuildUsageSampler
+
+    cancelled: list = []
+
+    async def reader(node_name, **kwargs):
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.append(node_name)
+            raise
+
+    sampler = BuildUsageSampler(sessions=None, namespace=BUILD_NS, reader=reader)
+    waiter = asyncio.ensure_future(sampler._snapshot("node-a"))
+    await asyncio.sleep(0.01)
+    await sampler.close()
+    assert cancelled == ["node-a"] and sampler._reads == {}
+    waiter.cancel()

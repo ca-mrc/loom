@@ -591,7 +591,7 @@ func TestSkippedPodFilesystemKeepsCountersWithoutAnyWalk(t *testing.T) {
 	if pod.Ephemeral != nil || len(pod.Containers) != 1 || pod.Containers[0].CPU == nil || pod.Containers[0].Memory == nil {
 		t.Fatalf("counters lost or total invented: %s", output.String())
 	}
-	if strings.Join(pod.Diagnostics, ",") != "pod_filesystem_skipped" {
+	if strings.Join(pod.Diagnostics, ",") != "container_logs_skipped,pod_filesystem_skipped" {
 		t.Fatalf("skipped walk not explicit: %v", pod.Diagnostics)
 	}
 	for _, value := range []string{`"pod_filesystem":"walk"`, `"pod_filesystem":""` + `,"x":1`} {
@@ -600,5 +600,42 @@ func TestSkippedPodFilesystemKeepsCountersWithoutAnyWalk(t *testing.T) {
 		if got := run(context.Background(), opts, strings.NewReader(bad), &output); got == 0 {
 			t.Fatalf("invalid filesystem mode accepted: %s", value)
 		}
+	}
+}
+
+func TestSlowLogWalkCannotDiscardStatsOnlyCounters(t *testing.T) {
+	walks := 0
+	original := logUsage
+	logUsage = func(ctx context.Context, root, pod, container string) (uint64, error) {
+		walks++
+		<-ctx.Done() // a log tree slower than the whole helper deadline
+		return 0, ctx.Err()
+	}
+	t.Cleanup(func() { logUsage = original })
+	f := &fakeRuntime{started: time.Now().Add(-time.Minute), stamp: time.Now()}
+	opts := fixture(t)
+	opts.runtimeEndpoint = startFake(t, f)
+	// With the walk, the slow log tree spends the deadline and nothing survives.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	var output bytes.Buffer
+	if got := run(ctx, opts, strings.NewReader(requestJSON(f.started)), &output); got == 0 || !strings.Contains(output.String(), "observation_deadline") || walks != 1 {
+		t.Fatalf("expected the slow walk to reach the deadline: %d %s", got, output.String())
+	}
+	// Stats-only never starts it, so the counters are returned well within the same deadline.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel2()
+	output.Reset()
+	request := strings.TrimSuffix(requestJSON(f.started), "}") + `,"pod_filesystem":"skip"}`
+	if got := run(ctx2, opts, strings.NewReader(request), &output); got != 0 || walks != 1 {
+		t.Fatalf("stats-only walked logs or lost counters: %d %s", got, output.String())
+	}
+	var result summary
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	container := result.Pods[0].Containers[0]
+	if container.CPU == nil || container.Memory == nil || container.Logs != nil {
+		t.Fatalf("counters lost or logs claimed: %s", output.String())
 	}
 }

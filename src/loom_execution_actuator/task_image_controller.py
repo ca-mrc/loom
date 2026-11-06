@@ -690,6 +690,9 @@ class NativeTaskImageController:
             sampling.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await sampling
+        build_usage = getattr(self, "build_usage", None)
+        if build_usage is not None:
+            await build_usage.close()
         await self.reconciler.close()
 
     def _start_sampling(self, attempt_ids: list[UUID]) -> None:

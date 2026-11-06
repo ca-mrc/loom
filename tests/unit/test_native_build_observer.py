@@ -215,6 +215,8 @@ def test_a_walk_at_the_helper_deadline_keeps_every_pods_counters_and_other_stora
     assert pods[slow]["_diagnostic_codes"] == ["observation_deadline"] and "ephemeral-storage" not in pods[slow]
     assert pods[slow]["containers"][0]["memory"]["usageBytes"] == 1234  # counters survive the failed walk
     assert pods[ok]["ephemeral-storage"]["usedBytes"] == 4096 and "_diagnostic_codes" not in pods[ok]
+    # The walk's end is recorded, so coverage can treat the total as an interval.
+    assert pods[ok]["ephemeral-storage"]["_finished_at"] >= pods[ok]["ephemeral-storage"]["time"]
     assert pods[ok]["containers"][0]["cpu"]["usageNanoCores"] == 7
 
 
@@ -262,3 +264,25 @@ print(json.dumps({{"pods": pods}}))
     assert pods[late]["_diagnostic_codes"] == ["storage_not_reached"]
     assert all("ephemeral-storage" not in pod and pod["containers"][0]["memory"]["usageBytes"] == 1234
                for pod in pods.values())
+
+
+def test_container_filesystem_pairs_come_only_from_the_walk_call() -> None:
+    uid = str(uuid4())
+    core = BuildCore([build_pod(uid)])
+    observer = BuildResourceObserver(settings(), core)
+
+    def sample(request, timeout):
+        output = helper_output(request, storage=request.get("pod_filesystem") != "skip")
+        (container,) = output["pods"][0]["containers"]
+        if request.get("pod_filesystem") == "skip":
+            container["rootfs"] = {"time": NOW.isoformat(), "usedBytes": 1}  # never paired with a walk's logs
+        else:
+            container["rootfs"] = {"time": NOW.isoformat(), "usedBytes": 100}
+            container["logs"] = {"time": NOW.isoformat(), "usedBytes": 20}
+        return output
+
+    observer._sample = sample
+    observer.collect_once(now=NOW)
+    (pod,) = json.loads(core.records[0]["data"]["snapshot.json"])["summary"]["pods"]
+    (container,) = pod["containers"]
+    assert container["rootfs"]["usedBytes"] == 100 and container["logs"]["usedBytes"] == 20

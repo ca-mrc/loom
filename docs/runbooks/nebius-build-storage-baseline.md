@@ -14,16 +14,16 @@ reported side by side, never merged.
 - **Trusted observer samples** (`resource_observer_builds`, off by default):
   - **What they are:** the existing node observer (the trusted helper over CRI and the Pod's disk-backed volumes and logs) also inventories builder Pods in `<execution-ns>-build`.
   - **Independence from Trial telemetry:** builder collection runs on its own thread, API client, 30 s schedule, 20 s deadline and ConfigMap (`builds-node-<node-uid>`), so a slow or failing build walk can't delay or replace Trial snapshots. It shares the observer container's CPU limit.
-  - **Counters independent of disk walks:** each cycle first reads CPU, memory and container filesystem counters for every builder Pod in one call that walks no volumes. Each Pod's storage walk is then a separate helper call with its own bound (at most 10 s, within the cycle). A walk that reaches the helper's deadline leaves only that Pod's storage unknown (`observation_deadline`, or `helper_timeout` if the call is killed); Pods the cycle can't reach are `storage_not_reached`.
+  - **Counters independent of disk walks:** each cycle first reads CPU and memory for every builder Pod in one call that walks no directories (neither volumes nor logs). Each Pod's storage walk, including its container log and writable-layer pair, is then a separate helper call with its own bound (at most 10 s, within the cycle). A walk that reaches the helper's deadline leaves only that Pod's storage unknown (`observation_deadline`, or `helper_timeout` if the call is killed); Pods the cycle can't reach are `storage_not_reached`.
   - **Fairness:** Pods are rotated each cycle, so a slow tree goes first at most once per rotation and can't keep later Pods unsampled.
   - **What the build controller stores:** per attempt and Pod, in `task_image_build_resource_usage`:
     - the validated Node UID. A snapshot from a different Node incarnation under the same name is never merged (`node_identity_changed`), and an attempt with a qualified Node UID only reads that Node;
     - the Pod's ephemeral-storage total, only when the helper produced a complete total, with the storage field's own measurement time;
     - otherwise the snapshot counts as **storage unknown**, with the helper's reason codes (for example `filesystem_limit` for trees over its entry cap, or `storage_stale`);
     - CPU and memory maxima per container;
-    - each counted snapshot's own times and storage total (up to 240, with any drop counted), so per-phase coverage and gaps can be stated;
+    - each counted snapshot's own measurement times (up to 240, with any drop counted): the storage walk's start and end, and each container's CPU and memory times, so per-phase coverage and gaps can be stated per signal;
     - read failures as **unavailable**.
-  - **How sampling runs:** a background round that a reconcile pass never waits on. Each round takes the 64 least recently sampled outstanding attempts, samples up to 8 at once (each bounded to 5 s), and reads each node's snapshot at most once at a time. A cached snapshot is checked again against its own freshness clocks when used. Samples are de-duplicated by producer snapshot time.
+  - **How sampling runs:** a background round that a reconcile pass never waits on. Each round takes the 64 least recently sampled outstanding attempts, samples up to 8 at once (each bounded to 5 s), and reads each node's snapshot at most once at a time. A shared read is cut off after 12 s (`snapshot_read_timeout`) so it can't hold a reader slot, and in-flight reads are cancelled when the controller stops. A cached snapshot is checked again against its own freshness clocks when used. Samples are de-duplicated by producer snapshot time.
   - **What it still shares:** the round doesn't block lifecycle progress, but it uses the same database, API client and nodes as the controller. The first observer window measures that cost (section 3).
   - **Limits:** these are sampled maxima, and sampling is best effort. Short phases, peaks between snapshots, the state just before a build ends, and file-heavy builds the helper can't total can be missed. A build that finishes between rounds may have no row at all. The report states all of these as unobserved, never as small.
 - **Boundary readings** (`record_boundary_usage`, off by default):
@@ -107,7 +107,10 @@ python scripts/task_image_boundary_usage_report.py /protected/attempts.jsonl --o
 - every boundary record, against its own volume limit;
 - every observer row, with the storage maximum against the effective Pod request;
 - `observer_status`: `sampled`, `storage_unknown_only`, `no_usable_snapshot` or `no_observer_row`. Every exported attempt is listed, so unsampled attempts (failed builds included) are counted rather than left out;
-- `phase_coverage` for `prepare`, `build` and `publish`: snapshots inside the phase's window, how many had complete storage, and the start, end and largest gaps. A phase with none is `unobserved`. A complete storage sample for an attempt does not mean each phase was observed.
+- `phase_coverage` for `prepare`, `build` and `publish`, separately for storage, CPU and memory, each by its own measurement time (never the snapshot's start): measurements inside the phase's window and the start, end and largest gaps.
+  - **Storage** is a walk over an interval. It counts for a phase only if the whole walk falls inside it; a walk that crosses a phase boundary is `ambiguous` and counts for neither.
+  - **CPU and memory** count only for that phase's own container.
+  - A signal with no measurement is `unobserved` (or `ambiguous_only`). A complete storage sample for an attempt does not mean each phase was observed.
 
 **Unusable or unknown data stays explicit:** `not_instrumented`, `not_observed`, record-level `partial`, `failed`, `timeout` and `skipped`, and observer `storage_unknown`, `unknown_codes` and `unavailable`. None of these contributes to a distribution. Keep exports and reports private.
 
@@ -116,7 +119,7 @@ python scripts/task_image_boundary_usage_report.py /protected/attempts.jsonl --o
 The first observer window establishes:
 1. **Coverage:**
    - the share of build attempts by `observer_status`, including `no_observer_row` (short builds) and failed builds;
-   - per phase, the share `observed` and the start, end and largest gaps. `prepare` and `publish` are short and are the expected blind spots;
+   - per phase and signal, the share `observed`, the `ambiguous` storage walks, and the start, end and largest gaps. `prepare` and `publish` are short and are the expected blind spots;
    - the unknown reasons for the rest, especially `filesystem_limit`, `observation_deadline` and `storage_not_reached` on file-heavy builds.
 2. **Cost:** observer CPU against its limit, any change in node I/O pressure while builder collection is on, and controller database and API load from sampling rounds.
 3. **Trial telemetry health:** Trial snapshot freshness on the same nodes must not degrade.

@@ -20,9 +20,11 @@ here is a Pod total, a peak or a measurement of unobserved time: unavailable
 readings stay unavailable, never zero, and the two volumes are always reported
 separately because their readings come from separate traversals.
 
-Observer coverage is stated per phase from the retained snapshot times: how
-many snapshots fell inside each phase's window and the gaps at its start, end
-and between snapshots. Sampling is best effort, so an attempt with no observer
+Observer coverage is stated per phase and per signal from each signal's own
+measurement time: Pod storage by its walk interval (a walk that crosses a
+phase boundary is ambiguous, never attributed), CPU and memory by that phase's
+own container. Each reports measurements in the window and the gaps at its
+start, end and between them. Sampling is best effort, so an attempt with no observer
 row, or no usable snapshot, is reported as unobserved (failed builds included);
 the sampled rows are never presented as the whole cohort.
 """
@@ -128,21 +130,54 @@ def _seconds(later: datetime, earlier: datetime) -> float:
     return round((later - earlier).total_seconds(), 1)
 
 
-def phase_coverage(phase_times: Any, observer_rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Per phase: snapshots inside its window and the gaps at its start, end and between snapshots.
+def _inside(at: datetime, start: datetime, end: datetime | None) -> bool:
+    return at >= start and (end is None or at <= end)
 
-    A phase with no snapshot in its window is ``unobserved``; one without a
-    recorded start is ``window_unknown``. A still-running phase has no end gap.
+
+def _signal(times: list[datetime], start: datetime, end: datetime | None, **extra: Any) -> dict[str, Any]:
+    """Measurements inside one phase window and the gaps at its start, end and between them."""
+    times = sorted(times)
+    edges = [start, *times, *([end] if end is not None else [])]
+    observed = bool(times)
+    return {
+        "status": "observed" if observed else "ambiguous_only" if extra.get("ambiguous") else "unobserved",
+        "measurements": len(times), **extra,
+        "start_gap_seconds": _seconds(times[0], start) if observed else None,
+        "end_gap_seconds": _seconds(end, times[-1]) if observed and end is not None else None,
+        "max_gap_seconds": max(_seconds(b, a) for a, b in pairwise(edges)) if len(edges) > 1 else None,
+    }
+
+
+def phase_coverage(phase_times: Any, observer_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per phase and per signal, from each signal's own measurement time, never the snapshot's.
+
+    - Pod storage is a walk over ``[storage_at, storage_finished_at]``. It counts
+      for a phase only when that whole interval lies inside the phase window; a
+      walk that crosses a phase boundary (or has no recorded end and falls at
+      one) is ``ambiguous`` and is never attributed to either phase.
+    - CPU and memory count only for that phase's own container, at their own times.
+
+    A signal with no measurement in the window is ``unobserved``. A phase without
+    a recorded start is ``window_unknown``; a still-running phase has no end gap.
     """
-    snapshots: list[tuple[datetime, bool]] = []
+    storage: list[tuple[datetime, datetime]] = []
+    counters: dict[str, dict[str, list[datetime]]] = {name: {"cpu": [], "memory": []} for name in _PHASES}
     truncated = False
     for row in observer_rows:
         truncated = truncated or bool(row.get("samples_dropped"))
         for sample in row.get("samples") or []:
-            at = _when(sample.get("at")) if isinstance(sample, dict) else None
-            if at is not None:
-                snapshots.append((at, type(sample.get("storage_bytes")) is int))
-    snapshots.sort()
+            if not isinstance(sample, dict):
+                continue
+            began = _when(sample.get("storage_at"))
+            if began is not None and type(sample.get("storage_bytes")) is int:
+                finished = _when(sample.get("storage_finished_at"))
+                storage.append((began, finished if finished is not None and finished >= began else began))
+            for name, times in (sample.get("counters") or {}).items():
+                if name in counters and isinstance(times, dict):
+                    for signal in ("cpu", "memory"):
+                        at = _when(times.get(signal + "_at"))
+                        if at is not None:
+                            counters[name][signal].append(at)
     windows = {p.get("name"): p for p in phase_times or [] if isinstance(p, dict)}
     result: dict[str, Any] = {}
     for name in _PHASES:
@@ -153,18 +188,17 @@ def phase_coverage(phase_times: Any, observer_rows: list[dict[str, Any]]) -> dic
         if start is None:
             result[name] = {"status": "window_unknown"}
             continue
-        inside = [(at, complete) for at, complete in snapshots if at >= start and (end is None or at <= end)]
-        times = [at for at, _ in inside]
-        edges = [start, *times, *([end] if end is not None else [])]
+
+        contained = [began for began, finished in storage if _inside(began, start, end) and _inside(finished, start, end)]
+        # Overlapping the window without lying inside it: the walk spans a phase boundary.
+        ambiguous = sum(finished >= start and (end is None or began <= end)
+                        and not (_inside(began, start, end) and _inside(finished, start, end)) for began, finished in storage)
         result[name] = {
-            "status": "observed" if inside else "unobserved",
             "duration_seconds": _seconds(end, start) if end is not None else None,
-            "snapshots": len(inside), "storage_complete": sum(complete for _, complete in inside),
-            "start_gap_seconds": _seconds(times[0], start) if times else None,
-            "end_gap_seconds": _seconds(end, times[-1]) if times and end is not None else None,
-            "max_gap_seconds": max((_seconds(b, a) for a, b in pairwise(edges)),
-                                   default=None) if len(edges) > 1 else None,
             "retained_times_truncated": truncated,
+            "storage": _signal(contained, start, end, ambiguous=ambiguous),
+            "cpu": _signal([at for at in counters[name]["cpu"] if _inside(at, start, end)], start, end),
+            "memory": _signal([at for at in counters[name]["memory"] if _inside(at, start, end)], start, end),
         }
     return result
 
@@ -301,8 +335,8 @@ def _observer_summary(attempts: list[dict[str, Any]]) -> dict[str, Any]:
         "note": ("Trusted node-observer samples: Pod ephemeral-storage when the helper produced a complete total, "
                  "otherwise counted as unknown. Sampled maxima, not peaks."),
         "coverage_note": ("A complete storage sample for an attempt does not mean each phase was observed: "
-                          "see phase_coverage for snapshots per phase window and the start, end and "
-                          "inter-snapshot gaps."),
+                          "see phase_coverage for storage, CPU and memory measurements per phase window "
+                          "(by their own times; boundary-crossing walks are ambiguous) and their gaps."),
         "attempts": len(attempts),
         "attempts_by_observer_status": dict(Counter(a.get("observer_status") for a in attempts)),
         "failed_attempts_without_complete_storage": sum(
@@ -323,18 +357,24 @@ def _observer_summary(attempts: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _phase_summary(attempts: list[dict[str, Any]]) -> dict[str, Any]:
-    result = {}
+    result: dict[str, Any] = {}
     for name in _PHASES:
         rows = [a["phase_coverage"][name] for a in attempts if name in (a.get("phase_coverage") or {})]
-        gaps = {key: [r[key] for r in rows if isinstance(r.get(key), int | float)]
-                for key in ("start_gap_seconds", "end_gap_seconds", "max_gap_seconds")}
-        result[name] = {
-            "attempts_with_phase": len(rows),
-            "by_status": dict(Counter(r["status"] for r in rows)),
-            "with_complete_storage": sum(bool(r.get("storage_complete")) for r in rows),
-            **{key: None if not values else {"max": max(values), "count": len(values)}
-               for key, values in gaps.items()},
-        }
+        timed = [r for r in rows if "storage" in r]
+        entry: dict[str, Any] = {"attempts_with_phase": len(rows),
+                                 "window_unknown": len(rows) - len(timed)}
+        for signal in ("storage", "cpu", "memory"):
+            values = [r[signal] for r in timed]
+            gaps = {key: [v[key] for v in values if isinstance(v.get(key), int | float)]
+                    for key in ("start_gap_seconds", "end_gap_seconds", "max_gap_seconds")}
+            entry[signal] = {
+                "by_status": dict(Counter(v["status"] for v in values)),
+                **({"ambiguous_measurements": sum(v.get("ambiguous", 0) for v in values)}
+                   if signal == "storage" else {}),
+                **{key: None if not found else {"max": max(found), "count": len(found)}
+                   for key, found in gaps.items()},
+            }
+        result[name] = entry
     return result
 
 

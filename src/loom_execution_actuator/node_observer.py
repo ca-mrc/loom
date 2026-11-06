@@ -459,6 +459,10 @@ class BuildResourceObserver(NodeResourceObserver):
         for pod in pods.values():
             pod.pop("ephemeral-storage", None)
             pod.pop("_diagnostic_codes", None)
+            for container in pod.get("containers", []):
+                # A container's filesystem pair comes from its Pod's walk call, together.
+                container.pop("rootfs", None)
+                container.pop("logs", None)
         for requested in request["pods"]:
             pod = pods.get(requested["uid"])
             if pod is None:
@@ -470,14 +474,22 @@ class BuildResourceObserver(NodeResourceObserver):
             try:
                 (walked,) = self._qualified({**request, "pods": [requested]}, budget, captured, started,
                                             track_cpu=False)["pods"]
+                finished = captured + timedelta(seconds=max(0, time.monotonic() - started))
             except HelperError as error:
                 pod["_diagnostic_codes"] = [error.code]
                 continue
             except (ObservationError, ValueError):
                 pod["_diagnostic_codes"] = ["storage_unavailable"]
                 continue
+            walked_containers = {c["name"]: c for c in walked.get("containers", [])}
+            for container in pod.get("containers", []):
+                pair = walked_containers.get(container["name"], {})
+                if "rootfs" in pair and "logs" in pair:
+                    container["rootfs"], container["logs"] = pair["rootfs"], pair["logs"]
             if "ephemeral-storage" in walked:
-                pod["ephemeral-storage"] = walked["ephemeral-storage"]
+                # The total's time is its oldest constituent; the walk can run until
+                # ``_finished_at``. Coverage treats the reading as this interval.
+                pod["ephemeral-storage"] = {**walked["ephemeral-storage"], "_finished_at": finished.isoformat()}
             elif walked.get("_diagnostic_codes"):
                 pod["_diagnostic_codes"] = walked["_diagnostic_codes"]
             else:
