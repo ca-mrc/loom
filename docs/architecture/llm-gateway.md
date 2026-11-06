@@ -114,6 +114,16 @@ statement execution;
 these fields locate the failed boundary without establishing a physical cause.
 The existing one-second audit budget and durable unknown outcomes still apply.
 
+An enabled quota-group queue counts in-flight receipts only for its pool's
+physical connections. It reads stall history only when the bound group is full
+and no overflow slot is available. Each member's latest admission uses the
+all-outcome `(provider_connection_id, admitted_at)` index; completed calls reset
+stall age too. Per-member indexed extrema keep this lookup bounded when several
+keys share a quota group. The separate partial index for open dispatches remains
+in use for capacity accounting. Migration `0194` installs the history index;
+queue admission must not depend on scanning retained dispatch history within
+the one-second audit budget.
+
 The internal join is `trial_id / step_id / agent_attempt_id / step_jwt_id`.
 The worker supervisor creates a new opaque attempt UUID for each real agent
 retry; CP returns a new signed grant UUID (`jti`) for each mint. The worker

@@ -8199,6 +8199,7 @@ class GatewayDispatchReceipt(Base):
         ),
         Index("gateway_receipt_trial_idx", "trial_id", "admitted_at"),
         Index("gateway_receipt_pending_idx", "provider_outcome", "admitted_at"),
+        Index("gateway_receipt_connection_history_idx", "provider_connection_id", "admitted_at"),
         Index(
             "gateway_receipt_admitted_connection_idx",
             "provider_connection_id",

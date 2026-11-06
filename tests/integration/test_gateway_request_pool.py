@@ -11,11 +11,12 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import delete, event, select, text, update
+from sqlalchemy import delete, event, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.auth import mint_step_jwt
 from loom.db.schema import (
+    GatewayDispatchQueue,
     GatewayDispatchReceipt,
     LlmCall,
     LlmCallIntent,
@@ -40,8 +41,8 @@ from loom_llm_gateway import dispatch_audit
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.egress_client_pool import EgressClientPool
-from loom_llm_gateway.rate_card import RateCardCache
 from loom_llm_gateway.quota_queue import decide_group_queue
+from loom_llm_gateway.rate_card import RateCardCache
 from loom_llm_gateway.request_pool import PoolDispatchAudit
 from tests.integration.test_service_execution_leases import (
     _cleanup_service_execution_test_rows,  # noqa: F401
@@ -1333,6 +1334,63 @@ async def test_group_stall_lookup_does_not_scan_completed_dispatch_history(pool_
         assert scans
         assert all(scan["Node Type"] in {"Index Scan", "Index Only Scan"} for scan in scans), plan
         assert sum(scan["Actual Rows"] * scan["Actual Loops"] for scan in scans) <= 2, plan
+
+
+async def test_group_queue_waits_and_drains_across_replicas_with_the_normal_audit_budget(
+    pool_setup: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    p = pool_setup
+    monkeypatch.setattr(dispatch_audit, "_AUDIT_TIMEOUT_SECONDS", 1.0)
+    released = asyncio.Event()
+    active = {"az": 0, "yibu": 0}
+    maximum = dict(active)
+
+    async def block(request):
+        group = "az" if request.url.host == "provider-0.example.test" else "yibu"
+        active[group] += 1
+        maximum[group] = max(maximum[group], active[group])
+        try:
+            await released.wait()
+        finally:
+            active[group] -= 1
+
+    p["captures"]["handler"] = block
+    async with p["sessions"]() as session:
+        pool = await session.get(ProviderRequestPool, p["root"])
+        pool.queue_enabled = True
+        session.add_all([
+            ProviderRequestPoolGroupCap(pool_connection_id=p["root"], quota_group=group,
+                                        max_in_flight=1)
+            for group in active
+        ])
+        await session.commit()
+    trials = [p] + [await _another_pool_trial(p) for _ in range(3)]
+    calls = [asyncio.create_task(post(trial, replica=i % 2,
+                                    headers={"X-Loom-Pause-Capable": "1"}))
+             for i, trial in enumerate(trials)]
+    try:
+        async with asyncio.timeout(5):
+            while True:
+                async with p["sessions"]() as session:
+                    waiting = await session.scalar(select(func.count()).select_from(
+                        GatewayDispatchQueue,
+                    ).where(GatewayDispatchQueue.pool_connection_id == p["root"],
+                            GatewayDispatchQueue.closed_at.is_(None)))
+                if waiting and all(active.values()):
+                    break
+                await asyncio.sleep(0.02)
+        assert len(p["captures"]["requests"]) == 2
+    finally:
+        released.set()
+        responses = await asyncio.wait_for(asyncio.gather(*calls), 10)
+    assert [response.status_code for response in responses] == [200] * 4
+    assert maximum == {"az": 1, "yibu": 1}
+    async with p["sessions"]() as session:
+        rows = list((await session.scalars(select(GatewayDispatchQueue).where(
+            GatewayDispatchQueue.pool_connection_id == p["root"],
+        ))).all())
+    assert rows and all(row.closed_at is not None for row in rows)
+    assert all(row.outcome in {"admitted", "overflow_admitted"} for row in rows)
 
 
 async def test_in_flight_cap_is_shared_by_gateway_replicas(pool_setup: dict) -> None:
