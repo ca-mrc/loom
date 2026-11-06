@@ -18,19 +18,38 @@ from loom_service.admin_audit import actor_from_context, write_admin_audit_event
 
 _REQUEST_CANCEL_SQL = text("""
 UPDATE trials
-   SET state = CASE WHEN state IN ('queued', 'protected-pending') THEN 'cancelled'
+   SET state = CASE WHEN state IN ('queued', 'protected-pending')
+                     OR (state = 'materializing' AND jsonb_typeof(result->'native_retry') = 'object')
+                   THEN 'cancelled'
                     ELSE state END,
        cancellation_requested_at = COALESCE(cancellation_requested_at, NOW()),
        cancellation_observed_at = CASE
-           WHEN state IN ('queued', 'protected-pending') THEN NOW()
+           WHEN state IN ('queued', 'protected-pending')
+             AND jsonb_typeof(result->'native_retry') IS DISTINCT FROM 'object'
+           THEN NOW()
            ELSE cancellation_observed_at END,
        finished_at = CASE
-           WHEN state IN ('queued', 'protected-pending') THEN COALESCE(finished_at, NOW())
+           WHEN state IN ('queued', 'protected-pending')
+             OR (state = 'materializing' AND jsonb_typeof(result->'native_retry') = 'object')
+           THEN COALESCE(finished_at, NOW())
            ELSE finished_at END,
+       result = CASE
+           WHEN state IN ('queued', 'materializing') AND jsonb_typeof(result->'native_retry') = 'object'
+           THEN result || jsonb_build_object('cancelled', true) ELSE result END,
+       failure_reason = CASE
+           WHEN state IN ('queued', 'materializing') AND jsonb_typeof(result->'native_retry') = 'object'
+           THEN 'cancelled' ELSE failure_reason END,
+       failure_message = CASE
+           WHEN state IN ('queued', 'materializing') AND jsonb_typeof(result->'native_retry') = 'object'
+           THEN 'service execution cancelled before model retry' ELSE failure_message END,
+       next_attempt_at = CASE
+           WHEN state IN ('queued', 'materializing') AND jsonb_typeof(result->'native_retry') = 'object'
+           THEN NULL ELSE next_attempt_at END,
        cancellation_retained_at = NULL
  WHERE id = (:trial_id)::uuid
    AND ((:team_id)::uuid IS NULL OR team_id = (:team_id)::uuid)
-   AND state IN ('queued', 'protected-pending', 'claimed', 'running')
+   AND (state IN ('queued', 'protected-pending', 'claimed', 'running')
+        OR (state = 'materializing' AND jsonb_typeof(result->'native_retry') = 'object'))
    AND (cancellation_requested_at IS NULL OR state IN ('queued', 'protected-pending'))
  RETURNING id, state;
 """)

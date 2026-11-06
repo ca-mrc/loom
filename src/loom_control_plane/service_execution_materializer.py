@@ -76,6 +76,7 @@ from loom.pipeline.artifact_commit import (
     ArtifactManifestV1,
 )
 from loom.pipeline.keys import canonical_document
+from loom.retry import next_attempt_at
 from loom.service_execution_claude_code import claude_usage, parse_claude_events
 from loom.service_execution_codex import codex_usage, parse_codex_events
 from loom.service_execution_oracle import oracle_usage, parse_oracle_events
@@ -105,6 +106,7 @@ from loom_control_plane.metrics import (
 )
 from loom_control_plane.service_execution import (
     defers_verification,
+    model_retry_policy,
     recover_deleted_committed_trial,
 )
 from loom_control_plane.service_execution_locks import lock_execution_trial
@@ -606,15 +608,16 @@ def build_canonical_events(
         else "failed"
     )
     if final_state == "failed":
+        failure = runtime_result.failure_reason or runtime_result.status
         events.append(
             TrialErrorEvent(
                 emitted_at=runtime_result.finished_at,
                 trial_id=trial_id,
                 step_id="trial",
                 seq=len(events),
-                error_type=exception_info.exception_type if exception_info else runtime_result.status,
+                error_type=exception_info.exception_type if exception_info else failure,
                 message=(exception_info.exception_message if exception_info else
-                         f"service execution runtime reported {runtime_result.status}"),
+                         f"service execution runtime reported {failure}"),
                 traceback="",
             )
         )
@@ -626,7 +629,7 @@ def build_canonical_events(
             seq=len(events),
             final_state=final_state,
             reward=runtime_result.verifier_rewards,
-            failure_reason=(None if final_state == "succeeded" else runtime_result.status),
+            failure_reason=(None if final_state == "succeeded" else runtime_result.failure_reason or runtime_result.status),
         )
     )
     return tuple(events)
@@ -974,6 +977,7 @@ class ServiceExecutionMaterializer:
                             ServiceExecutionLease.finalized_at.is_not(None),
                             # A deferred verifier is archived with its parent attempt.
                             ServiceExecutionLease.execution_role == "attempt",
+                            Trial.attempt_count == ServiceExecutionLease.attempt,
                             Trial.state.in_(("materializing", "succeeded", "failed", "cancelled")),
                         ),
                         and_(
@@ -1445,7 +1449,7 @@ class ServiceExecutionMaterializer:
         # Preserve that immutable source document, but derive public terminal
         # events from the cancellation that owns the Trial's final state.
         if trial_result_raw.get("cancelled") is True:
-            runtime_result = runtime_result.model_copy(update={"status": "cancelled", "partial_evidence": True})
+            runtime_result = runtime_result.model_copy(update={"status": "cancelled", "failure_reason": None, "partial_evidence": True})
         trace_body = derivation_inputs.get(_TRACE_PATH)
         exception_info = read_exception_info(runtime_result, derivation_inputs)
         if runtime_result.status == "succeeded" and trace_body is None:
@@ -1564,7 +1568,7 @@ class ServiceExecutionMaterializer:
                 else "failed"
             ),
             failure_reason=(
-                None if runtime_result.status == "succeeded" else runtime_result.status
+                None if runtime_result.status == "succeeded" else runtime_result.failure_reason or runtime_result.status
             ),
             accounting_call_count=len(gateway_calls) if gateway_calls is not None else None,
             exception_info=exception_info,
@@ -1603,10 +1607,31 @@ class ServiceExecutionMaterializer:
             if (
                 trial is None
                 or artifact is None
+                or trial.attempt_count != lease.attempt
                 or trial.state not in {"materializing", "succeeded", "failed", "cancelled"}
             ):
                 raise MaterializationIntegrityError("canonical_projection_identity_drift")
             await self._qualify_commit(session, lease, trial, artifact, result)
+            retry = (trial.result or {}).get("native_retry")
+            if (isinstance(retry, dict) and trial.state == "cancelled"
+                    and result.final_trial_state != "cancelled"):
+                # Cancellation won after the copy snapshot. Re-derive the
+                # public outcome before acknowledging canonical objects; the
+                # committed runtime source remains immutable.
+                raise RuntimeError("native retry cancelled during canonical derivation")
+            retry_policy = None
+            if (trial.state == "materializing" and result.final_trial_state == "failed"
+                    and lease.execution_role == "attempt" and isinstance(retry, dict)
+                    and retry.get("lease_id") == str(lease.id) and retry.get("attempt") == lease.attempt):
+                retry_policy = await model_retry_policy(session, trial=trial, reason=retry.get("reason"))
+                if trial.batch_id is not None:
+                    parent_state = await session.scalar(select(Batch.state)
+                        .where(Batch.id == trial.batch_id).with_for_update(key_share=True))
+                    if parent_state not in {"submitted", "running"}:
+                        retry_policy = None
+                if retry_policy is None:
+                    trial.state = "failed"
+                    trial.finished_at = now
             existing = list(
                 (
                     await session.execute(
@@ -1622,7 +1647,10 @@ class ServiceExecutionMaterializer:
                 expected_team_id=trial.team_id,
             )
             by_seq = {row.seq: row for row in existing}
-            for event in result.events:
+            # Intermediate attempts retain their complete, attempt-scoped
+            # archive. Publishing their seq=0 events into the Trial stream
+            # would collide with its eventual outcome and break SSE cursors.
+            for event in (() if retry_policy is not None else result.events):
                 payload = event.model_dump(mode="json")
                 present = by_seq.get(event.seq)
                 if present is not None:
@@ -1680,7 +1708,7 @@ class ServiceExecutionMaterializer:
                 **({"accounting_call_count": result.accounting_call_count}
                    if result.accounting_call_count is not None else {}),
             }
-            trial.trajectory_index = {
+            trajectory_index = {
                 "schema_version": "1",
                 "trial_id": str(trial.id),
                 "team_id": str(trial.team_id),
@@ -1701,6 +1729,13 @@ class ServiceExecutionMaterializer:
                     isinstance(event, Terminus2TurnEvent) for event in result.events
                 ) else [],
             }
+            trial.trajectory_index = trajectory_index
+            if retry_policy is not None:
+                artifact.artifact_metadata = {
+                    **artifact.artifact_metadata,
+                    "trajectory_index": trajectory_index,
+                    "trial_result": trial.result,
+                }
             artifact_authority_id = await ensure_artifact_lifecycle_authority(
                 session,
                 artifact_id=artifact.id,
@@ -1764,7 +1799,7 @@ class ServiceExecutionMaterializer:
                 trial.finished_at = now
                 trial.failure_reason = None
                 trial.failure_message = None
-            elif trial.state != result.final_trial_state:
+            elif retry_policy is None and trial.state != result.final_trial_state:
                 raise MaterializationIntegrityError("terminal_trial_state_drift")
             if result.exception_info is not None and not result.preserve_trial_outcome:
                 trial.result = {**(trial.result or {}),
@@ -1791,6 +1826,17 @@ class ServiceExecutionMaterializer:
             lease.source_cleanup_claim_expires_at = None
             lease.source_cleanup_error_message = None
             lease.updated_at = now
+            if retry_policy is not None:
+                trial.state = "queued"
+                trial.next_attempt_at = next_attempt_at(
+                    attempt_count=max(1, trial.attempt_count - trial.admission_pause_releases),
+                    backoff=retry_policy.backoff, now=now,
+                )
+                trial.result = {"native_retry": retry}
+                trial.worker_id = None
+                trial.claimed_at = trial.pre_start_heartbeat_at = trial.started_at = None
+                trial.finished_at = None
+                trial.cancellation_retained_at = None
             await session.commit()
             SERVICE_EXECUTION_MATERIALIZATION_COMPLETED_TOTAL.inc()
             return True
