@@ -481,7 +481,8 @@ func (b *workloadBroker) startProxy(ctx context.Context, modelLifetime ...contex
 		ReadHeaderTimeout: 10 * time.Second,
 		Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 			if request.URL.Path == "/internal/loom/terminus/reclaim" ||
-				request.URL.Path == "/internal/loom/terminus/episode-checkpoints" {
+				request.URL.Path == "/internal/loom/terminus/episode-checkpoints" ||
+				request.URL.Path == "/internal/loom/terminus/phase-deadline" {
 				b.serveTerminusControl(writer, request)
 				return
 			}

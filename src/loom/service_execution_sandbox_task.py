@@ -1150,6 +1150,34 @@ async def _run_verifier(
         raise failure
 
 
+def _model_transport_failure(exc: BaseException) -> str | None:
+    """Classify SDK types at the trusted controller boundary, never error prose.
+
+    LiteLLM's OpenAI adapter exceptions inherit these SDK types. Only unwrap
+    Loom's AgentError; an unrelated finalization failure must win over an
+    earlier model error retained in its implicit context.
+    """
+    if not isinstance(exc, AgentError):
+        return None
+    from openai import APIConnectionError, APIStatusError, APITimeoutError
+
+    seen: set[int] = set()
+    while isinstance(exc, AgentError) and exc.__cause__ is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        exc = exc.__cause__
+    if isinstance(exc, APIStatusError):
+        body = exc.body
+        detail = body.get("detail", body) if isinstance(body, dict) else None
+        if isinstance(detail, dict) and detail.get("code") == "agent_timeout":
+            return None
+        return "gateway_error" if 500 <= exc.status_code <= 599 else None
+    if isinstance(exc, APITimeoutError):
+        return "gateway_error"
+    if isinstance(exc, APIConnectionError):
+        return "provider_transport_disconnect"
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("phase", choices=(*workspace_controller_phases(), HARNESS_SETUP_PHASE, "setup-native-compose", "verify-sandbox"))
@@ -1194,6 +1222,10 @@ def main() -> None:
         # Keep that original identity instead of replacing it during unwinding.
         if not path.exists():
             _write_json_atomic(path, exception_info(exc).model_dump(mode="json"))
+        if args.phase == "terminus-2":
+            reason = _model_transport_failure(exc)
+            if reason is not None:
+                _write_json_atomic(path.with_name("transport-failure.json"), {"failure_reason": reason})
         raise
 
 

@@ -847,7 +847,7 @@ class ExecutionRuntimeResultV1(_Strict):
     phases: tuple[RuntimePhaseEvidenceV1, ...] = Field(max_length=64)
     outputs: tuple[RuntimeOutputEvidenceV1, ...] = Field(default=(), max_length=10_000)
     verifier_rewards: dict[str, float] | None = None
-    failure_reason: Literal["sandbox_lost"] | None = None
+    failure_reason: Literal["sandbox_lost", "gateway_error", "provider_transport_disconnect"] | None = None
     partial_evidence: bool
 
     @field_validator("task_image_ref", "runtime_image_ref")
@@ -863,8 +863,12 @@ class ExecutionRuntimeResultV1(_Strict):
             raise ValueError("runtime result timestamps are reversed")
         if self.partial_evidence != (self.status != "succeeded"):
             raise ValueError("runtime partial-evidence flag does not match status")
-        if self.failure_reason is not None and self.status != "runtime_error":
+        if self.failure_reason == "sandbox_lost" and self.status != "runtime_error":
             raise ValueError("sandbox loss must remain a runtime failure")
+        if self.failure_reason in {"gateway_error", "provider_transport_disconnect"} and (
+            self.status != "task_error" or self.execution_role != "attempt"
+        ):
+            raise ValueError("model transport failure requires a failed agent attempt")
         if [phase.ordinal for phase in self.phases] != list(range(1, len(self.phases) + 1)):
             raise ValueError("runtime phase ordinals are not contiguous")
         sources = [item.source_path for item in self.outputs]
