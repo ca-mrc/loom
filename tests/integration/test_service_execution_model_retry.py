@@ -6,7 +6,8 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import (
@@ -27,6 +28,7 @@ from loom_control_plane.service_execution import (
     ServiceExecutionConflict,
     enqueue_execution_transition,
     finalize_committed_service_execution,
+    model_retry_policy,
     record_execution_event,
 )
 from loom_control_plane.service_execution_materializer import ServiceExecutionMaterializer
@@ -36,6 +38,7 @@ from loom_control_plane.service_execution_output import (
     ServiceExecutionOutputRouteService,
 )
 from loom_control_plane.trial_cancellation import cancel_trial_under_authority
+from tests.integration.test_nebius_platform_bootstrap import platform_database  # noqa: F401
 from tests.integration.test_service_execution_leases import (
     _cleanup_service_execution_test_rows,  # noqa: F401
     _complete_output_contract,
@@ -116,6 +119,39 @@ async def _delete(sessions, lease_id, now):
 
 @pytest.mark.parametrize("fence", [None, "success", "policy", "retry_on", "team", "cancel", "cancel_after_copy", "cancel_queued", "ceiling_queued", "retain", "archive", "checkpoint", "batch_cancel", "pause"])
 async def test_native_model_retry_waits_for_archive_cleanup_and_backoff(postgres_url, fence):
+    await _exercise_native_model_retry(postgres_url, fence)
+
+
+async def test_native_model_retry_policy_uses_restricted_actuator_role(
+    platform_database, monkeypatch,  # noqa: F811 -- imported shared pytest fixture
+):
+    from loom import nebius_platform_bootstrap as bootstrap
+
+    monkeypatch.setattr(bootstrap, "database_url", lambda _value, _namespace: platform_database)
+    monkeypatch.setenv("LOOM_DB_URL", platform_database)
+    monkeypatch.setenv("LOOM_COLLECTOR_TOKEN", "loom_ecc_" + "f" * 64)
+    monkeypatch.setenv("LOOM_BATCH_RUNNER_TOKEN", "loom_br_" + "b" * 64)
+    password = "restricted-native-retry-" + "a" * 32
+    for role in ("SERVICE", "CONTROL_PLANE", "GATEWAY", "ACTUATOR"):
+        monkeypatch.setenv("LOOM_DB_" + role + "_PASSWORD", password)
+    bootstrap.bootstrap_database({"namespace": "loom-nebius-platform"})
+    url = make_url(platform_database).set(drivername="postgresql+psycopg")
+    actuator = create_async_engine(url.set(username="loom_actuator", password=password))
+    restricted = async_sessionmaker(actuator, expire_on_commit=False)
+    try:
+        async with restricted() as session:
+            assert await session.scalar(text("SELECT current_user")) == "loom_actuator"
+            assert not await session.scalar(text(
+                "SELECT has_table_privilege(current_user, 'episode_checkpoints', 'SELECT')"
+            ))
+        # This policy is shared with PoolExecutionOutbox.accept_grant. Checkpoint
+        # qualification belongs to the CP archive; mutable fences remain shared.
+        await _exercise_native_model_retry(url, None, retry_policy_sessions=restricted)
+    finally:
+        await actuator.dispose()
+
+
+async def _exercise_native_model_retry(postgres_url, fence, *, retry_policy_sessions=None):
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     store = FakeObjectStore()
@@ -221,6 +257,13 @@ async def test_native_model_retry_waits_for_archive_cleanup_and_backoff(postgres
                     assert trial.cancellation_retained_at is not None
                     assert trial.cancellation_requested_at is None
                     assert trial.trajectory_index["attempt"] == 1
+                if fence == "checkpoint":
+                    assert trial.state == "failed" and trial.failure_reason == "gateway_error"
+                    assert archived.materialization_state == "committed"
+                    assert trial.trajectory_index["attempt"] == 1
+                    assert artifact is not None
+                    assert await session.scalar(select(func.count()).select_from(ServiceExecutionLease)
+                        .where(ServiceExecutionLease.trial_id == trial_id)) == 1
                 assert trial.next_attempt_at is None
                 return
             assert trial.state == "queued", (archived.materialization_error_code, archived.materialization_error_message)
@@ -265,6 +308,17 @@ async def test_native_model_retry_waits_for_archive_cleanup_and_backoff(postgres
                 assert trial.trajectory_index["attempt"] == 1
                 assert all(store.objects[key] == body for key, body in original_archive.items())
             return
+        if retry_policy_sessions is not None:
+            async with retry_policy_sessions.begin() as session:
+                trial = await session.get(Trial, trial_id, with_for_update=True)
+                assert await model_retry_policy(session, trial=trial, reason="gateway_error") is not None
+            async with sessions.begin() as session:
+                (await session.get(TeamQuota, first.team_id)).max_attempts_ceiling = 1
+            async with retry_policy_sessions.begin() as session:
+                trial = await session.get(Trial, trial_id, with_for_update=True)
+                assert await model_retry_policy(session, trial=trial, reason="gateway_error") is None
+            async with sessions.begin() as session:
+                (await session.get(TeamQuota, first.team_id)).max_attempts_ceiling = 3
         async with sessions() as session:
             with pytest.raises(ServiceExecutionConflict):
                 await _reserve(session, trial_id=trial_id, target=target, now=retry_at - timedelta(seconds=1))

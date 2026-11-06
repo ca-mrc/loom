@@ -176,7 +176,7 @@ async def test_bootstrap_actuator_claims_registered_native_source_without_global
         await admin.dispose()
 
 
-@pytest.mark.parametrize("outcome", ["succeeded", "verifier_error"])
+@pytest.mark.parametrize("outcome", ["succeeded", "verifier_error", "gateway_error"])
 async def test_restricted_actuator_finalizes_large_results_without_artifact_identity_authority(
     platform_database: str,  # noqa: F811 -- imported shared pytest fixture
     monkeypatch: pytest.MonkeyPatch,
@@ -201,6 +201,10 @@ async def test_restricted_actuator_finalizes_large_results_without_artifact_iden
         # below use the real deployed login, not the fixture database owner.
         async with owners.begin() as session:
             trial_id, target = await _seed_ready_trial(session, now=now)
+            if outcome == "gateway_error":
+                trial = await session.get(Trial, trial_id)
+                trial.config = {**trial.config, "retry": {"max_attempts": 4}}
+                session.add(TeamQuota(team_id=trial.team_id, max_attempts_ceiling=4))
             lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
             await _hand_off_to_verifier(session, parent_id=lease.id, now=now)
             lease.finalized_at = None
@@ -218,7 +222,10 @@ async def test_restricted_actuator_finalizes_large_results_without_artifact_iden
             )
             session.add(artifact)
             document = _runtime_result_payload(lease, started_at=now)
-            document.update(status=outcome, partial_evidence=outcome != "succeeded",
+            if outcome == "gateway_error":
+                document["failure_reason"] = "gateway_error"
+            document.update(status="task_error" if outcome == "gateway_error" else outcome,
+                            partial_evidence=outcome != "succeeded",
                             verifier_rewards={"resolved": 0.0}, outputs=[{
                                 "source_path": f"out/part-{i:04}.json",
                                 "relative_path": f"artifacts/part-{i:04}.json",
@@ -236,6 +243,9 @@ async def test_restricted_actuator_finalizes_large_results_without_artifact_iden
 
         async with restricted.begin() as session:
             assert await session.scalar(text("SELECT current_user")) == "loom_actuator"
+            assert not await session.scalar(text(
+                "SELECT has_table_privilege(current_user, 'episode_checkpoints', 'SELECT')"
+            ))
             assert (await record_committed_runtime_result(
                 session, lease_id=lease_id, generation=1, runtime_result=result, observed_at=now,
             )).id == reported_id
@@ -248,7 +258,9 @@ async def test_restricted_actuator_finalizes_large_results_without_artifact_iden
             trial = await session.get(Trial, trial_id)
             artifact = await session.get(Artifact, artifact_id)
             assert trial is not None and artifact is not None and trial.result is not None
-            assert trial.state == ("materializing" if outcome == "succeeded" else "failed")
+            assert trial.state == ("materializing" if outcome in {"succeeded", "gateway_error"} else "failed")
+            if outcome == "gateway_error":
+                assert trial.result["native_retry"]["reason"] == "gateway_error"
             assert trial.result["aggregate_reward"] == 0
             assert trial.result["runtime_result"] == result.model_dump(mode="json")
             replay, duplicate = await record_execution_event(
