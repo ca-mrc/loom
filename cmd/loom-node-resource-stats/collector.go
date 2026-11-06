@@ -187,12 +187,16 @@ func collect(ctx context.Context, req request, client statsRuntime, opts options
 			// The operator mounts the configured host log root. Runtime paths
 			// must match that Pod/container/attempt suffix, never select a host path.
 			expected := filepath.Join(logPod, container.Name, strconv.FormatUint(uint64(status.Metadata.Attempt), 10)+".log")
-			if !validLogPath(status.LogPath, expected) {
+			if req.PodFilesystem == "skip" {
+				// Stats-only: no directory is walked, so a slow log tree cannot
+				// spend the shared deadline and discard every Pod's counters.
+				diagnostics["container_logs_skipped"] = true
+			} else if !validLogPath(status.LogPath, expected) {
 				diagnostics["container_logs_unavailable"] = true
 				complete = false
 			} else {
 				logAt := now()
-				usage, err := containerLogUsage(ctx, opts.podLogsRoot, logPod, container.Name)
+				usage, err := logUsage(ctx, opts.podLogsRoot, logPod, container.Name)
 				if err == nil {
 					out.Logs = &fsStats{UsedBytes: usage, Time: logAt.UTC().Format(time.RFC3339Nano)}
 				} else {
@@ -201,6 +205,19 @@ func collect(ctx context.Context, req request, client statsRuntime, opts options
 				}
 			}
 			item.Containers = append(item.Containers, out)
+		}
+		if req.PodFilesystem == "skip" {
+			// No Pod total is claimed; the caller measures it in its own call.
+			diagnostics["pod_filesystem_skipped"] = true
+			for code := range diagnostics {
+				item.Diagnostics = append(item.Diagnostics, code)
+			}
+			sort.Strings(item.Diagnostics)
+			result.Pods = append(result.Pods, item)
+			if ctx.Err() != nil {
+				break
+			}
+			continue
 		}
 		disk, code := podDiskUsage(ctx, opts, req.Namespace, pod)
 		if code != "" {
@@ -223,6 +240,9 @@ func collect(ctx context.Context, req request, client statsRuntime, opts options
 	}
 	return result, nil
 }
+
+// logUsage is the container log walk; tests replace it with a slow walk.
+var logUsage = containerLogUsage
 
 func boundLabels(labels map[string]string, namespace string, pod podRequest) bool {
 	return labels["io.kubernetes.pod.uid"] == pod.UID && labels["io.kubernetes.pod.namespace"] == namespace && labels["io.kubernetes.pod.name"] == pod.Name

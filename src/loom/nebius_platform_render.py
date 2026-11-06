@@ -152,6 +152,7 @@ def validate_environment(config: dict[str, Any]) -> None:
             "execution_command_concurrency",
             "postgres_settings",
             "resource_observer_api_cidrs",
+            "resource_observer_builds",
         }
         != expected
     ):
@@ -170,6 +171,10 @@ def validate_environment(config: dict[str, Any]) -> None:
         raise NebiusPlatformError("unsupported execution_placement_policy")
     if type(config.get("prefer_incoming_warm_fit", False)) is not bool:
         raise NebiusPlatformError("prefer_incoming_warm_fit must be a boolean")
+    if type(config.get("resource_observer_builds", False)) is not bool:
+        raise NebiusPlatformError("resource_observer_builds must be a boolean")
+    if config.get("resource_observer_builds") is True and config.get("task_image_builder") is None:
+        raise NebiusPlatformError("resource_observer_builds requires a configured task image builder")
     postgres_settings(config)
     concurrency = config.get("execution_command_concurrency", 1)
     if type(concurrency) is not int or not 1 <= concurrency <= 8:
@@ -1014,6 +1019,7 @@ def _task_image_builder_settings(
         "cache_total_mib",
         "cache_gc_policy",
         "reuse_task_cache_for_verifier",
+        "record_boundary_usage",
         "cpu_millis",
         "memory_mib",
         "ephemeral_storage_mib",
@@ -1256,6 +1262,12 @@ def _execution_documents(
                     }
                     if resource_observations:
                         environment["LOOM_EXECUTION_ACTUATOR_RESOURCE_OBSERVATION_NAMESPACE"] = ex + "-observations"
+                        from loom.nebius_resource_observer_render import (
+                            builder_observation_namespace,
+                        )
+
+                        if builder_observation_namespace(config) is not None:
+                            environment["LOOM_EXECUTION_ACTUATOR_BUILD_RESOURCE_OBSERVATIONS"] = "true"
                     pod["containers"][0].setdefault("env", []).extend(_env(environment))
                 if builder is not None:
                     pod["containers"][0].setdefault("env", []).extend(

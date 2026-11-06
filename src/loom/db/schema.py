@@ -2126,6 +2126,55 @@ class TaskImageMaterializationAttempt(Base):
     )
 
 
+class TaskImageBuildResourceUsage(Base):
+    """Trusted node-observer samples of one native build Pod (#2750).
+
+    Written by the build controller outside lifecycle transactions and never read
+    by admission. Storage is complete-or-unknown per observer snapshot: an unknown
+    Pod total is counted, never treated as zero and never lowers a maximum.
+    """
+
+    __tablename__ = "task_image_build_resource_usage"
+    __table_args__ = (
+        UniqueConstraint("attempt_id", "pod_uid", name="uq_task_image_build_resource_usage_pod"),
+        CheckConstraint(
+            "snapshots >= 0 AND storage_complete >= 0 AND storage_unknown >= 0 AND unavailable >= 0 "
+            "AND samples_dropped >= 0 AND storage_complete + storage_unknown <= snapshots",
+            name="ck_task_image_build_resource_usage_counts",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    attempt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("task_image_materialization_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    materialization_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    lease_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    pod_uid: Mapped[str] = mapped_column(Text, nullable=False)
+    node_name: Mapped[str] = mapped_column(Text, nullable=False)
+    node_uid: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    first_observed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    last_observed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    last_snapshot_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    snapshots: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    storage_complete: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    storage_unknown: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    unavailable: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    last_unavailable_code: Mapped[str | None] = mapped_column(Text)
+    unknown_codes: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    ephemeral_storage_max_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    ephemeral_storage_max_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    containers: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    # Each counted snapshot's own clocks (bounded, oldest first): the producer's
+    # snapshot time, the storage field's measurement time, and its total or None.
+    # The report derives phase coverage and gaps from these, never from counts.
+    samples: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    samples_dropped: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+
 class TaskImageAttemptRetention(Base):
     """Observation until retirement, then immutable exact-attempt evidence.
 

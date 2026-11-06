@@ -50,6 +50,13 @@ def api_egress(config: dict[str, Any]) -> list[dict[str, Any]]:
              "ports": [{"protocol": "TCP", "port": port}]}]
 
 
+def builder_observation_namespace(config: dict[str, Any]) -> str | None:
+    """The build namespace to observe, only when explicitly enabled and a builder exists."""
+    if config.get("resource_observer_builds") is not True or config.get("task_image_builder") is None:
+        return None
+    return str(config["execution_namespace"]) + "-build"
+
+
 def observer_documents(config: dict[str, Any], image: str, *,
         reader_subject: dict[str, str] | None = None) -> list[dict[str, Any]]:
     """No inbound service and no runtime authority in workload containers.
@@ -101,12 +108,19 @@ def observer_documents(config: dict[str, Any], image: str, *,
         obj("Role", NAME + "-reader", rules=[{"apiGroups": [""], "resources": ["configmaps", "pods"], "verbs": ["get"]}]),
         reader_binding,
     ]
+    build_namespace = builder_observation_namespace(config)
+    if build_namespace is not None:
+        # Opt-in (#2750): read-only Pod inventory in the build namespace only.
+        docs.extend([obj("Role", NAME, build_namespace, rules=[{"apiGroups": [""], "resources": ["pods"],
+                                                              "verbs": ["get", "list"]}]),
+                     binding("RoleBinding", NAME, NAME, build_namespace, subject)])
     env: list[dict[str, Any]] = [{"name": "LOOM_RESOURCE_OBSERVER_" + key, "value": value} for key, value in {
         "EXECUTION_NAMESPACE": execution, "NAMESPACE": namespace,
         "KUBERNETES_ENDPOINT": config["kubernetes_api_server"],
         "INTERVAL_SECONDS": "15", "MAX_PODS": "128",
         "HELPER_PATH": "/usr/local/bin/loom-node-resource-stats",
         "RUNTIME_ENDPOINT": "unix:///var/run/loom-node/containerd.sock",
+        **({} if build_namespace is None else {"BUILD_NAMESPACE": build_namespace}),
     }.items()]
     env.extend({"name": "LOOM_RESOURCE_OBSERVER_" + key,
                 "valueFrom": {"fieldRef": {"fieldPath": path}}} for key, path in {

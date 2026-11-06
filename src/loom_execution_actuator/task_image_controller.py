@@ -6,6 +6,7 @@ One durable attempt retains the Job UID and resource/lifecycle observations.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -62,6 +63,7 @@ from loom_execution_actuator.task_image_boundary_usage import (
     instrumented,
     observed_boundary_usage,
 )
+from loom_execution_actuator.task_image_build_usage import BuildUsageSampler
 from loom_execution_actuator.task_image_renderer import render_task_image_job
 from loom_execution_actuator.task_image_settings import (
     NativeTaskImageSettings as NativeTaskImageSettings,
@@ -72,6 +74,7 @@ _MANAGER = "loom-task-image-builder"
 _SELECTOR = "app.kubernetes.io/managed-by=" + _MANAGER
 _LIVE = ("claimed", "running")
 _LOG = logging.getLogger(__name__)
+# Builder telemetry (#2750): attempts sampled per background round.
 # One admission pass may start several fitting builds; each still reserves
 # capacity in its own transaction before its Job is created.
 ADMISSIONS_PER_PASS = 32
@@ -196,6 +199,16 @@ class NativeBuildKubernetesApi:
         else:
             self._api, self._credentials = create_api_client(connection)
         self._core, self._batch = client.CoreV1Api(self._api), client.BatchV1Api(self._api)
+
+    async def build_resource_summary(self, node_name: str, *, observation_namespace: str, build_namespace: str,
+                                     max_age_seconds: float, expected_node_uid: str | None = None) -> dict[str, Any]:
+        """The node's builder snapshot from the trusted observer; no kubelet access."""
+        from loom_execution_actuator.resource_observations import read_resource_observation
+
+        return await asyncio.to_thread(read_resource_observation, self._core, node_name=node_name,
+                                       namespace=observation_namespace, execution_namespace=build_namespace,
+                                       max_age_seconds=max_age_seconds, builds=True,
+                                       expected_node_uid=expected_node_uid)
 
     async def close(self) -> None:
         await asyncio.to_thread(self._api.close)
@@ -639,7 +652,8 @@ class NativeTaskImageController:
                  target: ExecutionTargetRuntime, settings: NativeTaskImageSettings,
                  admissions_per_pass: int = ADMISSIONS_PER_PASS,
                  reconcile_concurrency: int = RECONCILE_CONCURRENCY,
-                 admission_grace_seconds: float = ADMISSION_GRACE_SECONDS) -> None:
+                 admission_grace_seconds: float = ADMISSION_GRACE_SECONDS,
+                 build_usage: BuildUsageSampler | None = None) -> None:
         if admissions_per_pass < 1 or reconcile_concurrency < 1 or admission_grace_seconds < 0:
             raise ValueError("native build passes need at least one slot")
         # Every reconcile, and the admitting claim, may hold its guard
@@ -653,6 +667,8 @@ class NativeTaskImageController:
         self.admission_grace_seconds = admission_grace_seconds
         self.target = replace(target, namespace=settings.namespace, runtime_class_name=None)
         self.builder_id = "nebius:" + target.target_id
+        self.build_usage = build_usage
+        self._sampling: asyncio.Task[None] | None = None
 
     async def _outstanding(self, session: AsyncSession) -> list[TaskImageMaterializationAttempt]:
         return list((await session.scalars(select(TaskImageMaterializationAttempt).where(
@@ -669,12 +685,40 @@ class NativeTaskImageController:
         return self._reconciler
 
     async def close(self) -> None:
+        sampling = getattr(self, "_sampling", None)
+        if sampling is not None and not sampling.done():
+            sampling.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sampling
+        build_usage = getattr(self, "build_usage", None)
+        if build_usage is not None:
+            await build_usage.close()
         await self.reconciler.close()
+
+    def _start_sampling(self, attempt_ids: list[UUID]) -> None:
+        """Telemetry is never awaited by a pass: one background round at a time, each sample bounded."""
+        # Absent telemetry (including partially constructed controllers) leaves passes unchanged.
+        current = getattr(self, "_sampling", None)
+        if getattr(self, "build_usage", None) is None or not attempt_ids or (current is not None and not current.done()):
+            return
+        self._sampling = asyncio.create_task(self._sample_all(attempt_ids))
+
+    async def _sample_all(self, attempt_ids: list[UUID]) -> None:
+        assert self.build_usage is not None
+        try:
+            outcomes = await self.build_usage.sample_round(attempt_ids)
+        except Exception:
+            _LOG.debug("Build resource sampling round failed")
+            return
+        for attempt_id, outcome in outcomes.items():
+            if outcome is not None:
+                _LOG.debug("Build resource sample unavailable for attempt %s (%s)", attempt_id, outcome)
 
     async def run_once(self) -> None:
         # Database scans recover missing Jobs, stale epochs and ambiguous creates.
         async with self.sessions() as session:
             attempt_ids = [attempt.id for attempt in await self._outstanding(session)]
+        self._start_sampling(attempt_ids)
 
         # Admission does not wait behind a slow or failing unrelated build past
         # the grace, in this pass or later ones: at most one reconcile is in

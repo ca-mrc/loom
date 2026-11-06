@@ -209,6 +209,10 @@ def _builders(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
             result[target]["cache_total_mib"] = builder.get("cache_total_mib", 4096)
             result[target]["cache_gc_policy"] = builder.get("cache_gc_policy", "legacy-seven-day")
             result[target]["reuse_task_cache_for_verifier"] = builder.get("reuse_task_cache_for_verifier", False)
+            result[target]["record_boundary_usage"] = builder.get("record_boundary_usage", False)
+            # The saved representation, so a rollback restores exactly what was captured.
+            result[target]["record_boundary_usage_saved"] = (
+                "absent" if "record_boundary_usage" not in builder else json.dumps(builder["record_boundary_usage"]))
     return result
 
 
@@ -249,6 +253,7 @@ def _runtime(kube: Kubectl, controller: dict[str, Any]) -> dict[str, Any]:
                   "'builder_request_support':b is not None and hasattr(b,'cpu_request_millis'), "
                   "'builder_cache_budget_support':b is not None and hasattr(b,'cache_total_mib'), "
                   "'builder_cache_policy_support':b is not None and hasattr(b,'cache_gc_policy') and hasattr(b,'reuse_task_cache_for_verifier'), "
+                  "'builder_boundary_usage_support':b is not None and hasattr(b,'record_boundary_usage'), "
                   "'builder_configuration_source':'management-profile' if getattr(s,'global_pool',None) is not None else 'actuator', "
                   "'builder_resources':None if b is None else {"
                   "'effective_cpu_request_millis':getattr(b,'cpu_request_millis',None) or b.cpu_millis, "
@@ -256,7 +261,8 @@ def _runtime(kube: Kubectl, controller: dict[str, Any]) -> dict[str, Any]:
                   "'ephemeral_storage_mib':b.ephemeral_storage_mib,'namespace':b.namespace,"
                   "'cache_total_mib':getattr(b,'cache_total_mib',None), "
                   "'cache_gc_policy':getattr(b,'cache_gc_policy',None), "
-                  "'reuse_task_cache_for_verifier':getattr(b,'reuse_task_cache_for_verifier',None)}}))")
+                  "'reuse_task_cache_for_verifier':getattr(b,'reuse_task_cache_for_verifier',None), "
+                  "'record_boundary_usage':getattr(b,'record_boundary_usage',None)}}))")
     return cast(dict[str, Any], json.loads(kube.run(
         "exec", "-n", ns, "deployment/" + name, "--", "python", "-c", script,
     )))
@@ -344,9 +350,15 @@ def _updated_builders(
     limits = {"cpu_millis", "memory_mib", "ephemeral_storage_mib"}
     numeric = limits | {"cpu_request_millis", "cache_total_mib"}
     policies = {"cache_gc_policy", "reuse_task_cache_for_verifier"}
+    # Opt-in build-phase storage readings (#2750): True or False saves that
+    # explicit value; None ("unset") removes the key. Restoring a captured state
+    # therefore reproduces its exact saved representation.
+    diagnostics = {"record_boundary_usage"}
     for target, values in resources.items():
         if (target not in owners or owners[target].get("task_image_builder") is None
-                or not values or set(values) - (numeric | policies)
+                or not values or set(values) - (numeric | policies | diagnostics)
+                or ("record_boundary_usage" in values and values["record_boundary_usage"] is not None
+                    and type(values["record_boundary_usage"]) is not bool)
                 or any(type(value) is not int for key, value in values.items() if key in numeric)
                 or ("cache_gc_policy" in values and (not isinstance(values["cache_gc_policy"], str)
                     or values["cache_gc_policy"] not in {"legacy-seven-day", "budget-pressure"}))
@@ -360,7 +372,12 @@ def _updated_builders(
             raise DeploymentError("build tuning must preserve existing hard resource ceilings")
         if set(values) & (limits | {"cpu_request_millis"}):
             owner["task_image_builder"]["resource_ceiling"] = ceiling
-        owner["task_image_builder"].update(values)
+        owner["task_image_builder"].update({key: value for key, value in values.items() if key not in diagnostics})
+        if "record_boundary_usage" in values:
+            if values["record_boundary_usage"] is None:
+                owner["task_image_builder"].pop("record_boundary_usage", None)
+            else:
+                owner["task_image_builder"]["record_boundary_usage"] = values["record_boundary_usage"]
     # This is a bucket-wide limit. Controllers sharing it must use one saved
     # budget, including during independent regional tuning operations.
     budgets: dict[str, tuple[int, str]] = {}
@@ -609,7 +626,8 @@ def _apply_builders_locked(
         raise DeploymentError("build settings candidate differs from installed platform")
     updated = _updated_builders(config, resources)
     cache_policies = {"cache_gc_policy", "reuse_task_cache_for_verifier"}
-    allowed = {"cpu_request_millis", "cpu_millis", "memory_mib", "ephemeral_storage_mib", "cache_total_mib", *cache_policies}
+    allowed = {"cpu_request_millis", "cpu_millis", "memory_mib", "ephemeral_storage_mib", "cache_total_mib", *cache_policies,
+               "record_boundary_usage"}
     prepared = {}
     for target in resources:
         matches = [row for row in controllers if _env(row).get("LOOM_EXECUTION_ACTUATOR_TARGET_ID") == target]
@@ -627,6 +645,8 @@ def _apply_builders_locked(
             raise DeploymentError("installed builder lacks cache budget support; stage and deploy the supporting candidate first")
         if set(resources[target]) & cache_policies and not runtime.get("builder_cache_policy_support"):
             raise DeploymentError("installed builder lacks cache policy support; stage and deploy the supporting candidate first")
+        if "record_boundary_usage" in resources[target] and not runtime.get("builder_boundary_usage_support"):
+            raise DeploymentError("installed builder lacks boundary usage support; deploy the supporting candidate first")
         raw = _env(controller).get("LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER")
         if not raw:
             raise DeploymentError("existing actuator builder configuration unavailable")
@@ -639,6 +659,9 @@ def _apply_builders_locked(
             raise DeploymentError("saved cache budget requires a supporting builder candidate before live tuning")
         if desired is not None and not runtime.get("builder_cache_policy_support") and cache_policies & desired.model_fields_set:
             raise DeploymentError("saved cache policy requires a supporting builder candidate before live tuning")
+        if (desired is not None and not runtime.get("builder_boundary_usage_support")
+                and "record_boundary_usage" in desired.model_fields_set):
+            raise DeploymentError("saved boundary usage setting requires a supporting builder candidate before live tuning")
         if desired is None or any(getattr(current, key) != getattr(desired, key)
                                   for key in NativeTaskImageSettings.model_fields if key not in allowed):
             raise DeploymentError("live build tuning cannot change namespace, credential references, runtime or identity settings")
@@ -703,7 +726,9 @@ def _apply_builders_locked(
                            {"op": "replace", "path": "/spec/hard", "value": hard},
                        ]))
         name, ns = controller["metadata"]["name"], controller["metadata"]["namespace"]
-        if any(getattr(current, key) != getattr(desired, key) for key in allowed):
+        representation_changed = (("record_boundary_usage" in current.model_fields_set)
+                                  != ("record_boundary_usage" in desired.model_fields_set))
+        if representation_changed or any(getattr(current, key) != getattr(desired, key) for key in allowed):
             kube.run("set", "env", "deployment/" + name, "-n", ns,
                      "LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER=" + desired.model_dump_json())
             kube.run("rollout", "status", "deployment/" + name, "-n", ns, "--timeout=300s", timeout=330)
@@ -729,6 +754,13 @@ def _apply_builders_locked(
         elif isinstance(observed_resources, dict):
             if any(observed_resources.pop(key, None) is not None for key in cache_policies):
                 raise DeploymentError("builder cache policy capability readback differs")
+        if observed.get("builder_boundary_usage_support"):
+            expected["record_boundary_usage"] = desired.record_boundary_usage
+        elif "record_boundary_usage" in resources[target]:
+            raise DeploymentError("live builder lost boundary usage support; inspect before continuing")
+        elif isinstance(observed_resources, dict):
+            if observed_resources.pop("record_boundary_usage", None) is not None:
+                raise DeploymentError("builder boundary usage capability readback differs")
         if observed_resources != expected:
             raise DeploymentError("live builder resource readback differs; retry retained tuning intent")
         actual_quota = remote.get("resourcequota", "loom-task-image-build-capacity", desired.namespace)
@@ -862,7 +894,8 @@ def main() -> None:
     build_fields = {"cpu-request-millis": "cpu_request_millis", "cpu-limit-millis": "cpu_millis",
                     "memory-mib": "memory_mib", "storage-mib": "ephemeral_storage_mib",
                     "cache-total-mib": "cache_total_mib", "cache-gc-policy": "cache_gc_policy",
-                    "reuse-task-cache-for-verifier": "reuse_task_cache_for_verifier"}
+                    "reuse-task-cache-for-verifier": "reuse_task_cache_for_verifier",
+                    "record-boundary-usage": "record_boundary_usage"}
     for name in build_fields:
         parser.add_argument("--build-" + name, action="append", default=[], metavar="TARGET=VALUE")
     for name in ("cpu-request-millis", "cpu-limit-millis", "memory-request-mib", "memory-limit-mib", "shared-buffers-mib"):
@@ -884,6 +917,10 @@ def main() -> None:
                     if amount not in {"legacy-seven-day", "budget-pressure"}:
                         raise ValueError
                     selected[field] = amount
+                elif field == "record_boundary_usage":
+                    if amount not in {"true", "false", "unset"}:
+                        raise ValueError
+                    selected[field] = None if amount == "unset" else amount == "true"
                 elif field == "reuse_task_cache_for_verifier":
                     if amount not in {"true", "false"}:
                         raise ValueError

@@ -6,6 +6,7 @@ import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Response, status
@@ -26,6 +27,7 @@ from loom_execution_actuator.pool_execution_outbox import PoolExecutionOutbox
 from loom_execution_actuator.pool_execution_resources import PoolExecutionResources
 from loom_execution_actuator.pool_outbox import PoolBuildOutbox
 from loom_execution_actuator.renderer import ExecutionTargetRuntime
+from loom_execution_actuator.task_image_build_usage import BuildUsageSampler
 from loom_execution_actuator.task_image_controller import (
     NativeBuildKubernetesApi,
     NativeTaskImageController,
@@ -229,8 +231,21 @@ async def _run() -> None:
                     kubernetes=build_kubernetes, selector=PoolBuildSelector(outbox=build_outbox,
                         target_id=target.target_id, deadline_seconds=settings.task_image_builder.active_deadline_seconds))
             else:
+                build_usage = None
+                if settings.build_resource_observations and settings.resource_observation_namespace:
+                    builder_settings, observations = settings.task_image_builder, settings.resource_observation_namespace
+                    reader_api = build_kubernetes
+
+                    async def read_builds(node_name: str, *, expected_node_uid: str | None = None) -> dict[str, Any]:
+                        return await reader_api.build_resource_summary(
+                            node_name, observation_namespace=observations, build_namespace=builder_settings.namespace,
+                            max_age_seconds=settings.resource_observation_max_age_seconds,
+                            expected_node_uid=expected_node_uid)
+
+                    build_usage = BuildUsageSampler(sessions=sessions, namespace=builder_settings.namespace,
+                                                    reader=read_builds)
                 builder = NativeTaskImageController(sessions=sessions, kubernetes=build_kubernetes,
-                    target=target, settings=settings.task_image_builder)
+                    target=target, settings=settings.task_image_builder, build_usage=build_usage)
         if builder is not None:
             # A reconcile may outlive its pass; stop it before its clients close.
             resources.push_async_callback(builder.close)

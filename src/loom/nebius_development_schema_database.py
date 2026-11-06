@@ -288,7 +288,7 @@ def _grant(db: psycopg.Connection[Any], selection: DevelopmentSchemaSelection) -
                 db.execute(sql.SQL('GRANT SELECT,INSERT,UPDATE,DELETE ON public.{} TO {}').format(sql.Identifier(table), sql.Identifier(role)))
             db.execute(sql.SQL('GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO {}').format(sql.Identifier(role)))
         if selection.mode == 'shared':
-            tables_authority, columns_authority = actuator_authority()
+            tables_authority, columns_authority = actuator_authority(include_newer=True)
             for table, privileges in tables_authority.items():
                 db.execute(sql.SQL('GRANT {} ON public.{} TO loom_actuator').format(
                     sql.SQL(',').join(map(sql.SQL, sorted(privileges))), sql.Identifier(table)))
@@ -331,7 +331,7 @@ def _grant(db: psycopg.Connection[Any], selection: DevelopmentSchemaSelection) -
         install_application_database_access(db, data_environment_id=selection.data_environment_id, manager_role=_roles(selection)[-2])
         marker = db.execute("SELECT shobj_description(oid,'pg_authid') FROM pg_roles WHERE rolname='loom_actuator'").fetchone()
         assert marker is not None
-        qualify_actuator(db, marker[0], bytes.fromhex(json.loads(marker[0])['token_sha256']))
+        qualify_actuator(db, marker[0], bytes.fromhex(json.loads(marker[0])['token_sha256']), include_newer=True)
     for role in _roles(selection):
         if db.execute("SELECT has_table_privilege(%s,'public.alembic_version','INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,REFERENCES') "
                 "OR has_any_column_privilege(%s,'public.alembic_version','INSERT,UPDATE,REFERENCES')", (role, role)).fetchone() != (False,):

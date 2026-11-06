@@ -77,3 +77,53 @@ async def test_uninstrumented_builds_store_no_reading(controller_setup):  # noqa
     row, attempts = await rows(sessions, image_id)
     assert row.state == "ready" and attempts[0].native_build["capacity_released_at"]
     assert "boundary_usage" not in attempts[0].native_build
+
+
+@pytest.mark.parametrize("instrument", [True, False])
+async def test_report_export_is_the_minimal_projection_of_real_attempts(controller_setup, instrument):  # noqa: F811
+    import hashlib
+    from datetime import UTC, datetime, timedelta
+
+    from scripts import task_image_boundary_usage_report as report_module
+    from sqlalchemy import text
+
+    from loom.db.schema import TaskImageMaterialization
+
+    controller, sessions, team_id, kube = controller_setup
+    if instrument:
+        controller.settings = controller.settings.model_copy(update={"record_boundary_usage": True})
+    image_id, _ = await seed_image(sessions, team_id)
+    await controller.run_once()
+    kube.finish()
+    _instrument(kube, json.dumps(_VALID))
+    await controller.run_once()
+    row, attempts = await rows(sessions, image_id)
+    assert row.state == "ready"
+    stored = json.dumps(attempts[0].native_build)
+    claim = attempts[0].native_build["configmap"]["data"]["claim.json"]
+    async with sessions() as session:
+        task_id = (await session.get(TaskImageMaterialization, image_id)).task_id
+        exported = [value for (value,) in (await session.execute(
+            text(report_module.QUERY), {"since": datetime.now(UTC) - timedelta(hours=1)})).all()
+            if value["attempt_id"] == str(attempts[0].id)]
+    (export,) = exported
+    assert set(export) == report_module.EXPORT_FIELDS
+    identifiers = {str(export[key]) for key in ("attempt_id", "materialization_id", "task_checksum", "target_id",
+                                                "pod_uid", "cpu_arch") if export.get(key) is not None}
+    claim_values = [value for value in json.loads(claim).values()
+                    if isinstance(value, str) and len(value) > 6 and value not in identifiers]
+    assert claim_values  # the stored claim carries repository, bucket and source values
+    text_export = json.dumps(export)
+    # The attempt does store all of these; the export must not carry any of them.
+    for private in ("claim.json", "configmap", "registry_repository", "secretName", "loom_task_image_stage",
+                    "command", task_id, *claim_values):
+        assert private == task_id or private in stored or private in claim
+        assert private not in text_export
+    assert export["task_digest"] == hashlib.sha256(task_id.encode()).hexdigest()[:12]
+    assert export["instrumented"] is instrument and export["build_exit_code"] == 0
+    assert set(export["volume_size_limits"]) == {"build", "builder-tmp", "prepare-tmp", "publish-tmp"}
+    assert export["init_storage_requests"] and export["container_storage_requests"]
+    result = report_module.report([json.dumps(export, default=str)])
+    (attempt,) = result["attempts"]
+    assert attempt["usage_status"] == ("complete" if instrument else "not_instrumented")
+    assert attempt["effective_pod_request_kib"] == controller.settings.ephemeral_storage_mib * 1024

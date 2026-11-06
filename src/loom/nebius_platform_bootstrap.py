@@ -61,6 +61,8 @@ ACTUATOR_TASK_IMAGE_WRITES = {
     "task_image_materializations": ("UPDATE",),
     "task_image_materialization_attempts": ("INSERT", "UPDATE"),
     "task_image_publication_evidence": ("INSERT",),
+    # Observer samples of build Pods (#2750): telemetry only, never deleted here.
+    "task_image_build_resource_usage": ("INSERT", "UPDATE"),
 }
 ACTUATOR_TABLES = (
     "nebius_rollout_guard",
@@ -296,6 +298,7 @@ def _bootstrap_database(
                         "task_image_capacity_waits",
                         "task_image_materialization_attempts",
                         "task_image_publication_evidence",
+                        "task_image_build_resource_usage",
                         "trial_task_image_materializations",
                         "task_bundle_sources",
                         "task_bundle_source_incarnations",
