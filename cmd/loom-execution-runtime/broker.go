@@ -176,11 +176,19 @@ func workloadBrokerFromEnvironment() (*workloadBroker, error) {
 			return nil, fmt.Errorf("clear execution broker identity: %w", err)
 		}
 	}
+	// Detect an unresponsive HTTP/2 connection without timing out healthy
+	// long-running streams. PING acknowledgements keep the connection healthy;
+	// a failed health check lets existing broker retries use a fresh connection.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.HTTP2 = &http.HTTP2Config{
+		SendPingTimeout: 30 * time.Second,
+		PingTimeout:     15 * time.Second,
+	}
 	return &workloadBroker{
 		podTokenFile: podTokenFile,
 		root:         root,
 		identity:     workloadIdentity{LeaseID: leaseID, Generation: generation, ExecutionRole: role},
-		client:       &http.Client{Timeout: 120 * time.Second},
+		client:       &http.Client{Transport: transport, Timeout: 120 * time.Second},
 	}, nil
 }
 

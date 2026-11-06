@@ -168,6 +168,15 @@ Task DNS deadline. Each Task connection still resolves and validates its public
 addresses; no address or authorization result is cached. The deployment renderer
 persists both Pod settings and absolute proxy upstream names across releases.
 
+The runtime broker owns a clone of Go's default HTTP transport. Its HTTP/2
+connection health check sends a PING after 30 seconds without a received frame
+and closes a connection that does not acknowledge the PING within 15 seconds.
+A healthy peer can acknowledge PINGs while model and control handlers wait for
+response data, so this does not impose a shorter request deadline. A dead
+connection can then be replaced by the existing idempotent output retry. HTTP/1,
+TLS verification, the finite 120-second broker request timeout, model phase
+cancellation, the five-minute output commit cap, and retry ownership are unchanged.
+
 Rejected or timed-out tunnels log a fixed outcome, lease identity, handshake
 stage, total and stage elapsed milliseconds, and HTTP status at WARNING. Peer
 closure before relay starts also uses WARNING, so failed handshakes remain visible under the
