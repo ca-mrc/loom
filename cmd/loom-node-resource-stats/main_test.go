@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -604,11 +605,15 @@ func TestSkippedPodFilesystemKeepsCountersWithoutAnyWalk(t *testing.T) {
 }
 
 func TestSlowLogWalkCannotDiscardStatsOnlyCounters(t *testing.T) {
-	walks := 0
+	// The helper returns at its deadline while the walk goroutine is still
+	// unwinding, so the count is atomic and the test waits for the walk to exit.
+	var walks atomic.Int32
+	exited := make(chan struct{}, 1)
 	original := logUsage
 	logUsage = func(ctx context.Context, root, pod, container string) (uint64, error) {
-		walks++
+		walks.Add(1)
 		<-ctx.Done() // a log tree slower than the whole helper deadline
+		exited <- struct{}{}
 		return 0, ctx.Err()
 	}
 	t.Cleanup(func() { logUsage = original })
@@ -619,15 +624,19 @@ func TestSlowLogWalkCannotDiscardStatsOnlyCounters(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	var output bytes.Buffer
-	if got := run(ctx, opts, strings.NewReader(requestJSON(f.started)), &output); got == 0 || !strings.Contains(output.String(), "observation_deadline") || walks != 1 {
+	if got := run(ctx, opts, strings.NewReader(requestJSON(f.started)), &output); got == 0 || !strings.Contains(output.String(), "observation_deadline") {
 		t.Fatalf("expected the slow walk to reach the deadline: %d %s", got, output.String())
+	}
+	<-exited
+	if walks.Load() != 1 {
+		t.Fatalf("expected one walk, got %d", walks.Load())
 	}
 	// Stats-only never starts it, so the counters are returned well within the same deadline.
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel2()
 	output.Reset()
 	request := strings.TrimSuffix(requestJSON(f.started), "}") + `,"pod_filesystem":"skip"}`
-	if got := run(ctx2, opts, strings.NewReader(request), &output); got != 0 || walks != 1 {
+	if got := run(ctx2, opts, strings.NewReader(request), &output); got != 0 || walks.Load() != 1 {
 		t.Fatalf("stats-only walked logs or lost counters: %d %s", got, output.String())
 	}
 	var result summary
