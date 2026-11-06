@@ -16,7 +16,11 @@ whether the upstream implements `/responses`:
 3. The probe posts a minimal request with a nonexistent sentinel model. Status
    `200`, `400`, or `401` means the route exists; `404` or `501` means it is
    unavailable. Other `4xx` responses are inconclusive and retain the native
-   path.
+   path. Some relays (new-api / one-api style) pick a channel by model before
+   they look at the endpoint, so they answer any unknown model with
+   `model_not_found`, often as `503`. When the sentinel gets `model_not_found`,
+   the probe is sent once more with the model of the request being served,
+   still capped at one output token, and classified the same way.
 4. Any other `5xx` or a transport failure says the upstream is unwell, not what
    it supports. Nothing is stored, that request uses the Chat translation, and
    that Gateway replica waits 60 seconds before probing the connection again.
