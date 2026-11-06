@@ -118,9 +118,13 @@ oldest-first under one pool lock. Valid dispatches keep their slots until they
 settle or expire; admission age alone never establishes a stalled group. A full
 group with no overflow keeps waiting within the request and signed deadline.
 The stored `stall_sec` remains configuration-compatible but no longer cuts off
-valid occupancy. Legacy typed `provider_queue_stalled` errors remain eligible
+valid occupancy. Operators may set it up to 86400 seconds; new pools default
+to that same day-long bound. Legacy typed `provider_queue_stalled` errors remain eligible
 for the hosted controller's bounded infrastructure retry, without treating
-arbitrary 429s as task-independent failures. Queue time is `gateway_dispatch_queue_credit`:
+arbitrary 429s as task-independent failures. Harbor's LiteLLM/HTTP timeout is
+the remaining attempt deadline, not Harbor's 600-second default, so one queued
+call can wait through pause credit and generation inside a single outbound
+request. Queue time is `gateway_dispatch_queue_credit`:
 Postgres adds the committed rows with `clock_timestamp()`, and an open row stops
 15 seconds after its last renewal, the same moment a crashed waiter is expired.
 A failed or forbidden read adds no credit. The lease's `deadline_at` is the outer bound, set once

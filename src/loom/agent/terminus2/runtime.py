@@ -73,6 +73,20 @@ def _require_attempt_mutation_active(
         deadline.require_remaining()
 
 
+def _harbor_model_timeout_sec(deadline: AttemptDeadline | None) -> float:
+    """Timeout for one Harbor LiteLLM/HTTP call, including quota-group wait.
+
+    Harbor's built-in 600s covers the entire outbound request. A queued call
+    can sit that whole interval before the first token, so the transport must
+    use the remaining attempt deadline instead of that default. Without a
+    deadline, keep the previous 120s SDK transport default.
+    """
+
+    if deadline is None:
+        return 120.0
+    return deadline.require_remaining()
+
+
 def _import_terminus2() -> tuple[type, type]:
     try:
         from harbor.agents.terminus_2.terminus_2 import Terminus2
@@ -696,7 +710,9 @@ class LoomTerminus2Runtime:
         step_id: str,
     ) -> None:
         try:
-            async with ModelSDKClients(timeout_sec=120) as clients:
+            async with ModelSDKClients(
+                timeout_sec=_harbor_model_timeout_sec(self._attempt_deadline),
+            ) as clients:
                 self._model_clients = clients
                 try:
                     await self._run(instruction=instruction, env=env, trajectory=trajectory,
@@ -888,16 +904,24 @@ class LoomTerminus2Runtime:
         # Harbor binds reasoning_effort explicitly while expanding llm_kwargs.
         # Passing it in both places raises before the first model call.
         reasoning_effort = generation_params.pop("reasoning_effort", None)
+        llm_kwargs: dict[str, Any] = {**generation_params, "api_key": step_token}
+        if self._attempt_deadline is not None:
+            # sanitize_request_extras drops caller timeout; inject remaining
+            # so LiteLLM does not fall back to Harbor's 600s HTTP default.
+            llm_kwargs["timeout"] = _harbor_model_timeout_sec(self._attempt_deadline)
         agent = terminus2_cls(
             logs_dir=logs_root,
             model_name=self.direct_provider.harbor_model_name if self.direct_provider else _harbor_model_name(self.model),
             api_base=api_base,
             session_id=None if self.direct_provider else str(self.trial_id),
             reasoning_effort=reasoning_effort,
-            llm_kwargs={**generation_params, "api_key": step_token},
+            llm_kwargs=llm_kwargs,
             **harbor_options,
             **task_options,
         )
+        if "timeout" in llm_kwargs:
+            # Live calls expand _llm_call_kwargs, not the serializable dump.
+            agent._llm_call_kwargs["timeout"] = llm_kwargs["timeout"]
         if self._model_clients is not None:
             # Harbor deep-copies these call kwargs separately from serializable
             # options. Main, teacher and summary-subagent calls all expand them.

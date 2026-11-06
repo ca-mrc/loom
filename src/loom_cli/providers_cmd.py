@@ -767,7 +767,7 @@ def _pool(args: argparse.Namespace) -> int:
                     "timeout_burst_count": current["timeout_burst_count"],
                     "timeout_window_sec": current["timeout_window_sec"],
                     "queue_enabled": args.queue == "enable",
-                    "stall_sec": args.stall_sec if args.stall_sec is not None else current.get("stall_sec", 200),
+                    "stall_sec": args.stall_sec if args.stall_sec is not None else current.get("stall_sec", 86400),
                     "max_pause_sec": (
                         args.max_pause_sec
                         if args.max_pause_sec is not None
@@ -826,7 +826,12 @@ def dispatch(argv: list[str]) -> int:
         default=[],
         help="Quota group cap, as name=count. Required for every group when enabling.",
     )
-    pool.add_argument("--stall-sec", type=float, default=None)
+    pool.add_argument(
+        "--stall-sec",
+        type=float,
+        default=None,
+        help="Hung-queue bound in seconds (max 86400). Default for new pools is 86400.",
+    )
     pool.add_argument("--max-pause-sec", type=float, default=None)
     pool.add_argument("--expect-version", type=int, default=None)
     pool.add_argument("--admin-actor", default=None)
