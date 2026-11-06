@@ -254,7 +254,13 @@ candidate, after partial compilation writes roll back. Temporary
 capacity and image-readiness waits retain their existing retry behavior.
 
 The environment-local scheduler also isolates admission ceilings and paid-execution
-policy denials. Region admission limits and target-specific budget or price waits
+policy denials. Its candidate scan skips batches whose enabled concurrency policy
+is already full, so a capped backlog cannot repeatedly consume the bounded scan
+and starve a newer batch. This advisory counter read does not reserve capacity;
+the final admission function still enforces all scopes atomically. A seat release
+or policy change makes otherwise eligible trials selectable on the next scan;
+existing retry deadlines still apply. Region admission
+limits and target-specific budget or price waits
 roll back that target's route, lease, admission and spend writes before trying an
 eligible alternative. Broader policies retain their scope. If no target can admit
 the candidate, the Trial remains queued with a diagnostic and bounded retry time;
