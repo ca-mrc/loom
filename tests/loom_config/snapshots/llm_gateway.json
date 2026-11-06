@@ -194,6 +194,11 @@
     "default": "None",
     "required": false
   },
+  "upstream_read_timeout_sec": {
+    "annotation": "float | None",
+    "default": "None",
+    "required": false
+  },
   "upstream_timeout_sec": {
     "annotation": "<class 'float'>",
     "default": "200.0",
