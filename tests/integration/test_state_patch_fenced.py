@@ -128,9 +128,14 @@ def test_state_patch_with_wrong_worker_fenced(app, state_seed):  # type: ignore[
         assert "claim" in r.json()["detail"].lower()
 
 
-@pytest.mark.parametrize("identity", ["matching", "other_trial", "other_execution", "finished_attempt"])
+@pytest.mark.parametrize(
+    "identity", ["matching", "other_trial", "other_execution", "finished_attempt"]
+)
 def test_episode_checkpoint_requires_the_locked_trials_running_execution(
-    app, state_seed, postgres_url, identity,
+    app,
+    state_seed,
+    postgres_url,
+    identity,
 ):  # type: ignore[no-untyped-def]
     trial_id, _, _, raw, _ = state_seed
     engine = create_engine(postgres_url)
@@ -140,33 +145,71 @@ def test_episode_checkpoint_requires_the_locked_trials_running_execution(
     try:
         with sessions.begin() as session:
             trial = session.get(Trial, trial_id)
-            session.add(Trial(id=other_trial_id, team_id=trial.team_id, task_id=trial.task_id,
-                              config={}, requires_caps={}, state="queued"))
+            session.add(
+                Trial(
+                    id=other_trial_id,
+                    team_id=trial.team_id,
+                    task_id=trial.task_id,
+                    config={},
+                    requires_caps={},
+                    state="queued",
+                )
+            )
             session.flush()
-            session.add_all([
-                TerminusAgentExecution(id=execution_id, trial_id=trial_id, step_id="agent"),
-                TerminusAgentExecution(id=other_execution_id, trial_id=other_trial_id, step_id="agent"),
-            ])
+            session.add_all(
+                [
+                    TerminusAgentExecution(id=execution_id, trial_id=trial_id, step_id="agent"),
+                    TerminusAgentExecution(
+                        id=other_execution_id, trial_id=other_trial_id, step_id="agent"
+                    ),
+                ]
+            )
             session.flush()
-            session.add_all([
-                TerminusAgentRunAttempt(id=attempt_id, execution_id=execution_id, attempt_number=1,
-                    state="failed" if identity == "finished_attempt" else "running"),
-                TerminusAgentRunAttempt(id=other_attempt_id, execution_id=other_execution_id,
-                    attempt_number=1, state="running"),
-            ])
+            session.add_all(
+                [
+                    TerminusAgentRunAttempt(
+                        id=attempt_id,
+                        execution_id=execution_id,
+                        attempt_number=1,
+                        state="failed" if identity == "finished_attempt" else "running",
+                    ),
+                    TerminusAgentRunAttempt(
+                        id=other_attempt_id,
+                        execution_id=other_execution_id,
+                        attempt_number=1,
+                        state="running",
+                    ),
+                ]
+            )
         # A different active Trial URL must not bypass the queued Trial's fence.
         with TestClient(app) as client:
-            response = client.post(f"/trials/{trial_id}/terminus/episode-checkpoints",
-                headers={"Authorization": f"Bearer {raw}"}, json={
-                    "execution_id": str(other_execution_id if identity == "other_trial" else execution_id),
-                    "run_attempt_id": str(other_attempt_id if identity in {"other_trial", "other_execution"} else attempt_id),
-                    "episode": 1, "active_role": "student", "last_call_ordinal": 1, "last_seq": 1,
-                })
+            response = client.post(
+                f"/trials/{trial_id}/terminus/episode-checkpoints",
+                headers={"Authorization": f"Bearer {raw}"},
+                json={
+                    "execution_id": str(
+                        other_execution_id if identity == "other_trial" else execution_id
+                    ),
+                    "run_attempt_id": str(
+                        other_attempt_id
+                        if identity in {"other_trial", "other_execution"}
+                        else attempt_id
+                    ),
+                    "episode": 1,
+                    "active_role": "student",
+                    "last_call_ordinal": 1,
+                    "last_seq": 1,
+                },
+            )
         assert response.status_code == (200 if identity == "matching" else 409), response.text
         with sessions() as session:
-            checkpoints = list(session.scalars(select(EpisodeCheckpoint).where(
-                EpisodeCheckpoint.execution_id.in_((execution_id, other_execution_id)),
-            )))
+            checkpoints = list(
+                session.scalars(
+                    select(EpisodeCheckpoint).where(
+                        EpisodeCheckpoint.execution_id.in_((execution_id, other_execution_id)),
+                    )
+                )
+            )
             assert len(checkpoints) == (1 if identity == "matching" else 0)
             if checkpoints:
                 assert checkpoints[0].execution_id == execution_id
