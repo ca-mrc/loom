@@ -13,7 +13,9 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import func, insert, select, text, update
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 
 from loom.db.nebius_application_build_schema import (
     NebiusApplicationBuild,
@@ -70,6 +72,81 @@ def observe_worker_waits(*, delay_seconds=50):
         timer.cancel()
 
 
+# A pool operation still running after this many seconds is observed before the
+# client's 5-second request budget cancels it (#2603).
+SLOW_POOL_OPERATION_SECONDS = 3.0
+
+_BACKEND_WAITS = text("""
+    SELECT a.pid,
+           a.state,
+           a.wait_event_type,
+           a.wait_event,
+           round(extract(epoch FROM clock_timestamp() - a.xact_start)::numeric, 3) AS xact_age_seconds,
+           round(extract(epoch FROM clock_timestamp() - a.state_change)::numeric, 3) AS state_age_seconds,
+           cardinality(pg_blocking_pids(a.pid)) AS blocked_by,
+           EXISTS (SELECT 1 FROM pg_locks l
+                    WHERE l.pid = a.pid AND l.locktype = 'advisory' AND l.granted) AS holds_advisory
+      FROM pg_stat_activity a
+     WHERE a.datname = current_database()
+       AND a.pid <> pg_backend_pid()
+       AND a.backend_type = 'client backend'
+     ORDER BY a.pid
+""")
+
+
+async def database_waits(factory):
+    """Every other backend of the test database: what it waits on, how long its
+    transaction has been open, how many backends block it, and whether it holds
+    an advisory lock (all pool writers share one). No query text or values."""
+    engine = create_async_engine(
+        factory.kw["bind"].url.render_as_string(hide_password=False), poolclass=NullPool,
+    )
+    try:
+        async with asyncio.timeout(1.5):
+            async with engine.connect() as connection:
+                rows = (await connection.execute(_BACKEND_WAITS)).mappings().all()
+        return [{key: (float(value) if key.endswith("_seconds") and value is not None else value)
+                 for key, value in row.items()} for row in rows]
+    finally:
+        await engine.dispose()
+
+
+@asynccontextmanager
+async def observe_slow_pool_operation(factory, operation):
+    """Print database and event-loop state if a pool operation outlives
+    SLOW_POOL_OPERATION_SECONDS; pytest shows it only for a failed test.
+
+    `loop_lag_seconds` is how late the observation timer fired: a large value
+    means the event loop was starved, not that a statement was waiting.
+    """
+    loop = asyncio.get_running_loop()
+    due = loop.time() + SLOW_POOL_OPERATION_SECONDS
+
+    async def observe():
+        await asyncio.sleep(SLOW_POOL_OPERATION_SECONDS)
+        evidence = {"event": "slow_build_pool_operation", "operation": operation,
+                    "loop_lag_seconds": round(loop.time() - due, 3)}
+        try:
+            evidence["backends"] = await database_waits(factory)
+        except Exception as error:
+            # Best-effort evidence must not replace the original test failure.
+            evidence["backends_unavailable"] = type(error).__name__
+        print(json.dumps(evidence, default=str))
+
+    observer = asyncio.create_task(observe())
+    try:
+        yield
+    finally:
+        if observer.done():
+            pass
+        elif loop.time() >= due:
+            # The snapshot is being taken; let it finish rather than lose it.
+            await asyncio.gather(observer, return_exceptions=True)
+        else:
+            observer.cancel()
+            await asyncio.gather(observer, return_exceptions=True)
+
+
 @pytest.fixture
 async def worker_timeout_diagnostics():
     with observe_worker_waits():
@@ -106,7 +183,8 @@ async def setup_worker(environment_registry, build_inputs, tmp_path, *, lose_rep
             started = monotonic()
             outcome = "pending"
             try:
-                response = await httpx.ASGITransport(app=app).handle_async_request(request)
+                async with observe_slow_pool_operation(factory, operation):
+                    response = await httpx.ASGITransport(app=app).handle_async_request(request)
                 outcome = str(response.status_code)
             except BaseException as error:
                 outcome = type(error).__name__
