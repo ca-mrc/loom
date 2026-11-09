@@ -508,7 +508,9 @@ def test_workspace_verifier_reruns_summary_from_task_input_only(
     # instruction must tell the agent to create reports/ itself; a script that
     # relied on a hand-made reports/ scored `reproduced: 0` on staging (#2054).
     root, _ = _workspace_fixture(tmp_path)
-    assert "creates reports/ itself" in (root / "instruction.md").read_text()
+    instruction = (root / "instruction.md").read_text()
+    assert "must read data/items.csv and create reports/ itself" in instruction
+    assert "(keeping the data/ folder)" in instruction
     script = _SELF_CONTAINED_SUMMARY
     if not makes_reports_dir:
         script = script.replace('os.makedirs("reports", exist_ok=True)\n', "")

@@ -24,6 +24,7 @@ from loom_llm_gateway.attempt_deadline import (
     GatewayAttemptDeadline,
 )
 from loom_llm_gateway.responses_probe import (
+    MODEL_ROUTING_RELAY,
     ProbeBackoff,
     ProbeOutcome,
     classify_probe_status,
@@ -217,66 +218,64 @@ def test_probe_backoff_expires_and_clears() -> None:
     assert backoff.active(connection_id) is False
 
 
-def _model_routing_relay(native_status: int, served: frozenset[str]) -> tuple[httpx.MockTransport, list[str]]:
-    """A new-api style relay: it picks a channel by model before it looks at
-    the endpoint, so an unknown model is `503 model_not_found` (#2054)."""
-    models: list[str] = []
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        model = json.loads(request.content)["model"]
-        models.append(model)
-        if model not in served:
-            return httpx.Response(
-                503,
-                json={"error": {"code": "model_not_found", "message": "No available channel"}},
-            )
-        return httpx.Response(native_status, json={})
-
-    return httpx.MockTransport(handler), models
-
-
-@pytest.mark.parametrize(("native_status", "supported"), [(200, True), (404, False)])
-async def test_model_routing_relay_is_settled_with_the_request_model(
-    native_status: int, supported: bool,
-) -> None:
-    transport, models = _model_routing_relay(native_status, frozenset({"gpt-4.1-mini"}))
-
-    outcome = await probe_responses_api(
-        upstream_url="http://relay.example/v1/responses",
-        api_key="tok",
-        model="gpt-4.1-mini",
-        transport=transport,
-    )
-
-    assert outcome.supported is supported
-    assert outcome.transient is False
-    assert models == ["loom-probe-nonexistent-model", "gpt-4.1-mini"]
-
-
-async def test_model_not_found_without_a_request_model_stays_transient() -> None:
-    transport, models = _model_routing_relay(200, frozenset())
-
-    outcome = await probe_responses_api(
-        upstream_url="http://relay.example/v1/responses", api_key="tok", transport=transport,
-    )
-
-    assert outcome == ProbeOutcome(supported=None, error_detail="upstream_503", transient=True)
-    assert models == ["loom-probe-nonexistent-model"]
-
-
-@pytest.mark.parametrize("status", [400, 503])
-async def test_sentinel_answer_without_model_not_found_sends_one_probe(status: int) -> None:
+@pytest.mark.parametrize("code", [502, 503])
+async def test_model_routing_relay_settles_as_not_native(code: int) -> None:
+    """A new-api style relay picks a channel by model before it looks at the
+    endpoint, so the sentinel gets `model_not_found` as a 5xx. On staging a
+    real-model probe of such a relay answered 400 while native calls hung, so
+    the relay is settled as translated (#2054)."""
     models: list[str] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         models.append(json.loads(request.content)["model"])
-        return httpx.Response(status, json={"error": {"code": "invalid_request_error"}})
+        return httpx.Response(
+            code, json={"error": {"code": "model_not_found", "message": "No available channel"}},
+        )
 
-    await probe_responses_api(
-        upstream_url="http://mock.example/v1/responses",
+    outcome = await probe_responses_api(
+        upstream_url="http://relay.example/v1/responses",
         api_key="tok",
-        model="gpt-4.1-mini",
         transport=httpx.MockTransport(handler),
     )
 
+    assert outcome == ProbeOutcome(supported=False, error_detail=MODEL_ROUTING_RELAY)
     assert models == ["loom-probe-nonexistent-model"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"error": {"code": "upstream_error"}},
+        {"error": {"code": None}},
+        {"error": "model_not_found"},
+        ["model_not_found"],
+        None,
+    ],
+)
+async def test_other_5xx_bodies_stay_transient(body: object) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if body is None:
+            return httpx.Response(503, text="Service Unavailable")
+        return httpx.Response(503, json=body)
+
+    outcome = await probe_responses_api(
+        upstream_url="http://relay.example/v1/responses",
+        api_key="tok",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert outcome == ProbeOutcome(supported=None, error_detail="upstream_503", transient=True)
+
+
+async def test_model_not_found_from_a_responses_handler_is_still_native() -> None:
+    # OpenAI's own handler rejects an unknown model with a 4xx: the route exists.
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"code": "model_not_found"}})
+
+    outcome = await probe_responses_api(
+        upstream_url="http://api.example/v1/responses",
+        api_key="tok",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert outcome == ProbeOutcome(supported=True, error_detail=None)
