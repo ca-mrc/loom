@@ -1217,6 +1217,9 @@ def test_job_wait_returns_on_failure_or_completion_and_preserves_timeout(
     ({"status": {"failed": 1}}, False),
     ({"status": {"failed": 1}, "spec": {"backoffLimit": 0}}, True),
     ({"status": {"failed": 1}, "spec": {"backoffLimit": 1}}, False),
+    ({"status": {"failed": 2}, "spec": {"backoffLimit": 1}}, True),
+    ({"status": {"failed": 1, "conditions": [{"type": "Complete", "status": "True"}]},
+      "spec": {"backoffLimit": 1}}, False),
     ({"status": {"conditions": [{"type": "Failed", "status": "True"}]}}, True),
 ])
 def test_job_failed_uses_failed_count_against_backoff_limit(job: dict, expected: bool) -> None:

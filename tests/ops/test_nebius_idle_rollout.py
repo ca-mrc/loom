@@ -232,6 +232,19 @@ def running_rollout_intent():
             "previous_candidate_sha": "c" * 40}
 
 
+def test_cancelled_run_without_persisted_intent_is_not_recoverable(monkeypatch, tmp_path):
+    def api(path, data=None):
+        if path.startswith("deployments?"):
+            return []
+        response = recovery_api(path, data)
+        return {**response, "conclusion": "cancelled"} if path == "actions/runs/91" else response
+
+    monkeypatch.setattr(rollout, "github", api)
+    monkeypatch.setattr(rollout.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=1))
+    with pytest.raises(rollout.DeploymentError, match="persisted rollout intent"):
+        rollout.select_recovery("91", tmp_path / "recovery")
+
+
 @pytest.mark.parametrize("conclusion", ["failure", "timed_out", "cancelled"])
 def test_runner_loss_recovers_server_intent_when_artifact_is_missing(monkeypatch, tmp_path, conclusion):
     payload = {**running_rollout_intent(), "private_diagnostic": "must-not-be-copied"}
