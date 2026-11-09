@@ -35,9 +35,19 @@ def test_transferred_publication_keeps_stable_repository_authority(monkeypatch):
 def test_github_api_uses_stable_id_without_slug_redirect(monkeypatch):
     def command(argv, **kwargs):
         assert argv == ["gh", "api", "repositories/1281629473/actions/runs/42"]
+        assert kwargs.get("timeout") == 30
         return SimpleNamespace(returncode=0, stdout='{"id":42}')
     monkeypatch.setattr(rollout.subprocess, "run", command)
     assert rollout.github("actions/runs/42") == {"id": 42}
+
+
+def test_github_api_timeout_fails_the_actions_step(monkeypatch):
+    def command(argv, **kwargs):
+        assert kwargs.get("timeout") == 30
+        raise rollout.subprocess.TimeoutExpired(argv, 30)
+    monkeypatch.setattr(rollout.subprocess, "run", command)
+    with pytest.raises(rollout.DeploymentError, match="GitHub deployment API failed"):
+        rollout.github("actions/runs/42")
 
 
 def test_canonical_download_name_is_resolved_from_stable_repository(monkeypatch):
@@ -112,7 +122,7 @@ def test_recovery_selects_failed_attempt_evidence_and_original_published_candida
 
 
 @pytest.mark.parametrize("field,value", [
-    ("status", "in_progress"), ("conclusion", "success"), ("conclusion", "cancelled"),
+    ("status", "in_progress"), ("conclusion", "success"),
     ("head_branch", "feature"), ("head_repository", {"full_name": "someone/fork"}),
     ("path", ".github/workflows/nebius-candidate.yml"),
 ])
@@ -222,7 +232,7 @@ def running_rollout_intent():
             "previous_candidate_sha": "c" * 40}
 
 
-@pytest.mark.parametrize("conclusion", ["failure", "timed_out"])
+@pytest.mark.parametrize("conclusion", ["failure", "timed_out", "cancelled"])
 def test_runner_loss_recovers_server_intent_when_artifact_is_missing(monkeypatch, tmp_path, conclusion):
     payload = {**running_rollout_intent(), "private_diagnostic": "must-not-be-copied"}
 
@@ -379,6 +389,29 @@ def test_local_github_deployment_without_workflow_identity_still_works(monkeypat
     monkeypatch.setattr(rollout, "github", api)
     monkeypatch.setattr(rollout, "deploy", lambda *args, **kwargs: {"status": "complete"})
     assert rollout.rollout(args) == {"status": "complete"}
+
+
+def test_deploy_failure_survives_github_status_post_error(monkeypatch, tmp_path):
+    args = wrapper_inputs(monkeypatch, tmp_path, github=True)
+    monkeypatch.setenv("GITHUB_RUN_ID", "91")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "3")
+
+    def api(path, payload=None):
+        if path == "deployments":
+            return {"id": 123}
+        if payload and payload.get("state") == "failure":
+            raise rollout.DeploymentError("GitHub deployment API failed")
+        return {}
+
+    monkeypatch.setattr(rollout, "github", api)
+    monkeypatch.setattr(
+        rollout, "deploy",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            rollout.DeploymentError("job loom-platform-migrate reached Failed condition"),
+        ),
+    )
+    with pytest.raises(rollout.DeploymentError, match="Failed condition"):
+        rollout.rollout(args)
 
 
 def test_busy_cli_explains_activity_without_exposing_raw_evidence(monkeypatch, tmp_path, capsys):
