@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -174,7 +173,7 @@ async def route_setup(
         route_response = captures["route_response"]  # type: ignore[assignment]
         for suffix, resp in route_response.items():  # type: ignore[union-attr]
             if path.endswith(suffix):
-                return resp(request) if callable(resp) else resp
+                return resp
         return httpx.Response(500, json={"detail": f"no canned for {path}"})
 
     app.state.upstream_client = httpx.AsyncClient(
@@ -494,53 +493,43 @@ async def test_transient_probe_failure_is_not_cached_and_recovers(
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Model-routing relay: the sentinel is never routed, the request model is
+# Model-routing relay: settled as translated, not probed every minute
 # ──────────────────────────────────────────────────────────────────────
 
 
-async def test_model_routing_relay_settles_native_with_the_request_model(
+async def test_model_routing_relay_is_stored_as_translated(
     route_setup,
     postgres_url: str,
 ) -> None:
-    # az-gateway-loom-testing (new-api style) answers every unknown model with
-    # `503 model_not_found` before it looks at the endpoint, so the sentinel
-    # probe stayed transient forever and the route never left `unprobed` (#2054).
+    # az-gateway-loom-testing (new-api style) answers every model it doesn't
+    # serve with `503 model_not_found` before it looks at the endpoint. That
+    # used to count as transient, so the route stayed `unprobed` and every
+    # Codex request re-probed after a minute (#2054).
     app, jwt, conn_id, captures = route_setup
-    probe_models: list[str] = []
+    captures["route_response"]["/responses"] = httpx.Response(  # type: ignore[index]
+        503,
+        json={"error": {"code": "model_not_found", "message": "No available channel"}},
+    )
+    requests: list[httpx.Request] = captures["requests"]  # type: ignore[assignment]
 
-    def relay(request: httpx.Request) -> httpx.Response:
-        model = json.loads(request.content)["model"]
-        probe_models.append(model)
-        if model != "glm-5.1-thinking":
-            return httpx.Response(
-                503,
-                json={"error": {"code": "model_not_found", "message": "No available channel"}},
-            )
-        return httpx.Response(200, json={
-            "id": "resp_native",
-            "object": "response",
-            "model": model,
-            "output": [{
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "hi from native"}],
-                "status": "completed",
-            }],
-            "usage": {"input_tokens": 10, "output_tokens": 5},
-            "status": "completed",
-        })
+    def native_paths() -> list[str]:
+        return [req.url.path for req in requests if req.url.path.endswith("/responses")]
 
-    captures["route_response"]["/responses"] = relay  # type: ignore[index]
+    assert (await _post_responses(app, jwt)).status_code == 200
+    assert (await _post_responses(app, jwt)).status_code == 200
 
-    r = await _post_responses(app, jwt)
-
-    assert r.status_code == 200, r.text
-    assert r.json()["id"] == "resp_native"
-    # Sentinel, then the request model as the probe, then the real request.
-    assert probe_models == [
-        "loom-probe-nonexistent-model", "glm-5.1-thinking", "glm-5.1-thinking",
-    ]
+    assert len(native_paths()) == 1  # one sentinel probe, then the stored result
     supported, probed_at = await _read_probe_state(postgres_url, conn_id)
-    assert supported is True
+    assert supported is False
     assert probed_at is not None
-    assert await _recorded_routes(postgres_url) == ["native_responses"]
+    engine = create_async_engine(postgres_url)
+    async with async_sessionmaker(engine)() as ses:
+        error = (
+            await ses.execute(
+                select(ProviderConnection.responses_api_probe_error)
+                .where(ProviderConnection.id == conn_id)
+            )
+        ).scalar_one()
+    await engine.dispose()
+    assert error == "model_routing_relay"
+    assert await _recorded_routes(postgres_url) == ["chat_translation", "chat_translation"]
