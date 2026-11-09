@@ -36,6 +36,7 @@ from loom.db.schema import (
 )
 from loom.provider_model_preflight import preflight_failure_kind
 from loom.provider_queue_error import PROVIDER_QUEUE_STALLED
+from loom_llm_gateway.account_standing import account_standing_400
 from loom_llm_gateway.attempt_deadline import GatewayAttemptDeadline
 from loom_llm_gateway.dispatch_audit import (
     ConnectionAtCapacityError,
@@ -522,6 +523,40 @@ class PoolDispatchAudit(DispatchAudit):
                 self.pool_id,
             )
 
+    async def _switch_after_account_standing(self) -> None:
+        assert self.row is not None and self.state.session_factory is not None
+        assert self.ctx.trial_id is not None
+        self.failover_reason = "upstream_account_standing"
+        self.possible_duplicate_inference = False
+        if not self.state.receipt_ids:
+            return
+        receipt_id = self.state.receipt_ids[-1]
+        try:
+            async with asyncio.timeout(1.0), self.state.session_factory() as session:
+                pool = await session.scalar(
+                    select(ProviderRequestPool)
+                    .where(ProviderRequestPool.connection_id == self.pool_id)
+                    .with_for_update()
+                )
+                if pool is None or not pool.enabled:
+                    return
+                await authorize_trial_execution_dispatch(session, self.ctx)
+                now = datetime.now(UTC)
+                await session.execute(
+                    update(GatewayDispatchReceipt)
+                    .where(GatewayDispatchReceipt.id == receipt_id)
+                    .values(failover_reason="upstream_account_standing")
+                )
+                await self._rebind_after_timeout(session, pool, now)
+                await session.commit()
+        except HTTPException:
+            raise
+        except Exception:
+            logger.warning(
+                "request_pool_account_standing_switch_unavailable pool_connection_id=%s",
+                self.pool_id,
+            )
+
     async def _rebind_after_timeout(
         self,
         session: AsyncSession,
@@ -638,6 +673,9 @@ class PoolDispatchAudit(DispatchAudit):
         if response.status_code == 504:
             await self._switch_after_timeout("upstream_504")
             raise PoolMemberSwitchedError("upstream_504") from None
+        if account_standing_400(response):
+            await self._switch_after_account_standing()
+            return response
         if response.status_code < 400:
             await self._note_member_success()
         return response

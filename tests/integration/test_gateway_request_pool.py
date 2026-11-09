@@ -1375,6 +1375,103 @@ async def test_non_timeout_errors_stay_on_the_bound_member(pool_setup: dict, sta
         assert binding is not None and binding.member_connection_id == p["ids"][0]
 
 
+_ARREARAGE_400 = {
+    "error": {
+        "message": "Access denied, please make sure your account is in good standing.",
+        "type": "Arrearage",
+        "param": "",
+        "code": "Arrearage",
+    }
+}
+
+
+async def test_account_standing_400_moves_the_binding_and_returns_400(
+    pool_setup: dict,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    p = pool_setup
+    caplog.set_level("INFO")
+
+    async def denied(request):
+        return httpx.Response(400, json=_ARREARAGE_400)
+
+    p["captures"]["handler"] = denied
+    response = await post(p)
+    assert response.status_code == 400, response.text
+    standing = _ARREARAGE_400["error"]["message"]
+    assert standing in response.text
+    assert [request.url.host for request in p["captures"]["requests"]] == [
+        "provider-0.example.test"
+    ]
+    assert standing not in caplog.text
+    async with p["sessions"]() as session:
+        call = await session.scalar(select(LlmCall).where(LlmCall.trial_id == p["trial_id"]))
+        binding = await session.get(ProviderRequestPoolBinding, (p["root"], p["trial_id"]))
+        health = await session.get(ProviderConnectionTimeoutHealth, p["ids"][0])
+        assert call.attempt == 1
+        extras = call.provider_extras
+        assert standing not in json.dumps(extras)
+        pool = extras["_loom_request_pool"]
+        assert pool["provider_connection_id"] == str(p["ids"][0])
+        assert pool["failover_reason"] == "upstream_account_standing"
+        assert pool["possible_duplicate_inference"] is False
+        assert binding is not None and binding.member_connection_id == p["ids"][1]
+        assert health is None
+    rows = await receipts(p)
+    assert [row.provider_connection_id for row in rows] == [p["ids"][0]]
+    assert [row.failover_reason for row in rows] == ["upstream_account_standing"]
+
+
+async def test_account_standing_spare_skips_keys_in_the_same_quota_group(pool_setup: dict) -> None:
+    p = pool_setup
+    async with p["sessions"]() as session:
+        pool = await session.get(ProviderRequestPool, p["root"])
+        pool.next_member = 1
+        await session.commit()
+
+    async def denied(request):
+        if request.url.host == "provider-1.example.test":
+            return httpx.Response(400, json=_ARREARAGE_400)
+
+    p["captures"]["handler"] = denied
+    assert (await post(p)).status_code == 400
+    async with p["sessions"]() as session:
+        binding = await session.get(ProviderRequestPoolBinding, (p["root"], p["trial_id"]))
+        health = await session.get(ProviderConnectionTimeoutHealth, p["ids"][1])
+    assert binding is not None and binding.member_connection_id == p["ids"][0]
+    assert health is None
+    p["captures"]["handler"] = None
+    assert (await post(p)).status_code == 200
+    assert [r.url.host for r in p["captures"]["requests"]] == [
+        "provider-1.example.test",
+        "provider-0.example.test",
+    ]
+
+
+async def test_account_standing_keeps_the_binding_when_only_same_quota_group_keys_remain(
+    pool_setup: dict,
+) -> None:
+    p = pool_setup
+    async with p["sessions"]() as session:
+        pool = await session.get(ProviderRequestPool, p["root"])
+        pool.next_member = 1
+        root_member = await session.get(ProviderRequestPoolMember, (p["root"], p["root"]))
+        root_member.enabled = False
+        await session.commit()
+
+    async def denied(request):
+        return httpx.Response(400, json=_ARREARAGE_400)
+
+    p["captures"]["handler"] = denied
+    assert (await post(p)).status_code == 400
+    async with p["sessions"]() as session:
+        binding = await session.get(ProviderRequestPoolBinding, (p["root"], p["trial_id"]))
+        health = await session.get(ProviderConnectionTimeoutHealth, p["ids"][1])
+    assert binding is not None and binding.member_connection_id == p["ids"][1]
+    assert health is None
+    assert [r.url.host for r in p["captures"]["requests"]] == ["provider-1.example.test"]
+
+
 async def test_upstream_429_cannot_spoof_a_local_queue_retry_reason(pool_setup: dict) -> None:
     p = pool_setup
 
