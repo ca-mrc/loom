@@ -89,8 +89,15 @@ def github(path: str, payload: dict | None = None) -> dict | list:
     command = ["gh", "api", endpoint]
     if payload is not None:
         command += ["--method", "POST", "--input", "-"]
-    result = subprocess.run(command, input=json.dumps(payload) if payload is not None else None,
-                            text=True, capture_output=True, check=False)
+    try:
+        result = subprocess.run(
+            command, input=json.dumps(payload) if payload is not None else None,
+            text=True, capture_output=True, check=False, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        raise DeploymentError(
+            "GitHub deployment API failed", reason_code="github_deployment_api_failed",
+        ) from None
     if result.returncode:
         raise DeploymentError("GitHub deployment API failed", reason_code="github_deployment_api_failed")
     return json.loads(result.stdout)
@@ -307,7 +314,7 @@ def select_recovery(run_id: str, directory: Path) -> dict:
     if not run_id.isdigit():
         raise DeploymentError("recovery run ID must be numeric")
     run = github(f"actions/runs/{run_id}")
-    if (run.get("conclusion") not in {"failure", "timed_out"} or run.get("status") != "completed"
+    if (run.get("conclusion") not in {"failure", "timed_out", "cancelled"} or run.get("status") != "completed"
             or run.get("head_branch") != "dev" or not is_loom_repository(run.get("head_repository"))
             or run.get("path") != ".github/workflows/nebius-rollout.yml"):
         raise DeploymentError("recovery requires a terminal failed same-repository dev rollout")
@@ -561,7 +568,10 @@ def rollout(args: argparse.Namespace, *, participant_rollout: RetainedParticipan
                 participant_reference=participant_rollout.reference, candidate_writer=candidate_writer,
                 participant_finalize=participant_finalize)
     except Exception:
-        report("failure", "Rollout failed; inspect phase evidence and dispatch pause before recovery")
+        try:
+            report("failure", "Rollout failed; inspect phase evidence and dispatch pause before recovery")
+        except Exception:
+            pass
         raise
     if result["status"] == "complete":
         report("success", "Candidate deployed; HTTPS and workload versions verified; dispatch resumed")
