@@ -693,10 +693,18 @@ def job_complete(job: dict[str, Any]) -> bool:
 
 
 def job_failed(job: dict[str, Any]) -> bool:
-    return any(
+    status = job.get("status") or {}
+    if any(
         condition.get("type") == "Failed" and condition.get("status") == "True"
-        for condition in job.get("status", {}).get("conditions", [])
-    )
+        for condition in status.get("conditions") or []
+    ):
+        return True
+    # Kubernetes defaults backoffLimit to 6 when the Job spec omits it.
+    spec = job.get("spec") or {}
+    try:
+        return int(status.get("failed") or 0) > int(spec.get("backoffLimit", 6))
+    except (TypeError, ValueError):
+        return False
 
 
 def wait_for_job(kube: Kubectl, name: str, namespace: str, seconds: int) -> None:

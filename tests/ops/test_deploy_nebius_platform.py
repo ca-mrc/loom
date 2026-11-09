@@ -1212,6 +1212,79 @@ def test_job_wait_returns_on_failure_or_completion_and_preserves_timeout(
     assert reads == (5 if condition == "Pending" else 2)
 
 
+@pytest.mark.parametrize("job,expected", [
+    ({}, False),
+    ({"status": {"failed": 1}}, False),
+    ({"status": {"failed": 1}, "spec": {"backoffLimit": 0}}, True),
+    ({"status": {"failed": 1}, "spec": {"backoffLimit": 1}}, False),
+    ({"status": {"failed": 2}, "spec": {"backoffLimit": 1}}, True),
+    ({"status": {"failed": 1, "conditions": [{"type": "Complete", "status": "True"}]},
+      "spec": {"backoffLimit": 1}}, False),
+    ({"status": {"conditions": [{"type": "Failed", "status": "True"}]}}, True),
+])
+def test_job_failed_uses_failed_count_against_backoff_limit(job: dict, expected: bool) -> None:
+    assert deploy.job_failed(job) is expected
+
+
+def test_job_wait_fails_when_failed_pods_exceed_backoff_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    reads = 0
+    now = 0.0
+
+    def get(*args: str) -> dict:
+        nonlocal reads
+        reads += 1
+        return {"status": {"failed": 1}, "spec": {"backoffLimit": 0}}
+
+    monkeypatch.setattr(deploy.time, "monotonic", lambda: now)
+    monkeypatch.setattr(deploy.time, "sleep", lambda seconds: pytest.fail("must not wait"))
+    with pytest.raises(deploy.DeploymentError, match="Failed condition"):
+        deploy.wait_for_job(SimpleNamespace(get=get), "test-migration", "test-namespace", 20)
+    assert now == 0
+    assert reads == 1
+
+
+def test_job_wait_keeps_polling_when_failed_pods_are_within_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    reads = 0
+    now = 0.0
+
+    def get(*args: str) -> dict:
+        nonlocal reads
+        reads += 1
+        return {"status": {"failed": 1}, "spec": {"backoffLimit": 1}}
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    monkeypatch.setattr(deploy.time, "monotonic", lambda: now)
+    monkeypatch.setattr(deploy.time, "sleep", sleep)
+    with pytest.raises(deploy.DeploymentError, match="timed out"):
+        deploy.wait_for_job(SimpleNamespace(get=get), "test-migration", "test-namespace", 20)
+    assert now == 20
+    assert reads == 5
+
+
+def test_job_wait_empty_job_is_not_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    reads = 0
+    now = 0.0
+
+    def get(*args: str) -> dict:
+        nonlocal reads
+        reads += 1
+        return {}
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    monkeypatch.setattr(deploy.time, "monotonic", lambda: now)
+    monkeypatch.setattr(deploy.time, "sleep", sleep)
+    with pytest.raises(deploy.DeploymentError, match="timed out"):
+        deploy.wait_for_job(SimpleNamespace(get=get), "test-migration", "test-namespace", 20)
+    assert now == 20
+    assert reads == 5
+
+
 def test_regional_deploy_waits_for_each_primary_actuator_and_checks_secret_keys(
     rendered: tuple, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:
