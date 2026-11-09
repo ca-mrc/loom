@@ -206,10 +206,10 @@ def _validate_remote(value: object) -> dict[str, Any]:
     # 0192 adds only the task-image input-manifest cache discriminator and its
     # identity constraints. 0193 adds the quota-group queue and a nullable
     # execution_leases.working_deadline_at. 0194/0195 index dispatch receipts only. 0196 adds only the
-    # separate task_image_build_resource_usage table.
+    # separate task_image_build_resource_usage table. 0197 narrows a dispatch receipt index.
     # None changes these fixed
     # lease/command/trial reads.
-    if value.get("schema_head") not in {"0175", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187", "0188", "0189", "0190", "0191", "0192", "0193", "0194", "0195", "0196"}:
+    if value.get("schema_head") not in {"0175", "0176", "0177", "0178", "0179", "0180", "0181", "0182", "0183", "0184", "0185", "0186", "0187", "0188", "0189", "0190", "0191", "0192", "0193", "0194", "0195", "0196", "0197"}:
         raise DeploymentError("unsupported installed schema")
     count = value.get("active_count")
     leases = value.get("leases")

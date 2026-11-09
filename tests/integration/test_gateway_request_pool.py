@@ -216,6 +216,11 @@ async def pool_setup(monkeypatch: pytest.MonkeyPatch, postgres_url: str):
             await app.state.egress_client_pool.aclose()
             await app.state.upstream_client.aclose()
         async with sessions() as session:
+            # Receipts outlive their connections (no foreign key). Left behind,
+            # they skew planner statistics for later tests in the session.
+            await session.execute(delete(GatewayDispatchReceipt).where(
+                GatewayDispatchReceipt.trial_id.in_(data["trial_ids"]),
+            ))
             await session.execute(delete(LlmCall).where(LlmCall.trial_id.in_(data["trial_ids"])))
             await session.execute(
                 update(Trial).where(Trial.id.in_(data["trial_ids"])).values(provider_connection_id=None)
@@ -1578,6 +1583,24 @@ async def test_capacity_lookup_does_not_scan_expired_admitted_receipts(
               FROM generate_series(1, 6000) AS n
         """), {"team": p["team_id"], "trial": p["trial_id"],
                 "connection": p["root"], "now": now})
+        # Production shape: the table is dominated by other connections' dated
+        # receipts. With 0195's index those statistics made the planner serve
+        # the undated range as `deadline IS NULL` plus an `admitted_at` filter,
+        # visiting all 3,000 undated rows above; the session-wide test database
+        # reached that shape only sometimes, so this test was flaky.
+        await session.execute(text("""
+            INSERT INTO gateway_dispatch_receipts
+                (id, request_id, dispatch_ordinal, attempt, team_id, trial_id,
+                 step_id, provider_connection_id, dialect, purpose, admitted_at,
+                 attempt_deadline_wall_clock, provider_outcome)
+            SELECT gen_random_uuid(), gen_random_uuid(), 1, 1, :team, :trial,
+                   'agent', :connection, 'facade_openai', 'model_call',
+                   :now - n * interval '1 second', :now + interval '1 hour',
+                   CASE WHEN n % 10 = 0 THEN 'admitted' ELSE 'response_received' END
+              FROM generate_series(1, 300000) AS n
+        """), {"team": p["team_id"], "trial": p["trial_id"],
+                # Not a pool member: these rows must shape statistics only.
+                "connection": uuid4(), "now": now})
         await session.commit()
         await session.execute(text("ANALYZE gateway_dispatch_receipts"))
     statements = []

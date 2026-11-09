@@ -8253,7 +8253,11 @@ class GatewayDispatchReceipt(Base):
             "gateway_receipt_admitted_deadline_idx",
             "provider_connection_id",
             "attempt_deadline_wall_clock",
-            postgresql_where=text("provider_outcome = 'admitted'"),
+            # Dated rows only: undated counts must use the admitted_at index
+            # below, not `deadline IS NULL` here plus a filter (0197).
+            postgresql_where=text(
+                "provider_outcome = 'admitted' AND attempt_deadline_wall_clock IS NOT NULL"
+            ),
         ),
         Index(
             "gateway_receipt_admitted_connection_idx",

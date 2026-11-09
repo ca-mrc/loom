@@ -6637,4 +6637,5 @@ async def test_batch_detail_reports_its_database_time_in_server_timing(
         return float(metrics[name].split("dur=", 1)[1].split(";", 1)[0])
 
     assert 0 < dur("db") <= dur("total")
-    assert 0 < dur("checkout") <= dur("auth") <= dur("total")
+    # A warm pooled checkout can take under 0.05 ms and print as 0.0.
+    assert 0 <= dur("checkout") <= dur("auth") <= dur("total")
