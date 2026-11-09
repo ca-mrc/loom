@@ -61,6 +61,7 @@ from loom_service.metrics import (
 )
 from loom_service.pipeline_control_bindings import SqlPipelineRecipeBindingResolver
 from loom_service.provider_secret_gc import run_loop as provider_secret_gc_run_loop
+from loom_service.request_timing import SERVER_TIMING_HEADER, start_request_timing
 from loom_service.routes import (
     admin_audit,
     agents,
@@ -552,8 +553,11 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         import time as _time
 
         t0 = _time.perf_counter()
+        timing = start_request_timing()
         response = await call_next(request)
         elapsed = _time.perf_counter() - t0
+        # Per-request split for callers without metrics access (#2771).
+        response.headers[SERVER_TIMING_HEADER] = timing.header_value(elapsed)
         # The matched route lands on request.scope["route"] for
         # APIRoute matches; missing for /metrics and 404s. Fall back
         # to the raw URL path in those cases (bounded — 404s typically

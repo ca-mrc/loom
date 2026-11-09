@@ -6581,3 +6581,60 @@ async def test_admitted_profile_hardware_rejects_all_member_execution_selectors(
             session.execute(delete(Benchmark).where(Benchmark.id == profile_id))
             session.commit()
         sync_engine.dispose()
+
+
+async def test_batch_detail_reports_its_database_time_in_server_timing(
+    camp_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    """The header splits one request's time into database and the rest, so a
+    slow detail read on a deployment can be attributed without metrics
+    access (#2771)."""
+    from sqlalchemy import event
+
+    from loom_service.metrics import instrument_engine
+
+    app, raw, _team_id = camp_setup
+    engine = app.state.session_factory.kw["bind"]
+    instrument_engine(engine)
+    statements: list[str] = []
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://svc") as ac:
+        created = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "timing",
+                "purpose": "evaluation",
+                "task_filter": {"task_ids": [f"local/mit-{i}" for i in range(3)]},
+                "trial_config": {"agent": {"name": "oracle"}},
+            },
+        )
+        assert created.status_code == 201, created.text
+
+        def count(_conn, _cursor, statement, *_args) -> None:  # type: ignore[no-untyped-def]
+            statements.append(statement)
+
+        event.listen(engine.sync_engine, "before_cursor_execute", count)
+        try:
+            detail = await ac.get(
+                f"/api/v1/batches/{created.json()['batch_id']}",
+                headers={"Authorization": f"Bearer {raw}"},
+            )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", count)
+
+    assert detail.status_code == 200, detail.text
+    metrics = {
+        part.split(";", 1)[0]: part
+        for part in (item.strip() for item in detail.headers["server-timing"].split(","))
+    }
+    assert set(metrics) == {"total", "db", "auth", "checkout"}
+    # Every statement the request ran, including authentication, and only those.
+    assert f'desc="{len(statements)} statements"' in metrics["db"]
+    assert len(statements) > 3
+
+    def dur(name: str) -> float:
+        return float(metrics[name].split("dur=", 1)[1].split(";", 1)[0])
+
+    assert 0 < dur("db") <= dur("total")
+    assert 0 < dur("checkout") <= dur("auth") <= dur("total")
