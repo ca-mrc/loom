@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import String, cast, func, or_, select
+from sqlalchemy import String, and_, cast, func, or_, select
 
 from loom.auth import AuthContext
 from loom.db.schema import (
@@ -208,6 +208,11 @@ def apply_trial_monitor_filters(
         stages = [value.removeprefix("stage:") for value in wanted if value.startswith("stage:")]
         cleanups = [value.removeprefix("cleanup:") for value in wanted if value.startswith("cleanup:")]
         outputs = [value.removeprefix("output:") for value in wanted if value.startswith("output:")]
+        failures = [
+            value.removeprefix("failure:")
+            for value in wanted
+            if value.startswith("failure:") and value.removeprefix("failure:")
+        ]
         states = [value for value in wanted if ":" not in value]
         # Carry authorized non-state predicates into every projection aggregate;
         # an outer tenant filter alone must not scan unrelated historical work.
@@ -219,5 +224,14 @@ def apply_trial_monitor_filters(
             predicates.append(progress_state_filter("cleanup", cleanups, scope))
         if outputs:
             predicates.append(progress_state_filter("output", outputs, scope))
+        if failures:
+            unknown = "unknown_failure" in failures
+            named = [name for name in failures if name != "unknown_failure"]
+            reason_match: list[Any] = []
+            if named:
+                reason_match.append(Trial.failure_reason.in_(named))
+            if unknown:
+                reason_match.append(Trial.failure_reason.is_(None))
+            predicates.append(and_(Trial.state == "failed", or_(*reason_match)))
         stmt = stmt.where(or_(*predicates))
     return stmt

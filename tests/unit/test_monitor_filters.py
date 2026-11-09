@@ -141,6 +141,27 @@ def test_apply_trial_monitor_filters_adds_structured_predicates() -> None:
     assert "trials.state IN" in sql
 
 
+def test_apply_trial_monitor_filters_failure_reason_prefix() -> None:
+    named = _sql(
+        apply_trial_monitor_filters(
+            select(Trial),
+            target_team=None,
+            state="failure:timed_out",
+        )
+    )
+    assert "trials.failure_reason IN" in named
+    assert "trials.state" in named
+
+    unknown = _sql(
+        apply_trial_monitor_filters(
+            select(Trial),
+            target_team=None,
+            state="failure:unknown_failure",
+        )
+    )
+    assert "IS NULL" in unknown
+
+
 def test_apply_trial_monitor_filters_keeps_legacy_agent_and_model_aliases() -> None:
     statement = apply_trial_monitor_filters(
         select(Trial),

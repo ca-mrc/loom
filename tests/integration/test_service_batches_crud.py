@@ -4432,7 +4432,18 @@ async def test_batch_diagnosis_clusters_failed_trials(
     assert "loom_api_supersecret" not in json.dumps(body)
 
     assert detail.status_code == 200, detail.text
-    assert "diagnosis" not in detail.json()
+    detail_body = detail.json()
+    assert "diagnosis" not in detail_body
+    groups = detail_body["failure_reason_groups"]
+    assert [group["reason"] for group in groups] == ["gateway_error", "verifier_error"]
+    assert [group["count"] for group in groups] == [3, 1]
+    assert sum(group["count"] for group in groups) == detail_body["trial_summary"]["failed"] == 4
+    assert groups[0]["sample_trial_id"] == str(max(trial_ids[:3]))
+    assert groups[1]["sample_trial_id"] == str(trial_ids[3])
+    assert groups[0]["messages"] == [
+        "provider returned error with Authorization: Bearer [REDACTED:bearer]"
+    ]
+    assert "loom_api_supersecret" not in json.dumps(detail_body)
 
 
 async def test_batch_detail_omits_heavy_debug_by_default_and_includes_on_request(

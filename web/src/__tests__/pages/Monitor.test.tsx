@@ -3,6 +3,7 @@ import { screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import Monitor from "../../pages/Monitor";
+import { TrialsView } from "../../pages/MonitorTrials";
 import type { FetchMock } from "../../test-utils/fetchMock";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
 
@@ -828,8 +829,121 @@ describe("Monitor human-readable labels", () => {
     expect(
       screen.getByRole("link", { name: /Open trial-provider/i }),
     ).toHaveAttribute("href", "/trials/trial-provider");
+    const group = new URL(
+      screen.getByRole("link", { name: /gateway_error/i }).getAttribute("href")!,
+      "https://example.test",
+    );
+    expect(group.pathname).toBe("/monitor");
+    expect(group.searchParams.get("view")).toBe("trials");
+    expect(group.searchParams.get("state")).toBe("failure:gateway_error");
     expect(screen.getByText("no LLM calls")).toBeInTheDocument();
     expect(screen.getByText(/invalid evidence/i)).toBeInTheDocument();
+  });
+
+  it("counts every failed trial in the batch, not the current page", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : String(input);
+      if (url.includes("/api/v1/auth/me")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              user: { id: "admin", username: "Admin", email: "admin@example.com" },
+              teams: [],
+              current_team: null,
+              role: "member",
+              scopes: ["read:own"],
+              is_platform_admin: false,
+              csrf_token: "csrf",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }
+      if (url.includes("/api/v1/trials")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              items: [
+                {
+                  id: "trial-page-timeout",
+                  task_id: "mbpp/1",
+                  state: "failed",
+                  agent_name: "terminus-2",
+                  aggregate_reward: null,
+                  total_prompt_tokens: 0,
+                  total_completion_tokens: 0,
+                  llm_calls_count: 0,
+                  submitted_at: "2026-11-05T16:00:00Z",
+                  failure_reason: "timed_out",
+                  failure_message: "agent timeout",
+                },
+              ],
+              next_cursor: "next-page",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }
+      if (url.includes("/api/v1/batches/batch-2801")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              id: "batch-2801",
+              trial_summary: { failed: 313 },
+              failure_reason_groups: [
+                {
+                  reason: "timed_out",
+                  count: 219,
+                  sample_trial_id: "trial-timeout",
+                  messages: ["agent timeout"],
+                },
+                {
+                  reason: "task_error",
+                  count: 72,
+                  sample_trial_id: "trial-504",
+                  messages: ["upstream returned HTTP 504"],
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }
+      return Promise.reject(new Error(`unexpected fetch ${url}`));
+    });
+    renderWithProviders(
+      <TrialsView
+        search=""
+        stateFilter=""
+        batchId="batch-2801"
+        teamFilter=""
+        benchmarkFilter=""
+        agentFilter=""
+        modelProviderFilter=""
+        modelNameFilter=""
+        providerConnectionFilter=""
+        providerModelFilter=""
+      />,
+      { route: "/batches/batch-2801?tab=trials" },
+    );
+
+    expect(await screen.findByText("Failure diagnostics")).toBeInTheDocument();
+    expect(screen.getByText("219 failed trials")).toBeInTheDocument();
+    expect(screen.getByText("72 failed trials")).toBeInTheDocument();
+    expect(screen.getByText("upstream returned HTTP 504")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Open trial-504/i })).toHaveAttribute(
+      "href",
+      "/trials/trial-504",
+    );
+    const group = new URL(
+      screen.getByRole("link", { name: /task_error/i }).getAttribute("href")!,
+      "https://example.test",
+    );
+    expect(group.pathname).toBe("/batches/batch-2801");
+    expect(group.hash).toBe("#batch-trials");
+    expect(group.searchParams.get("tab")).toBe("trials");
+    expect(group.searchParams.get("state")).toBe("failure:task_error");
+    expect(screen.queryByText("1 failed trial")).not.toBeInTheDocument();
   });
 
   it("labels reward zero successes as score failures, not platform failures", async () => {

@@ -1,6 +1,7 @@
 import { type MonitorSummary } from "../api";
 import type { components } from "../api/schema";
 import { type StatusVariant } from "../components/StatusPill";
+import { clearCursorParams } from "../hooks/useUrlCursorPage";
 import { type SubmittedByUser } from "../lib/ownership";
 
 export type View = "batches" | "trials";
@@ -61,7 +62,33 @@ export const STATE_OPTION_LABELS: Record<string, string> = {
 };
 
 export function stateOptionLabel(state: string): string {
+  if (state.startsWith("failure:")) {
+    return state.slice("failure:".length).replaceAll("_", " ");
+  }
   return STATE_OPTION_LABELS[state] ?? state.replaceAll("_", " ");
+}
+
+export function failureReasonStateFilter(reason: string): string {
+  return `failure:${reason}`;
+}
+
+/** Same drill-down as ProgressSummary: keep the current batch/monitor scope, replace state. */
+export function trialStateFilterHref(
+  filter: string,
+  location: { pathname: string; search: string },
+  batchId?: string,
+): string {
+  const params = new URLSearchParams(location.search);
+  params.set("state", filter);
+  clearCursorParams(params);
+  const inBatch = Boolean(batchId) && location.pathname === `/batches/${batchId}`;
+  if (inBatch) {
+    params.set("tab", "trials");
+    return `${location.pathname}?${params}#batch-trials`;
+  }
+  params.set("view", "trials");
+  if (batchId) params.set("batch_id", batchId);
+  return `/monitor?${params}`;
 }
 
 export function formatBytes(size: number): string {
@@ -120,6 +147,46 @@ export interface FailureGroup {
   count: number;
   firstTrialId: string;
   messages: string[];
+}
+
+export interface FailureReasonGroupPayload {
+  reason: string;
+  count: number;
+  sample_trial_id: string;
+  messages: string[];
+}
+
+export function failureGroupsFromBatch(
+  groups: FailureReasonGroupPayload[] | undefined,
+): FailureGroup[] {
+  return (groups ?? []).map((group) => ({
+    reason: group.reason,
+    count: group.count,
+    firstTrialId: group.sample_trial_id,
+    messages: group.messages,
+  }));
+}
+
+export function failureGroupsFromTrials(items: TrialRow[]): FailureGroup[] {
+  const groups = new Map<string, FailureGroup>();
+  for (const item of items) {
+    if (item.state !== "failed") continue;
+    const reason = item.failure_reason || "unknown_failure";
+    const group = groups.get(reason) ?? {
+      reason,
+      count: 0,
+      firstTrialId: item.id,
+      messages: [],
+    };
+    group.count += 1;
+    if (item.failure_message && !group.messages.includes(item.failure_message)) {
+      group.messages.push(item.failure_message);
+    }
+    groups.set(reason, group);
+  }
+  return Array.from(groups.values()).sort((a, b) =>
+    b.count === a.count ? a.reason.localeCompare(b.reason) : b.count - a.count,
+  );
 }
 
 export function plural(value: number, singular: string, pluralLabel?: string): string {
