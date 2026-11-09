@@ -52,6 +52,28 @@ All metrics use the `loom_*` prefix and follow these cardinality rules:
 | Worker | `loom_worker_claim_loop_iterations_total` | Counter | `result` (hit\|miss\|error) |
 | Worker | `loom_worker_heartbeat_failures_total` | Counter | — |
 
+### Per-request timing (`Server-Timing`)
+
+Every Loom Service response carries a `Server-Timing` header with the split
+for that one request, so a slow page can be attributed by anyone who can load
+it, without metrics access (browser devtools show it under Timing):
+
+```
+Server-Timing: total;dur=912.4, db;dur=703.1;desc="18 statements", auth;dur=21.0, checkout;dur=1.2
+```
+
+- `total`: until the response headers were ready (for a streamed body, not
+  including the stream).
+- `db`: all SQL statements the request ran, from send until the driver had
+  every result row, so it includes moving rows to the pod. Python work is
+  roughly `total - db`.
+- `auth`: authentication including connection checkout and the session-touch
+  commit; its statements also count toward `db`.
+- `checkout`: waiting for a pooled connection.
+
+Durations are milliseconds. Only counts and durations are reported, never SQL
+or parameters. Statements from background loops aren't attributed to requests.
+
 ## Grafana dashboards
 
 Five dashboards live in `deploy/grafana/dashboards/` and are auto-deployed as

@@ -137,3 +137,19 @@ def test_instrument_engine_records_failed_statements_and_recovers() -> None:
             assert count() == before + 2
     finally:
         engine.dispose()
+
+
+def test_every_response_carries_server_timing() -> None:
+    from fastapi.testclient import TestClient
+
+    from loom_service.app import create_app
+
+    client = TestClient(create_app(_make_settings()))
+    try:
+        response = client.get("/")
+    finally:
+        client.close()
+
+    timing = response.headers["server-timing"]
+    assert timing.startswith("total;dur=")
+    assert 'db;dur=0.0;desc="0 statements"' in timing

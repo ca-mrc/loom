@@ -17,6 +17,8 @@ from prometheus_client import Counter, Histogram
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
+from loom_service.request_timing import record_statement
+
 HTTP_REQUESTS_TOTAL = Counter(
     "loom_svc_http_requests_total",
     "HTTP requests handled by loom_service",
@@ -154,10 +156,10 @@ def instrument_engine(engine: Any) -> None:
         if started is None:
             return
         del context._loom_statement_start
+        elapsed = time.perf_counter() - started
         verb = statement.lstrip().split(None, 1)[0].lower() if statement and statement.strip() else ""
-        DB_STATEMENT_SEC.labels(verb=verb if verb in _STATEMENT_VERBS else "other").observe(
-            time.perf_counter() - started,
-        )
+        DB_STATEMENT_SEC.labels(verb=verb if verb in _STATEMENT_VERBS else "other").observe(elapsed)
+        record_statement(elapsed)
 
     @event.listens_for(sync_engine, "after_cursor_execute")
     def _finish(

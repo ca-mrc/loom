@@ -47,6 +47,7 @@ from loom_service.auth_guards import (
     require_team_or_admin,
 )
 from loom_service.metrics import AUTH_DURATION_SEC, AUTH_FAILURES_TOTAL, DB_CHECKOUT_WAIT_SEC
+from loom_service.request_timing import record_auth, record_checkout
 from loom_service.session_auth import verify_csrf, verify_session_cookie
 
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -120,7 +121,9 @@ async def authed_session(
         if _request_auth_kind(request, authorization) != "anonymous":
             # Anonymous requests are rejected without touching the database.
             await session.connection()
-            DB_CHECKOUT_WAIT_SEC.observe(time.perf_counter() - started)
+            checkout_sec = time.perf_counter() - started
+            DB_CHECKOUT_WAIT_SEC.observe(checkout_sec)
+            record_checkout(checkout_sec)
         admin_verifier = getattr(
             request.app.state, "admin_secret_verifier", None,
         )
@@ -168,9 +171,9 @@ async def authed_session(
         # holds the user_sessions row lock, and a slow read must not queue
         # every other request from the same browser behind it (#2687).
         await session.commit()
-        AUTH_DURATION_SEC.labels(auth_kind=ctx.auth_kind).observe(
-            time.perf_counter() - started,
-        )
+        auth_sec = time.perf_counter() - started
+        AUTH_DURATION_SEC.labels(auth_kind=ctx.auth_kind).observe(auth_sec)
+        record_auth(auth_sec)
         await _limit_interactive_read(request, session, ctx)
         yield session, ctx
 
