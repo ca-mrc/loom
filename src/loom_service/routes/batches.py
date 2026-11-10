@@ -30,7 +30,8 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError, field_validator
-from sqlalchemy import and_, func, literal_column, or_, select, update
+from sqlalchemy import and_, case, func, literal_column, or_, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 
 from loom.auth import AuthContext
 from loom.batch_cancellation import finish_batch_drain
@@ -2230,12 +2231,92 @@ async def _llm_call_counts_for_trials(
     return {trial_id: int(count or 0) for trial_id, count in rows if trial_id is not None}
 
 
+# Batch detail reads only these parts of `trials.result` and `trials.config`;
+# loading whole columns moved ~3.5 MB of JSON per read of a 475-Trial Batch
+# (#2771). Readers: reward (`aggregate_reward`, `reward`), image-preparation
+# failure class, agent step errors for the no-call reason, attempt timing when
+# `started_at` is unset, and the configured model.
+_SLIM_RUNTIME_KEYS = ("schema_version", "execution_role", "started_at", "finished_at")
+_SLIM_RESULT_KEYS = ("aggregate_reward", "reward", "task_image_preparation_failure")
+# Only object-valued `error`s of array `steps`; anything else is skipped by the
+# reader too. `silent` turns a non-array `steps` into an empty list.
+_STEP_ERRORS_PATH: Any = literal_column(
+    "'strict $.steps[*] ? (@.error.type() == \"object\").error'::jsonpath"
+)
+
+
+def _slim_trial_json_columns() -> list[Any]:
+    result_type = func.jsonb_typeof(Trial.result)
+    runtime = Trial.result["runtime_result"]
+    return [
+        result_type.label("result_type"),
+        # Non-object results are kept whole, so readers see exactly what's stored.
+        case((result_type == "object", None), else_=Trial.result).label("result_other"),
+        *(Trial.result[key].label(f"result_{key}") for key in _SLIM_RESULT_KEYS),
+        func.jsonb_path_query_array(
+            Trial.result, _STEP_ERRORS_PATH, literal_column("'{}'::jsonb"), True,
+            type_=JSONB,
+        ).label("result_step_errors"),
+        func.jsonb_typeof(runtime).label("runtime_type"),
+        *(runtime[key].label(f"runtime_{key}") for key in _SLIM_RUNTIME_KEYS),
+        func.jsonb_typeof(Trial.config).label("config_type"),
+        case((func.jsonb_typeof(Trial.config) == "object", None), else_=Trial.config)
+        .label("config_other"),
+        Trial.config["agent_model"].label("config_agent_model"),
+        func.jsonb_typeof(Trial.config["agent"]).label("config_agent_type"),
+        Trial.config["agent"]["model"].label("config_agent_model_legacy"),
+    ]
+
+
+def _slim_result(row: Any) -> Any:
+    if row.result_type != "object":
+        return row.result_other
+    result: dict[str, Any] = {
+        key: value
+        for key in _SLIM_RESULT_KEYS
+        if (value := getattr(row, f"result_{key}")) is not None
+    }
+    if row.result_step_errors:
+        result["steps"] = [{"error": error} for error in row.result_step_errors]
+    if row.runtime_type == "object":
+        result["runtime_result"] = {
+            key: value
+            for key in _SLIM_RUNTIME_KEYS
+            if (value := getattr(row, f"runtime_{key}")) is not None
+        }
+    return result
+
+
+def _slim_config(row: Any) -> Any:
+    if row.config_type != "object":
+        return row.config_other
+    config: dict[str, Any] = {}
+    if row.config_agent_model is not None:
+        config["agent_model"] = row.config_agent_model
+    if row.config_agent_type == "object":
+        config["agent"] = (
+            {"model": row.config_agent_model_legacy}
+            if row.config_agent_model_legacy is not None
+            else {}
+        )
+    return config
+
+
 async def _trial_projections_for_batch_ids(
     session: Any,
     batch_ids: Sequence[UUID],
+    *,
+    slim: bool = False,
 ) -> list[_BatchTrialProjection]:
+    """Trials of these Batches. With `slim`, `config` and `result` carry only
+    the fields Batch detail reads (see `_slim_trial_json_columns`); callers
+    that hand Trials to debug evidence, diagnosis or exports need the full
+    columns."""
     if not batch_ids:
         return []
+    json_columns = (
+        _slim_trial_json_columns() if slim else [Trial.config, Trial.result]
+    )
     rows = (
         await session.execute(
             select(
@@ -2243,11 +2324,10 @@ async def _trial_projections_for_batch_ids(
                 Trial.batch_id,
                 Trial.team_id,
                 Trial.task_id,
-                Trial.config,
+                *json_columns,
                 Trial.state,
                 Trial.failure_reason,
                 Trial.failure_message,
-                Trial.result,
                 Trial.claimed_at,
                 Trial.pre_start_heartbeat_at,
                 Trial.started_at,
@@ -2260,36 +2340,40 @@ async def _trial_projections_for_batch_ids(
             ).where(Trial.batch_id.in_(list(batch_ids))),
         )
     ).all()
-    return [
-        _BatchTrialProjection(
+    projections = []
+    for row in rows:
+        config = _slim_config(row) if slim else row.config
+        result = _slim_result(row) if slim else row.result
+        projections.append(_BatchTrialProjection(
             id=row.id,
             batch_id=row.batch_id,
             team_id=row.team_id,
             task_id=row.task_id,
-            config=row.config,
+            config=config,
             state=row.state,
             failure_reason=row.failure_reason,
             failure_message=row.failure_message,
-            result=row.result,
+            result=result,
             claimed_at=row.claimed_at,
             pre_start_heartbeat_at=row.pre_start_heartbeat_at,
-            started_at=trial_started_at(row.started_at, row.result),
+            started_at=trial_started_at(row.started_at, result),
             finished_at=row.finished_at,
             sample_idx=row.sample_idx,
             combination_idx=row.combination_idx,
             provider_connection_id=row.provider_connection_id,
             provider_model_id=row.provider_model_id,
             worker_id=row.worker_id,
-        )
-        for row in rows
-    ]
+        ))
+    return projections
 
 
 async def _trial_projections_for_batch(
     session: Any,
     batch_id: UUID,
+    *,
+    slim: bool = False,
 ) -> list[_BatchTrialProjection]:
-    return await _trial_projections_for_batch_ids(session, [batch_id])
+    return await _trial_projections_for_batch_ids(session, [batch_id], slim=slim)
 
 
 def _empty_trial_summary() -> dict[str, int]:
@@ -2543,7 +2627,12 @@ async def get_batch(
             )
         ).scalar_one_or_none()
 
-    original_trials: list[Any] = list(await _trial_projections_for_batch(s, batch_id))
+    # Debug evidence and diagnosis read whole Trial results; everything else
+    # here needs only the slim projection (#2771).
+    slim = not include_debug
+    original_trials: list[Any] = list(
+        await _trial_projections_for_batch(s, batch_id, slim=slim)
+    )
     summary = _summary_from_trials(original_trials)
     avg_reward = _rollup_from_trials(original_trials)
     usage = await _usage_totals_for_trials(s, original_trials)
@@ -2582,6 +2671,7 @@ async def get_batch(
         rerun_trials = await _trial_projections_for_batch_ids(
             s,
             rerun_batch_ids,
+            slim=slim,
         )
     rerun_plan = build_supplemental_rerun_plan(
         b,
