@@ -319,7 +319,7 @@ async def test_pytest_verifier_retains_audit_on_success(tmp_path) -> None:  # ty
     )
 
     def _exec(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
-        if cmd.startswith("mkdir -p "):
+        if cmd.startswith(("mkdir -p ", "echo $(id -u)")):
             return ExecResult(return_code=0, stdout=b"", stderr=b"", duration_sec=0.01)
         if cmd == build_pytest_install_command():
             return ExecResult(return_code=0, stdout=b"", stderr=b"", duration_sec=0.02)
@@ -388,7 +388,7 @@ async def test_pytest_verifier_nonzero_exit_with_valid_junit_still_scores(
     )
 
     def _exec(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
-        if cmd.startswith("mkdir -p "):
+        if cmd.startswith(("mkdir -p ", "echo $(id -u)")):
             return ExecResult(return_code=0, stdout=b"", stderr=b"", duration_sec=0.01)
         if cmd == build_pytest_install_command():
             return ExecResult(return_code=0, stdout=b"", stderr=b"", duration_sec=0.02)

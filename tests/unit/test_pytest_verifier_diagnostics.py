@@ -43,7 +43,7 @@ async def test_missing_junit_includes_pytest_exec_diagnostics(
     tmp_path: Path,
 ) -> None:
     def _exec(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
-        if cmd.startswith("mkdir -p "):
+        if cmd.startswith(("mkdir -p ", "echo $(id -u)")):
             return ExecResult(
                 return_code=0,
                 stdout=b"",
@@ -112,7 +112,7 @@ async def test_pytest_verifier_clears_stale_junit_before_exec(
                     PurePosixPath("/loom/verifier/junit.xml"),
                     None,
                 )
-            if cmd == build_pytest_install_command() or cmd.startswith("mkdir -p "):
+            if cmd == build_pytest_install_command() or cmd.startswith(("mkdir -p ", "echo $(id -u)")):
                 return ExecResult(
                     return_code=0,
                     stdout=b"",
@@ -157,6 +157,8 @@ async def test_pytest_verifier_rejects_stale_junit_when_cleanup_fails(
     tmp_path: Path,
 ) -> None:
     def _cleanup_failure(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
+        if cmd == "echo $(id -u) $(id -g)":  # owner probe before cleanup
+            return ExecResult(return_code=0, stdout=b"0 0\n", stderr=b"", duration_sec=0.01)
         assert cmd.startswith("mkdir -p /loom/verifier && rm -f -- ")
         return ExecResult(
             return_code=1,
@@ -200,7 +202,7 @@ async def test_pytest_command_timeout_returns_scored_diagnostic(
             env=None,  # type: ignore[no-untyped-def]
             timeout_sec=None,  # type: ignore[no-untyped-def]
         ) -> ExecResult:
-            if cmd.startswith("mkdir -p "):
+            if cmd.startswith(("mkdir -p ", "echo $(id -u)")):
                 return ExecResult(
                     return_code=0,
                     stdout=b"",
@@ -265,7 +267,7 @@ async def test_pytest_install_timeout_is_unscored_infrastructure_failure(
             env=None,  # type: ignore[no-untyped-def]
             timeout_sec=None,  # type: ignore[no-untyped-def]
         ) -> ExecResult:
-            if cmd.startswith("mkdir -p "):
+            if cmd.startswith(("mkdir -p ", "echo $(id -u)")):
                 return ExecResult(
                     return_code=0,
                     stdout=b"",
@@ -300,7 +302,7 @@ async def test_pytest_install_timeout_is_unscored_infrastructure_failure(
 @pytest.mark.asyncio
 async def test_pytest_install_failure_retains_audit_pair(tmp_path: Path) -> None:
     def _exec(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
-        if cmd.startswith("mkdir -p "):
+        if cmd.startswith(("mkdir -p ", "echo $(id -u)")):
             return ExecResult(return_code=0, stdout=b"", stderr=b"", duration_sec=0.01)
         assert cmd == build_pytest_install_command()
         return ExecResult(

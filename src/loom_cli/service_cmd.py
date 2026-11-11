@@ -30,6 +30,7 @@ import time
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 import tomli_w
@@ -529,6 +530,11 @@ def _up_local(args: argparse.Namespace) -> int:
     # the new tokens by hand.
     if env_file is not None:
         _write_env_tokens(env_file, tokens)
+        # `loom` loads .env into its own environment at startup, and Compose
+        # gives shell variables precedence over `--env-file`. Without this,
+        # the containers recreated below would get the tokens from the old
+        # .env and fail with 401 (worker register, batch fan-out).
+        _export_env_tokens(tokens)
         print(f"→ updated {env_file} with fresh tokens")
         if batch_runner_token:
             print("✓ batch-runner CP token written to .env")
@@ -586,17 +592,62 @@ def _up_local(args: argparse.Namespace) -> int:
     return 0
 
 
+def _dev_host() -> str:
+    bind = os.environ.get("LOOM_DEV_BIND_ADDR", "").strip()
+    return bind if bind and bind not in {"0.0.0.0", "::"} else "localhost"
+
+
+def _local_db_url() -> str:
+    """Host-side Postgres URL matching the Compose port and credentials.
+
+    Compose reads LOOM_DEV_POSTGRES_* from the shell or .env (which `loom`
+    loads at startup), so the migration and seeding steps must use the same
+    values instead of assuming port 5432.
+    """
+    env = os.environ
+    if not any(env.get(f"LOOM_DEV_POSTGRES_{k}") for k in ("PORT", "USER", "PASSWORD", "DB")) and (
+        not env.get("LOOM_DEV_BIND_ADDR")
+    ):
+        return _DEFAULT_DB_URL
+    user = quote(env.get("LOOM_DEV_POSTGRES_USER") or "loom", safe="")
+    password = quote(env.get("LOOM_DEV_POSTGRES_PASSWORD") or "loom", safe="")
+    port = env.get("LOOM_DEV_POSTGRES_PORT") or "5432"
+    database = env.get("LOOM_DEV_POSTGRES_DB") or "loom"
+    return f"postgresql+psycopg://{user}:{password}@{_dev_host()}:{port}/{database}"
+
+
+def _local_cp_url() -> str:
+    port = os.environ.get("LOOM_DEV_CONTROL_PLANE_PORT")
+    if not port and not os.environ.get("LOOM_DEV_BIND_ADDR"):
+        return _DEFAULT_CP_URL
+    return f"http://{_dev_host()}:{port or '8080'}"
+
+
+def _export_docker_socket_for_compose() -> None:
+    """Point the worker's socket mount at the daemon `docker` itself uses.
+
+    Rootless Docker serves `unix://$XDG_RUNTIME_DIR/docker.sock`, not
+    /var/run/docker.sock; the Compose file mounts LOOM_DEV_DOCKER_SOCKET.
+    """
+    if os.environ.get("LOOM_DEV_DOCKER_SOCKET"):
+        return
+    docker_host = os.environ.get("DOCKER_HOST", "")
+    if docker_host.startswith("unix://"):
+        os.environ["LOOM_DEV_DOCKER_SOCKET"] = docker_host.removeprefix("unix://")
+
+
 def _populate_local_defaults(args: argparse.Namespace) -> None:
     if args.compose_file is None:
         args.compose_file = _DEFAULT_COMPOSE_FILE
     if args.env_file is None:
         args.env_file = _DEFAULT_ENV_FILE
     if args.db_url is None:
-        args.db_url = _DEFAULT_DB_URL
+        args.db_url = _local_db_url()
     if args.admin_secret_file is None:
         args.admin_secret_file = _DEFAULT_DEV_ADMIN_SECRET_FILE
     if args.cp_url is None:
-        args.cp_url = _DEFAULT_CP_URL
+        args.cp_url = _local_cp_url()
+    _export_docker_socket_for_compose()
 
 
 def _up(args: argparse.Namespace) -> int:
@@ -639,6 +690,12 @@ _ENV_TOKEN_KEYS: dict[str, str] = {
     "batch_runner_cp": "LOOM_SVC_BATCH_RUNNER_CP_TOKEN",
     "secret_store_master_key": "LOOM_SECRET_STORE_MASTER_KEY",
 }
+
+
+def _export_env_tokens(tokens: dict[str, str]) -> None:
+    for label, env_key in _ENV_TOKEN_KEYS.items():
+        if tokens.get(label):
+            os.environ[env_key] = tokens[label]
 
 
 def _write_env_tokens(env_file: Path, tokens: dict[str, str]) -> None:

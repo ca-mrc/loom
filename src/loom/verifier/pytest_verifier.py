@@ -30,6 +30,7 @@ from loom.verifier.audit import (
     persist_verifier_file,
     workspace_from_task,
 )
+from loom.verifier.output_dir import prepare_verifier_output_dir
 
 if TYPE_CHECKING:
     from loom.models.task import TaskConfig
@@ -91,9 +92,8 @@ class PytestVerifier:
     ) -> VerifierResult:
         # A driver/workspace may be reused. Remove the prior JUnit file before
         # this attempt so pytest must produce a current report.
-        prepare_result = await env.exec(
-            "mkdir -p /loom/verifier && rm -f -- /loom/verifier/junit.xml",
-            user="root",
+        prepare_result = await prepare_verifier_output_dir(
+            env, stale_file=_JUNIT_PATH, user=self.user,
         )
         if prepare_result.return_code != 0:
             return VerifierResult(

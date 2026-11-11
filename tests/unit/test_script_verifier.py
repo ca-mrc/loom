@@ -112,6 +112,8 @@ async def test_script_verifier_clears_stale_source_output_before_exec():
 
 async def test_script_verifier_rejects_stale_output_when_cleanup_fails():
     def _cleanup_failure(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
+        if cmd == "echo $(id -u) $(id -g)":  # owner probe before cleanup
+            return ExecResult(return_code=0, stdout=b"0 0\n", stderr=b"", duration_sec=0.01)
         assert cmd.startswith("mkdir -p /loom/verifier && rm -f -- ")
         return ExecResult(
             return_code=1,
@@ -616,4 +618,38 @@ async def test_script_verifier_shell_quotes_audit_workspace_path():
             "mkdir -p -- '/workspace/team'\"'\"'s task/.loom/verifier' "
         )
         for command in commands
+    )
+
+
+@pytest.mark.parametrize(
+    ("ids", "expected_suffix"),
+    [
+        (b"65532 65532\n", " && chown 65532:65532 /loom/verifier"),
+        (b"0 0\n", ""),
+        (b"", ""),  # unresolvable user keeps the old root-owned directory
+    ],
+)
+async def test_script_verifier_output_dir_is_writable_by_its_user(ids: bytes, expected_suffix: str) -> None:
+    """A task image with a non-root USER runs the verifier as that user, so the
+    root-created output directory must belong to it (local Docker, #2054)."""
+    calls: list[tuple[str, object]] = []
+
+    def _handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
+        calls.append((cmd, user))
+        stdout = ids if cmd == "echo $(id -u) $(id -g)" else b""
+        return ExecResult(return_code=0, stdout=stdout, stderr=b"", duration_sec=0.01)
+
+    fake = FakeDriver(exec_handler=_handler)
+    await fake.start(options=StartOptions())
+    await ScriptVerifier(script_path=PurePosixPath("/tests/check.sh")).verify(
+        task=None,  # type: ignore[arg-type]
+        env=fake,
+        artifacts_dir=PurePosixPath("/x"),
+        trajectory=None,  # type: ignore[arg-type]
+    )
+
+    assert calls[0] == ("echo $(id -u) $(id -g)", None)
+    assert calls[1] == (
+        "mkdir -p /loom/verifier && rm -f -- /loom/verifier/output.json" + expected_suffix,
+        "root",
     )

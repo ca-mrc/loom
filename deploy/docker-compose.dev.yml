@@ -121,6 +121,12 @@ services:
     ports:
       - "${LOOM_DEV_BIND_ADDR:-127.0.0.1}:${LOOM_DEV_LLM_GATEWAY_PORT:-9100}:9100"
     restart: on-failure
+    # Trial sandboxes reach the gateway by service name on this network.
+    # It holds only the gateway and trial containers, so sandboxes still
+    # can't reach Postgres, MinIO or the other services.
+    networks:
+      - default
+      - sandbox-gateway
     # python -c probe rather than curl because Dockerfile.gateway is
     # python:3.11-slim and slim images don't ship curl. Reusing the
     # base interpreter keeps the image size unchanged.
@@ -229,16 +235,14 @@ services:
       LOOM_LOCAL_EXECUTION: "1"
       LOOM_WORKER_CONTROL_PLANE_URL: http://control-plane:8080
       LOOM_WORKER_GATEWAY_URL: http://llm-gateway:9100
-      # Trial containers spawned by the worker are NOT on `deploy_default`,
-      # so the compose-internal `llm-gateway` DNS name doesn't resolve there.
-      # Override the agent-facing gateway URL to the host-mapped port so the
-      # in-trial agent CLI (claude-code, codex, etc.) can reach the gateway.
-      # `_sandbox_extra_hosts_for_url` adds the matching `host-gateway`
-      # mapping to each trial container when this URL's hostname is
-      # `host.docker.internal`. Without this, real-model trials get
-      # `FailedToOpenSocket` retries until they exhaust the agent's retry
-      # budget (10× by default for claude-code).
-      LOOM_WORKER_SUBPROCESS_GATEWAY_URL: "http://host.docker.internal:${LOOM_DEV_LLM_GATEWAY_PORT:-9100}"
+      # Trial containers spawned by the worker are not on the compose default
+      # network. The worker connects each agent sandbox to the dedicated
+      # sandbox-gateway network after start, so in-trial agent CLIs (codex,
+      # claude-code, ...) reach the gateway by service name. The host-mapped
+      # port is not an option on Linux: a port published on 127.0.0.1 is not
+      # reachable through `host.docker.internal` (host-gateway) from containers.
+      LOOM_WORKER_SUBPROCESS_GATEWAY_URL: "http://llm-gateway:9100"
+      LOOM_WORKER_SANDBOX_GATEWAY_NETWORK: "${LOOM_DEV_SANDBOX_GATEWAY_NETWORK:-loom-dev-sandbox-gateway}"
       LOOM_WORKER_TOKEN: "${LOOM_WORKER_TOKEN:-placeholder}"
       LOOM_WORKER_MINIO_ENDPOINT: http://minio:9000
       LOOM_WORKER_MINIO_ACCESS_KEY: "${LOOM_DEV_MINIO_ROOT_USER:-loomdev}"
@@ -272,7 +276,8 @@ services:
       - ../src:/app/src
       - ../packages:/app/packages
       - ../tests/fixtures:/app/tests/fixtures:ro
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Rootless Docker: set LOOM_DEV_DOCKER_SOCKET (`loom service up` derives it from DOCKER_HOST).
+      - ${LOOM_DEV_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
       - task_image_builder_storage_probe:/run/loom/docker-storage-probe:ro
       - worker_trajectories:/var/lib/loom/trajectories
     ulimits:
@@ -294,10 +299,12 @@ services:
     restart: unless-stopped
 
   task-image-builder:
+    # Same image as `worker`, which builds it. A second `build:` block makes
+    # `up --build` export the same tag twice in parallel and fail with
+    # "already exists"; `pull_policy: never` stops Compose looking for it on
+    # Docker Hub before the worker build finishes.
     image: loom-worker:${LOOM_DEV_IMAGE_TAG:-dev}
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.worker
+    pull_policy: never
     command: ["python", "-m", "loom_worker.task_image_builder"]
     environment:
       LOOM_ENV: development
@@ -319,7 +326,8 @@ services:
       - ../src:/app/src
       - ../packages:/app/packages
       - ../tests/fixtures:/app/tests/fixtures:ro
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Rootless Docker: set LOOM_DEV_DOCKER_SOCKET (`loom service up` derives it from DOCKER_HOST).
+      - ${LOOM_DEV_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
       - task_image_builder_storage_probe:/run/loom/docker-storage-probe:ro
     depends_on:
       control-plane:
@@ -399,6 +407,12 @@ services:
     depends_on:
       loom-service:
         condition: service_started
+
+networks:
+  sandbox-gateway:
+    # Fixed name: the worker passes it to `docker network connect` for each
+    # trial sandbox. Override when two local stacks share one Docker daemon.
+    name: ${LOOM_DEV_SANDBOX_GATEWAY_NETWORK:-loom-dev-sandbox-gateway}
 
 volumes:
   postgres_data:

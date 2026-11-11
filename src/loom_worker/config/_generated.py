@@ -61,6 +61,7 @@ class WorkerSettings(BaseSettings):
     pipeline_terminal_task_validator_sha256: str = ""
     pool_name: str = "default"
     pre_start_heartbeat_interval_sec: float = 60.0
+    sandbox_gateway_network: str = ""
     sandbox_identity: str = ""
     sandbox_isolation: bool = False
     sandbox_singleton_image: str = "loom-llm-gateway-sandbox:dev"

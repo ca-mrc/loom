@@ -487,6 +487,11 @@ class DockerDriver:
             self._container = container
             await asyncio.to_thread(container.start)
             await self._wait_until_running()
+            def _connect_network(name: str) -> None:
+                client.networks.get(name).connect(container)
+
+            for network_name in opts.extra_networks:
+                await asyncio.to_thread(_connect_network, network_name)
             # Mark running BEFORE applying baseline policy —
             # set_network_policy() calls _require_running() which checks state.
             self._state = "running"

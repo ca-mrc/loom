@@ -312,6 +312,12 @@ used_by     = ["worker"]
 python_type = "HttpUrl"
 description = "Optional OpenAI-compatible facade base URL as seen from trial sandbox subprocess agents. Use when the worker's own gateway_url is not resolvable from Docker sandboxes, e.g. http://host.docker.internal:30443/openai/v1 on k8s nodes with gateway-router hostPort."
 
+[service_config.sandbox_gateway_network]
+used_by     = ["worker"]
+python_type = "str"
+default     = ""
+description = "Optional Docker network that trial sandbox containers join after start, in addition to their own network, so in-sandbox agents reach the LLM gateway by service name. Local Compose sets it to a network shared only with llm-gateway, because a gateway port published on 127.0.0.1 is not reachable from containers through host.docker.internal on Linux. Ignored when sandbox isolation gives the trial an internal bridge. Empty disables it."
+
 [service_config.admin_secret_file]
 used_by     = ["control-plane", "llm-gateway", "loom-service"]
 python_type = "Path"

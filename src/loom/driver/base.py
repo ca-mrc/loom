@@ -36,6 +36,10 @@ class StartOptions:
     # isolation is on. Honored only by drivers whose
     # `capabilities.supports_custom_network` is True.
     network: str | None = None
+    # Additional docker networks the container joins after it starts, on top
+    # of `network`. Local Compose uses this to give sandboxed agents a route
+    # to the LLM gateway by service name. Same capability gate as `network`.
+    extra_networks: tuple[str, ...] = ()
     # Phase D (#78 PR-D1): tuple of (host_path, container_path,
     # mode) bind mounts to apply at container creation. Used by the
     # worker to expose the rotating step-JWT + loom-CA cert to the

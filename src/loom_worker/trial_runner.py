@@ -119,6 +119,7 @@ class LocalTrialRunner:
     sandbox_secrets_root: Path | None = None
     sandbox_step_jwt_ttl_sec: int = 600
     sandbox_extra_hosts: tuple[tuple[str, str], ...] = ()
+    sandbox_gateway_networks: tuple[str, ...] = ()
     # #672 PR-3: bind-mount tuples for the family-run state directory.
     # Populated by the worker main loop after prepare_family_state_mount
     # downloads the shared state tarball; each entry is
@@ -345,6 +346,7 @@ class LocalTrialRunner:
                 on_driver_started=on_driver_started_cb,
                 sandbox_volumes=sandbox_volumes,
                 sandbox_extra_hosts=self.sandbox_extra_hosts,
+                sandbox_gateway_networks=self.sandbox_gateway_networks,
                 workspace_staging_policy=self.workspace_staging_policy,
                 # #2418: every task-sandbox trial withholds private paths. Separate
                 # verification always gets a fresh driver; shared grading injects
