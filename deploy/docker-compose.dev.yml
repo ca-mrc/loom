@@ -243,6 +243,9 @@ services:
       # reachable through `host.docker.internal` (host-gateway) from containers.
       LOOM_WORKER_SUBPROCESS_GATEWAY_URL: "http://llm-gateway:9100"
       LOOM_WORKER_SANDBOX_GATEWAY_NETWORK: "${LOOM_DEV_SANDBOX_GATEWAY_NETWORK:-loom-dev-sandbox-gateway}"
+      # BuildKit for agent install layers: the legacy builder's layer export
+      # fails under rootless containerd (npm cache in the install layer).
+      LOOM_WORKER_TRIAL_CACHE_BUILDKIT: "1"
       LOOM_WORKER_TOKEN: "${LOOM_WORKER_TOKEN:-placeholder}"
       LOOM_WORKER_MINIO_ENDPOINT: http://minio:9000
       LOOM_WORKER_MINIO_ACCESS_KEY: "${LOOM_DEV_MINIO_ROOT_USER:-loomdev}"

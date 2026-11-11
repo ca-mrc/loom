@@ -310,6 +310,10 @@ def _auto_register_benchmarks(
                 hf_token=hf_token,
                 db_url=db_url,
                 registered_by="seed_test_data.py:auto_register",
+                # Local stacks build task images on first use (the Control
+                # Plane queues them at Trial submit). Building every
+                # registered benchmark's image up front fills laptop disks.
+                prebuild_task_images=False,
             ))
             results[slug] = f"ok registered={stats['registered']}"
         except (RepositoryNotFoundError, EntryNotFoundError):

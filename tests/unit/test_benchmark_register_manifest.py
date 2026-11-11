@@ -428,9 +428,11 @@ async def test_mirror_manifest_task_bundle_rejects_unsafe_dockerfile(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("prebuild_task_images", [True, False])
 async def test_run_register_mirror_writes_internal_source_and_hf_provenance(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    prebuild_task_images: bool,
 ) -> None:
     bundle = tmp_path / "repo" / "task-001"
     bundle.mkdir(parents=True)
@@ -544,9 +546,15 @@ async def test_run_register_mirror_writes_internal_source_and_hf_provenance(
         "loom_benchmark_tool.register_cmd.pg_insert",
         lambda model: FakeInsert(model),
     )
+    queued: list[object] = []
+
+    def _record_queue(*_args: object, **kwargs: object) -> object:
+        queued.append(kwargs.get("task_row"))
+        return _empty_async_result()
+
     monkeypatch.setattr(
         "loom_benchmark_tool.register_cmd.ensure_task_image_materializations",
-        lambda *_args, **_kwargs: _empty_async_result(),
+        _record_queue,
     )
 
     result = await run_register(
@@ -559,8 +567,12 @@ async def test_run_register_mirror_writes_internal_source_and_hf_provenance(
         mirror_to_object_store=True,
         object_store=FakeObjectStore(),
         bucket="loom-benchmarks",
+        prebuild_task_images=prebuild_task_images,
     )
 
+    # Local dev seeding skips up-front image builds (#2836); the Control
+    # Plane queues them on Trial submit instead.
+    assert len(queued) == (1 if prebuild_task_images else 0)
     task_insert = executed[-1]
     tags = task_insert.payload["tags"]
     assert isinstance(tags, dict)

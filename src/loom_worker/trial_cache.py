@@ -27,19 +27,23 @@ for the installation and cache contract.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import io
+import json
 import logging
 import random
 import re
 import shutil
+import tarfile
 import textwrap
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 from uuid import UUID
 
 import docker
@@ -143,12 +147,26 @@ def _image_exists_locally(client: Any, tag: str) -> bool:
         return False
 
 
+def _split_image_reference(reference: str) -> tuple[str, str]:
+    """`registry:5000/repo:tag` → (`registry:5000/repo`, `tag`).
+
+    The tag is after the last `:` that follows the last `/`. Splitting at the
+    first `:` breaks any registry with a port (the local one is
+    `localhost:<port>/...`), and Docker rejects the result as an invalid tag.
+    """
+    slash = reference.rfind("/")
+    colon = reference.rfind(":")
+    if colon > slash:
+        return reference[:colon], reference[colon + 1:] or "latest"
+    return reference, "latest"
+
+
 def _tag_alias(client: Any, source: str, target: str) -> None:
     """Tag an already-pulled image with a second name. Used after
     pulling `<registry>/<repo>:<key>` to also expose it as
     `loom-trial-cache:<key>` locally."""
-    repo, _, tag = target.partition(":")
-    client.images.get(source).tag(repository=repo, tag=tag or "latest")
+    repo, tag = _split_image_reference(target)
+    client.images.get(source).tag(repository=repo, tag=tag)
 
 
 _DOCKERFILE_USER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*(:[A-Za-z0-9_][A-Za-z0-9_.-]*)?$")
@@ -164,12 +182,136 @@ def _image_user(client: Any, image: str) -> str:
     return user
 
 
+def _protobuf_fields(data: bytes) -> Iterator[tuple[int, int, int | bytes]]:
+    """Minimal protobuf wire-format reader: (field number, wire type, value).
+
+    Enough to read BuildKit progress records without the BuildKit protos.
+    Stops quietly at anything it can't parse.
+    """
+
+    def varint(index: int) -> tuple[int, int]:
+        value = shift = 0
+        while index < len(data):
+            byte = data[index]
+            index += 1
+            value |= (byte & 0x7F) << shift
+            if not byte & 0x80:
+                return value, index
+            shift += 7
+        raise ValueError("truncated varint")
+
+    index = 0
+    try:
+        while index < len(data):
+            key, index = varint(index)
+            field, wire = key >> 3, key & 0x7
+            if wire == 0:
+                value, index = varint(index)
+                yield field, wire, value
+            elif wire == 2:
+                length, index = varint(index)
+                yield field, wire, data[index:index + length]
+                index += length
+            elif wire == 1:
+                index += 8
+            elif wire == 5:
+                index += 4
+            else:
+                return
+    except ValueError:
+        return
+
+
+def _buildkit_trace_logs(aux: str) -> list[str]:
+    """Process output carried in one `moby.buildkit.trace` record.
+
+    The record is a base64 `moby.buildkit.v1.StatusResponse`; its `logs`
+    (field 3) are `VertexLog`s whose `msg` (field 4) is the raw output.
+    """
+    try:
+        raw = base64.b64decode(aux)
+    except (ValueError, TypeError):
+        return []
+    out: list[str] = []
+    for field, wire, value in _protobuf_fields(raw):
+        if field == 3 and wire == 2 and isinstance(value, bytes):
+            for inner_field, inner_wire, msg in _protobuf_fields(value):
+                if inner_field == 4 and inner_wire == 2 and isinstance(msg, bytes):
+                    out.append(msg.decode("utf-8", "replace"))
+    return out
+
+
+def _ustar_context(files: dict[str, str]) -> bytes:
+    """Build-context tar for the Engine API. BuildKit misreads PAX headers
+    (Python's default tar format) as Dockerfile text, so use USTAR."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+        for name, text in files.items():
+            payload = text.encode("utf-8")
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            info.mode = 0o644
+            archive.addfile(info, io.BytesIO(payload))
+    return buf.getvalue()
+
+
+def _build_with_buildkit(
+    client: Any,
+    *,
+    tag: str,
+    dockerfile: str,
+    install_script: str,
+    labels: dict[str, str],
+) -> None:
+    """`POST /build?version=2` with an in-memory context.
+
+    docker-py's `images.build` only drives the legacy builder, whose layer
+    export fails under rootless containerd when an install leaves an npm
+    cache behind (`CreateDiff: ... lstat .../.npm/_cacache/...`). Errors are
+    raised as docker-py `BuildError`s carrying the decoded process output,
+    so the caller's diagnostics stay the same.
+    """
+    api = client.api
+    response = api._post(
+        api._url("/build"),
+        params={
+            "t": tag,
+            "version": "2",
+            "rm": "1",
+            "forcerm": "1",
+            "labels": json.dumps(labels),
+        },
+        data=_ustar_context({"Dockerfile": dockerfile, "install.sh": install_script}),
+        headers={"Content-Type": "application/x-tar"},
+        stream=True,
+    )
+    api._raise_for_status(response)
+    build_log: list[dict[str, str]] = []
+    error: str | None = None
+    for line in response.iter_lines():
+        if not line:
+            continue
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if message.get("id") == "moby.buildkit.trace" and isinstance(message.get("aux"), str):
+            build_log.extend({"stream": text} for text in _buildkit_trace_logs(message["aux"]))
+        elif message.get("error"):
+            error = str(message["error"])
+        elif isinstance(message.get("stream"), str):
+            build_log.append({"stream": message["stream"]})
+    if error is not None:
+        raise BuildError(reason=error, build_log=iter(build_log))
+
+
 def _build_layered_image_sync(
     *,
     client: Any,
     tag: str,
     base_digest: str,
     install_script: str,
+    buildkit: bool = False,
 ) -> None:
     """Synthesize a Dockerfile that layers `install_script` on top of
     `base_digest`, then run `docker build`. Tempdir cleanup is automatic.
@@ -184,6 +326,35 @@ def _build_layered_image_sync(
     with exit 100. The agent still runs as the task image's user."""
     image_user = _image_user(client, base_digest)
     restore_user = f"USER {image_user}\n" if image_user else ""
+    labels = {
+        "loom.trial-cache": "true",
+        "loom.cache-key": tag.split(":", 1)[1],
+        "loom.created-at": datetime.now(UTC).isoformat(),
+        # No loom.last-used-at: Docker labels can't be updated post-build;
+        # eviction uses creation-age via `docker image prune --filter until=`.
+    }
+    if buildkit:
+        # BuildKit resolves FROM as a registry reference, not a local image
+        # ID, so give the base a temporary local tag for the build.
+        base_tag = f"{LOCAL_TAG_PREFIX}-base:{tag.split(':', 1)[1]}"
+        dockerfile = (
+            f"FROM {base_tag}\nUSER root\nCOPY install.sh /tmp/install.sh\n"
+            "RUN bash /tmp/install.sh && rm /tmp/install.sh\n"
+        ) + restore_user
+        try:
+            _tag_alias(client, base_digest, base_tag)
+            try:
+                _build_with_buildkit(
+                    client, tag=tag, dockerfile=dockerfile, install_script=install_script, labels=labels,
+                )
+            finally:
+                with contextlib.suppress(Exception):
+                    client.images.remove(base_tag, noprune=True)
+        except BuildError as exc:
+            _raise_layer_build_error(tag, exc)
+        except APIError as exc:
+            raise TrialCacheError(f"failed to build layered image {tag!r}: {exc}") from exc
+        return
     with TemporaryDirectory(prefix="loom-trial-build-") as ctx:
         ctx_path = Path(ctx)
         (ctx_path / "install.sh").write_text(install_script)
@@ -203,34 +374,30 @@ def _build_layered_image_sync(
                 rm=True,
                 forcerm=True,
                 pull=False,
-                labels={
-                    "loom.trial-cache": "true",
-                    "loom.cache-key": tag.split(":", 1)[1],
-                    "loom.created-at": datetime.now(UTC).isoformat(),
-                    # No loom.last-used-at: Docker labels can't be
-                    # updated post-build; eviction uses creation-age
-                    # via `docker image prune --filter until=`.
-                },
+                labels=labels,
             )
         except BuildError as exc:
-            # docker-py's BuildError stringifies to only the failing
-            # RUN command — useless for diagnosing WHY the install
-            # script failed. Walk build_log and surface the trailing
-            # 40 lines so operators see pip's / apt's actual error.
-            # Preserve the full log separately for diagnostic downloads.
-            tail, full_log = _format_build_log_sections(exc.build_log)
-            diagnostic_detail = f"failed to build layered image {tag!r}: {exc}" + (
-                f"\nbuild log (full):\n{full_log}" if full_log else ""
-            )
-            raise TrialCacheError(
-                f"failed to build layered image {tag!r}: {exc}"
-                + (f"\nbuild log (last lines):\n{tail}" if tail else ""),
-                diagnostic_detail=diagnostic_detail,
-            ) from exc
+            _raise_layer_build_error(tag, exc)
         except APIError as exc:
             raise TrialCacheError(
                 f"failed to build layered image {tag!r}: {exc}",
             ) from exc
+
+
+def _raise_layer_build_error(tag: str, exc: BuildError) -> NoReturn:
+    # docker-py's BuildError stringifies to only the failing RUN command —
+    # useless for diagnosing WHY the install script failed. Walk build_log
+    # and surface the trailing lines so operators see pip's / apt's actual
+    # error. Preserve the full log separately for diagnostic downloads.
+    tail, full_log = _format_build_log_sections(exc.build_log)
+    diagnostic_detail = f"failed to build layered image {tag!r}: {exc}" + (
+        f"\nbuild log (full):\n{full_log}" if full_log else ""
+    )
+    raise TrialCacheError(
+        f"failed to build layered image {tag!r}: {exc}"
+        + (f"\nbuild log (last lines):\n{tail}" if tail else ""),
+        diagnostic_detail=diagnostic_detail,
+    ) from exc
 
 
 _BUILD_LOG_TAIL_LINES = 40
@@ -552,6 +719,7 @@ async def resolve_trial_image(
                     tag=local_tag,
                     base_digest=task_image_digest,
                     install_script=install_script,
+                    buildkit=bool(getattr(settings, "trial_cache_buildkit", False)),
                 )
 
                 # AWAITED push under the slot — prevents the v3 race
@@ -615,8 +783,8 @@ async def _try_registry_pull(
 def _push_image(client: Any, source_tag: str, registry_tag: str) -> None:
     """Tag `source_tag` as `registry_tag` then push. `push` raises on
     auth / network failure; caller logs + continues."""
-    repo, _, tag = registry_tag.partition(":")
-    client.images.get(source_tag).tag(repository=repo, tag=tag or "latest")
+    repo, tag = _split_image_reference(registry_tag)
+    client.images.get(source_tag).tag(repository=repo, tag=tag)
     # Docker SDK's push is generator-based; consume it so we wait for
     # completion and surface errors.
     for line in client.images.push(repository=repo, tag=tag, stream=True, decode=True):
