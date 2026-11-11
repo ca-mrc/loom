@@ -438,6 +438,30 @@ def test_arch_package_transaction_never_changes_authored_packages(
         assert "would change authored package bash (5.3 -> 5.4)" in result.stderr
 
 
+def test_arch_package_install_conflict_reports_the_snapshot_remedy(tmp_path: Path) -> None:
+    """November 2026: `python` started depending on the new `openssl-3`, whose
+    files the authored `openssl` package owns. The version guard can't see a
+    renamed package, so pacman refuses at install; preparation must say why."""
+    manager = tmp_path / "pacman"
+    manager.write_text("#!/bin/sh\nset -eu\ncase \"$1\" in\n"
+                       "-Q) printf 'openssl 3.6.5-1\\n' ;;\n"
+                       "-Sy) exit 0 ;;\n"
+                       "-Sp) printf 'python 3.14.10-1\\nopenssl-3 3.5.9-2\\n' ;;\n"
+                       "-S) echo 'error: failed to commit transaction (conflicting files)' >&2; "
+                       "echo 'openssl-3: /usr/lib/libcrypto.so.3 exists in filesystem (owned by openssl)' >&2; exit 1 ;;\n"
+                       "*) exit 42 ;;\nesac\n")
+    manager.chmod(0o755)
+    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+
+    result = subprocess.run(["/bin/sh", "-c", _arch_package_install()],
+                            capture_output=True, text=True, env=env)
+
+    assert result.returncode == 1
+    assert "exists in filesystem (owned by openssl)" in result.stderr  # pacman's own detail is kept
+    assert "could not add" in result.stderr
+    assert "use an explicitly reviewed compatible image/repository snapshot" in result.stderr
+
+
 def test_plain_pip_keeps_base_dependencies_and_both_pytest_results(tmp_path: Path) -> None:
     environment = bundle(tmp_path)
     script = """pip install pytest==8.4.1 pytest-json-ctrf==0.3.5 --break-system-packages
