@@ -1049,6 +1049,12 @@ description = "Additive grace on top of `effective_agent_timeout_sec * trial_har
 # workers reach it via /api/v1/internal/trial-cache/*). Optional
 # shared registry sharing for cross-worker cache hits.
 
+[service_config.trial_cache_buildkit]
+used_by     = ["worker"]
+python_type = "bool"
+default     = false
+description = "Build agent install layers with BuildKit (Engine API `/build?version=2`) instead of docker-py's legacy builder. Local Compose enables it: under rootless containerd the legacy builder fails to export layers whose install leaves an npm cache behind. Off by default so other deployments keep the existing builder."
+
 [service_config.trial_cache_registry_repo]
 used_by     = ["worker"]
 python_type = "str"

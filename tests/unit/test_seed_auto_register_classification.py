@@ -94,3 +94,16 @@ def test_other_errors_still_surface_as_error(
             db_url="postgresql://noop", hf_org="PRHW", hf_token=None,
         )
     assert all(v.startswith("error RuntimeError") for v in results.values())
+
+
+def test_dev_seed_registers_without_prebuilding_task_images(fake_registry: None) -> None:
+    """A laptop stack builds task images on first use; queueing every
+    registered benchmark image filled the disk in about an hour (#2836)."""
+    dispatcher = _async_dispatcher({
+        "fake-missing": RepositoryNotFoundError("repo doesn't exist on HF"),
+        "fake-published": {"registered": 1, "skipped": 0},
+    })
+    with patch("loom_benchmark_tool.register_cmd.run_register", new=dispatcher):
+        _auto_register_benchmarks(db_url="postgresql://noop", hf_org="PRHW", hf_token=None)
+    assert dispatcher.await_args_list
+    assert all(call.kwargs["prebuild_task_images"] is False for call in dispatcher.await_args_list)

@@ -359,6 +359,11 @@
     "default": "1",
     "required": false
   },
+  "trial_cache_buildkit": {
+    "annotation": "<class 'bool'>",
+    "default": "False",
+    "required": false
+  },
   "trial_cache_min_free_gb": {
     "annotation": "<class 'int'>",
     "default": "20",

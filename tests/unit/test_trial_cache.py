@@ -378,7 +378,8 @@ async def test_resolve_trial_image_local_cache_hit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resolve_trial_image_builder_path() -> None:
+@pytest.mark.parametrize("buildkit", [False, True])
+async def test_resolve_trial_image_builder_path(buildkit: bool) -> None:
     """Cache miss → claim slot → build → release. Verifies the
     happy-path orchestration (without exercising real Docker build)."""
     digest = "sha256:base"
@@ -403,6 +404,9 @@ async def test_resolve_trial_image_builder_path() -> None:
 
     cp = _StubCPClient()
     worker_id = uuid4()
+    settings = _StubSettings(setup_health_guard_enabled=False)
+    if buildkit:
+        settings.trial_cache_buildkit = True  # type: ignore[attr-defined]
 
     # Replace the sync build helper with our stub
     import unittest.mock
@@ -415,7 +419,7 @@ async def test_resolve_trial_image_builder_path() -> None:
         out = await tc.resolve_trial_image(
             task_image="python:3.11-slim",
             adapter=_StubAdapter(install_script=install),
-            settings=_StubSettings(setup_health_guard_enabled=False),
+            settings=settings,
             cp_client=cp,
             worker_id=worker_id,
             docker_client=client,
@@ -427,6 +431,7 @@ async def test_resolve_trial_image_builder_path() -> None:
     )
     assert out == f"loom-trial-cache:{expected_key}"
     assert len(build_calls) == 1
+    assert build_calls[0]["buildkit"] is buildkit  # LOOM_WORKER_TRIAL_CACHE_BUILDKIT
     # Slot released after build
     assert (expected_key, worker_id) in cp.release_calls
 
@@ -1053,3 +1058,137 @@ def test_build_layered_image_rejects_unrestorable_user() -> None:
             client=client, tag="loom-trial-cache:abc", base_digest="sha256:base", install_script="true",
         )
     client.images.build.assert_not_called()
+
+
+def _pb_bytes(field: int, payload: bytes) -> bytes:
+    """Encode one length-delimited protobuf field (test helper)."""
+    def varint(value: int) -> bytes:
+        out = bytearray()
+        while True:
+            byte = value & 0x7F
+            value >>= 7
+            out.append(byte | (0x80 if value else 0))
+            if not value:
+                return bytes(out)
+    return varint(field << 3 | 2) + varint(len(payload)) + payload
+
+
+def _trace_record(*messages: bytes) -> str:
+    import base64
+
+    logs = b"".join(
+        _pb_bytes(3, _pb_bytes(1, b"sha256:vertex") + b"\x18\x02" + _pb_bytes(4, msg))
+        for msg in messages
+    )
+    return base64.b64encode(_pb_bytes(1, b"vertex-record") + logs).decode()
+
+
+def test_buildkit_trace_logs_reads_vertex_log_messages() -> None:
+    record = _trace_record(b"E: Could not open lock file\n", b"exit 100\n")
+    assert trial_cache._buildkit_trace_logs(record) == ["E: Could not open lock file\n", "exit 100\n"]
+    assert trial_cache._buildkit_trace_logs("not base64!!") == []
+    assert trial_cache._buildkit_trace_logs("AAEC") == []  # truncated / junk bytes
+
+
+def test_ustar_context_is_readable_without_pax_headers() -> None:
+    import io
+    import tarfile
+
+    data = trial_cache._ustar_context({"Dockerfile": "FROM x\n", "install.sh": "echo é\n"})
+    with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+        assert archive.getnames() == ["Dockerfile", "install.sh"]
+        assert archive.extractfile("install.sh").read().decode() == "echo é\n"  # type: ignore[union-attr]
+    assert b"PaxHeader" not in data
+
+
+class _FakeBuildResponse:
+    def __init__(self, lines: list[dict[str, object]]) -> None:
+        self._lines = lines
+
+    def iter_lines(self) -> list[bytes]:
+        import json
+
+        return [json.dumps(line).encode() for line in self._lines]
+
+
+def _buildkit_client(lines: list[dict[str, object]], *, image_user: str = "65532:65532") -> MagicMock:
+    client = MagicMock()
+    client.images.get.return_value.attrs = {"Config": {"User": image_user}}
+    client.api._url.side_effect = lambda path: f"http+docker://local{path}"
+    client.api._post.return_value = _FakeBuildResponse(lines)
+    return client
+
+
+def test_buildkit_layer_build_posts_ustar_context_and_cleans_up_base_tag() -> None:
+    import io
+    import json
+    import tarfile
+
+    client = _buildkit_client([{"id": "moby.image.id", "aux": {"ID": "sha256:new"}}])
+
+    trial_cache._build_layered_image_sync(
+        client=client, tag="loom-trial-cache:abc", base_digest="sha256:base",
+        install_script="apt-get install -y nodejs", buildkit=True,
+    )
+
+    client.images.build.assert_not_called()  # legacy builder unused
+    client.images.get.return_value.tag.assert_called_once_with(repository="loom-trial-cache-base", tag="abc")
+    client.images.remove.assert_called_once_with("loom-trial-cache-base:abc", noprune=True)
+    (url,), kwargs = client.api._post.call_args
+    assert url == "http+docker://local/build"
+    assert kwargs["params"]["version"] == "2"
+    assert kwargs["params"]["t"] == "loom-trial-cache:abc"
+    assert json.loads(kwargs["params"]["labels"])["loom.cache-key"] == "abc"
+    with tarfile.open(fileobj=io.BytesIO(kwargs["data"])) as archive:
+        dockerfile = archive.extractfile("Dockerfile").read().decode()  # type: ignore[union-attr]
+        script = archive.extractfile("install.sh").read().decode()  # type: ignore[union-attr]
+    assert dockerfile == (
+        "FROM loom-trial-cache-base:abc\nUSER root\nCOPY install.sh /tmp/install.sh\n"
+        "RUN bash /tmp/install.sh && rm /tmp/install.sh\nUSER 65532:65532\n"
+    )
+    assert script == "apt-get install -y nodejs"
+
+
+def test_buildkit_layer_build_failure_surfaces_process_output() -> None:
+    client = _buildkit_client([
+        {"id": "moby.buildkit.trace", "aux": _trace_record(b"E: Unable to locate package nodejs\n")},
+        {"error": 'process "/bin/sh -c bash /tmp/install.sh" did not complete successfully: exit code: 100'},
+    ])
+
+    with pytest.raises(trial_cache.TrialCacheError) as exc:
+        trial_cache._build_layered_image_sync(
+            client=client, tag="loom-trial-cache:abc", base_digest="sha256:base",
+            install_script="apt-get install -y nodejs", buildkit=True,
+        )
+
+    assert "exit code: 100" in str(exc.value)
+    assert "E: Unable to locate package nodejs" in str(exc.value)
+    assert exc.value.diagnostic_detail is not None
+    client.images.remove.assert_called_once_with("loom-trial-cache-base:abc", noprune=True)
+
+
+@pytest.mark.parametrize(
+    ("reference", "expected"),
+    [
+        ("localhost:25015/loom-task-images:48b730c0", ("localhost:25015/loom-task-images", "48b730c0")),
+        ("registry.example/loom/trial-cache:abc", ("registry.example/loom/trial-cache", "abc")),
+        ("loom-trial-cache:abc", ("loom-trial-cache", "abc")),
+        ("localhost:25015/loom-task-images", ("localhost:25015/loom-task-images", "latest")),
+    ],
+)
+def test_split_image_reference_keeps_registry_port(reference: str, expected: tuple[str, str]) -> None:
+    assert trial_cache._split_image_reference(reference) == expected
+
+
+def test_push_image_tags_registry_with_port_correctly() -> None:
+    client = MagicMock()
+    client.images.push.return_value = iter([{"status": "Pushed"}])
+
+    trial_cache._push_image(client, "loom-trial-cache:abc", "localhost:25015/loom-task-images:abc")
+
+    client.images.get.return_value.tag.assert_called_once_with(
+        repository="localhost:25015/loom-task-images", tag="abc",
+    )
+    client.images.push.assert_called_once_with(
+        repository="localhost:25015/loom-task-images", tag="abc", stream=True, decode=True,
+    )

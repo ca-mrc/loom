@@ -92,6 +92,7 @@ class WorkerSettings(BaseSettings):
     trial_cache_base_image_pull_timeout_sec: float = 1800.0
     trial_cache_build_lock_timeout_sec: float = 1800.0
     trial_cache_build_max_concurrent: int = 1
+    trial_cache_buildkit: bool = False
     trial_cache_min_free_gb: int = 20
     trial_cache_registry_pull_timeout_sec: float = 15.0
     trial_cache_registry_repo: str = ""

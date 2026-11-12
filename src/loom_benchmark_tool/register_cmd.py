@@ -226,6 +226,7 @@ async def _locked_tb21_registration_preflight(
     *,
     manifest: dict[str, Any],
     prepared_tasks: list[_PreparedTask],
+    prebuild_task_images: bool = True,
 ) -> bool:
     """Return True for an exact existing profile; False when absent.
 
@@ -257,7 +258,7 @@ async def _locked_tb21_registration_preflight(
             prepared_tasks=prepared_tasks,
         )
         for task_row in existing_tasks:
-            if task_row.config:
+            if task_row.config and prebuild_task_images:
                 await ensure_task_image_materializations(session, task_row=task_row)
         return True
     colliding = await session.scalar(
@@ -602,10 +603,17 @@ async def run_register(
     chunk_sleep_secs: float = 300.0,
     manifest: dict[str, Any] | None = None,
     activate_alias: bool = False,
+    prebuild_task_images: bool = True,
 ) -> dict[str, Any]:
     """Read manifest from the selected source, upsert Benchmark + Task
     rows. Returns `{"registered": N, "skipped": M, "source": str,
     "repo_id": str, "revision": str, …}`.
+
+    `prebuild_task_images=False` skips queueing an image build for every
+    registered task. The Control Plane still queues a task's image when a
+    Trial for it is submitted, so only images that are used get built. The
+    local dev seed uses this: building every benchmark image up front filled
+    a laptop disk in about an hour (#2836).
 
     The manifest's `task_count` MUST match the length of `tasks`; the
     publish path guarantees this. We trust it here rather than
@@ -809,6 +817,7 @@ async def run_register(
                     session,
                     manifest=manifest,
                     prepared_tasks=prepared_tasks,
+                    prebuild_task_images=prebuild_task_images,
                 )
             if exact_existing:
                 skipped = len(prepared_tasks)
@@ -853,6 +862,7 @@ async def run_register(
                         session,
                         manifest=manifest,
                         prepared_tasks=prepared_tasks,
+                        prebuild_task_images=prebuild_task_images,
                     )
                     continue_writes = not exact_existing
                     if exact_existing:
@@ -943,7 +953,7 @@ async def run_register(
                                 .returning(TaskRow)
                             )
                         ).scalar_one()
-                        if task.config:
+                        if task.config and prebuild_task_images:
                             await ensure_task_image_materializations(
                                 session,
                                 task_row=task_row,
