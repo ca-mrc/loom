@@ -2457,6 +2457,50 @@ def _summary_from_trials(trials: Sequence[Any]) -> dict[str, int]:
     return summary
 
 
+_FAILURE_MESSAGE_CAP = 3
+_UNFINISHED = datetime.min.replace(tzinfo=UTC)
+
+
+def _failure_reason_groups_from_trials(trials: Sequence[Any]) -> list[dict[str, Any]]:
+    """Group failed trials by diagnostic reason for the Monitor card.
+
+    Uses rows already loaded for trial_summary. Latest-finished first so the
+    sample Open link and messages are stable without a second query.
+    """
+    failed = [trial for trial in trials if str(trial.state) == "failed"]
+    failed.sort(
+        key=lambda trial: (
+            trial.finished_at is not None,
+            trial.finished_at or _UNFINISHED,
+            trial.id,
+        ),
+        reverse=True,
+    )
+    groups: dict[str, dict[str, Any]] = {}
+    for trial in failed:
+        reason = trial.failure_reason or "unknown_failure"
+        group = groups.get(reason)
+        if group is None:
+            group = {
+                "reason": reason,
+                "count": 0,
+                "sample_trial_id": str(trial.id),
+                "messages": [],
+            }
+            groups[reason] = group
+        group["count"] += 1
+        message = trial.failure_message
+        if not message or len(group["messages"]) >= _FAILURE_MESSAGE_CAP:
+            continue
+        redacted = redact_text(message)
+        if redacted and redacted not in group["messages"]:
+            group["messages"].append(redacted)
+    return sorted(
+        groups.values(),
+        key=lambda group: (-int(group["count"]), str(group["reason"])),
+    )
+
+
 def _rollup_from_trials(trials: Sequence[Any]) -> float | None:
     reward_sum = 0.0
     reward_n = 0
@@ -2634,6 +2678,7 @@ async def get_batch(
         await _trial_projections_for_batch(s, batch_id, slim=slim)
     )
     summary = _summary_from_trials(original_trials)
+    failure_reason_groups = _failure_reason_groups_from_trials(original_trials)
     avg_reward = _rollup_from_trials(original_trials)
     usage = await _usage_totals_for_trials(s, original_trials)
     llm_call_counts = await _llm_call_counts_for_trials(s, original_trials)
@@ -2787,6 +2832,7 @@ async def get_batch(
         "benchmark_summary": benchmark_summary,
         "combination_summary": combination_summary,
         "effective_combination_summary": effective_combination_summary,
+        "failure_reason_groups": failure_reason_groups,
     }
     if b.admission_paused_at is not None:
         extra["admission_held_count"] = int(summary.get("queued", 0))

@@ -910,12 +910,21 @@ class Batch(TypedDict):
 
 
 @with_config(ConfigDict(extra="allow"))
+class FailureReasonGroup(TypedDict):
+    reason: str
+    count: int
+    sample_trial_id: str
+    messages: list[str]
+
+
+@with_config(ConfigDict(extra="allow"))
 class BatchDetail(Batch):
     admission_held_count: NotRequired[int]
     network_policy: NotRequired[BatchDetailNetworkPolicyEvidence]
     execution_selection: NotRequired[BatchExecutionSelection]
     task_resource_requests: NotRequired[dict[str, TaskResourceRequests]]
     trial_summary: dict[str, int | float]
+    failure_reason_groups: list[FailureReasonGroup]
     progress: NotRequired[ProgressSummary]
     service_execution_summary: NotRequired[BatchDetailServiceExecutionSummaryVariant0 | None]
     aggregate_reward: int | float | None
