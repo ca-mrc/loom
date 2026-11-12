@@ -3412,6 +3412,8 @@ export interface components {
             failure_message: string | null;
             /** Failure Reason */
             failure_reason: string | null;
+            /** Failure Reason Groups */
+            failure_reason_groups: components["schemas"]["FailureReasonGroup"][];
             /** Fanout Errors */
             fanout_errors: {
                 [key: string]: unknown;
@@ -4546,6 +4548,19 @@ export interface components {
             ephemeral_storage_mib: number;
             /** Memory Mib */
             memory_mib: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** FailureReasonGroup */
+        FailureReasonGroup: {
+            /** Count */
+            count: number;
+            /** Messages */
+            messages: string[];
+            /** Reason */
+            reason: string;
+            /** Sample Trial Id */
+            sample_trial_id: string;
         } & {
             [key: string]: unknown;
         };

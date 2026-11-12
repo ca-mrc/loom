@@ -311,6 +311,51 @@ async def test_list_my_trials(
     assert "failure_message" in items[0]
 
 
+async def test_list_trials_filters_failure_reason_prefix(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+    postgres_url: str,
+) -> None:
+    app, raw, _team_id, trial_ids = trials_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            update(Trial)
+            .where(Trial.id == trial_ids[0])
+            .values(state="failed", failure_reason="timed_out")
+        )
+        s.execute(
+            update(Trial)
+            .where(Trial.id == trial_ids[1])
+            .values(state="failed", failure_reason="task_error")
+        )
+        s.execute(
+            update(Trial)
+            .where(Trial.id == trial_ids[2])
+            .values(state="failed", failure_reason=None)
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        timed = await ac.get(
+            "/api/v1/trials",
+            params={"state": "failure:timed_out"},
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        unknown = await ac.get(
+            "/api/v1/trials",
+            params={"state": "failure:unknown_failure"},
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert timed.status_code == 200, timed.text
+    assert {item["id"] for item in timed.json()["items"]} == {str(trial_ids[0])}
+    assert unknown.status_code == 200, unknown.text
+    assert {item["id"] for item in unknown.json()["items"]} == {str(trial_ids[2])}
+
+
 async def test_trial_list_and_detail_project_current_agent_config_shape(
     trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
     postgres_url: str,

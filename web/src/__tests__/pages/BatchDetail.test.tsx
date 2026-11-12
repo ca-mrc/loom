@@ -76,6 +76,7 @@ const BATCH_BODY: BatchBody = {
   created_by_token_prefix: "test:web",
   expected_trial_count: 164,
   trial_summary: {},
+  failure_reason_groups: [],
   aggregate_reward: null,
   benchmark_summary: [],
   total_prompt_tokens: 0,

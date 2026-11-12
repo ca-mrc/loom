@@ -18,7 +18,12 @@ import { SkeletonRows } from "./MonitorControls";
 import {
   TERMINAL_TRIAL_STATES,
   compactCostLabel,
+  failureGroupsFromBatch,
+  failureGroupsFromTrials,
+  failureReasonStateFilter,
+  trialStateFilterHref,
   type FailureGroup,
+  type FailureReasonGroupPayload,
   type TrialRow,
 } from "./monitorPresentation";
 
@@ -108,29 +113,24 @@ export function TrialsView({
       return allTerminal ? 60_000 : polling.refetchInterval;
     },
   });
+  const batchQuery = useQuery({
+    queryKey: queryKeys["batch"](batchId),
+    queryFn: ({ signal }) => api.getBatch(batchId!, signal),
+    enabled: Boolean(batchId),
+    staleTime: 5_000,
+    refetchOnMount: false,
+  });
 
   const items = useMemo(() => (query.data?.items ?? []) as TrialRow[], [query.data?.items]);
   const failureGroups: FailureGroup[] = useMemo(() => {
-    const groups = new Map<string, FailureGroup>();
-    for (const item of items) {
-      if (item.state !== "failed") continue;
-      const reason = item.failure_reason || "unknown_failure";
-      const group = groups.get(reason) ?? {
-        reason,
-        count: 0,
-        firstTrialId: item.id,
-        messages: [],
-      };
-      group.count += 1;
-      if (item.failure_message && !group.messages.includes(item.failure_message)) {
-        group.messages.push(item.failure_message);
-      }
-      groups.set(reason, group);
+    if (batchId) {
+      if (!batchQuery.data) return [];
+      return failureGroupsFromBatch(
+        batchQuery.data.failure_reason_groups as FailureReasonGroupPayload[] | undefined,
+      );
     }
-    return Array.from(groups.values()).sort((a, b) =>
-      b.count === a.count ? a.reason.localeCompare(b.reason) : b.count - a.count,
-    );
-  }, [items]);
+    return failureGroupsFromTrials(items);
+  }, [batchId, batchQuery.data, items]);
 
   const COLS = 8;
   return (
@@ -268,12 +268,20 @@ export function TrialsView({
                 className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
+                  <Link
+                    to={trialStateFilterHref(
+                      failureReasonStateFilter(group.reason),
+                      location,
+                      batchId,
+                    )}
+                    state={returnState}
+                    className="min-w-0 rounded-sm hover:text-accent focus-visible:ring-2 focus-visible:ring-sky-500"
+                  >
                     <p className="font-semibold text-slate-900">{group.reason}</p>
                     <p className="text-xs text-slate-500">
                       {group.count} failed trial{group.count === 1 ? "" : "s"}
                     </p>
-                  </div>
+                  </Link>
                   <Link
                     to={`/trials/${group.firstTrialId}`}
                     state={returnState}
