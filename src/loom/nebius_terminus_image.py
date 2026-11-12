@@ -490,6 +490,11 @@ def _arch_package_install() -> str:
     A refreshed rolling repository may require an existing package upgrade.
     Reject that transaction before installation instead of silently changing
     task toolchains. Use a separate cache so authored offline inputs survive.
+
+    The version check only sees packages that keep their name. A dependency
+    that moved to a new package owning an authored package's files (e.g.
+    `openssl-3` taking `libcrypto.so.3` from `openssl` in November 2026)
+    makes pacman refuse with a file conflict; report that the same way.
     """
     packages = "bash ca-certificates curl tmux asciinema shadow python tar"
     return f"""loom_prep_cache=$(mktemp -d /tmp/loom-arch-preparation.XXXXXX) && \
@@ -512,7 +517,9 @@ def _arch_package_install() -> str:
             exit 1; \
         fi; \
     done < "$loom_prep_cache/transaction" && \
-    pacman -S --needed --noconfirm --cachedir "$loom_prep_cache" $loom_missing; \
+    {{ pacman -S --needed --noconfirm --cachedir "$loom_prep_cache" $loom_missing || {{ \
+        echo "nebius-terminus: Arch harness preparation could not add$loom_missing without changing authored packages (see pacman output above; e.g. a renamed dependency whose files an authored package owns); use an explicitly reviewed compatible image/repository snapshot" >&2; \
+        exit 1; }}; }}; \
     fi && \
     rm -rf "$loom_prep_cache" && trap - EXIT"""
 
