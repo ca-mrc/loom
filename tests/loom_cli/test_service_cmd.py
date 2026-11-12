@@ -1263,3 +1263,97 @@ def test_up_preserves_existing_secret_store_master_key(
         f"expected exactly one LOOM_SECRET_STORE_MASTER_KEY line; "
         f"got {len(key_lines)}: {key_lines!r}"
     )
+
+
+def _clear_dev_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "LOOM_DEV_POSTGRES_PORT", "LOOM_DEV_POSTGRES_USER", "LOOM_DEV_POSTGRES_PASSWORD",
+        "LOOM_DEV_POSTGRES_DB", "LOOM_DEV_BIND_ADDR", "LOOM_DEV_CONTROL_PLANE_PORT",
+        "LOOM_DEV_DOCKER_SOCKET", "DOCKER_HOST",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_local_defaults_follow_dev_port_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Compose publishes Postgres and the Control Plane on LOOM_DEV_* ports, so
+    the host-side migration and token steps must use the same ones."""
+    import argparse
+
+    from loom_cli.service_cmd import _populate_local_defaults
+
+    _clear_dev_env(monkeypatch)
+    monkeypatch.setenv("LOOM_DEV_POSTGRES_PORT", "15432")
+    monkeypatch.setenv("LOOM_DEV_POSTGRES_PASSWORD", "p@ss/word")
+    monkeypatch.setenv("LOOM_DEV_CONTROL_PLANE_PORT", "28080")
+    args = argparse.Namespace(compose_file=None, env_file=None, db_url=None, admin_secret_file=None, cp_url=None)
+
+    _populate_local_defaults(args)
+
+    assert args.db_url == "postgresql+psycopg://loom:p%40ss%2Fword@localhost:15432/loom"
+    assert args.cp_url == "http://localhost:28080"
+
+
+def test_local_defaults_keep_explicit_urls_and_plain_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    import argparse
+
+    from loom_cli.service_cmd import _DEFAULT_CP_URL, _DEFAULT_DB_URL, _populate_local_defaults
+
+    _clear_dev_env(monkeypatch)
+    args = argparse.Namespace(compose_file=None, env_file=None, db_url=None, admin_secret_file=None, cp_url=None)
+    _populate_local_defaults(args)
+    assert (args.db_url, args.cp_url) == (_DEFAULT_DB_URL, _DEFAULT_CP_URL)
+
+    monkeypatch.setenv("LOOM_DEV_POSTGRES_PORT", "15432")
+    explicit = argparse.Namespace(
+        compose_file=None, env_file=None, db_url="postgresql+psycopg://x@db:1/x",
+        admin_secret_file=None, cp_url="http://cp:1",
+    )
+    _populate_local_defaults(explicit)
+    assert (explicit.db_url, explicit.cp_url) == ("postgresql+psycopg://x@db:1/x", "http://cp:1")
+
+
+@pytest.mark.parametrize(
+    ("docker_host", "preset", "expected"),
+    [
+        ("unix:///run/user/2015/docker.sock", None, "/run/user/2015/docker.sock"),
+        ("tcp://10.0.0.1:2376", None, None),
+        (None, None, None),
+        ("unix:///run/user/2015/docker.sock", "/custom.sock", "/custom.sock"),
+    ],
+)
+def test_local_defaults_export_rootless_docker_socket(
+    monkeypatch: pytest.MonkeyPatch, docker_host: str | None, preset: str | None, expected: str | None,
+) -> None:
+    import argparse
+    import os
+
+    from loom_cli.service_cmd import _populate_local_defaults
+
+    _clear_dev_env(monkeypatch)
+    if docker_host:
+        monkeypatch.setenv("DOCKER_HOST", docker_host)
+    if preset:
+        monkeypatch.setenv("LOOM_DEV_DOCKER_SOCKET", preset)
+    args = argparse.Namespace(compose_file=None, env_file=None, db_url=None, admin_secret_file=None, cp_url=None)
+
+    _populate_local_defaults(args)
+
+    assert os.environ.get("LOOM_DEV_DOCKER_SOCKET") == expected
+
+
+def test_export_env_tokens_overrides_values_loaded_from_old_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`loom` loads .env at startup and Compose prefers shell variables over
+    --env-file, so recreated containers would get the old tokens."""
+    import os
+
+    from loom_cli.service_cmd import _export_env_tokens
+
+    monkeypatch.setenv("LOOM_WORKER_TOKEN", "old-worker")
+    monkeypatch.setenv("LOOM_SVC_BATCH_RUNNER_CP_TOKEN", "old-runner")
+    monkeypatch.setenv("LOOM_TEAM_TOKEN", "keep-me")
+
+    _export_env_tokens({"worker": "new-worker", "batch_runner_cp": "new-runner", "team": ""})
+
+    assert os.environ["LOOM_WORKER_TOKEN"] == "new-worker"
+    assert os.environ["LOOM_SVC_BATCH_RUNNER_CP_TOKEN"] == "new-runner"
+    assert os.environ["LOOM_TEAM_TOKEN"] == "keep-me"

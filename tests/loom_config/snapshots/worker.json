@@ -204,6 +204,11 @@
     "default": "60.0",
     "required": false
   },
+  "sandbox_gateway_network": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
   "sandbox_identity": {
     "annotation": "<class 'str'>",
     "default": "''",

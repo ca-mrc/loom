@@ -31,6 +31,7 @@ from loom.verifier.audit import (
     persist_verifier_file,
     workspace_from_task,
 )
+from loom.verifier.output_dir import prepare_verifier_output_dir
 
 if TYPE_CHECKING:
     from loom.models.task import TaskConfig
@@ -66,9 +67,8 @@ class ScriptVerifier:
         # A driver/workspace may be reused. Remove the prior scoring file
         # before this attempt so a script that writes nothing cannot inherit
         # a previous step's result.
-        prepare_result = await env.exec(
-            "mkdir -p /loom/verifier && rm -f -- /loom/verifier/output.json",
-            user="root",
+        prepare_result = await prepare_verifier_output_dir(
+            env, stale_file=_OUTPUT_PATH, user=self.user,
         )
         if prepare_result.return_code != 0:
             return VerifierResult(

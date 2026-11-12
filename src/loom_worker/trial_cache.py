@@ -30,6 +30,7 @@ import asyncio
 import contextlib
 import logging
 import random
+import re
 import shutil
 import textwrap
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -150,6 +151,19 @@ def _tag_alias(client: Any, source: str, target: str) -> None:
     client.images.get(source).tag(repository=repo, tag=tag or "latest")
 
 
+_DOCKERFILE_USER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*(:[A-Za-z0-9_][A-Za-z0-9_.-]*)?$")
+
+
+def _image_user(client: Any, image: str) -> str:
+    """The base image's configured USER, or "" when it runs as root."""
+    user = str((client.images.get(image).attrs.get("Config") or {}).get("User") or "").strip()
+    if user in {"", "root", "0", "0:0", "root:root"}:
+        return ""
+    if not _DOCKERFILE_USER_RE.fullmatch(user):
+        raise TrialCacheError(f"task image USER {user!r} cannot be restored after the install layer")
+    return user
+
+
 def _build_layered_image_sync(
     *,
     client: Any,
@@ -162,16 +176,24 @@ def _build_layered_image_sync(
 
     Layer pattern: `COPY install.sh /tmp/install.sh; RUN bash /tmp/install.sh`
     — beats inline `RUN bash -c '<script>'` because shell quoting
-    doesn't bite when scripts contain $, backticks, or single quotes."""
+    doesn't bite when scripts contain $, backticks, or single quotes.
+
+    Agent install scripts use the system package manager, so the layer runs
+    as root and then restores the task image's own USER. A task image that
+    ends in `USER 65532` would otherwise run `apt-get` unprivileged and fail
+    with exit 100. The agent still runs as the task image's user."""
+    image_user = _image_user(client, base_digest)
+    restore_user = f"USER {image_user}\n" if image_user else ""
     with TemporaryDirectory(prefix="loom-trial-build-") as ctx:
         ctx_path = Path(ctx)
         (ctx_path / "install.sh").write_text(install_script)
         (ctx_path / "Dockerfile").write_text(
             textwrap.dedent(f"""\
             FROM {base_digest}
+            USER root
             COPY install.sh /tmp/install.sh
             RUN bash /tmp/install.sh && rm /tmp/install.sh
-        """)
+        """) + restore_user
         )
         # Local development builds the image through the configured Docker daemon.
         try:

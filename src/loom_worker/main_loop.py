@@ -1527,6 +1527,11 @@ async def _spawn_trial(
             ),
             sandbox_step_jwt_ttl_sec=settings.sandbox_step_jwt_ttl_sec,
             sandbox_extra_hosts=_sandbox_extra_hosts_for_url(subprocess_gateway_url_str),
+            sandbox_gateway_networks=(
+                (str(getattr(settings, "sandbox_gateway_network", "")),)
+                if getattr(settings, "sandbox_gateway_network", "")
+                else ()
+            ),
             family_state_volumes=family_state_volumes,
             workspace_staging_policy=workspace_staging_policy,
             # Apply configured local resource limits to both the trial container

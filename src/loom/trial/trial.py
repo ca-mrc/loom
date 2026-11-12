@@ -114,6 +114,10 @@ class TrialContext:
     # endpoints on Linux Docker, where `host.docker.internal` is not
     # present unless the container is started with host-gateway mapping.
     sandbox_extra_hosts: tuple[tuple[str, str], ...] = ()
+    # Docker networks the agent sandbox joins after start so in-sandbox agents
+    # reach the LLM gateway by service name (local Compose). Not applied when
+    # `sandbox_network` is set: an isolated bridge must stay the only route.
+    sandbox_gateway_networks: tuple[str, ...] = ()
     # Worker-owned overrides win over task proxy settings for an opted-in
     # controlled tool network. They are also applied to separate verifiers.
     sandbox_environment_overrides: dict[str, str] = field(default_factory=dict)
@@ -268,6 +272,12 @@ class Trial:
                         options=StartOptions(
                             force_build=self.ctx.trial_config.force_build,
                             network=self.ctx.sandbox_network,
+                            extra_networks=(
+                                self.ctx.sandbox_gateway_networks
+                                if self.ctx.sandbox_network is None
+                                and self.ctx.driver.capabilities.supports_custom_network
+                                else ()
+                            ),
                             volumes=self.ctx.sandbox_volumes,
                             environment=self.ctx.sandbox_environment,
                             extra_hosts=_merge_extra_hosts(

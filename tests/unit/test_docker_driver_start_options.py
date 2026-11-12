@@ -525,3 +525,50 @@ def test_pipeline_container_passes_only_sorted_allocation_gpu_uuids(
             scratch_bytes=150 << 30,
             gpu_device_uuids=["0"],
         )
+
+
+async def test_docker_driver_connects_extra_networks_after_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = _FakeContainer()
+    connected: list[tuple[str, object, bool]] = []
+
+    class _Containers:
+        def create(self, image: str, **kwargs: Any) -> object:
+            assert "network" not in kwargs  # the primary network is unchanged
+            return container
+
+    class _Network:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def connect(self, target: object) -> None:
+            connected.append((self.name, target, container.started))
+
+    class _Networks:
+        def get(self, name: str) -> _Network:
+            return _Network(name)
+
+    class _Client:
+        containers = _Containers()
+        networks = _Networks()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(docker_module.docker, "from_env", lambda: _Client())
+    monkeypatch.setattr(DockerDriver, "_ensure_image", lambda self, opts: None)
+
+    async def _noop_wait(self: DockerDriver) -> None:
+        return None
+
+    async def _noop_policy(self: DockerDriver, policy: object) -> None:
+        return None
+
+    monkeypatch.setattr(DockerDriver, "_wait_until_running", _noop_wait)
+    monkeypatch.setattr(DockerDriver, "set_network_policy", _noop_policy)
+
+    driver = DockerDriver(image="loom-agent-sandbox:dev", workspace=PurePosixPath("/workspace"))
+    await driver.start(options=StartOptions(extra_networks=("loom-dev-sandbox-gateway",)))
+
+    assert connected == [("loom-dev-sandbox-gateway", container, True)]

@@ -356,6 +356,80 @@ async def test_trial_run_passes_task_sandbox_start_options(
     assert start_options.tmpfs == ("/root:size=100M,mode=755",)
 
 
+@pytest.mark.parametrize(
+    ("custom_network", "sandbox_network", "expected"),
+    [
+        (True, None, ("loom-dev-sandbox-gateway",)),
+        # An isolated per-trial bridge must stay the sandbox's only route.
+        (True, "loom-sandbox-trial", ()),
+        # Drivers without custom-network support never receive it.
+        (False, None, ()),
+    ],
+)
+async def test_trial_run_passes_sandbox_gateway_networks(
+    hello_task: Path,
+    tmp_path: Path,
+    custom_network: bool,
+    sandbox_network: str | None,
+    expected: tuple[str, ...],
+) -> None:
+    from loom.models.capabilities import Capabilities
+
+    class _CaptureDriver(FakeDriver):
+        start_options: list[StartOptions | None]
+
+        def __init__(self, **kwargs):  # type: ignore[no-untyped-def]
+            super().__init__(**kwargs)
+            self.start_options = []
+            self.capabilities = Capabilities(
+                **{**self.capabilities.model_dump(), "supports_custom_network": custom_network},
+            )
+
+        async def start(self, *, options: StartOptions | None = None) -> None:
+            self.start_options.append(options)
+            await super().start(options=options)
+
+    task = TaskConfig(
+        schema_version="1",
+        task=TaskMetadata(id="hello", name="hello"),
+        environment=EnvironmentConfig(os="linux", docker_image="alpine"),
+        agent=AgentDefaults(name="oracle"),
+        verifier=VerifierDefaults(name="pass"),
+        steps=[StepConfig(name="main")],
+    )
+    handler = command_table_handler(
+        {
+            "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
+                return_code=0, stdout=b"hello\n", stderr=b"", truncated=False, duration_sec=0.05,
+            ),
+        }
+    )
+    driver = _CaptureDriver(exec_handler=handler)
+    trial_id = uuid4()
+    ctx = TrialContext(
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=task,
+        task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(),
+        driver=driver,
+        agent=OracleAgent(task_dir=hello_task, trial_id=trial_id),
+        verifier=_AlwaysPassVerifier(),
+        object_store=FakeObjectStore(),
+        local_trajectory_path=tmp_path / "events.jsonl",
+        sandbox_network=sandbox_network,
+        sandbox_gateway_networks=("loom-dev-sandbox-gateway",),
+        verifier_driver_factory=FakeDriver,
+    )
+
+    await Trial(ctx=ctx).run()
+
+    start_options = driver.start_options[0]
+    assert start_options is not None
+    assert start_options.extra_networks == expected
+
+
 async def test_trial_run_driver_start_failure_classified(
     hello_task: Path,
     tmp_path: Path,

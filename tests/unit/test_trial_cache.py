@@ -688,6 +688,7 @@ def test_build_layered_image_wraps_build_error() -> None:
     from docker.errors import BuildError
 
     client = MagicMock()
+    client.images.get.return_value.attrs = {"Config": {"User": ""}}
     client.images.build.side_effect = BuildError(
         reason="step 2 failed: exit code 1",
         build_log=[],
@@ -706,6 +707,7 @@ def test_build_layered_image_preserves_full_diagnostic_detail() -> None:
     from docker.errors import BuildError
 
     client = MagicMock()
+    client.images.get.return_value.attrs = {"Config": {"User": ""}}
     noise = [{"stream": f"layer noise line {idx}\n"} for idx in range(120)]
     error = [{"stream": "LAYER_FINAL_ERROR: dpkg failed\n"}]
     client.images.build.side_effect = BuildError(
@@ -1011,3 +1013,43 @@ def test_managed_image_eviction_from_env_closes_docker_client(
     assert client.images.prune.call_count == 3
     client.close.assert_called_once_with()
     assert result.probe_available is True
+
+
+@pytest.mark.parametrize(
+    ("image_user", "expected_tail"),
+    [
+        ("65532:65532", "USER 65532:65532\n"),
+        ("agent", "USER agent\n"),
+        ("", "RUN bash /tmp/install.sh && rm /tmp/install.sh\n"),
+        ("root", "RUN bash /tmp/install.sh && rm /tmp/install.sh\n"),
+    ],
+)
+def test_build_layered_image_installs_as_root_and_restores_user(image_user: str, expected_tail: str) -> None:
+    """Agent installs use the package manager, so a task image ending in a
+    non-root USER must not make `apt-get` run unprivileged (exit 100)."""
+    client = MagicMock()
+    client.images.get.return_value.attrs = {"Config": {"User": image_user}}
+    dockerfiles: list[str] = []
+    client.images.build.side_effect = lambda **kwargs: dockerfiles.append(
+        (Path(kwargs["path"]) / "Dockerfile").read_text()
+    )
+
+    trial_cache._build_layered_image_sync(
+        client=client, tag="loom-trial-cache:abc", base_digest="sha256:base", install_script="apt-get install -y nodejs",
+    )
+
+    [dockerfile] = dockerfiles
+    assert dockerfile.startswith("FROM sha256:base\nUSER root\nCOPY install.sh /tmp/install.sh\n")
+    assert dockerfile.endswith(expected_tail)
+    client.images.get.assert_called_once_with("sha256:base")
+
+
+def test_build_layered_image_rejects_unrestorable_user() -> None:
+    client = MagicMock()
+    client.images.get.return_value.attrs = {"Config": {"User": "agent\nRUN curl evil"}}
+
+    with pytest.raises(trial_cache.TrialCacheError, match="cannot be restored"):
+        trial_cache._build_layered_image_sync(
+            client=client, tag="loom-trial-cache:abc", base_digest="sha256:base", install_script="true",
+        )
+    client.images.build.assert_not_called()
