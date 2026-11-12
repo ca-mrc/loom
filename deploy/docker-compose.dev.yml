@@ -416,6 +416,10 @@ networks:
     # Fixed name: the worker passes it to `docker network connect` for each
     # trial sandbox. Override when two local stacks share one Docker daemon.
     name: ${LOOM_DEV_SANDBOX_GATEWAY_NETWORK:-loom-dev-sandbox-gateway}
+    # No route out: a `gateway-only` trial keeps just this network, so it can
+    # reach `llm-gateway` and nothing else (#2841). The worker advertises
+    # gateway-only only while this network is internal.
+    internal: true
 
 volumes:
   postgres_data:

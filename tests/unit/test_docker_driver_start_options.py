@@ -572,3 +572,113 @@ async def test_docker_driver_connects_extra_networks_after_start(
     await driver.start(options=StartOptions(extra_networks=("loom-dev-sandbox-gateway",)))
 
     assert connected == [("loom-dev-sandbox-gateway", container, True)]
+
+
+async def _gateway_only_driver(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    extra_networks: tuple[str, ...],
+) -> tuple[DockerDriver, list[tuple[str, str]], list[str]]:
+    """A started driver whose network attach/detach and execs are recorded."""
+    from loom.models.exec import ExecResult
+
+    container = _FakeContainer()
+    network_calls: list[tuple[str, str]] = []
+    execs: list[str] = []
+
+    class _Network:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def connect(self, target: object) -> None:
+            assert target is container
+            network_calls.append(("connect", self.name))
+
+        def disconnect(self, target: object) -> None:
+            assert target is container
+            network_calls.append(("disconnect", self.name))
+
+    class _Client:
+        class containers:  # noqa: N801 - docker-py attribute name
+            @staticmethod
+            def create(image: str, **kwargs: Any) -> object:
+                return container
+
+        class networks:  # noqa: N801 - docker-py attribute name
+            @staticmethod
+            def get(name: str) -> _Network:
+                return _Network(name)
+
+        def close(self) -> None:
+            pass
+
+    async def _noop_wait(self: DockerDriver) -> None:
+        return None
+
+    async def _exec(self: DockerDriver, cmd: str, **kwargs: Any) -> ExecResult:
+        execs.append(cmd)
+        return ExecResult(return_code=0, stdout=b"", stderr=b"", duration_sec=0)
+
+    monkeypatch.setattr(docker_module.docker, "from_env", lambda: _Client())
+    monkeypatch.setattr(DockerDriver, "_ensure_image", lambda self, opts: None)
+    monkeypatch.setattr(DockerDriver, "_wait_until_running", _noop_wait)
+    monkeypatch.setattr(DockerDriver, "exec", _exec)
+
+    driver = DockerDriver(image="loom-agent-sandbox:dev", workspace=PurePosixPath("/workspace"))
+    await driver.start(options=StartOptions(extra_networks=extra_networks))
+    network_calls.clear()  # keep only policy-driven changes
+    return driver, network_calls, execs
+
+
+async def test_gateway_only_keeps_only_the_gateway_network_and_restores_the_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom.models.networking import GatewayOnly, Public
+
+    driver, network_calls, execs = await _gateway_only_driver(
+        monkeypatch, extra_networks=("loom-dev-sandbox-gateway",),
+    )
+
+    await driver.set_network_policy(GatewayOnly())
+    await driver.set_network_policy(GatewayOnly())  # idempotent
+    assert network_calls == [("disconnect", "bridge")]
+
+    await driver.set_network_policy(Public())  # e.g. a public verifier phase
+    assert network_calls == [("disconnect", "bridge"), ("connect", "bridge")]
+    assert execs == []  # no iptables needed in the task image
+    assert driver.network_policy_baseline == Public()
+
+
+async def test_gateway_only_after_a_restricted_phase_clears_iptables_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom.models.networking import GatewayOnly, NoNetwork
+
+    driver, network_calls, execs = await _gateway_only_driver(
+        monkeypatch, extra_networks=("loom-dev-sandbox-gateway",),
+    )
+
+    await driver.set_network_policy(NoNetwork())
+    assert any("iptables -P OUTPUT DROP" in cmd for cmd in execs)
+    execs.clear()
+
+    await driver.set_network_policy(GatewayOnly())
+    assert execs == ["iptables -P OUTPUT ACCEPT && iptables -F OUTPUT"]
+    assert network_calls == [("disconnect", "bridge")]
+    execs.clear()
+
+    await driver.set_network_policy(NoNetwork())  # bridge back, then DROP
+    assert network_calls[-1] == ("connect", "bridge")
+    assert any("iptables -P OUTPUT DROP" in cmd for cmd in execs)
+
+
+async def test_gateway_only_without_a_gateway_network_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom.models.networking import GatewayOnly
+
+    driver, network_calls, _ = await _gateway_only_driver(monkeypatch, extra_networks=())
+
+    with pytest.raises(DriverError, match="sandbox gateway network"):
+        await driver.set_network_policy(GatewayOnly())
+    assert network_calls == []  # the sandbox keeps its network untouched

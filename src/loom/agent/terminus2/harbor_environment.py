@@ -148,14 +148,21 @@ def make_trial_paths(logs_root: Path) -> TrialPaths:
     return TrialPaths(trial_dir=logs_root)
 
 
+# Installs what the Terminus-2 bridge needs in the sandbox. Skips the package
+# manager when the tools are already present, so an image that has them
+# (e.g. the worker's prebuilt layer below) needs no network at trial time.
+# Never fails by itself; `ensure_sandbox_deps` checks the result.
+SANDBOX_DEPS_INSTALL_SCRIPT = (
+    "if command -v bash >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 "
+    "&& command -v asciinema >/dev/null 2>&1; then :; "
+    "elif command -v apk >/dev/null 2>&1; then "
+    "apk add --no-cache bash tmux asciinema 2>/dev/null || true; "
+    "elif command -v apt-get >/dev/null 2>&1; then "
+    "export DEBIAN_FRONTEND=noninteractive; "
+    "apt-get update -qq && apt-get install -y --no-install-recommends "
+    "tmux asciinema 2>/dev/null || true; fi"
+)
+
+
 async def ensure_sandbox_deps(driver: Driver) -> None:
-    install = (
-        "if command -v apk >/dev/null 2>&1; then "
-        "apk add --no-cache bash tmux asciinema 2>/dev/null || true; "
-        "elif command -v apt-get >/dev/null 2>&1; then "
-        "export DEBIAN_FRONTEND=noninteractive; "
-        "apt-get update -qq && apt-get install -y --no-install-recommends "
-        "tmux asciinema 2>/dev/null || true; fi; "
-        "tmux -V"
-    )
-    await driver.exec(install, user="root")
+    await driver.exec(f"{SANDBOX_DEPS_INSTALL_SCRIPT}; tmux -V", user="root")
