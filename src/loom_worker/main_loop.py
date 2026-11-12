@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -194,8 +195,44 @@ _DEFAULT_CAPS = [
 ]
 
 
+@functools.lru_cache(maxsize=8)
+def _internal_docker_network(name: str) -> bool:
+    """True when `name` exists and is a Docker `internal` network."""
+    try:
+        import docker
+
+        client = docker.from_env()
+        try:
+            internal = bool(client.networks.get(name).attrs.get("Internal"))
+        finally:
+            client.close()
+    except Exception as exc:
+        logger.warning(
+            "sandbox_gateway_network_unavailable network=%s err=%s — not advertising gateway-only",
+            name, exc,
+        )
+        return False
+    if not internal:
+        logger.warning(
+            "sandbox_gateway_network_not_internal network=%s — not advertising gateway-only", name,
+        )
+    return internal
+
+
+def _gateway_only_supported(settings: WorkerSettings) -> bool:
+    """#2841: Docker trials can run `gateway-only` when the sandbox can join an
+    internal network shared only with the LLM gateway. Not with sandbox
+    isolation, whose per-trial bridge replaces that network."""
+    network = str(getattr(settings, "sandbox_gateway_network", "") or "")
+    if not network or getattr(settings, "sandbox_isolation", False):
+        return False
+    return _internal_docker_network(network)
+
+
 def _worker_capabilities(settings: WorkerSettings) -> list[dict[str, Any]]:
-    caps = dict(_DEFAULT_CAPS[0])
+    caps: dict[str, Any] = dict(_DEFAULT_CAPS[0])
+    if _gateway_only_supported(settings):
+        caps["network_policies"] = [*caps["network_policies"], "gateway-only"]
     profile_dir = getattr(settings, "mainland_proxy_profile_dir", None)
     if (
         getattr(settings, "mainland_proxy_image", "") and profile_dir
@@ -1015,6 +1052,14 @@ async def _prepare_family_state_mount_if_any(
     return mount
 
 
+@dataclass(frozen=True)
+class _Terminus2SandboxDeps:
+    """Layered-image adapter for the built-in Terminus-2 runtime."""
+
+    install_script: str
+    name: str = "terminus-2"
+
+
 async def _resolve_layered_trial_image(
     *,
     task_image: str,
@@ -1027,9 +1072,22 @@ async def _resolve_layered_trial_image(
     return the cached layered image (or build it). Returns `task_image`
     unchanged for agents without an install_script (oracle, direct completion,
     or adapters that haven't declared an install_script yet)."""
-    # Built-in agents aren't in the launcher registry
-    # and don't need an install step. Skip.
-    if agent_name in {"oracle", "direct-completion", "litellm", "terminus-2"}:
+    if agent_name == "terminus-2":
+        # #2841: install tmux/asciinema at image-build time, where the build
+        # has network. At trial time the sandbox may have none (gateway-only,
+        # no-network, allowlist), and the runtime install would fail.
+        from loom.agent.terminus2.harbor_environment import SANDBOX_DEPS_INSTALL_SCRIPT
+
+        return await resolve_trial_image(
+            task_image=task_image,
+            adapter=_Terminus2SandboxDeps(install_script=SANDBOX_DEPS_INSTALL_SCRIPT),
+            settings=settings,
+            cp_client=cp_client,
+            worker_id=worker_id,
+        )
+    # Other built-in agents aren't in the launcher registry and don't need
+    # an install step. Skip.
+    if agent_name in {"oracle", "direct-completion", "litellm"}:
         return task_image
     adapter_name = agent_name
     try:

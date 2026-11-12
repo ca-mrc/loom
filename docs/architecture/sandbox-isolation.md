@@ -80,6 +80,19 @@ capability that the task author did not declare. The hosted-native choices are
 `gateway-only`, `web-allowlist`, and `public-web`. Legacy local-driver policies
 are not translated.
 
+Local Docker workers run `gateway-only` when `LOOM_WORKER_SANDBOX_GATEWAY_NETWORK`
+names a Docker `internal` network shared only with the LLM gateway (local
+Compose creates `loom-dev-sandbox-gateway` this way). The sandbox starts on its
+normal network plus that one; applying `gateway-only` disconnects the normal
+network, leaving the gateway reachable by service name and no other route,
+including external DNS. A later phase with another policy reconnects it. This is
+network attachment, not iptables, so the task image needs no iptables and the
+workload's `NET_ADMIN` cannot widen it. The worker advertises `gateway-only` only
+while that network exists and is internal, and not with sandbox isolation, whose
+per-trial bridge takes its place. Terminus-2's `tmux`/`asciinema` install runs in
+the cached agent layer at image build, so restricted trials don't need network
+for it.
+
 Loom resolves the task default and optional trial override before choosing an
 execution compiler. The complete effective policy is frozen into workload
 requirements, command identity, the immutable runtime plan, and the trusted

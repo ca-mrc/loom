@@ -44,7 +44,7 @@ from loom.errors import (
 from loom.models.capabilities import Capabilities
 from loom.models.exec import ExecResult
 from loom.models.healthcheck import HealthcheckSpec
-from loom.models.networking import NetworkPolicy, Public
+from loom.models.networking import GatewayOnly, NetworkPolicy, Public
 from loom.models.types import OS
 
 logger = logging.getLogger(__name__)
@@ -366,6 +366,11 @@ class DockerDriver:
     _client: Any | None = field(default=None, init=False, repr=False)
     _container: Any | None = field(default=None, init=False, repr=False)
     _state: str = field(default="constructed", init=False)
+    # Gateway-only (#2841) is network attachment, not iptables: the sandbox
+    # keeps only `_gateway_networks` (internal networks shared with the LLM
+    # gateway) and leaves `_primary_network` while the policy is active.
+    _primary_network: str = field(default="bridge", init=False, repr=False)
+    _gateway_networks: tuple[str, ...] = field(default=(), init=False, repr=False)
     _stream_readers: dict[asyncio.Task[None], Callable[[], None]] = field(
         default_factory=dict, init=False, repr=False,
     )
@@ -487,11 +492,10 @@ class DockerDriver:
             self._container = container
             await asyncio.to_thread(container.start)
             await self._wait_until_running()
-            def _connect_network(name: str) -> None:
-                client.networks.get(name).connect(container)
-
             for network_name in opts.extra_networks:
-                await asyncio.to_thread(_connect_network, network_name)
+                await asyncio.to_thread(self._connect_network, network_name)
+            self._primary_network = opts.network or "bridge"
+            self._gateway_networks = tuple(opts.extra_networks)
             # Mark running BEFORE applying baseline policy —
             # set_network_policy() calls _require_running() which checks state.
             self._state = "running"
@@ -901,6 +905,12 @@ class DockerDriver:
 
     async def set_network_policy(self, policy: NetworkPolicy) -> None:
         self._require_running()
+        if isinstance(policy, GatewayOnly):
+            await self._enter_gateway_only()
+            self.network_policy_baseline = policy
+            return
+        if isinstance(self.network_policy_baseline, GatewayOnly):
+            await self._leave_gateway_only()
         plan = compute_iptables_rules(policy)
         cmds = render_iptables_commands(plan)
         if isinstance(policy, Public) and not isinstance(self.network_policy_baseline, Public):
@@ -919,6 +929,52 @@ class DockerDriver:
                 f"network policy apply failed: rc={r.return_code} stderr={r.stderr[:512]!r}",
             )
         self.network_policy_baseline = policy
+
+    async def _enter_gateway_only(self) -> None:
+        """Leave every network except the gateway networks.
+
+        The gateway networks are Docker `internal` networks whose only other
+        member is the LLM gateway, so the sandbox can reach the gateway (by
+        service name, through Docker's embedded DNS) and nothing else. Unlike
+        the iptables policies this needs no tools in the task image, and the
+        workload's NET_ADMIN can't undo it: there is no interface to route to.
+        """
+        if isinstance(self.network_policy_baseline, GatewayOnly):
+            return
+        if not self._gateway_networks:
+            raise DriverError(
+                "gateway-only network policy needs a sandbox gateway network "
+                "(LOOM_WORKER_SANDBOX_GATEWAY_NETWORK)",
+            )
+        if not isinstance(self.network_policy_baseline, Public):
+            # A preceding restricted phase left a DROP policy; the gateway
+            # route must not be filtered by it.
+            r = await self.exec("iptables -P OUTPUT ACCEPT && iptables -F OUTPUT", user="root", timeout_sec=30)
+            if r.return_code != 0:
+                raise DriverError(
+                    f"network policy reset failed: rc={r.return_code} stderr={r.stderr[:512]!r}",
+                )
+            self.network_policy_baseline = Public()
+        await asyncio.to_thread(self._disconnect_network, self._primary_network)
+
+    async def _leave_gateway_only(self) -> None:
+        await asyncio.to_thread(self._connect_network, self._primary_network)
+        # Back on an untouched namespace: the next policy applies as on start.
+        self.network_policy_baseline = Public()
+
+    def _connect_network(self, name: str) -> None:
+        assert self._client is not None and self._container is not None
+        try:
+            self._client.networks.get(name).connect(self._container)
+        except APIError as exc:
+            raise DriverError(f"network connect {name!r} failed: {exc}") from exc
+
+    def _disconnect_network(self, name: str) -> None:
+        assert self._client is not None and self._container is not None
+        try:
+            self._client.networks.get(name).disconnect(self._container)
+        except APIError as exc:
+            raise DriverError(f"network disconnect {name!r} failed: {exc}") from exc
 
     async def run_healthcheck(self, hc: HealthcheckSpec | None = None) -> None:
         self._require_running()
