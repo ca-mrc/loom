@@ -203,12 +203,23 @@ def test_unpinned_uvx_resolves_verifier_python_without_replacing_old_task_tools(
         client.close()
 
 
+# archlinux:base-20261101.0.620205 (Docker Hub), and the archive day it was built from.
+_ARCH_BASE_20261101_DIGEST = "sha256:b1c2fe6e717bfd5673af8fc217e1e1c3ce0dcbb1d53c3414c8425e7ce79fc6d9"
+_ARCH_ARCHIVE_20261101 = "https://archive.archlinux.org/repos/2026/11/01"
+
+
 @pytest.mark.timeout(600)
 def test_arch_preparation_retains_authored_packages_and_offline_cache(tmp_path: Path):
     import docker
 
+    # Arch is rolling: `archlinux:latest` plus live repositories breaks whenever
+    # the repositories move past the image (November 2026: `python` started
+    # depending on `openssl-3`, whose files the image's `openssl` owns). Pin the
+    # image and the matching Arch Linux Archive snapshot, the "reviewed
+    # compatible image/repository snapshot" preparation itself asks for.
     original = (
-        "FROM archlinux:latest\n"
+        f"FROM archlinux:base@{_ARCH_BASE_20261101_DIGEST}\n"
+        f"RUN echo 'Server = {_ARCH_ARCHIVE_20261101}/$repo/os/$arch' > /etc/pacman.d/mirrorlist\n"
         "RUN pacman -Q > /authored-packages && mkdir -p /var/cache/pacman/pkg && "
         "printf task-input > /var/cache/pacman/pkg/loom-authored-cache\nWORKDIR /app\n"
     )
