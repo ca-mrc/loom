@@ -217,7 +217,7 @@ def apply_trial_monitor_filters(
         # Carry authorized non-state predicates into every projection aggregate;
         # an outer tenant filter alone must not scan unrelated historical work.
         scope = stmt.with_only_columns(Trial.id, maintain_column_froms=True).order_by(None)
-        predicates = [Trial.state.in_(states)]
+        predicates: list[Any] = [Trial.state.in_(states)]
         if stages:
             predicates.append(progress_state_filter("stage", stages, scope))
         if cleanups:
